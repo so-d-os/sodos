@@ -1,0 +1,5 @@
+Exemplos da area de trabalho.
+cd exemplos
+dir
+md pasta
+rd pasta

@@ -1,0 +1,5 @@
+Este é um arquivo de teste simples.
+
+Linha 1: Teste de exibição de arquivo
+Linha 2: O comando type funciona corretamente
+Linha 3: Fim do teste

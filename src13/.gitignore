@@ -1,0 +1,48 @@
+# Objetos e dependências de compilação
+*.o
+*.a
+*.so
+*.d
+
+# Binários / ELFs (gerados pelo Makefile)
+*.elf
+*.bin
+
+# Imagem do SO e discos de dados (gerados localmente)
+os.img
+disk.img
+disk2.img
+*.iso
+
+# Pasta da ISO de teste (mkisofs/genisoimage)
+iso_root/
+
+# Código gerado automaticamente (hello/testapp/editor embutidos)
+executables.c
+
+# Logs e traces de QEMU / execução
+*.log
+qemu.log
+qemu_serial.log
+
+# Disassembly / dumps opcionais
+*.dis
+*.map
+
+# Auxiliares de formatação de disco (make format-disk)
+*.part
+
+# Editor / backup
+*~
+*.swp
+*.swo
+.#*
+
+# Python / tooling (se usar scripts locais)
+__pycache__/
+*.pyc
+
+# Core dumps
+core
+vgcore.*
+core.*

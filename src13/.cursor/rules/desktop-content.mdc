@@ -1,0 +1,14 @@
+---
+description: content/ vai para a area de trabalho padrao do SO
+alwaysApply: true
+---
+
+# Area de trabalho
+
+`content/` e a area de trabalho do usuario default. No disco FAT isso e `::/USER/DEFAULT/DESKTOP/`, que o desktop le como `D:\user\default\desktop\`.
+
+- Copiar com o QEMU fechado. Com o sistema ligado, o guest regrava a FAT e apaga o mcopy.
+- Nomes em maiusculas 8.3 (`VIDEO2.MP4`, `LEIA.TXT`). Nao criar nome longo.
+- Pasta vira pasta: `content/exemplos/leia.txt` vai para `::/USER/DEFAULT/DESKTOP/EXEMPLOS/LEIA.TXT`.
+- So criar o diretorio se `mdir` nao o achar. `mmd` numa pasta que ja existe trava.
+- O disco de dados e FAT16 de 256 MB (cluster 8 KB). Um arquivo de `content/` que nao cabe exige ampliar o disco, sem mudar o destino.

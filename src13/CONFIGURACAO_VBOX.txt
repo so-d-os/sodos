@@ -1,0 +1,66 @@
+===========================================
+CONFIGURAÇÃO DO VIRTUALBOX - GUIA RÁPIDO
+===========================================
+
+1. CRIAR NOVA VM:
+   - Nome: MeuSO (ou qualquer nome)
+   - Tipo: Other
+   - Versão: Other/Unknown (32-bit)
+   - Memória: 64 MB (mínimo)
+
+2. CONFIGURAÇÕES DO SISTEMA:
+   - Aba Principal:
+     * Desmarque Floppy
+     * CD/DVD = Primeiro boot
+     * Hard Disk = Segundo boot
+     * DESMARQUE "Habilitar EFI" (importante!)
+   
+   - Aba Processador:
+     * Processadores: 1
+     * DESMARQUE "Habilitar PAE/NX"
+
+3. ARMAZENAMENTO:
+   - Controlador IDE:
+     * Clique no CD/DVD vazio
+     * Clique no ícone de disco à direita
+     * Escolha: /home/usuario/so/src_dos/so.iso
+
+4. DESABILITAR (não necessário):
+   - Rede
+   - Áudio
+   - USB
+
+5. INICIAR:
+   - Selecione a VM
+   - Clique em "Iniciar"
+   - Deve aparecer: "Boot OK. Loading..."
+
+===========================================
+PROBLEMAS COMUNS:
+===========================================
+
+ERRO: "FATAL: No bootable medium found!"
+SOLUÇÃO: Verifique se o ISO está anexado no CD/DVD
+
+ERRO: Não boota / trava
+SOLUÇÃO: 
+  - Desmarque "Habilitar EFI"
+  - Use modo "PC BIOS" (não UEFI)
+  - Verifique ordem de boot (CD primeiro)
+
+ERRO: Trava após "KER"
+SOLUÇÃO: Problema no kernel, não no VirtualBox
+         Verifique a compilação do kernel
+
+===========================================
+COMANDOS ÚTEIS:
+===========================================
+
+# Criar VM automaticamente:
+./setup_vbox.sh
+
+# Regenerar ISO:
+make clean && make && make iso
+
+# Verificar ISO:
+file so.iso

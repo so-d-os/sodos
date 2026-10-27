@@ -1,0 +1,11 @@
+Noto Sans, Noto Serif, Noto Sans Mono and Noto Sans Collection
+Copyright 2022 The Noto Project Authors (https://github.com/notofonts/latin-greek-cyrillic)
+
+These fonts are licensed under the SIL Open Font License, Version 1.1.
+They are not public domain. They may be used, studied, modified and
+redistributed, including inside this operating system, as long as the
+fonts are not sold by themselves and this notice stays with the files.
+
+The Reserved Font Names are those published by the Noto Project Authors.
+The full license text is the SIL Open Font License 1.1:
+https://openfontlicense.org
