@@ -2,13 +2,19 @@
 
 Sistema operacional educacional de 64 bits (*long mode*), freestanding, escrito em C e assembly. Sobe direto pela BIOS (`os.img`); há também um caminho Multiboot legado para GRUB. Não depende de libc do Linux. Tem shell estilo DOS, desktop gráfico com janelas, FAT16 com subpastas, rede NE2000 com TCP/IP, servidor HTTP com API de controle remoto, navegador com TLS 1.3, compilador C/C++ próprio que roda dentro do sistema, visualizador de imagens, player de vídeo MJPEG e rasterizador de fontes TrueType.
 
+O SODOS é projetado para ser o primeiro sistema operacional que pode ser comandado por uma API de inteligência artificial.
+
+![Desktop do SODOS em 1920×1080, com o Navegador aberto na página inicial](docs/desktop.png)
+
+O desktop em 1920×1080 com o Navegador aberto e o Gerenciador atrás. A captura foi feita pelo próprio SO, com `GET /win/printscreen` na porta 8797.
+
 O código está em `src13/`; este README fica na raiz do repositório.
 
 O prompt aparece como `C:\>`; `C:` é um disco em RAM e `D:` é o `disk.img` (FAT16). Programas de usuário são arquivos `.EXE` no formato **SOX** — não são ELF, e o `hello.bin` de 32 bits que o boot ainda carrega não é executado.
 
 ## Um SO comandado por IA
 
-O SODOS é projetado para ser o primeiro sistema operacional que pode ser comandado por uma API de inteligência artificial. O servidor HTTP da porta 8797 é a superfície de controle: um agente executa comandos, abre e fecha janelas, move o ponteiro, consulta as janelas abertas e captura a tela — sem teclado, mouse ou sessão humana.
+A API HTTP da porta 8797 é a superfície de controle: um agente executa comandos, abre e fecha janelas, move o ponteiro, consulta as janelas abertas e captura a tela — sem teclado, mouse ou sessão humana.
 
 O objetivo do projeto é ser leve o bastante para **rodar LLMs dentro do próprio SO** e, ao mesmo tempo, fazer tudo o que um sistema operacional convencional faz — arquivos, discos, rede, janelas, compilador, programas — gastando o mínimo de recursos.
 
@@ -310,10 +316,6 @@ HELLO um dois
 ## Desktop (`win`)
 
 `win` entra no ambiente gráfico; `Esc` volta ao prompt de texto (salvando o Bloco de notas se houver alterações).
-
-![Desktop do SODOS em 1920×1080, com o Navegador aberto na página inicial](docs/desktop.png)
-
-O desktop em 1920×1080 com o Navegador aberto e o Gerenciador atrás. A captura foi feita pelo próprio SO, com `GET /win/printscreen` na porta 8797.
 
 ### Tela
 
