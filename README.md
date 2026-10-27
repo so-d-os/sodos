@@ -293,6 +293,10 @@ HELLO um dois
 
 `win` entra no ambiente gráfico; `Esc` volta ao prompt de texto (salvando o Bloco de notas se houver alterações).
 
+![Desktop do SODOS em 1920×1080, com o Navegador aberto na página inicial](docs/desktop.png)
+
+O desktop em 1920×1080 com o Navegador aberto e o Gerenciador atrás. A captura foi feita pelo próprio SO, com `GET /win/printscreen` na porta 8797.
+
 ### Tela
 
 - Bochs VBE 32 bpp: `1920x1080`, `1600x1200`, `1280x1024`, `1024x768`, `800x600`, `640x480`. O padrão é o maior modo que couber na memória de vídeo; sem VBE, cai para VGA 13h `320x200`.
