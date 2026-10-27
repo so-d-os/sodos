@@ -6,6 +6,24 @@ O código está em `src13/`; este README fica na raiz do repositório.
 
 O prompt aparece como `C:\>`; `C:` é um disco em RAM e `D:` é o `disk.img` (FAT16). Programas de usuário são arquivos `.EXE` no formato **SOX** — não são ELF, e o `hello.bin` de 32 bits que o boot ainda carrega não é executado.
 
+## Um SO comandado por IA
+
+O SODOS é projetado para ser o primeiro sistema operacional que pode ser comandado por uma API de inteligência artificial. O servidor HTTP da porta 8797 é a superfície de controle: um agente executa comandos, abre e fecha janelas, move o ponteiro, consulta as janelas abertas e captura a tela — sem teclado, mouse ou sessão humana.
+
+O objetivo do projeto é ser leve o bastante para **rodar LLMs dentro do próprio SO** e, ao mesmo tempo, fazer tudo o que um sistema operacional convencional faz — arquivos, discos, rede, janelas, compilador, programas — gastando o mínimo de recursos.
+
+O kernel é enxuto por construção:
+
+| Item | Consumo |
+|---|---|
+| Kernel (`kernel.bin`) | ~193 KB |
+| Imagem de boot (`os.img`) | ~198 KB |
+| Heap do kernel | 2 MB fixos (`0xA80000`–`0xC7FFFF`) |
+| Heap de usuário | do fim do kernel até o topo da RAM (256 MB no QEMU) |
+| Dependências de runtime | nenhuma libc, nenhum POSIX; só o hardware |
+
+É essa base — API de controle pronta, kernel de centenas de KB e nenhuma camada POSIX — que torna viável embarcar o modelo no próprio sistema.
+
 ## Estrutura do repositório
 
 | Caminho | Conteúdo |
@@ -26,7 +44,7 @@ Os comandos de shell abaixo assumem a raiz do repositório; quando precisam do c
 - **Compilador C/C++** (`cc` + `link`) que roda no Linux e dentro do SO (`CC.EXE`, `LINK.EXE`), com libc própria, DLLs, realocação e *self-hosting* verificado.
 - **Navegador** com HTTP/1.1, HTML, subconjunto de CSS e JavaScript, imagens, cache em disco, busca (DuckDuckGo/Google/Bing/Imagens) e TLS 1.3 com verificação de certificado.
 - **Rede**: NE2000 em polling, ARP, IPv4, ICMP, UDP (DNS) e TCP; IP fixo `10.0.2.15` no SLIRP do QEMU.
-- **Servidor HTTP na porta 8797** com rotas para executar comandos, listar/fechar janelas, mover o mouse e tirar *printscreen* em BMP.
+- **Servidor HTTP na porta 8797** com rotas para executar comandos, listar/fechar janelas, mover o mouse e tirar *printscreen* em BMP — a interface que permite a uma IA comandar o SO.
 - **Mídia**: `IMG.DLL` (PNG, JPEG, GIF, ICO), `IMAGEVW.EXE`, `VIDPLAY.EXE` (MJPEG/RGB em AVI/MOV/MP4) e `FONTADV.EXE` com rasterizador TTF.
 - **Ferramentas de host**: `soxrun` (executa `.EXE` SOX no Linux), `mkthumb`, `mkvid.py`, testes e comparação de *self-host*.
 - **Depuração**: log serial em COM1, log do QEMU, `gdb`, anel de *trace*, despejo de exceção e comandos de diagnóstico (`free`, `df`, `dstat`, `dlls`).
@@ -673,6 +691,8 @@ ping example.com -n 2 -l 64
 ## Servidor HTTP
 
 O kernel sobe um servidor na porta **8797** no boot, em paralelo ao shell. Com `make run`, o host alcança o guest em `http://127.0.0.1:8797/`.
+
+É por essa API que um agente de IA opera a máquina: `GET /exec` e `/win/execute` rodam comandos, `/win/mouse` e `/click` controlam o ponteiro, `/win/windows` e `/win/close` gerenciam as janelas e `/win/printscreen` devolve a tela em BMP.
 
 É HTTP/1.0, uma requisição por conexão (`Connection: close`), e aceita `GET`, `POST`, `PUT`, `DELETE` e `HEAD`.
 
