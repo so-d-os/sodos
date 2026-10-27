@@ -33,7 +33,9 @@ O kernel é enxuto por construção:
 ## Execute rápido
 
 cd src13
+
 run.bat
+
 <img width="1093" height="184" alt="image" src="https://github.com/user-attachments/assets/17ab4d72-06ab-4494-9eb8-d06df9a92e9a" />
 
 ## Estrutura do repositório
