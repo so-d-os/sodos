@@ -1,9 +1,17 @@
-; kernel_entry.asm - entra em long mode e chama kmain.
-; O boot (boot.asm) fica em 32 bits e faz call cdecl:
-;   [esp+4] = app_addr, [esp+8] = app_size.
+; kernel_entry.asm - entra em long mode e chama kmain(BootInfo*).
+;
+; Contrato de entrada v1 (BIOS stage2 e futuro UEFI):
+;   EBX = endereco fisico de struct BootInfo, com magic BOOTINFO_MAGIC
+;   paging desligado, interrupcoes desligadas, A20 ligado
+;   CS=0x08; DS=ES=FS=GS=SS=0x10; ESP=0x9FC00 alinhado a 16
+;   DF limpo; EAX/ECX/EDX indefinidos
+;
+; O ponto de entrada continua sendo kernel_entry.  Qualquer carregador que
+; respeite o contrato entrega o mesmo BootInfo ao mesmo kmain() 64 bits.
 ; Paginas de 2 MB, identidade, 256 MB (igual a QEMU -m 256 e ao probe de mm.c).
 ; Tabelas em 0x1000/0x2000/0x3000. O diretorio 0x6000 cobre o framebuffer
-; Bochs em 0xE0000000 e o candidato 0xFD000000. GDT em 0x4000. Args em 0x5000.
+; Bochs em 0xE0000000 e o candidato 0xFD000000. GDT em 0x4000.
+; BootInfo fica em 0x5000 e o mapa E820 em 0x5200; nada aqui os sobrescreve.
 
 bits 32
 section .text
@@ -11,10 +19,11 @@ global kernel_entry
 extern kmain
 
 kernel_entry:
-    mov eax, [esp+4]
-    mov [0x5000], eax
-    mov eax, [esp+8]
-    mov [0x5004], eax
+    test ebx, ebx
+    jz .no_bootinfo
+    cmp dword [ebx], 0x53444F53
+    jne .no_bootinfo
+    mov ebp, ebx          ; cpuid abaixo clobbera EBX; EBP preserva BootInfo
 
     mov dx, 0x3F8
     mov al, 'P'
@@ -108,6 +117,15 @@ kernel_entry:
 
     jmp 0x08:lm_entry
 
+.no_bootinfo:
+    mov dx, 0x3F8
+    mov al, 'B'
+    out dx, al
+.no_bootinfo_hang:
+    cli
+    hlt
+    jmp .no_bootinfo_hang
+
 .no64:
     mov dx, 0x3F8
     mov al, 'N'
@@ -128,13 +146,13 @@ lm_entry:
     mov gs, ax
 
     mov rsp, 0x9FC00
+    cld
 
     mov dx, 0x3F8
     mov al, 'L'
     out dx, al
 
-    mov edi, [qword 0x5000]
-    mov esi, [qword 0x5004]
+    mov edi, ebp          ; RDI = BootInfo* (zero-extend de EBP)
     call kmain
 
 .hang:

@@ -1,22 +1,29 @@
 /* mm.c - First-fit. Cada bloco guarda o tamanho total, inclusive o cabecalho.
- * Duas arenas: a do kernel (kmalloc, 2 MB em 0xA80000) e a alta (umalloc, de 16 MB
- * ate o fim da RAM) para programas, DLLs e buffers grandes. */
+ * Duas arenas: a do kernel (kmalloc, 2 MB em 0xA80000) e a alta (umalloc, logo
+ * apos o kernel, ate o limite da identidade de 256 MB) para programas, DLLs e
+ * buffers grandes.
+ *
+ * Desde o boot em dois estagios o kernel fica em 0x01000000.  A arena alta e
+ * escolhida a partir do mapa E820 entregue no BootInfo: nunca testamos (nem
+ * escrevemos) memoria reservada e nunca comecamos antes de __bss_end.
+ */
 #include "mm.h"
+#include "bootinfo.h"
 
-/* O kernel vai ate 0x58000 (o Makefile recusa __bss_end maior). O heap do
- * kernel fica depois da FAT (fat.c): nada aqui vai direto para o disco, o
- * fat.c copia por um bounce abaixo de 1 MB. */
+/* O kernel fica em 0x01000000.  A FAT ocupa 0xA00000-0xA59000 e o heap do
+ * kernel fica em 0xA80000-0xC7FFFF, abaixo do kernel. */
 #define MM_HEAP_START 0x00A80000u
 #define MM_HEAP_END   0x00C80000u
 #define MM_ALIGN      16u
 
-/* 0x100000-0x9FFFFF: tela em memoria (visual.c, ate 1920x1080x4).
- * 0xA00000-0xA51000: FAT e raiz. 0xA51000-0xA59000: diretorio aberto.
- * 0xA80000-0xC7FFFF: kmalloc.
- * O heap alto comeca em 16 MB. */
-#define UM_START      0x01000000u
+/* Limite da identidade montada por kernel_entry (128 paginas de 2 MB). */
 #define UM_PROBE_MAX  0x10000000u
 #define UM_STEP       0x00100000u
+#define UM_START      0x01000000u
+#define UM_MIN_SIZE   0x00400000u
+#define UM_ALIGN_BIG  0x00200000u
+
+extern char __bss_end[];
 
 struct mm_hdr {
   uint32_t size;
@@ -61,10 +68,13 @@ static void arena_init(struct arena* a, uint32_t start, uint32_t end) {
   a->ready = 1;
 }
 
-/* Sem tabela E820: testa cada MB escrevendo e relendo. */
-static uint32_t probe_ram_end(void) {
+/* Fallback sem E820: testa cada MB acima do kernel.  Nunca comeca em UM_START
+ * puro, porque o kernel ocupa 0x01000000 em diante. */
+static uint32_t probe_ram_end(uint32_t start) {
   uint32_t a;
-  for (a = UM_START; a < UM_PROBE_MAX; a += UM_STEP) {
+  if (start < UM_START) start = UM_START;
+  start = (start + UM_STEP - 1u) & ~(UM_STEP - 1u);
+  for (a = start; a < UM_PROBE_MAX; a += UM_STEP) {
     volatile uint32_t* p = (volatile uint32_t*)(a + UM_STEP - 4u);
     uint32_t old = *p;
     *p = 0x5A3CA55Au;
@@ -76,15 +86,80 @@ static uint32_t probe_ram_end(void) {
   return UM_PROBE_MAX;
 }
 
+/* Verdadeiro se [start,end) cabe inteiro em uma entrada E820 utilizavel. */
+static int range_usable(const struct BootInfo* bi, uint32_t start, uint32_t end) {
+  const struct BootMemEntry* map;
+  uint32_t i;
+  if (!bi || bi->mem_count == 0) return 0;
+  map = bootinfo_mem_map(bi);
+  if (!map) return 0;
+  for (i = 0; i < bi->mem_count; ++i) {
+    uint64_t b = map[i].base;
+    uint64_t len = map[i].length;
+    uint64_t e;
+    if (map[i].type != BOOTINFO_MEM_USABLE || len == 0) continue;
+    if (b > 0xFFFFFFFFULL) continue;
+    e = b + len;
+    if (e < b) e = 0x100000000ULL;
+    if (b <= start && e >= end) return 1;
+  }
+  return 0;
+}
+
+/* Fim da memoria que o kernel ocupa: __bss_end e a verdade do link; o tamanho
+ * declarado no BootInfo cobre carregadores que informem um initrd/arquivo. */
+static uint32_t kernel_reserved_end(const struct BootInfo* bi) {
+  uint32_t end = (uint32_t)(uintptr_t)__bss_end;
+  if (bi && bi->kernel_phys <= 0xFFFFFFFFULL) {
+    uint64_t kend = bi->kernel_phys + bi->kernel_size;
+    if (kend > end && kend <= 0xFFFFFFFFULL) end = (uint32_t)kend;
+  }
+  return end;
+}
+
 void mm_init(void) {
-  uint32_t top;
+  const struct BootInfo* bi = bootinfo_get();
+  const struct BootMemEntry* map;
+  uint32_t kend = kernel_reserved_end(bi);
+  uint32_t start;
+  uint32_t i;
+
   low.ready = 0;
   high.ready = 0;
-  top = probe_ram_end();
-  if (top >= MM_HEAP_END)
-    arena_init(&low, MM_HEAP_START, MM_HEAP_END);
-  if (top >= UM_START + 4u * UM_STEP)
-    arena_init(&high, UM_START, top);
+
+  if (kend < UM_START) kend = UM_START;
+  start = (kend + UM_ALIGN_BIG - 1u) & ~(UM_ALIGN_BIG - 1u);
+
+  map = bootinfo_mem_map(bi);
+  if (bi && map && bi->mem_count != 0) {
+    for (i = 0; i < bi->mem_count; ++i) {
+      uint64_t b = map[i].base;
+      uint64_t len = map[i].length;
+      uint64_t e;
+      uint64_t s;
+      if (map[i].type != BOOTINFO_MEM_USABLE || len == 0) continue;
+      if (b > 0xFFFFFFFFULL) continue;
+      e = b + len;
+      if (e < b) e = 0x100000000ULL;
+      if (e > UM_PROBE_MAX) e = UM_PROBE_MAX;
+      if (e <= start) continue;
+      s = (b > start) ? b : start;
+      s = (s + UM_ALIGN_BIG - 1u) & ~(uint64_t)(UM_ALIGN_BIG - 1u);
+      if (e > s + UM_MIN_SIZE) {
+        arena_init(&high, (uint32_t)s, (uint32_t)e);
+        break;
+      }
+    }
+    /* A arena baixa e fixa; so a habilitamos se o E820 disser que e RAM. */
+    if (kend >= MM_HEAP_END && range_usable(bi, MM_HEAP_START, MM_HEAP_END))
+      arena_init(&low, MM_HEAP_START, MM_HEAP_END);
+  } else {
+    uint32_t top = probe_ram_end(start);
+    if (top >= start + UM_MIN_SIZE)
+      arena_init(&high, start, top);
+    if (top >= MM_HEAP_END && kend >= MM_HEAP_END)
+      arena_init(&low, MM_HEAP_START, MM_HEAP_END);
+  }
 }
 
 int mm_ready(void) { return low.ready; }

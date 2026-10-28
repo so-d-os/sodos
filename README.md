@@ -54,7 +54,7 @@ The shell commands below assume the repository root; when they need the code, th
 ## What's inside
 
 - **64-bit kernel** in long mode, 2 MB paging, kernel heap and user heap, exception handler with register and stack dump.
-- **Its own boot path**: `boot.asm` (real mode → A20 → GDT → long mode) and a legacy Multiboot path for GRUB.
+- **Two-stage BIOS boot**: `boot.asm` (512-byte stage 1) loads `stage2.asm`, which uses E820, validates the target RAM, loads the kernel at `0x01000000` and hands over a versioned `BootInfo`; a legacy Multiboot path for GRUB is still present.
 - **DOS shell** with 33 built-in commands, history, TAB, subdirectories and drive switching.
 - **FAT12 (read) and FAT16 (read/write)**, MBR partitions, up to 4 ATA disks, subdirectories, cross-drive copy and RAM disk.
 - **`win` desktop**: movable and resizable windows, taskbar, Start menu, icons, thumbnails, Notepad, Manager, Explorer in assembly and Command.
@@ -128,11 +128,12 @@ The USB tablet provides the absolute pointer position used by the desktop. All t
 
 | Sector | Contents |
 |---|---|
-| 0 | `boot.bin` (real mode, A20, GDT, long mode) |
-| 1 onward | `kernel.bin` (at least 72 sectors), loaded at `0x10000` |
-| after the kernel | `app.bin` (minimal 32-bit application; the 64-bit kernel does not run it) |
+| 0 | `boot.bin` (512-byte stage 1: LBA/CHS load of stage 2) |
+| 1 … N | `stage2.bin` (E820, memory validation, kernel/app load, BootInfo) |
+| N+1 … | `kernel.bin`, loaded at `0x01000000` (16 MiB) |
+| after the kernel | `app.bin` (legacy 32-bit application; the 64-bit kernel does not run it) |
 
-The kernel must end before `0x58000`, the slot used by `asm`/`run`; the Makefile aborts the build if `__bss_end` goes past that.
+The kernel is linked at `0x01000000`; `stage2` checks the E820 map before loading it and reports which range failed. `tools/validate_layout.sh` aborts the build on size/address/overlap errors (including a kernel that no longer fits below the 256 MiB identity map). See [BOOT.md](src13/BOOT.md) for the full BootInfo contract.
 
 ### Debugging with GDB
 
@@ -149,9 +150,10 @@ gdb -ex "target remote :1234" -ex "symbol-file kernel.elf" -ex "break kmain" -ex
 
 ## How the system boots
 
-1. The BIOS loads sector 0 at `0x7C00`. `boot.asm` enables the A20 line, reads the kernel via `INT 13h` (LBA with CHS fallback), builds a flat GDT and enters 32-bit protected mode with the stack at `0x9FC00`.
-2. `kernel_entry.asm` checks whether the CPU supports long mode, builds the page tables (128 2 MB pages = 256 MB identity) and enables PAE + paging. Without long mode it writes `N` to the serial port and halts.
-3. `kmain` zeroes the BSS, initializes memory, the serial port (COM1), remaps and masks the PIC, builds the IDT, captures the BIOS 8×16 font, enters text mode, starts the network and HTTP, registers the commands, initializes the drives, mounts `D:` if there is FAT16, runs `HTTPD.EXE` if it exists on `D:` and opens the shell.
+1. The BIOS loads sector 0 at `0x7C00`. Stage 1 (`boot.asm`) reads stage 2 (`stage2.asm`) to `0x7E00` via `INT 13h` (LBA with CHS fallback), passes the boot drive and kernel LBA at `0x4FF0`, and jumps to stage 2.
+2. Stage 2 enables A20, collects the E820 map at `0x5200`, validates the kernel/app ranges against usable RAM, loads the kernel to `0x01000000` through a low bounce buffer plus a small protected-mode copy, fills `BootInfo` at `0x5000`, and calls `kernel_entry` with `EBX = BootInfo*`.
+3. `kernel_entry.asm` checks for long mode, builds the page tables (128 2 MB pages = 256 MB identity plus the LFB), enables PAE + paging and calls `kmain(BootInfo*)`. Without long mode it writes `N` to the serial port and halts; a bad BootInfo writes `B`.
+4. `kmain` validates BootInfo, zeroes the BSS, initializes memory (low `kmalloc` arena + E820-driven high `umalloc` arena after the kernel), the serial port (COM1), remaps and masks the PIC, builds the IDT, captures the BIOS 8×16 font, enters text mode, starts the network and HTTP, registers the commands, initializes the drives, mounts `D:` if there is FAT16, runs `HTTPD.EXE` if it exists on `D:` and opens the shell.
 
 The kernel **does not enable interrupts** (`sti` is never called): keyboard, mouse, network, timer and disk are polled. The IDT exists to catch exceptions and IRQs, which are masked.
 
@@ -159,18 +161,22 @@ The kernel **does not enable interrupts** (`sti` is never called): keyboard, mou
 
 | Address | Use |
 |---|---|
-| `0x10000` | Kernel start (code, data, BSS) |
-| `0x30000` | Old embedded executables (`load`) |
-| `0x58000`–`0x5FFFF` | Slot for `asm`/`run` and for assembly window programs |
+| `0x4FF0` | Stage 1 → stage 2 parameters (`boot_drive`, `kernel_lba`) |
+| `0x5000` | `BootInfo` v1 (128 bytes) |
+| `0x5200`–`0x57FF` | E820 map (up to 64 entries) |
+| `0x7C00` / `0x7E00` | Stage 1 / stage 2 |
+| `0x58000`–`0x5FFFF` | Slot for `asm`/`run`, assembly window programs and legacy `app.bin` |
 | `0x7C000` | **NET1** gate for assembly (TCP) |
 | `0x7E000` | FAT sector buffer (*bounce*) |
 | `0x80000`–`0x806FF` | MBR/`fdisk` buffers |
+| `0x80800` | FAT format buffer (absolute symbol, not in `kernel.bin`) |
 | `0x9FC00` | Initial kernel stack |
 | `0xB8000` | VGA text 80×25 |
 | `0x100000`–`0x9FFFFF` | Screen in RAM (graphics back buffer) |
 | `0xA00000`–`0xA59000` | Boot sector, FAT, root and open directory |
 | `0xA80000`–`0xC7FFFF` | Kernel heap (2 MB) |
-| `0x1000000` onward | User heap (up to the detected top, 256 MB in QEMU) |
+| `0x01000000` | Kernel (code, data, BSS) |
+| after the kernel | User heap (E820-driven, capped at 256 MB in QEMU) |
 
 ### Scheduling
 
@@ -892,7 +898,7 @@ dlls      loaded modules, base, size and references
 - **No `reboot`**; `shutdown` uses ACPI/the Bochs port without parsing the ACPI tables.
 - `IMG.DLL` does not decode BMP, although the desktop accepts `.BMP`.
 - `make debug` and `make iso-grub` are outdated relative to the current kernel.
-- `boot.bin` still loads `app.bin` at `0x58000`, but the 64-bit kernel ignores that 32-bit application.
+- Stage 2 still loads `app.bin` at `0x58000` for compatibility, but the 64-bit kernel ignores that 32-bit application.
 
 ## Directory map
 

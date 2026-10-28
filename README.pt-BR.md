@@ -54,7 +54,7 @@ Os comandos de shell abaixo assumem a raiz do repositório; quando precisam do c
 ## O que tem dentro
 
 - **Kernel 64 bits** em long mode, paginação de 2 MB, heap de kernel e heap de usuário, tratador de exceções com despejo de registradores e pilha.
-- **Boot próprio**: `boot.asm` (real mode → A20 → GDT → long mode) e um caminho Multiboot legado para GRUB.
+- **Boot BIOS em dois estágios**: `boot.asm` (stage 1 de 512 bytes) carrega `stage2.asm`, que usa E820, valida a RAM de destino, carrega o kernel em `0x01000000` e entrega um `BootInfo` versionado; um caminho Multiboot legado para GRUB continua presente.
 - **Shell DOS** com 33 comandos internos, histórico, TAB, subpastas e troca de unidade.
 - **FAT12 (leitura) e FAT16 (leitura e escrita)**, partições MBR, até 4 discos ATA, subpastas, cópia entre unidades e disco RAM.
 - **Desktop `win`**: janelas móveis e redimensionáveis, barra de tarefas, menu Iniciar, ícones, miniaturas, Bloco de notas, Gerenciador, Explorer em assembly e Command.
@@ -128,11 +128,12 @@ O tablet USB entrega a posição absoluta do ponteiro, usada pelo desktop. Todos
 
 | Setor | Conteúdo |
 |---|---|
-| 0 | `boot.bin` (real mode, A20, GDT, long mode) |
-| 1 em diante | `kernel.bin` (pelo menos 72 setores), carregado em `0x10000` |
-| depois do kernel | `app.bin` (aplicativo mínimo de 32 bits; o kernel de 64 bits não o executa) |
+| 0 | `boot.bin` (stage 1 de 512 bytes: carga do stage 2 por LBA/CHS) |
+| 1 … N | `stage2.bin` (E820, validação de memória, carga do kernel/app, BootInfo) |
+| N+1 … | `kernel.bin`, carregado em `0x01000000` (16 MiB) |
+| depois do kernel | `app.bin` (aplicativo legado de 32 bits; o kernel de 64 bits não o executa) |
 
-O kernel precisa terminar antes de `0x58000`, o slot usado pelo `asm`/`run`; o Makefile aborta o build se `__bss_end` passar disso.
+O kernel é linkado em `0x01000000`; o `stage2` confere o mapa E820 antes de carregá-lo e informa qual faixa falhou. `tools/validate_layout.sh` aborta o build em erros de tamanho/endereço/sobreposição (inclusive kernel que não cabe mais abaixo da identidade de 256 MiB). O contrato completo do BootInfo está em [BOOT.md](src13/BOOT.md).
 
 ### Depurar com GDB
 
@@ -149,9 +150,10 @@ gdb -ex "target remote :1234" -ex "symbol-file kernel.elf" -ex "break kmain" -ex
 
 ## Como o sistema sobe
 
-1. A BIOS carrega o setor 0 em `0x7C00`. `boot.asm` habilita a linha A20, lê o kernel por `INT 13h` (LBA com queda para CHS), monta uma GDT plana e entra em modo protegido de 32 bits com pilha em `0x9FC00`.
-2. `kernel_entry.asm` confere se a CPU tem long mode, monta as tabelas de página (128 páginas de 2 MB = 256 MB de identidade) e ativa PAE + paging. Se não houver long mode, escreve `N` na serial e para.
-3. `kmain` zera o BSS, inicializa a memória, a serial (COM1), remapeia e mascara o PIC, monta a IDT, captura a fonte 8×16 da BIOS, entra em modo texto, sobe a rede e o HTTP, registra os comandos, inicializa as unidades, monta `D:` se houver FAT16, roda `HTTPD.EXE` se ele existir em `D:` e abre o shell.
+1. A BIOS carrega o setor 0 em `0x7C00`. O stage 1 (`boot.asm`) lê o stage 2 (`stage2.asm`) para `0x7E00` por `INT 13h` (LBA com queda para CHS), passa a unidade e o LBA do kernel em `0x4FF0` e salta para o stage 2.
+2. O stage 2 habilita A20, coleta o mapa E820 em `0x5200`, valida as faixas do kernel/app contra RAM utilizável, carrega o kernel em `0x01000000` por um bounce buffer baixo + cópia em modo protegido, preenche o `BootInfo` em `0x5000` e chama `kernel_entry` com `EBX = BootInfo*`.
+3. `kernel_entry.asm` confere long mode, monta as tabelas de página (128 páginas de 2 MB = 256 MB de identidade + LFB), ativa PAE + paging e chama `kmain(BootInfo*)`. Sem long mode escreve `N` na serial e para; BootInfo inválido escreve `B`.
+4. `kmain` valida o BootInfo, zera o BSS, inicializa a memória (arena baixa do `kmalloc` + arena alta do `umalloc` escolhida pelo E820 após o kernel), a serial (COM1), remapeia e mascara o PIC, monta a IDT, captura a fonte 8×16 da BIOS, entra em modo texto, sobe a rede e o HTTP, registra os comandos, inicializa as unidades, monta `D:` se houver FAT16, roda `HTTPD.EXE` se ele existir em `D:` e abre o shell.
 
 O kernel **não habilita interrupções** (`sti` nunca é chamado): teclado, mouse, rede, timer e disco são lidos por *polling*. A IDT existe para capturar exceções e IRQs, que são mascaradas.
 
@@ -159,18 +161,22 @@ O kernel **não habilita interrupções** (`sti` nunca é chamado): teclado, mou
 
 | Endereço | Uso |
 |---|---|
-| `0x10000` | Início do kernel (código, dados, BSS) |
-| `0x30000` | Executáveis embutidos antigos (`load`) |
-| `0x58000`–`0x5FFFF` | Slot do `asm`/`run` e de programas de janela em assembly |
+| `0x4FF0` | Parâmetros stage 1 → stage 2 (`boot_drive`, `kernel_lba`) |
+| `0x5000` | `BootInfo` v1 (128 bytes) |
+| `0x5200`–`0x57FF` | Mapa E820 (até 64 entradas) |
+| `0x7C00` / `0x7E00` | Stage 1 / stage 2 |
+| `0x58000`–`0x5FFFF` | Slot do `asm`/`run`, de programas de janela em assembly e do `app.bin` legado |
 | `0x7C000` | Porta **NET1** para assembly (TCP) |
 | `0x7E000` | Buffer de setor do FAT (*bounce*) |
 | `0x80000`–`0x806FF` | Buffers de MBR/`fdisk` |
+| `0x80800` | Buffer de formatação FAT (símbolo absoluto, fora do `kernel.bin`) |
 | `0x9FC00` | Pilha inicial do kernel |
 | `0xB8000` | Texto VGA 80×25 |
 | `0x100000`–`0x9FFFFF` | Tela em RAM (back buffer do modo gráfico) |
 | `0xA00000`–`0xA59000` | Boot sector, FAT, raiz e diretório aberto |
 | `0xA80000`–`0xC7FFFF` | Heap do kernel (2 MB) |
-| `0x1000000` em diante | Heap de usuário (até o topo detectado, 256 MB no QEMU) |
+| `0x01000000` | Kernel (código, dados, BSS) |
+| depois do kernel | Heap de usuário (escolhido pelo E820, limitado a 256 MB no QEMU) |
 
 ### Escalonamento
 
@@ -893,7 +899,7 @@ dlls      módulos carregados, base, tamanho e referências
 - **Sem `reboot`**; `shutdown` usa ACPI/porta Bochs sem interpretar as tabelas ACPI.
 - `IMG.DLL` não decodifica BMP, embora o desktop aceite `.BMP`.
 - `make debug` e `make iso-grub` estão defasados em relação ao kernel atual.
-- O `boot.bin` ainda carrega `app.bin` em `0x58000`, mas o kernel de 64 bits ignora esse aplicativo de 32 bits.
+- O stage 2 ainda carrega `app.bin` em `0x58000` por compatibilidade, mas o kernel de 64 bits ignora esse aplicativo de 32 bits.
 
 ## Mapa das pastas
 

@@ -1,13 +1,24 @@
-/* linker.ld - kernel 64 bits, identidade, carga em 0x10000 */
+/* linker.ld - kernel 64 bits, identidade, carga em 16 MiB.
+ *
+ * O kernel NAO ocupa mais a memoria baixa (0x10000-0x58000).  Ele e carregado
+ * pelo stage 2 em 0x01000000, deixando livres a pilha (0x9FC00), a tela em
+ * memoria (0x100000), a FAT (0xA00000) e o heap do kernel (0xA80000).
+ *
+ * FORMAT_BUF_ADDR e um simbolo absoluto: o buffer de 512 bytes usado por
+ * fat_format.c continua em memoria baixa (o driver de disco so aceita buffers
+ * em [0x60000,0x100000)), mas nao entra no kernel.bin.  Antes ele era uma
+ * secao carregavel em 0x80800, o que fazia o objcopy gerar uma imagem que
+ * atravessava o slot de aplicacao.
+ */
 OUTPUT_FORMAT(elf64-x86-64)
 ENTRY(kernel_entry)
 
-/* Endereços fixos para I/O (partition.c / fat_format.c): 0x80000-0x80620 em uso; 0x80800 = buffer de formatação (512 bytes) */
+KERNEL_LOAD    = 0x01000000;
 FORMAT_BUF_ADDR = 0x00080800;
 
 SECTIONS
 {
-  . = 0x00010000;
+  . = KERNEL_LOAD;
 
   .text : { *(.text*) }
   .rodata : { *(.rodata*) }
@@ -18,18 +29,14 @@ SECTIONS
     __bss_end = .;
   }
 
-  /* Sem excecoes: estas tabelas so empurravam o nucleo para cima de 0x58000. */
+  /* Sem excecoes: o kernel freestanding nao as usa. */
   /DISCARD/ : {
     *(.eh_frame)
     *(.eh_frame_hdr)
     *(.note.GNU-stack)
     *(.note.gnu.property)
   }
-
-  /* Reserva 512 bytes em 0x80800 para fat_format (evita sobrepor .rodata/.bss do kernel) */
-  . = FORMAT_BUF_ADDR;
-  .format_sector_buf : {
-    format_buf_region = .;
-    . = . + 512;
-  }
 }
+
+/* 512 bytes reservados em 0x80800 para fat_format (fora da imagem carregada). */
+format_buf_region = FORMAT_BUF_ADDR;

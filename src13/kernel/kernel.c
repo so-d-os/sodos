@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "disk.h"
+#include "bootinfo.h"
 #include "idt.h"
 #include "pic.h"
 #include "trace.h"
@@ -1029,10 +1030,24 @@ void shell_exec_line(char* line) {
 extern char __bss_start[];
 extern char __bss_end[];
 
-void kmain(uint32_t app_addr, uint32_t app_size) {
-  (void)app_addr; (void)app_size;
+static void bootinfo_panic(const char* msg) {
+  volatile uint16_t* vga = (volatile uint16_t*)0xB8000;
+  int i;
+  /* Nao usa puts_k: row/col vivem na BSS, que ainda nao foi zerada. */
+  for (i = 0; msg[i] && msg[i] != '\n' && i < 80; ++i)
+    vga[i] = (uint16_t)(unsigned char)msg[i] | (uint16_t)0x0F00;
+  serial_init();
+  serial_puts(msg);
+  for (;;) {
+    __asm__ volatile ("cli; hlt");
+  }
+}
 
+void kmain(const struct BootInfo* bi) {
   __asm__ volatile ("cli");
+
+  if (!bootinfo_valid(bi))
+    bootinfo_panic("Erro: BootInfo invalida. Boot abortado.\n");
 
   /* BSS alem do kernel.bin nao e carregado/zerado pelo boot. */
   {
@@ -1040,8 +1055,24 @@ void kmain(uint32_t app_addr, uint32_t app_size) {
     while (p < __bss_end)
       *p++ = 0;
   }
-  mm_init();
+
+  /* So depois de zerar a BSS: g_bootinfo vive nela. */
+  bootinfo_set(bi);
   serial_init();
+  serial_puts("\n[kernel] BootInfo v1, firmware=");
+  serial_puts(bi->firmware == BOOTINFO_FIRMWARE_BIOS ? "BIOS" :
+              (bi->firmware == BOOTINFO_FIRMWARE_UEFI ? "UEFI" : "unknown"));
+  serial_puts(" kernel=0x");
+  serial_hex32((uint32_t)bi->kernel_phys);
+  serial_puts(" size=0x");
+  serial_hex32((uint32_t)bi->kernel_size);
+  serial_puts(" entry=0x");
+  serial_hex32((uint32_t)bi->kernel_entry);
+  serial_puts(" e820=0x");
+  serial_hex32(bi->mem_count);
+  serial_puts("\n");
+
+  mm_init();
   serial_puts("\n[kernel] boot 64-bit, serial log at COM1 (use qemu -serial file:...)\n");
 
   pic_mask_all();

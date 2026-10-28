@@ -1,18 +1,32 @@
-; boot.asm - stage1 (512 bytes)
-; i386-friendly: usa BIOS, real mode, entra em protected mode, chama kernel 32-bit
+; boot.asm - stage1 (512 bytes) do carregador BIOS do SODOS.
+;
+; Responsabilidades minimas:
+;   - escolher modo texto e imprimir "S1";
+;   - carregar stage2.bin em 0x7E00 via LBA estendido (ou CHS como fallback);
+;   - deixar {boot_drive, kernel_lba} em 0x4FF0 para o stage2;
+;   - saltar para o stage2.  O kernel e a aplicacao NAO sao tocados aqui.
+;
+; O stage2 faz A20, E820, carrega o kernel acima de 1 MiB e entrega o BootInfo.
+; Layout: setor 0 = este codigo; setores 1..N = stage2; depois kernel; depois app.
+
 org 0x7C00
 bits 16
 
-KERNEL_LOAD      equ 0x10000
-%ifndef KERNEL_ENTRY
-%define KERNEL_ENTRY 0x1026c
+%ifndef STAGE2_SECTORS
+%define STAGE2_SECTORS 8
 %endif
-APP_LOAD         equ 0x58000   ; depois do kernel (que pode ir ate 0x58000)
+%ifndef PART_SECTORS
+%define PART_SECTORS 128
+%endif
+%if STAGE2_SECTORS < 1
+%error "STAGE2_SECTORS deve ser positivo"
+%endif
+%if STAGE2_SECTORS > 56
+%error "stage2 grande demais para o buffer de 0x7E00..0xEE00"
+%endif
 
-%ifndef KERNEL_SECTORS
-KERNEL_SECTORS   equ 20
-%endif
-APP_SECTORS      equ 4
+STAGE2_LOAD     equ 0x7E00
+BOOT_PARAM_ADDR equ 0x4FF0
 
 start:
     cli
@@ -22,70 +36,97 @@ start:
     mov ss, ax
     mov sp, 0x7C00
     sti
+    cld
 
-    mov [BOOT_DRIVE], dl
-
+    mov [boot_drive], dl
     mov ax, 0x0003
     int 0x10
 
-    mov si, msg
+    mov si, msg_start
     call print
 
-    call enable_a20
+    ; Contrato com o stage2: unidade e LBA inicial do kernel.
+    movzx eax, byte [boot_drive]
+    mov [BOOT_PARAM_ADDR], eax
+    mov eax, 1 + STAGE2_SECTORS
+    mov [BOOT_PARAM_ADDR + 4], eax
 
-    ; Verifica suporte a LBA estendido
-    call check_lba_support
+    call check_lba
+    cmp byte [lba_ok], 0
+    je .chs
 
-    mov ax, KERNEL_LOAD >> 4
-    mov es, ax
-    xor bx, bx
-    mov cx, KERNEL_SECTORS
-    mov di, 1              ; LBA fixo: setor 1 (kernel)
-    call read_sectors
-
-    mov ax, APP_LOAD >> 4
-    mov es, ax
-    xor bx, bx
-    mov cx, APP_SECTORS
-    ; Carrega app logo após o kernel
-    mov di, 1 + KERNEL_SECTORS
-    call read_sectors
-
-    cli
-    lgdt [gdt_desc]
-
-    ; Entra em protected mode
-    mov eax, cr0
-    or eax, 1
-    mov cr0, eax
-
-    ; Limpa pipeline (necessário em processadores modernos com pipeline)
-    ; O jmp far força uma limpeza completa do pipeline
-    jmp CODE_SEL:pm_entry
-
-bits 32
-pm_entry:
-    mov ax, DATA_SEL
+    ; LBA estendido: um setor por chamada, buffer em 0x07E0:offset.
+    mov word [dap + 2], 1
+    mov word [dap + 4], 0
+    mov word [dap + 6], STAGE2_LOAD >> 4
+    mov dword [dap + 8], 1
+    mov dword [dap + 12], 0
+    mov cx, STAGE2_SECTORS
+.lba_loop:
+    mov si, dap
+    mov dl, [boot_drive]
+    mov ah, 0x42
+    int 0x13
+    jc disk_fail
+    push ax
+    xor ax, ax
     mov ds, ax
     mov es, ax
-    mov fs, ax
-    mov gs, ax
-    mov ss, ax
-    ; Alinha stack a 16 bytes para compatibilidade com SSE/MMX em processadores modernos
-    mov esp, 0x9FC00
-    and esp, 0xFFFFFFF0  ; Alinha para 16 bytes
+    pop ax
+    add word [dap + 4], 512
+    inc dword [dap + 8]
+    loop .lba_loop
+    jmp .go
 
-    push dword APP_SECTORS*512
-    push dword APP_LOAD
+    ; CHS: 63 setores por trilha, 16 cabecas; um setor por chamada.
+.chs:
+    mov word [cur_off], 0
+    mov dword [cur_lba], 1
+    mov cx, STAGE2_SECTORS
+.chs_loop:
+    push cx
+    mov eax, [cur_lba]
+    xor edx, edx
+    mov ebx, 63
+    div ebx
+    inc edx
+    mov cl, dl
+    xor edx, edx
+    mov ebx, 16
+    div ebx
+    mov dh, dl
+    mov ch, al
+    mov al, ah
+    and al, 0x03
+    shl al, 6
+    or cl, al
+    mov dl, [boot_drive]
+    mov ax, STAGE2_LOAD >> 4
+    mov es, ax
+    mov bx, [cur_off]
+    mov ax, 0x0201
+    int 0x13
+    jc disk_fail
+    push ax
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
+    pop ax
+    add word [cur_off], 512
+    inc dword [cur_lba]
+    pop cx
+    loop .chs_loop
 
-    call dword KERNEL_ENTRY
-    add esp, 8
+.go:
+    mov dl, [boot_drive]
+    jmp 0x0000:STAGE2_LOAD
 
-hang:
-    jmp hang
-
-bits 16
+; ---------------------------------------------------------------------------
 print:
+    push ax
+    push bx
+    push si
+.loop:
     lodsb
     test al, al
     jz .done
@@ -93,187 +134,89 @@ print:
     mov bh, 0
     mov bl, 0x07
     int 0x10
-    jmp print
+    jmp .loop
 .done:
+    pop si
+    pop bx
+    pop ax
     ret
 
-enable_a20:
-    ; Método rápido (porta 0x92) - funciona na maioria dos sistemas modernos
-    in al, 0x92
-    test al, 2
-    jnz .done
-    or al, 2
-    and al, 0xFE
-    out 0x92, al
-.done:
-    ret
-
-; Verifica suporte a INT 13h extensions (LBA)
-check_lba_support:
+check_lba:
     mov ah, 0x41
     mov bx, 0x55AA
-    mov dl, [BOOT_DRIVE]
+    mov dl, [boot_drive]
     int 0x13
-    jc .no_lba
+    jc .no
     cmp bx, 0xAA55
-    jne .no_lba
+    jne .no
     test cl, 1
-    jz .no_lba
-    mov byte [LBA_SUPPORTED], 1
-    ret
-.no_lba:
-    mov byte [LBA_SUPPORTED], 0
-    ret
-
-; Wrapper que escolhe entre LBA e CHS
-; Entrada: ES:BX=buffer, CX=setores, DI=LBA
-read_sectors:
-    cmp byte [LBA_SUPPORTED], 0
-    jne read_lba_extended
-    jmp read_lba_chs
-
-; LBA estendido (INT 13h AH=42h)
-read_lba_extended:
+    jz .no
     push ax
-    push bx
-    push cx
-    push si
-    push di
-    
-.next:
-    mov word [DAP+2], 1
-    mov [DAP+4], bx
-    mov ax, es
-    mov [DAP+6], ax
-    xor eax, eax
-    mov ax, di
-    mov [DAP+8], eax
-    mov dword [DAP+12], 0
-    
-    mov si, DAP
-    mov ah, 0x42
-    mov dl, [BOOT_DRIVE]
-    int 0x13
-    jc disk_fail
-    
-    add bx, 512
-    jnc .no_wrap_ext
-    mov ax, es
-    add ax, 0x1000
+    xor ax, ax
+    mov ds, ax
     mov es, ax
-.no_wrap_ext:
-    inc di
-    loop .next
-    
-    pop di
-    pop si
-    pop cx
-    pop bx
     pop ax
+    mov byte [lba_ok], 1
     ret
-
-; CHS fallback - lê múltiplos setores
-read_lba_chs:
+.no:
     push ax
-    push bx
-    push cx
-    push dx
-    push si
-    push di
-    push es
-
-.next:
-    mov ax, di
-    xor dx, dx
-    mov si, 63
-    div si
-    inc dx
-    mov cl, dl
-
-    xor dx, dx
-    mov si, 16
-    div si
-    mov dh, dl
-    mov ch, al
-
-    mov dl, [BOOT_DRIVE]
-    mov ah, 0x02
-    mov al, 0x01
-    int 0x13
-    jc disk_fail
-
-    add bx, 512
-    jnc .no_wrap_chs
-    mov ax, es
-    add ax, 0x1000
+    xor ax, ax
+    mov ds, ax
     mov es, ax
-.no_wrap_chs:
-    inc di
-    loop .next
-
-    pop es
-    pop di
-    pop si
-    pop dx
-    pop cx
-    pop bx
     pop ax
+    mov byte [lba_ok], 0
     ret
-
 
 disk_fail:
+    push ax
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
+    pop ax
     mov si, msg_fail
     call print
-    jmp $
+.hang:
+    cli
+    hlt
+    jmp .hang
 
-BOOT_DRIVE db 0
-LBA_SUPPORTED db 0
+; ---------------------------------------------------------------------------
+; Dados
+; ---------------------------------------------------------------------------
+boot_drive db 0
+lba_ok     db 0
+cur_off    dw 0
+cur_lba    dd 0
 
-msg db "Boot OK. Loading...", 13,10,0
-msg_fail db "Disk error!", 13,10,0
+align 4
+dap:
+    db 16
+    db 0
+    dw 1
+    dw 0
+    dw STAGE2_LOAD >> 4
+    dd 0
+    dd 0
 
-; Disk Address Packet para INT 13h extensão (AH=42h)
-; Tamanho 16 bytes
-DAP:
-    db 16          ; tamanho
-    db 0           ; reservado
-    dw 1           ; número de setores (ajustado em runtime)
-    dw 0           ; offset do buffer (ajustado em runtime)
-    dw 0           ; segmento do buffer (ajustado em runtime)
-    dd 0           ; LBA (low)
-    dd 0           ; LBA (high - não usado aqui)
+msg_start db "S1", 13, 10, 0
+msg_fail  db "S1: disk error", 13, 10, 0
 
-align 8
-gdt:
-    dq 0x0000000000000000  ; Null descriptor
-    dq 0x00CF9A000000FFFF  ; Code segment: base=0, limit=4GB, 32-bit, executable, readable
-    dq 0x00CF92000000FFFF  ; Data segment: base=0, limit=4GB, 32-bit, writable
-    ; GDT compatível com processadores modernos (i386 até x86-64 em modo 32-bit)
-
-gdt_desc:
-    dw gdt_desc - gdt - 1
-    dd gdt
-
-CODE_SEL equ 0x08
-DATA_SEL equ 0x10
-
-; ------------------------------
-; Tabela de partições MBR (64 bytes)
-; Fica nos bytes 446-509 do setor
-; ------------------------------
+; ---------------------------------------------------------------------------
+; Tabela de particoes MBR (64 bytes em 0x1BE).  A particao descreve os dados
+; reais da imagem (stage2 + kernel + app); o SODOS nao a usa para montar C:.
+; ---------------------------------------------------------------------------
+times 446 - ($ - $$) db 0
 partition_table:
-    ; Partição 1: Ativa, tipo 0x83 (Linux), começa no setor 1
-    db 0x80                    ; Status: ativa
-    db 0x00, 0x01, 0x00        ; CHS início (head=0, sector=1, cylinder=0)
-    db 0x83                    ; Tipo: Linux filesystem (genérico)
-    db 0xFF, 0xFF, 0xFF        ; CHS fim (máximo, não usamos)
-    dd 1                       ; LBA start: setor 1 (onde o kernel começa)
-    dd 24                      ; Sector count: 24 setores (kernel + app)
+    db 0x80
+    db 0x00, 0x01, 0x00
+    db 0x83
+    db 0xFF, 0xFF, 0xFF
+    dd 1
+    dd PART_SECTORS
 
-    ; Partições 2-4: Vazias
     times 16 db 0
     times 16 db 0
     times 16 db 0
 
-times 510-($-$$) db 0
+times 510 - ($ - $$) db 0
 dw 0xAA55

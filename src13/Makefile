@@ -3,6 +3,19 @@ CC=gcc
 LD=ld
 AS=nasm
 
+# Layout fisico do boot.  Estes valores sao o contrato entre boot.asm,
+# stage2.asm, linker.ld e tools/validate_layout.sh.
+KERNEL_LOAD       := 0x01000000
+KERNEL_MAX_SIZE   := 0x0E000000
+APP_LOAD          := 0x00058000
+APP_MAX_SIZE      := 0x00008000
+STAGE2_LOAD       := 0x00007E00
+STAGE2_MAX_SIZE   := 0x00007000
+BOOTINFO_ADDR     := 0x00005000
+E820_ADDR         := 0x00005200
+BOOT_PARAM_ADDR   := 0x00004FF0
+IMAGE_MAX_SECTORS := 1048576
+
 # Kernel em long mode (identidade, abaixo de 2 GB). Sem red zone: IRQ usa a pilha.
 # -I. acha shell.h. kernel, fs, net e video guardam o nucleo.
 CFLAGS=-ffreestanding -fno-pic -fno-stack-protector -fno-pie -nostdlib -O2 -fno-jump-tables \
@@ -23,15 +36,56 @@ all: os.img
 
 executables.c: hello.bin testapp.bin hello.elf testapp.elf
 
-boot.bin: kernel/boot.asm kernel.elf kernel.bin
-	@KERNEL_ENTRY=$$(readelf -h kernel.elf 2>/dev/null | grep -E "(Entry point|ponto de entrada)" | awk '{print $$NF}' | sed 's/0x//' | head -1); \
-	if [ -z "$$KERNEL_ENTRY" ]; then KERNEL_ENTRY=1026c; fi; \
-	KERNEL_SIZE=$$(wc -c < kernel.bin 2>/dev/null || echo 0); \
-	if [ "$$KERNEL_SIZE" -lt 1 ]; then KERNEL_SIZE=36864; fi; \
+stage2.bin: kernel/stage2.asm Makefile kernel.elf kernel.bin app.bin
+	@KERNEL_SIZE=$$(wc -c < kernel.bin); \
 	KERNEL_SECTORS=$$(( (KERNEL_SIZE + 511) / 512 )); \
-	if [ "$$KERNEL_SECTORS" -lt 72 ]; then KERNEL_SECTORS=72; fi; \
-	echo "Building boot.bin with KERNEL_ENTRY=0x$$KERNEL_ENTRY, KERNEL_SECTORS=$$KERNEL_SECTORS (kernel.bin=$$KERNEL_SIZE bytes)"; \
-	$(AS) -f bin -DKERNEL_ENTRY=0x$$KERNEL_ENTRY -DKERNEL_SECTORS=$$KERNEL_SECTORS kernel/boot.asm -o $@
+	BSS_END=$$(nm kernel.elf | awk '$$3=="__bss_end"{print $$1; exit}'); \
+	if [ -z "$$BSS_END" ]; then \
+	  echo "Erro: __bss_end nao encontrado em kernel.elf."; exit 1; \
+	fi; \
+	KERNEL_RESERVED=$$(( $$(printf '%d' 0x$$BSS_END) - $$(printf '%d' 0x$(KERNEL_LOAD)) )); \
+	if [ "$$KERNEL_RESERVED" -lt "$$KERNEL_SIZE" ]; then KERNEL_RESERVED=$$KERNEL_SIZE; fi; \
+	if [ "$$KERNEL_RESERVED" -lt "$$(( KERNEL_SECTORS * 512 ))" ]; then KERNEL_RESERVED=$$(( KERNEL_SECTORS * 512 )); fi; \
+	KERNEL_ENTRY=$$(nm kernel.elf | awk '$$3=="kernel_entry"{print $$1; exit}'); \
+	if [ -z "$$KERNEL_ENTRY" ]; then \
+	  echo "Erro: kernel_entry nao encontrado em kernel.elf."; exit 1; \
+	fi; \
+	APP_SIZE=$$(wc -c < app.bin 2>/dev/null || echo 0); \
+	APP_SECTORS=$$(( (APP_SIZE + 511) / 512 )); \
+	echo "Building stage2.bin: kernel=$$KERNEL_SIZE bytes/$$KERNEL_SECTORS sectors, reserved=$$KERNEL_RESERVED, app=$$APP_SIZE bytes/$$APP_SECTORS sectors"; \
+	$(AS) -f bin \
+	  -DKERNEL_LOAD=$(KERNEL_LOAD) \
+	  -DKERNEL_ENTRY=0x$$KERNEL_ENTRY \
+	  -DKERNEL_SECTORS=$$KERNEL_SECTORS \
+	  -DKERNEL_SIZE=$$KERNEL_SIZE \
+	  -DKERNEL_RESERVED=$$KERNEL_RESERVED \
+	  -DKERNEL_MAX_SIZE=$(KERNEL_MAX_SIZE) \
+	  -DAPP_LOAD=$(APP_LOAD) \
+	  -DAPP_SECTORS=$$APP_SECTORS \
+	  -DAPP_SIZE=$$APP_SIZE \
+	  -DAPP_MAX_SIZE=$(APP_MAX_SIZE) \
+	  -DBOOTINFO_ADDR=$(BOOTINFO_ADDR) \
+	  -DE820_ADDR=$(E820_ADDR) \
+	  -DBOOT_PARAM_ADDR=$(BOOT_PARAM_ADDR) \
+	  kernel/stage2.asm -o $@
+
+boot.bin: kernel/boot.asm Makefile stage2.bin kernel.bin app.bin
+	@STAGE2_SIZE=$$(wc -c < stage2.bin); \
+	STAGE2_SECTORS=$$(( (STAGE2_SIZE + 511) / 512 )); \
+	KERNEL_SIZE=$$(wc -c < kernel.bin); \
+	KERNEL_SECTORS=$$(( (KERNEL_SIZE + 511) / 512 )); \
+	APP_SIZE=$$(wc -c < app.bin 2>/dev/null || echo 0); \
+	APP_SECTORS=$$(( (APP_SIZE + 511) / 512 )); \
+	PART_SECTORS=$$(( STAGE2_SECTORS + KERNEL_SECTORS + APP_SECTORS )); \
+	echo "Building boot.bin: stage2=$$STAGE2_SIZE bytes/$$STAGE2_SECTORS sectors, kernel=$$KERNEL_SECTORS, app=$$APP_SECTORS, partition=$$PART_SECTORS"; \
+	$(AS) -f bin -DSTAGE2_SECTORS=$$STAGE2_SECTORS -DPART_SECTORS=$$PART_SECTORS kernel/boot.asm -o $@; \
+	if [ $$(wc -c < $@) -ne 512 ]; then \
+	  echo "Erro: boot.bin nao tem 512 bytes."; rm -f $@; exit 1; \
+	fi
+
+.PHONY: check-layout
+check-layout: boot.bin stage2.bin kernel.elf kernel.bin app.bin
+	@KERNEL_LOAD=$(KERNEL_LOAD) KERNEL_MAX_SIZE=$(KERNEL_MAX_SIZE) APP_LOAD=$(APP_LOAD) APP_MAX_SIZE=$(APP_MAX_SIZE) STAGE2_LOAD=$(STAGE2_LOAD) STAGE2_MAX_SIZE=$(STAGE2_MAX_SIZE) BOOTINFO_ADDR=$(BOOTINFO_ADDR) E820_ADDR=$(E820_ADDR) IMAGE_MAX_SECTORS=$(IMAGE_MAX_SECTORS) sh tools/validate_layout.sh kernel.bin kernel.elf stage2.bin app.bin
 
 
 
@@ -57,8 +111,9 @@ DISKS_CMD_O = $(DISKS_CMD_C:.c=.o)
 
 CMD_O = $(SHELL_CMD_O) $(DISKS_CMD_O)
 
-kernel.elf: kernel/kernel.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c kernel/mm.c net/net.c net/httpd.c kernel/module.c kernel/sched.c kernel/kexports.c $(SHELL_CMD_C) $(DISKS_CMD_C) shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
+kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c kernel/mm.c net/net.c net/httpd.c kernel/module.c kernel/sched.c kernel/kexports.c $(SHELL_CMD_C) $(DISKS_CMD_C) shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
 	$(CC) $(CFLAGS) -c kernel/kernel.c -o kernel/kernel.o
+	$(CC) $(CFLAGS) -c kernel/bootinfo.c -o kernel/bootinfo.o
 	$(CC) $(CFLAGS) -c kernel/mm.c -o kernel/mm.o
 	$(CC) $(CFLAGS) -c net/net.c -o net/net.o
 	$(CC) $(CFLAGS) -c kernel/sched.c -o kernel/sched.o
@@ -111,11 +166,12 @@ kernel.elf: kernel/kernel.c fs/files.c executables.c fs/fat.c fs/partition.c fs/
 	$(AS) -f elf64 kernel/irq_stubs.asm -o kernel/irq_stubs.o
 	$(AS) -f elf64 kernel/modrun.asm -o kernel/modrun.o
 	$(AS) -f elf64 kernel/kernel_entry.asm -o kernel/kernel_entry.o
-	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o kernel/mm.o net/net.o net/httpd.o kernel/module.o kernel/sched.o kernel/kexports.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o kernel/mm.o net/net.o net/httpd.o kernel/module.o kernel/sched.o kernel/kexports.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
-# Kernel com suporte Multiboot para GRUB
-kernel_multiboot.elf: kernel/multiboot_header.o kernel/kernel.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/interrupt_stack.c kernel/trace.c kernel/isr_stubs.asm kernel/irq_stubs.asm
+# Kernel com suporte Multiboot para GRUB (caminho legado; o boot principal e BIOS)
+kernel_multiboot.elf: kernel/multiboot_header.o kernel/kernel.c kernel/bootinfo.c kernel/kernel_entry.asm fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/interrupt_stack.c kernel/trace.c kernel/isr_stubs.asm kernel/irq_stubs.asm
 	$(CC) $(CFLAGS) -c kernel/kernel.c -o kernel/kernel.o
+	$(CC) $(CFLAGS) -c kernel/bootinfo.c -o kernel/bootinfo.o
 	$(CC) $(CFLAGS) -c fs/files.c -o fs/files.o
 	$(CC) $(CFLAGS) -c net/net.c -o net/net.o
 	$(CC) $(CFLAGS) -c executables.c -o executables.o
@@ -133,16 +189,22 @@ kernel_multiboot.elf: kernel/multiboot_header.o kernel/kernel.c fs/files.c execu
 	$(CC) $(CFLAGS) -c kernel/trace.c -o kernel/trace.o
 	$(AS) -f elf64 kernel/isr_stubs.asm -o kernel/isr_stubs.o
 	$(AS) -f elf64 kernel/irq_stubs.asm -o kernel/irq_stubs.o
-	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/interrupt_stack.o kernel/trace.o net/net.o kernel/isr_stubs.o kernel/irq_stubs.o
+	$(AS) -f elf64 kernel/kernel_entry.asm -o kernel/kernel_entry.o
+	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/interrupt_stack.o kernel/trace.o net/net.o kernel/isr_stubs.o kernel/irq_stubs.o
 
 
 kernel.bin: kernel.elf
 	objcopy -O binary $< $@
-	@BSS_END=$$(nm kernel.elf | awk '$$3=="__bss_end"{print $$1}'); \
-	if [ -n "$$BSS_END" ] && [ "$$(printf '%d' 0x$$BSS_END)" -ge "$$(printf '%d' 0x58000)" ]; then \
-	  echo "Erro: __bss_end=0x$$BSS_END ultrapassa 0x58000 (slot do asm/APP_LOAD)."; \
-	  rm -f $@; \
-	  exit 1; \
+	@BSS_END=$$(nm kernel.elf | awk '$$3=="__bss_end"{print $$1; exit}'); \
+	if [ -z "$$BSS_END" ]; then \
+	  echo "Erro: __bss_end nao encontrado em kernel.elf."; rm -f $@; exit 1; \
+	fi; \
+	BSS_DEC=$$(printf '%d' 0x$$BSS_END); \
+	LO=$$(( $(KERNEL_LOAD) )); \
+	HI=$$(( $(KERNEL_LOAD) + $(KERNEL_MAX_SIZE) )); \
+	if [ "$$BSS_DEC" -lt "$$LO" ] || [ "$$BSS_DEC" -ge "$$HI" ]; then \
+	  echo "Erro: __bss_end=0x$$BSS_END fora da faixa do kernel (0x$(KERNEL_LOAD)..0x$$(printf '%x' $$HI))."; \
+	  rm -f $@; exit 1; \
 	fi
 
 
@@ -228,18 +290,24 @@ executables.c: hello.bin testapp.bin editor.bin hello.elf testapp.elf editor.elf
 	@echo "" >> $@
 	@echo "const int executable_count = 3;" >> $@
 
-os.img: boot.bin kernel.bin app.bin
-	@KERNEL_SIZE=$$(wc -c < kernel.bin); \
+os.img: boot.bin stage2.bin kernel.bin app.bin Makefile tools/validate_layout.sh
+	@$(MAKE) --no-print-directory check-layout
+	@STAGE2_SIZE=$$(wc -c < stage2.bin); \
+	STAGE2_SECTORS=$$(( (STAGE2_SIZE + 511) / 512 )); \
+	KERNEL_SIZE=$$(wc -c < kernel.bin); \
 	KERNEL_SECTORS=$$(( (KERNEL_SIZE + 511) / 512 )); \
-	if [ "$$KERNEL_SECTORS" -lt 72 ]; then KERNEL_SECTORS=72; fi; \
-	APP_SEEK=$$((1 + KERNEL_SECTORS)); \
-	TOTAL=$$((APP_SEEK + 8)); \
+	APP_SIZE=$$(wc -c < app.bin 2>/dev/null || echo 0); \
+	APP_SECTORS=$$(( (APP_SIZE + 511) / 512 )); \
+	KERNEL_SEEK=$$(( 1 + STAGE2_SECTORS )); \
+	APP_SEEK=$$(( KERNEL_SEEK + KERNEL_SECTORS )); \
+	TOTAL=$$(( APP_SEEK + APP_SECTORS )); \
 	if [ "$$TOTAL" -lt 128 ]; then TOTAL=128; fi; \
-	echo "os.img: kernel_sectors=$$KERNEL_SECTORS app_seek=$$APP_SEEK total=$$TOTAL"; \
+	echo "os.img: stage2_sectors=$$STAGE2_SECTORS kernel_sectors=$$KERNEL_SECTORS app_sectors=$$APP_SECTORS total=$$TOTAL"; \
 	dd if=/dev/zero of=os.img bs=512 count=$$TOTAL; \
-	dd if=boot.bin   of=os.img bs=512 seek=0 conv=notrunc; \
-	dd if=kernel.bin of=os.img bs=512 seek=1 conv=notrunc; \
-	dd if=app.bin    of=os.img bs=512 seek=$$APP_SEEK conv=notrunc
+	dd if=boot.bin   of=os.img bs=512 seek=0          conv=notrunc; \
+	dd if=stage2.bin of=os.img bs=512 seek=1          conv=notrunc; \
+	dd if=kernel.bin of=os.img bs=512 seek=$$KERNEL_SEEK conv=notrunc; \
+	dd if=app.bin    of=os.img bs=512 seek=$$APP_SEEK   conv=notrunc
 
 # Gera uma imagem ISO bootável a partir do os.img
 # Requer genisoimage ou mkisofs instalado no sistema
@@ -403,8 +471,9 @@ run-format: os.img disk.img disk2.img
 CFLAGS_DEBUG=-ffreestanding -fno-pic -fno-stack-protector -fno-pie -nostdlib -O0 -g \
 	-m64 -mcmodel=small -mno-red-zone -march=x86-64 -mno-sse -mno-mmx -Werror -Wstrict-prototypes \
 	-I. -Ikernel -Ifs -Inet -Ivideo
-debug: kernel/kernel.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/interrupt_stack.c kernel/trace.c
+debug: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/interrupt_stack.c kernel/trace.c
 	$(CC) $(CFLAGS_DEBUG) -c kernel/kernel.c -o kernel/kernel.o
+	$(CC) $(CFLAGS_DEBUG) -c kernel/bootinfo.c -o kernel/bootinfo.o
 	$(CC) $(CFLAGS_DEBUG) -c fs/files.c -o fs/files.o
 	$(CC) $(CFLAGS_DEBUG) -c executables.c -o executables.o
 	$(CC) $(CFLAGS_DEBUG) -c fs/fat.c -o fs/fat.o
@@ -423,7 +492,7 @@ debug: kernel/kernel.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_f
 	$(AS) -f elf64 kernel/isr_stubs.asm -o kernel/isr_stubs.o
 	$(AS) -f elf64 kernel/irq_stubs.asm -o kernel/irq_stubs.o
 	$(AS) -f elf64 kernel/kernel_entry.asm -o kernel/kernel_entry.o
-	$(LD) $(LDFLAGS) -T kernel/linker.ld -o kernel.elf kernel/kernel_entry.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/interrupt_stack.o kernel/trace.o net/net.o kernel/isr_stubs.o kernel/irq_stubs.o
+	$(LD) $(LDFLAGS) -T kernel/linker.ld -o kernel.elf kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/interrupt_stack.o kernel/trace.o net/net.o kernel/isr_stubs.o kernel/irq_stubs.o
 	$(MAKE) boot.bin kernel.bin
 	$(MAKE) os.img
 
