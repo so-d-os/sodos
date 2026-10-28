@@ -32,6 +32,19 @@ APP_LDFLAGS=-m elf_i386
 # -usb -device usb-tablet: o QEMU entrega a posicao absoluta do ponteiro.
 QEMU=qemu-system-x86_64 -m 256 -usb -device usb-tablet
 
+# VirtualBox (Windows/WSL).  wslpath/cygpath convertem o caminho para o
+# PowerShell; em Linux nativo o alvo vbox avisa que nao ha suporte.
+VBOX_VM ?= SODOS
+VBOX_PS1 := $(CURDIR)/tools/vbox-update.ps1
+VBOX_PS1_WIN := $(shell wslpath -w "$(VBOX_PS1)" 2>/dev/null || cygpath -w "$(VBOX_PS1)" 2>/dev/null)
+VBOX_PROJECT_WIN := $(shell wslpath -w "$(CURDIR)" 2>/dev/null || cygpath -w "$(CURDIR)" 2>/dev/null)
+POWERSHELL ?= powershell.exe
+VBOX_REFRESH :=
+ifeq ($(VBOX_DISKS),1)
+  VBOX_REFRESH := -RefreshDisks
+endif
+VBOX_CMD = $(POWERSHELL) -NoProfile -ExecutionPolicy Bypass -File "$(VBOX_PS1_WIN)" -VmName "$(VBOX_VM)" -ProjectDir "$(VBOX_PROJECT_WIN)" $(VBOX_REFRESH)
+
 all: os.img
 
 executables.c: hello.bin testapp.bin hello.elf testapp.elf
@@ -43,7 +56,7 @@ stage2.bin: kernel/stage2.asm Makefile kernel.elf kernel.bin app.bin
 	if [ -z "$$BSS_END" ]; then \
 	  echo "Erro: __bss_end nao encontrado em kernel.elf."; exit 1; \
 	fi; \
-	KERNEL_RESERVED=$$(( $$(printf '%d' 0x$$BSS_END) - $$(printf '%d' 0x$(KERNEL_LOAD)) )); \
+	KERNEL_RESERVED=$$(( $$(printf '%d' 0x$$BSS_END) - $(KERNEL_LOAD) )); \
 	if [ "$$KERNEL_RESERVED" -lt "$$KERNEL_SIZE" ]; then KERNEL_RESERVED=$$KERNEL_SIZE; fi; \
 	if [ "$$KERNEL_RESERVED" -lt "$$(( KERNEL_SECTORS * 512 ))" ]; then KERNEL_RESERVED=$$(( KERNEL_SECTORS * 512 )); fi; \
 	KERNEL_ENTRY=$$(nm kernel.elf | awk '$$3=="kernel_entry"{print $$1; exit}'); \
@@ -203,7 +216,7 @@ kernel.bin: kernel.elf
 	LO=$$(( $(KERNEL_LOAD) )); \
 	HI=$$(( $(KERNEL_LOAD) + $(KERNEL_MAX_SIZE) )); \
 	if [ "$$BSS_DEC" -lt "$$LO" ] || [ "$$BSS_DEC" -ge "$$HI" ]; then \
-	  echo "Erro: __bss_end=0x$$BSS_END fora da faixa do kernel (0x$(KERNEL_LOAD)..0x$$(printf '%x' $$HI))."; \
+	  echo "Erro: __bss_end=0x$$BSS_END fora da faixa do kernel ($(KERNEL_LOAD)..0x$$(printf '%x' $$HI))."; \
 	  rm -f $@; exit 1; \
 	fi
 
@@ -356,6 +369,36 @@ run: os.img disk.img disk2.img
 	  -drive format=raw,file=os.img,if=ide,index=0 \
 	  -drive format=raw,file=disk.img,if=ide,index=1 \
 	  -drive format=raw,file=disk2.img,if=ide,index=2
+
+# O QEMU GTK pode manter o zoom antigo quando o guest muda de resolucao em
+# fullscreen (texto 720x400 -> win 1920x1080).  Este alvo inicia em fullscreen
+# com zoom-to-fit=off: a tela do guest fica 1:1 (em um monitor 1080p, 1920x1080
+# preenche sem esticar).  Ctrl+Alt+F continua alternando fullscreen.
+run-fs: os.img disk.img disk2.img
+	$(MAKE) run QEMU="$(QEMU) -display gtk,full-screen=on,zoom-to-fit=off"
+
+# Reconstroi as imagens, atualiza os.vdi da VM "SODOS" e inicia a VM.
+# O script preserva disk.vdi/disk2.vdi (D: e disco 2) por padrao.  Use
+# VBOX_DISKS=1 para recria-los a partir de disk.img/disk2.img (perde
+# alteracoes feitas dentro da VM).
+.PHONY: vbox vbox-update
+vbox: os.img disk.img disk2.img
+	@if [ -z "$(VBOX_PS1_WIN)" ] || [ -z "$(VBOX_PROJECT_WIN)" ]; then \
+	  echo "Erro: alvo vbox requer Windows ou WSL (wslpath/cygpath)."; exit 1; \
+	fi
+	@command -v "$(POWERSHELL)" >/dev/null 2>&1 || { \
+	  echo "Erro: $(POWERSHELL) nao encontrado; use POWERSHELL=/caminho/powershell.exe."; exit 1; \
+	}
+	$(VBOX_CMD) -Start
+
+vbox-update: os.img disk.img disk2.img
+	@if [ -z "$(VBOX_PS1_WIN)" ] || [ -z "$(VBOX_PROJECT_WIN)" ]; then \
+	  echo "Erro: alvo vbox-update requer Windows ou WSL (wslpath/cygpath)."; exit 1; \
+	fi
+	@command -v "$(POWERSHELL)" >/dev/null 2>&1 || { \
+	  echo "Erro: $(POWERSHELL) nao encontrado; use POWERSHELL=/caminho/powershell.exe."; exit 1; \
+	}
+	$(VBOX_CMD)
 
 # Formata disk.img (256MB) como FAT16 pelo Linux: MBR + partição 0 + mkfs.fat
 # Uso: make format-disk [DISK=disk.img] [FAT_LABEL=MYDISK]

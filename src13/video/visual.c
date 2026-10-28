@@ -369,7 +369,11 @@ static void serial_u16(uint16_t v) {
 /* 1 se o indice 0x0A trouxe um tamanho crivel (v86 e QEMU). */
 static int bochs_vram_bytes(uint32_t* out) {
   uint16_t vram64 = bochs_vbe_read(VBE_DISPI_INDEX_VRAM_64K);
-  if (vram64 == 0 || vram64 >= 4096u) return 0;
+  /* No Bochs/QEMU 0x0A e a VRAM em unidades de 64 KiB.  No VirtualBox o
+   * mesmo indice e VBE_DISPI_INDEX_VBOX_VIDEO e devolve 1; 64 KiB nao cabe
+   * nem o modo 640x480x32.  Nesse caso trate como desconhecido e deixe a
+   * verificacao de XRES/YRES/BPP decidir. */
+  if (vram64 <= 1u || vram64 >= 4096u) return 0;
   *out = (uint32_t)vram64 << 16;
   return 1;
 }

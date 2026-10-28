@@ -108,6 +108,10 @@ O tablet USB entrega a posição absoluta do ponteiro, usada pelo desktop. Todos
 |---|---|
 | `make` / `make all` | Gera `os.img` (boot + kernel + `app.bin`) |
 | `make run` | QEMU com os três discos e a porta 8797 encaminhada |
+| `make run-fs` | Igual ao `run`, mas inicia em fullscreen com `zoom-to-fit=off` (evita o QEMU GTK esticar depois do `win`) |
+| `make vbox` | Recompila o `os.img`, atualiza a VM `SODOS` no VirtualBox (`os.vdi`) e inicia a VM |
+| `make vbox-update` | Igual ao `vbox`, mas não inicia a VM |
+| `make vbox VBOX_DISKS=1` | Também recria `disk.vdi`/`disk2.vdi` a partir de `disk.img`/`disk2.img` (perde alterações feitas dentro da VM) |
 | `make run-log` | Igual ao `run`, COM1 em `qemu_serial.log` e trace do QEMU em `qemu.log` |
 | `make run-log-stdio` | COM1 no terminal **e** em `qemu_serial.log` (via `tee`) |
 | `make run-console` | QEMU em curses |
@@ -123,6 +127,12 @@ O tablet USB entrega a posição absoluta do ponteiro, usada pelo desktop. Todos
 | `make clean-all` | `clean` + `disk.img`, `disk2.img` e as ISOs |
 
 `disk.img` (256 MB) e `disk2.img` (100 MB) são criados automaticamente na primeira execução.
+
+Se o QEMU GTK mantiver o zoom antigo do fullscreen quando o guest passa do modo texto para o `win` em 1920×1080, use `make run-fs` (fullscreen 1:1) ou pressione `Ctrl+Alt+0` depois do `win` para restaurar a escala; `Ctrl+Alt+F` continua alternando o fullscreen.
+
+### VirtualBox
+
+No Windows/WSL, `make vbox` compila as imagens, cria/atualiza a VM `SODOS` (BIOS, 256 MB, VBoxSVGA, 1920×1080) e inicia. `make vbox-update` atualiza sem iniciar. O script preserva os VDI de `D:` e `disk2`; `VBOX_DISKS=1` recria esses VDI a partir das imagens do projeto e descarta alterações feitas dentro da VM. Se a VM estiver rodando, ela é desligada antes da atualização dos discos.
 
 ### Layout de `os.img`
 

@@ -1,5 +1,9 @@
 # Configuração do VirtualBox para o SO
 
+> **Método atual (Windows/WSL):** rode `wsl make vbox` na pasta `src13` (ou `make vbox` dentro do WSL/MSYS2). O alvo recompila as imagens, cria/atualiza a VM `SODOS` com BIOS, 256 MB, VBoxSVGA e os discos `os.vdi`, `disk.vdi` e `disk2.vdi`, e inicia a VM.
+>
+> Use `make vbox-update` para atualizar sem iniciar e `make vbox VBOX_DISKS=1` se também quiser recriar `D:`/`disk2` a partir de `disk.img`/`disk2.img`. As instruções de ISO abaixo são **legadas** (o caminho atual usa a imagem de disco, não o CD).
+
 ## Configurações Recomendadas da VM
 
 ### 1. Criar Nova Máquina Virtual

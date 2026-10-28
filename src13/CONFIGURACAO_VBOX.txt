@@ -2,6 +2,16 @@
 CONFIGURAÇÃO DO VIRTUALBOX - GUIA RÁPIDO
 ===========================================
 
+ATALHO ATUAL (Windows/WSL):
+  cd src13
+  wsl make vbox
+  (ou "make vbox" dentro do WSL/MSYS2)
+  - recompila as imagens
+  - atualiza a VM "SODOS" (os.vdi) e inicia
+  - "make vbox-update" atualiza sem iniciar
+  - "make vbox VBOX_DISKS=1" recria também D:/disk2
+As instruções de ISO abaixo são legadas.
+
 1. CRIAR NOVA VM:
    - Nome: MeuSO (ou qualquer nome)
    - Tipo: Other
