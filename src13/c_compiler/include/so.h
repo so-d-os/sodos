@@ -32,6 +32,9 @@ void k_meminfo(unsigned* total, unsigned* freeb);
 /* processos e DLLs */
 void k_exit(int code);
 int k_exec(const char* path, int argc, char** argv);
+/* Uma linha do prompt: comando interno, .EXE ou .BAT. Nao grava historico.
+ * A linha do chamador nao e alterada. Erro de carga vira 1. */
+int k_shell(char* line);
 const char* k_last_error(void);
 int k_dll_load(const char* name);
 void* k_dll_sym(int handle, const char* name);

@@ -408,6 +408,51 @@ static void k_tcp_close(void) {
   sock = -1;
 }
 
+/* No SO isto e o prompt. Aqui: echo imprime, o resto vira k_exec. */
+static int k_ci_start(const char* s, const char* p) {
+  while (*p) {
+    char a = *s++;
+    char b = *p++;
+    if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+    if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+    if (a != b) return 0;
+  }
+  return 1;
+}
+
+static int k_shell(char* line) {
+  char buf[512];
+  char* argv[16];
+  char* p;
+  int argc = 0;
+  int rc;
+  if (!line) return 1;
+  strncpy(buf, line, sizeof(buf) - 1);
+  buf[sizeof(buf) - 1] = 0;
+  p = buf;
+  while (*p == ' ' || *p == '\t') p++;
+  if (k_ci_start(p, "echo") && (p[4] == 0 || p[4] == ' ' || p[4] == '\t')) {
+    p += 4;
+    while (*p == ' ' || *p == '\t') p++;
+    printf("%s\n", p);
+    return 0;
+  }
+  while (*p && argc < 16) {
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p) break;
+    argv[argc++] = p;
+    while (*p && *p != ' ' && *p != '\t') p++;
+    if (*p) *p++ = 0;
+  }
+  if (argc == 0) return 0;
+  rc = k_exec(argv[0], argc, argv);
+  if (rc <= -1000) {
+    fprintf(stderr, "Bad command or file name\n");
+    return 1;
+  }
+  return rc;
+}
+
 /* sem WIN: a janela nunca abre (como no shell do DOS) */
 static int k_gui_open(const char* t) { (void)t; return -1; }
 static void k_gui_nop(void) {}
@@ -426,7 +471,7 @@ static const struct {
   E(k_putc), E(k_write), E(k_puts), E(k_getc), E(k_readline), E(k_clear),
   E(k_fsize), E(k_fload), E(k_fsave), E(k_flist), E(k_drive), E(k_set_drive),
   E(k_malloc), E(k_free), E(k_realloc), E(k_msize), E(k_meminfo),
-  E(k_exit), E(k_exec), E(k_last_error), E(k_dll_load), E(k_dll_sym), E(k_dll_free),
+  E(k_exit), E(k_exec), E(k_shell), E(k_last_error), E(k_dll_load), E(k_dll_sym), E(k_dll_free),
   E(k_rdtsc), E(k_ms), E(k_date), E(k_random),
   E(k_net_ready), E(k_dns), E(k_tcp_connect), E(k_tcp_send), E(k_tcp_recv), E(k_tcp_close),
   E(k_gui_open), E(k_gui_size), E(k_gui_font), E(k_gui_event),

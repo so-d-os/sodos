@@ -16,6 +16,9 @@ int mod_exec(const char* path, int argc, char** argv);
 
 /* Procura o programa como o shell faz: nome, nome.EXE, na unidade corrente e em D:. */
 int mod_find_exe(const char* name, char* out, int max);
+/* Acha um script: nome.BAT, nome.CMD, ou nome sem extensao virando nome.BAT.
+ * out recebe o caminho encontrado. -1 se nao ha. */
+int mod_find_batch(const char* name, char* out, int max);
 
 /* DLL em tempo de execucao. Handle > 0; 0 = falhou. */
 int mod_dll_load(const char* name);

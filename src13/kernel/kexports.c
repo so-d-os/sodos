@@ -90,6 +90,26 @@ static void k_meminfo(uint32_t* total, uint32_t* freeb) {
 
 /* ---------- processos e DLL ---------- */
 static void k_exit(int code) { mod_exit(code); }
+static int k_shell(char* line) {
+  char buf[256];
+  int i = 0;
+  int rc;
+  void (*prev)(char);
+  if (!line) return 1;
+  while (line[i] && i < (int)sizeof(buf) - 1) {
+    buf[i] = line[i];
+    i++;
+  }
+  buf[i] = 0;
+  /* No WIN a saida do programa vai pela hook; o comando interno usa putc. */
+  prev = shell_get_out();
+  if (!prev && con_hook) shell_set_out(con_hook);
+  rc = shell_exec_quiet(buf);
+  shell_set_out(prev);
+  if (rc < 0) return 1;
+  return rc;
+}
+
 static int k_exec(const char* path, int argc, char** argv) {
   char full[64];
   char* wide[32];
@@ -225,6 +245,7 @@ static const struct kexp table[] = {
   EXP(k_meminfo),
   EXP(k_exit),
   EXP(k_exec),
+  EXP(k_shell),
   EXP(k_last_error),
   EXP(k_dll_load),
   EXP(k_dll_sym),

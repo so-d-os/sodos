@@ -443,6 +443,7 @@ format-disk:
 DISK_FILES = c_compiler/out/*.EXE c_compiler/out/*.DLL c_compiler/out/*.OBJ \
 	c_compiler/out/*.IMP c_compiler/include/*.h c_compiler/lib/*.c \
 	c_compiler/examples/*.c c_compiler/examples/*.h c_compiler/examples/*.cpp \
+	c_compiler/examples/*.bat \
 	c_compiler/cc/*.c c_compiler/cc/cc.h c_compiler/sox.h c_compiler/link/link.c \
 	c_compiler/tls/*.c c_compiler/tls/*.h c_compiler/gui/*.c \
 	c_compiler/img/*.c c_compiler/browser/*.c c_compiler/browser/*.cpp c_compiler/browser/*.h
@@ -458,7 +459,7 @@ disk-files: disk.img
 	  mcopy -o -i $(DISK)@@512 "$$f" "::/$$n" || exit 1; \
 	done
 	@mkdir -p c_compiler/build/desk
-	@gcc -m32 -O2 -D__export= -Ic_compiler/include -o c_compiler/build/mkthumb \
+	@gcc -O2 -D__export= -idirafter c_compiler/include -o c_compiler/build/mkthumb \
 	  c_compiler/img/img.c utils/mkthumb.c
 	@if ! mdir -i $(DISK)@@512 ::/USER >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/USER; fi
 	@if ! mdir -i $(DISK)@@512 ::/USER/DEFAULT >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/USER/DEFAULT; fi

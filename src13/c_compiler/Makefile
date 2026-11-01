@@ -33,7 +33,8 @@ CC_SRC = cc/main.c cc/util.c cc/lex.c cc/pp.c cc/type.c cc/parse.c cc/gen.c
 
 all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/HELLO.EXE \
 	$(O)/CC.EXE $(O)/LINK.EXE $(O)/TLS.DLL $(O)/HTTPS.EXE $(O)/GUI.DLL $(O)/IMG.DLL \
-	$(O)/BROWSER.EXE $(O)/IMAGEVW.EXE $(O)/VIDPLAY.EXE $(O)/FONTADV.EXE $(O)/COMMAND.EXE $(O)/HTTPD.EXE
+	$(O)/BROWSER.EXE $(O)/IMAGEVW.EXE $(O)/VIDPLAY.EXE $(O)/FONTADV.EXE $(O)/COMMAND.EXE $(O)/HTTPD.EXE \
+	$(O)/WGET.EXE $(O)/BAT.EXE
 
 # GUI.DLL (janela canvas do WIN) e o navegador, em varios arquivos
 $(B)/gui_gui.obj: gui/gui.c include/gui.h $(HCC) $(HEADERS) | $(B)
@@ -88,6 +89,12 @@ $(O)/TLS.DLL: $(TLS_OBJ) $(O)/LIBC.DLL $(LINK)
 
 $(O)/HTTPS.EXE: examples/https.c $(O)/TLS.DLL $(HCC) $(HEADERS)
 	$(HCC) -o $@ examples/https.c $(O)/TLS.DLL
+
+$(O)/WGET.EXE: examples/wget.c $(O)/TLS.DLL $(HCC) $(HEADERS) $(O)/KERNEL.IMP
+	$(HCC) -o $@ examples/wget.c $(O)/TLS.DLL
+
+$(O)/BAT.EXE: examples/bat.c $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
+	$(HCC) -o $@ examples/bat.c
 
 $(HCC): $(CC_SRC) cc/cc.h sox.h | $(B)
 	$(HOSTCC) $(HCFLAGS) -o $@ $(CC_SRC)

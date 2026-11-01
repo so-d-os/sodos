@@ -78,7 +78,7 @@ O `Makefile` fica em `src13/` e usa sintaxe de shell Unix (`bash`). No Windows, 
 | `dosfstools` (`mkfs.fat`) e `util-linux` (`sfdisk`) | `make format-disk` |
 | `genisoimage` ou `mkisofs` | `make iso` |
 | `grub-mkrescue`, `xorriso` | `make iso-grub` (caminho Multiboot) |
-| `gcc -m32` no host | `mkthumb`, usado pelo `make disk-files` |
+| `gcc` no host | `mkthumb`, usado pelo `make disk-files` |
 
 ## Como compilar e executar
 
@@ -421,11 +421,15 @@ Janela preta 80×40 com o mesmo interpretador do shell. Várias podem ficar aber
 | `VIDPLAY.EXE` | Player de vídeo |
 | `HTTPD.EXE` | Mostra as rotas do servidor; o kernel já sobe o serviço no boot |
 | `HTTPS.EXE` | GET via TLS (`HTTPS example.com /`) |
+| `WGET.EXE` | Baixa um arquivo por HTTP ou HTTPS (`WGET http://exemplo.com/a.txt`) |
+| `BAT.EXE` | Arquivo de lote (`BAT DEMO.BAT` ou só `DEMO.BAT`) |
 | `HELLO.EXE`, `HELLO2.EXE` | Exemplos de `argc`/`argv` |
 | `CRT0.OBJ`, `KERNEL.IMP` | Ponto de entrada e lista de exports do kernel |
-| `*.H`, `*.C`, `*.CPP` | Headers, libc, exemplos e fontes do próprio `cc`/`link` |
+| `*.H`, `*.C`, `*.CPP`, `*.BAT` | Headers, libc, exemplos, fontes do `cc`/`link` e `DEMO.BAT` |
 
 Em `D:\SODOS\` ficam `FONTADV.EXE` e `FONTS\` com quatro TTF. `IMAGEVW.C` também vai para a raiz, como exemplo.
+
+`WGET` grava no máximo 4 MB e segue até 5 redirecionamentos. Sem nome de saída, o arquivo fica em 8.3 a partir do caminho da URL (`INDEX.HTM` se for `/`). `BAT` entende `REM`, `#`, `::`, `@`, `ECHO ON`/`OFF`, `SET N=valor`, `%N%`, `%1` a `%9`, `%*`, `GOTO :rotulo`, `IF [NOT] EXIST`, `IF [NOT] ERRORLEVEL n`, `IF [NOT] a==b`, `CALL` e `EXIT`. O que não for disso roda como linha do prompt. Dentro do SO: `CC WGET.C TLS.DLL` e `CC BAT.C`.
 
 Os exemplos `CALC`, `MATHX.DLL`, `USEMATH`, `DYNLOAD` e `VMAIN` não vão prontos; compile dentro do SO a partir dos fontes copiados.
 
@@ -472,14 +476,14 @@ LINK /out:HELLO.EXE CRT0.OBJ HELLO.OBJ LIBC.DLL KERNEL.IMP
 
 ### API do kernel (`so.h`)
 
-Funções que a libc não embrulha são importadas da biblioteca `KERNEL` (44 exports):
+Funções que a libc não embrulha são importadas da biblioteca `KERNEL` (45 exports):
 
 | Grupo | Funções |
 |---|---|
 | Console | `k_putc`, `k_puts`, `k_write`, `k_getc`, `k_readline`, `k_clear` |
 | Arquivos | `k_fsize`, `k_fload`, `k_fread`, `k_fsave`, `k_flist`, `k_drive`, `k_set_drive` |
 | Memória | `k_malloc`, `k_free`, `k_realloc`, `k_msize`, `k_meminfo` |
-| Processo | `k_exit`, `k_exec`, `k_last_error` |
+| Processo | `k_exit`, `k_exec`, `k_shell`, `k_last_error` |
 | DLL | `k_dll_load`, `k_dll_sym`, `k_dll_free` |
 | Tempo | `k_rdtsc`, `k_ms`, `k_date`, `k_random` |
 | Rede | `k_net_ready`, `k_dns`, `k_tcp_connect`, `k_tcp_send`, `k_tcp_recv`, `k_tcp_close` |

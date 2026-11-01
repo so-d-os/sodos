@@ -78,7 +78,7 @@ The `Makefile` is in `src13/` and uses Unix shell syntax (`bash`). On Windows, r
 | `dosfstools` (`mkfs.fat`) and `util-linux` (`sfdisk`) | `make format-disk` |
 | `genisoimage` or `mkisofs` | `make iso` |
 | `grub-mkrescue`, `xorriso` | `make iso-grub` (Multiboot path) |
-| `gcc -m32` on the host | `mkthumb`, used by `make disk-files` |
+| `gcc` on the host | `mkthumb`, used by `make disk-files` |
 
 ## Building and running
 
@@ -421,11 +421,15 @@ Black 80×40 window with the same shell interpreter. Several can be open; the `e
 | `VIDPLAY.EXE` | Video player |
 | `HTTPD.EXE` | Shows the server routes; the kernel already starts the service at boot |
 | `HTTPS.EXE` | GET over TLS (`HTTPS example.com /`) |
+| `WGET.EXE` | Downloads a file over HTTP or HTTPS (`WGET http://example.com/a.txt`) |
+| `BAT.EXE` | Batch file (`BAT DEMO.BAT` or just `DEMO.BAT`) |
 | `HELLO.EXE`, `HELLO2.EXE` | `argc`/`argv` examples |
 | `CRT0.OBJ`, `KERNEL.IMP` | Entry point and kernel export list |
-| `*.H`, `*.C`, `*.CPP` | Headers, libc, examples and the `cc`/`link` sources themselves |
+| `*.H`, `*.C`, `*.CPP`, `*.BAT` | Headers, libc, examples, the `cc`/`link` sources and `DEMO.BAT` |
 
 `D:\SODOS\` holds `FONTADV.EXE` and `FONTS\` with four TTFs. `IMAGEVW.C` also goes to the root, as an example.
+
+`WGET` stores at most 4 MB and follows up to 5 redirects. With no output name, the file is 8.3 taken from the URL path (`INDEX.HTM` for `/`). `BAT` understands `REM`, `#`, `::`, `@`, `ECHO ON`/`OFF`, `SET N=value`, `%N%`, `%1` through `%9`, `%*`, `GOTO :label`, `IF [NOT] EXIST`, `IF [NOT] ERRORLEVEL n`, `IF [NOT] a==b`, `CALL` and `EXIT`. Anything else runs as a prompt line. Inside the OS: `CC WGET.C TLS.DLL` and `CC BAT.C`.
 
 The `CALC`, `MATHX.DLL`, `USEMATH`, `DYNLOAD` and `VMAIN` examples are not shipped built; compile them inside the OS from the copied sources.
 
@@ -472,14 +476,14 @@ LINK /out:HELLO.EXE CRT0.OBJ HELLO.OBJ LIBC.DLL KERNEL.IMP
 
 ### Kernel API (`so.h`)
 
-Functions not wrapped by libc are imported from the `KERNEL` library (44 exports):
+Functions not wrapped by libc are imported from the `KERNEL` library (45 exports):
 
 | Group | Functions |
 |---|---|
 | Console | `k_putc`, `k_puts`, `k_write`, `k_getc`, `k_readline`, `k_clear` |
 | Files | `k_fsize`, `k_fload`, `k_fread`, `k_fsave`, `k_flist`, `k_drive`, `k_set_drive` |
 | Memory | `k_malloc`, `k_free`, `k_realloc`, `k_msize`, `k_meminfo` |
-| Process | `k_exit`, `k_exec`, `k_last_error` |
+| Process | `k_exit`, `k_exec`, `k_shell`, `k_last_error` |
 | DLL | `k_dll_load`, `k_dll_sym`, `k_dll_free` |
 | Time | `k_rdtsc`, `k_ms`, `k_date`, `k_random` |
 | Network | `k_net_ready`, `k_dns`, `k_tcp_connect`, `k_tcp_send`, `k_tcp_recv`, `k_tcp_close` |

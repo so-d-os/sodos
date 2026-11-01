@@ -1,12 +1,11 @@
 /* mkthumb.c - gera uma miniatura THM1 para o desktop (ferramenta do Linux).
- *   gcc -m32 -D__export= -Iinclude -o mkthumb img/img.c mkthumb.c
+ *   gcc -D__export= -idirafter include -o mkthumb img/img.c mkthumb.c
  *   mkthumb entrada.png saida.THM
  * O arquivo e "THM1" + largura e altura em 16 bits + RGBA. O lado maior cabe em 48. */
 #include <img.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #define SIDE 48
 
@@ -27,14 +26,14 @@ int main(int argc, char** argv) {
   if (argc < 3) return 1;
   in = fopen(argv[1], "rb");
   if (!in) {
-    if (write(2, "mkthumb: nao abriu\n", 19) < 0) return 1;
+    fputs("mkthumb: nao abriu\n", stderr);
     return 1;
   }
   fseek(in, 0, SEEK_END);
   n = ftell(in);
   fseek(in, 0, SEEK_SET);
   if (n < 8 || n > 8 * 1024 * 1024) {
-    if (write(2, "mkthumb: tamanho\n", 17) < 0) return 1;
+    fputs("mkthumb: tamanho\n", stderr);
     fclose(in);
     return 1;
   }
@@ -47,7 +46,7 @@ int main(int argc, char** argv) {
   fclose(in);
   im.rgba = 0;
   if (img_decode(buf, (int)n, &im) != 0) {
-    if (write(2, "mkthumb: decode falhou\n", 23) < 0) return 1;
+    fputs("mkthumb: decode falhou\n", stderr);
     free(buf);
     return 1;
   }

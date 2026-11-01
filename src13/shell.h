@@ -23,8 +23,11 @@ void (*shell_get_out(void))(char c);
 /* Enquanto fn nao e nulo, o .EXE achado por shell_exec_line vai para fn.
  * fn devolve 0 quando nao quer o programa, e ai roda o mod_exec de sempre. */
 void shell_set_exec(int (*fn)(const char* path, int argc, char** argv));
-/* Executa uma linha como o prompt do boot. line e modificada. */
-void shell_exec_line(char* line);
+/* Executa uma linha como o prompt do boot. line e modificada.
+ * Devolve o codigo do comando (0 = ok). Erro de carga de .EXE e negativo. */
+int shell_exec_line(char* line);
+/* Igual, sem gravar a linha no historico. Usado por BAT.EXE. */
+int shell_exec_quiet(char* line);
 void vga_put_at(int r, int c, unsigned char ch);
 void clear_screen(void);
 

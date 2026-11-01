@@ -971,61 +971,120 @@ static int drive_switch(const char* s, char* letter) {
   return 1;
 }
 
-/* Uma linha do prompt, a mesma do shell de texto. line e alterada. */
-void shell_exec_line(char* line) {
+static int ends_ci(const char* s, const char* suf) {
+  int ns = 0, nf = 0, i;
+  if (!s || !suf) return 0;
+  while (s[ns]) ns++;
+  while (suf[nf]) nf++;
+  if (ns < nf) return 0;
+  for (i = 0; i < nf; i++) {
+    char a = s[ns - nf + i];
+    char b = suf[i];
+    if (a >= 'a' && a <= 'z') a = (char)(a - 32);
+    if (b >= 'a' && b <= 'z') b = (char)(b - 32);
+    if (a != b) return 0;
+  }
+  return 1;
+}
+
+/* Roda BAT.EXE com o script em argv. O desktop, se estiver capturando
+ * programas, recebe o EXE e devolve 1; senao o script roda e espera. */
+static int launch_bat(const char* script, int argc, char** argv) {
+  char exe[64];
+  char* nav[18];
+  int i, n, rc;
+  if (mod_find_exe("BAT", exe, (int)sizeof(exe)) != 0) {
+    puts_k("BAT.EXE nao encontrado\n");
+    return 1;
+  }
+  n = argc;
+  if (n < 1) n = 1;
+  if (n > 16) n = 16;
+  nav[0] = "BAT";
+  nav[1] = (char*)script;
+  for (i = 1; i < n; i++) nav[i + 1] = argv[i];
+  if (shell_exec_fn && shell_exec_fn(exe, n + 1, nav)) return 0;
+  rc = mod_exec(exe, n + 1, nav);
+  if (rc <= MOD_ERR_NOTFOUND && rc >= MOD_ERR_DEPTH) {
+    puts_k("Erro ao executar: ");
+    puts_k(mod_last_error());
+    puts_k("\n");
+  }
+  if (!shell_out_fn && col != 0) putc('\n');
+  if (rc < 0) return 1;
+  return rc;
+}
+
+static int finish_exe(const char* path, int argc, char** argv) {
+  int rc;
+  if (shell_exec_fn && shell_exec_fn(path, argc, argv)) return 0;
+  rc = mod_exec(path, argc, argv);
+  if (rc <= MOD_ERR_NOTFOUND && rc >= MOD_ERR_DEPTH) {
+    puts_k("Erro ao executar: ");
+    puts_k(mod_last_error());
+    puts_k("\n");
+  }
+  if (!shell_out_fn && col != 0) putc('\n');
+  return rc;
+}
+
+/* Uma linha do prompt. line e alterada. history=1 grava no historico. */
+static int exec_line(char* line, int history) {
   char raw[256];
   char* argv[16];
   int argc;
   int i;
-  int handled = 0;
   char letter = 0;
   int k = 0;
-  if (!line) return;
-  while (line[k] && k < (int)sizeof(raw) - 1) {
-    raw[k] = line[k];
-    k++;
+  if (!line) return 0;
+  if (history) {
+    while (line[k] && k < (int)sizeof(raw) - 1) {
+      raw[k] = line[k];
+      k++;
+    }
+    raw[k] = '\0';
+    if (raw[0]) add_to_history(raw);
   }
-  raw[k] = '\0';
-  if (raw[0]) add_to_history(raw);
   argc = tokenize(line, argv, 16);
-  if (argc == 0) return;
+  if (argc == 0) return 0;
   if (argc == 1 && drive_switch(argv[0], &letter)) {
     if (drives_set_current(letter) != 0) {
       putc(letter);
       puts_k(": nao montado. Use: mount ");
       putc(letter);
       puts_k(":\n");
+      return 1;
     }
-    return;
+    return 0;
   }
   for (i = 0; i < cmd_count; ++i) {
-    if (!stricmp(argv[0], commands[i].name)) {
-      commands[i].fn(argc, argv);
-      handled = 1;
-      break;
-    }
+    if (!stricmp(argv[0], commands[i].name))
+      return commands[i].fn(argc, argv);
   }
-  if (!handled) {
-    char path[64];
-    if (mod_find_exe(argv[0], path, sizeof(path)) == 0) {
-      int rc;
-      if (shell_exec_fn && shell_exec_fn(path, argc, argv)) return;
-      rc = mod_exec(path, argc, argv);
-      if (rc <= MOD_ERR_NOTFOUND && rc >= MOD_ERR_DEPTH) {
-        puts_k("Erro ao executar: ");
-        puts_k(mod_last_error());
-        puts_k("\n");
-      }
-      if (shell_out_fn) {
-        /* o console grafico quebra a linha no proprio buffer */
-      } else if (col != 0) {
-        putc('\n');
-      }
-    } else {
+  if (ends_ci(argv[0], ".BAT") || ends_ci(argv[0], ".CMD")) {
+    char bpath[64];
+    if (mod_find_batch(argv[0], bpath, (int)sizeof(bpath)) != 0) {
       puts_k("Bad command or file name\n");
+      return 1;
     }
+    return launch_bat(bpath, argc, argv);
   }
+  {
+    char path[64];
+    if (mod_find_exe(argv[0], path, sizeof(path)) == 0)
+      return finish_exe(path, argc, argv);
+  }
+  {
+    char bpath[64];
+    if (mod_find_batch(argv[0], bpath, (int)sizeof(bpath)) == 0)
+      return launch_bat(bpath, argc, argv);
+  }
+  puts_k("Bad command or file name\n");
+  return 1;
 }
+
+int shell_exec_line(char* line) { return exec_line(line, 1); }
+int shell_exec_quiet(char* line) { return exec_line(line, 0); }
 
 extern char __bss_start[];
 extern char __bss_end[];

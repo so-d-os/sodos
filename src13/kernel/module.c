@@ -166,6 +166,27 @@ int mod_find_exe(const char* name, char* out, int max) {
   return locate(tmp, 0, out, max);
 }
 
+static int ends_ci(const char* s, const char* suf) {
+  int ns = 0, nf = 0, i;
+  if (!s || !suf) return 0;
+  while (s[ns]) ns++;
+  while (suf[nf]) nf++;
+  if (ns < nf) return 0;
+  for (i = 0; i < nf; i++)
+    if (up(s[ns - nf + i]) != up(suf[i])) return 0;
+  return 1;
+}
+
+int mod_find_batch(const char* name, char* out, int max) {
+  char tmp[64];
+  if (!name || !name[0]) return -1;
+  if (ends_ci(name, ".BAT") || ends_ci(name, ".CMD"))
+    return locate(name, 0, out, max);
+  if (has_dot(name)) return -1;
+  cat3(tmp, sizeof(tmp), name, ".BAT", 0);
+  return locate(tmp, 0, out, max);
+}
+
 /* Cada programa tem a sua copia da DLL: a LIBC e a GUI guardam estado
  * (malloc, tamanho da janela) que nao pode ser compartilhado. */
 static int find_loaded(const char* base) {
