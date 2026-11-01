@@ -1,0 +1,9 @@
+src13/libs/ — port hibrido MC
+
+  posix-lite/   POSIX.DLL (cc) + POSIXX.DLL (gcc -mx32)
+  term/         TERM.DLL + curses.h
+  glib/         GLIB.DLL + glib.h (subset)
+
+MC.EXE: c_compiler/examples/mc.c
+  make -C c_compiler out/MC.EXE
+  build/soxrun -C out MC.EXE auto

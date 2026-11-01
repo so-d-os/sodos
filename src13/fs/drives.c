@@ -479,12 +479,27 @@ int file_list(const char* path, char* out, int max) {
   char L;
   char name[64];
   int idx;
+  int pos = 0;
   if (!out || max < 2) return -1;
   out[0] = 0;
   path_parse(path ? path : "", &L, name, (int)sizeof(name));
   idx = letter_idx(L);
-  if (idx < 0 || drv_kind[idx] != DRV_FAT) return -1;
-  return fat_list_dir(name, out, max);
+  if (idx < 0 || drv_kind[idx] == DRV_NONE) return -1;
+  if (drv_kind[idx] == DRV_FAT) return fat_list_dir(name, out, max);
+  /* RAM / embutidos: so a raiz da unidade. */
+  if (name[0]) return -1;
+  {
+    char names[64][32];
+    int n = drives_names(L, names, 64);
+    int i;
+    for (i = 0; i < n && pos < max - 2; i++) {
+      int k = 0;
+      while (names[i][k] && pos < max - 2) out[pos++] = names[i][k++];
+      if (pos < max - 1) out[pos++] = '\n';
+    }
+  }
+  out[pos] = 0;
+  return pos > 0 ? 1 : 0;
 }
 
 static void print_where(char L, const char* name) {

@@ -1,0 +1,22 @@
+Port hibrido do GNU Midnight Commander no SODOS
+================================================
+
+Notas: D:\USER\DEFAULT\DESKTOP\MC
+Fontes upstream: src13/vendor/mc/ (4.8.33; fora do git)
+
+Rodando agora
+-------------
+  make -C c_compiler out/MC.EXE
+  c_compiler/build/soxrun -C c_compiler/out MC.EXE auto
+
+MC.EXE = file manager de 2 paineis (TERM+POSIXX+GLIB+LIBCX, gcc -mx32).
+Nao e ainda o binario GNU MC completo (fase 5b).
+
+Libs
+----
+  POSIX.DLL / POSIXX.DLL   posix-lite
+  TERM.DLL                 curses shim 80x25
+  GLIB.DLL                 subset GLib
+  LIBCX.DLL                libc SysV (gcc)
+
+Veja PORT.MD e TODO.TXT. Fetch upstream: ./content/mc/FETCH.sh

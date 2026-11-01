@@ -441,21 +441,31 @@ format-disk:
 # Tudo vai para a raiz do D: em maiusculas: binarios, headers, fontes da libc,
 # exemplos e os fontes do proprio cc/link (para recompilar dentro do SO).
 DISK_FILES = c_compiler/out/*.EXE c_compiler/out/*.DLL c_compiler/out/*.OBJ \
-	c_compiler/out/*.IMP c_compiler/include/*.h c_compiler/lib/*.c \
+	c_compiler/out/*.IMP c_compiler/include/*.h c_compiler/include/sys/*.h \
+	c_compiler/lib/*.c \
 	c_compiler/examples/*.c c_compiler/examples/*.h c_compiler/examples/*.cpp \
 	c_compiler/examples/*.bat \
 	c_compiler/cc/*.c c_compiler/cc/cc.h c_compiler/sox.h c_compiler/link/link.c \
 	c_compiler/tls/*.c c_compiler/tls/*.h c_compiler/gui/*.c \
-	c_compiler/img/*.c c_compiler/browser/*.c c_compiler/browser/*.cpp c_compiler/browser/*.h
+	c_compiler/img/*.c c_compiler/browser/*.c c_compiler/browser/*.cpp c_compiler/browser/*.h \
+	libs/posix-lite/posix.c
 # browser/main.c vai como BROWSER.C para nao colidir com o MAIN.C do cc
+# Headers sys/*.h vao para ::/SYS/ (FAT 8.3; no SO o include path e flat).
 disk-files: disk.img
 	@if pgrep -f "[q]emu-system.*file=$(DISK)" >/dev/null; then \
 	  echo "Feche o QEMU antes: o SO regrava a FAT e apaga o que o mcopy gravou."; exit 1; fi
 	$(MAKE) -C c_compiler all
 	@if ! mdir -i $(DISK)@@512 ::/ >/dev/null 2>&1; then $(MAKE) format-disk; fi
 	@for f in $$(ls $(DISK_FILES) | grep -v '/TEST.EXE$$'); do \
-	  case "$$f" in */browser/main.c) n=BROWSER.C ;; \
-	  *) n=$$(basename "$$f" | tr 'a-z' 'A-Z') ;; esac; \
+	  case "$$f" in \
+	    */browser/main.c) n=BROWSER.C ;; \
+	    */include/sys/*) \
+	      if ! mdir -i $(DISK)@@512 ::/SYS >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SYS; fi; \
+	      n=SYS/$$(basename "$$f" | tr 'a-z' 'A-Z'); \
+	      mcopy -o -i $(DISK)@@512 "$$f" "::/$$n" || exit 1; \
+	      continue ;; \
+	    *) n=$$(basename "$$f" | tr 'a-z' 'A-Z') ;; \
+	  esac; \
 	  mcopy -o -i $(DISK)@@512 "$$f" "::/$$n" || exit 1; \
 	done
 	@mkdir -p c_compiler/build/desk

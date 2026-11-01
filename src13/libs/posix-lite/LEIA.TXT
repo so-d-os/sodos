@@ -1,0 +1,15 @@
+posix-lite — subset POSIX para o port MC (e outros apps)
+
+Fonte: posix.c
+Saida:  c_compiler/out/POSIX.DLL  (make -C c_compiler out/POSIX.DLL)
+
+Headers no cc:
+  include/unistd.h, dirent.h, fcntl.h, sys/types.h, sys/stat.h
+
+Kernel: k_pwd, k_chdir, k_dirlist
+
+Uso (cc):
+  CC APP.C POSIX.DLL
+
+Apps gcc -mx32: recompilar posix.c com XGFLAGS e linkar com LIBCX.DLL
+(ainda nao ha POSIXX.DLL separado; proximo passo se o MC precisar).

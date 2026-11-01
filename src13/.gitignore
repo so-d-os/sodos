@@ -46,3 +46,13 @@ __pycache__/
 core
 vgcore.*
 core.*
+
+# Midnight Commander upstream / build host (ver content/mc/FETCH.sh, BUILD.sh)
+vendor/mc/
+vendor/mc-*/
+vendor/mc-build/
+libs/**/build/
+libs/**/*.o
+libs/**/*.obj
+libs/**/*.EXE
+libs/**/*.DLL

@@ -16,6 +16,11 @@ TGFLAGS = -m32 -march=i386 -mno-sse -mno-mmx -O2 -ffreestanding -fno-pic -fno-pi
 	-fno-stack-protector -fno-asynchronous-unwind-tables -fno-builtin \
 	-fno-tree-loop-distribute-patterns -fno-jump-tables -nostdinc -Iinclude -Wall
 
+# gcc -mx32: long mode + ponteiros 32 bits (ABI do SO). Preferir a -m32.
+XGFLAGS = -mx32 -march=x86-64 -mno-sse -mno-mmx -mno-red-zone -O2 -ffreestanding \
+	-fno-pic -fno-pie -fno-stack-protector -fno-asynchronous-unwind-tables \
+	-fno-builtin -fno-jump-tables -nostdinc -Iinclude -Wall
+
 LINK = $(B)/link
 LIBC_SRC = lib/string.c lib/ctype.c lib/stdlib.c lib/stdio.c lib/printf.c lib/divdi.c
 ifeq ($(LIBC_WITH),gcc)
@@ -34,7 +39,9 @@ CC_SRC = cc/main.c cc/util.c cc/lex.c cc/pp.c cc/type.c cc/parse.c cc/gen.c
 all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/HELLO.EXE \
 	$(O)/CC.EXE $(O)/LINK.EXE $(O)/TLS.DLL $(O)/HTTPS.EXE $(O)/GUI.DLL $(O)/IMG.DLL \
 	$(O)/BROWSER.EXE $(O)/IMAGEVW.EXE $(O)/VIDPLAY.EXE $(O)/FONTADV.EXE $(O)/COMMAND.EXE $(O)/HTTPD.EXE \
-	$(O)/WGET.EXE $(O)/BAT.EXE
+	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
+	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
+	$(O)/POSIXX.DLL $(O)/MC.EXE
 
 # GUI.DLL (janela canvas do WIN) e o navegador, em varios arquivos
 $(B)/gui_gui.obj: gui/gui.c include/gui.h $(HCC) $(HEADERS) | $(B)
@@ -95,6 +102,59 @@ $(O)/WGET.EXE: examples/wget.c $(O)/TLS.DLL $(HCC) $(HEADERS) $(O)/KERNEL.IMP
 
 $(O)/BAT.EXE: examples/bat.c $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
 	$(HCC) -o $@ examples/bat.c
+
+# posix-lite: subset POSIX sobre k_* (port MC)
+$(B)/posix_posix.obj: ../libs/posix-lite/posix.c include/unistd.h include/dirent.h \
+		include/fcntl.h include/sys/stat.h include/sys/types.h $(HCC) $(HEADERS) | $(B)
+	$(HCC) -c ../libs/posix-lite/posix.c -o $@
+
+$(O)/POSIX.DLL: $(B)/posix_posix.obj $(O)/LIBC.DLL $(LINK)
+	$(HCC) -dll -o $@ $(B)/posix_posix.obj
+
+# gcc -mx32 -> ELF -> SOX. CRT0/LIBCX em SysV (compativel com k_* e com o gcc).
+# LIBC.DLL do cc continua para apps do cc (ABI de pilha).
+XLIBC_OBJ = $(patsubst lib/%.c,$(B)/x_%.o,$(LIBC_SRC))
+$(B)/x_%.o: lib/%.c $(HEADERS) | $(B)
+	$(HOSTCC) $(XGFLAGS) -c $< -o $@
+$(B)/x_crt0.o: lib/crt0.c $(HEADERS) | $(B)
+	$(HOSTCC) $(XGFLAGS) -c $< -o $@
+$(B)/x_hello.o: examples/xhello.c $(HEADERS) | $(B)
+	$(HOSTCC) $(XGFLAGS) -c $< -o $@
+$(O)/LIBCX.DLL: $(XLIBC_OBJ) $(O)/KERNEL.IMP $(LINK)
+	$(LINK) /dll /exportall /out:$@ $(XLIBC_OBJ) $(O)/KERNEL.IMP
+$(O)/XHELLO.EXE: $(B)/x_crt0.o $(B)/x_hello.o $(O)/LIBCX.DLL $(LINK) $(O)/KERNEL.IMP
+	$(LINK) /out:$@ /map $(B)/x_crt0.o $(B)/x_hello.o $(O)/LIBCX.DLL $(O)/KERNEL.IMP
+
+# term shim (ncurses subset) — gcc -mx32
+$(B)/x_term.o: ../libs/term/term.c include/curses.h $(HEADERS) | $(B)
+	$(HOSTCC) $(XGFLAGS) -c ../libs/term/term.c -o $@
+$(O)/TERM.DLL: $(B)/x_term.o $(O)/LIBCX.DLL $(LINK) $(O)/KERNEL.IMP
+	$(LINK) /dll /exportall /out:$@ $(B)/x_term.o $(O)/LIBCX.DLL $(O)/KERNEL.IMP
+$(B)/x_tterm.o: examples/tterm.c include/curses.h $(HEADERS) | $(B)
+	$(HOSTCC) $(XGFLAGS) -c examples/tterm.c -o $@
+$(O)/TTERM.EXE: $(B)/x_crt0.o $(B)/x_tterm.o $(O)/TERM.DLL $(O)/LIBCX.DLL $(LINK)
+	$(LINK) /out:$@ $(B)/x_crt0.o $(B)/x_tterm.o $(O)/TERM.DLL $(O)/LIBCX.DLL $(O)/KERNEL.IMP
+
+# glib subset — gcc -mx32
+$(B)/x_glib.o: ../libs/glib/glib.c include/glib.h $(HEADERS) | $(B)
+	$(HOSTCC) $(XGFLAGS) -c ../libs/glib/glib.c -o $@
+$(O)/GLIB.DLL: $(B)/x_glib.o $(O)/LIBCX.DLL $(LINK) $(O)/KERNEL.IMP
+	$(LINK) /dll /exportall /out:$@ $(B)/x_glib.o $(O)/LIBCX.DLL $(O)/KERNEL.IMP
+$(B)/x_tglib.o: examples/tglib.c include/glib.h $(HEADERS) | $(B)
+	$(HOSTCC) $(XGFLAGS) -c examples/tglib.c -o $@
+$(O)/TGLIB.EXE: $(B)/x_crt0.o $(B)/x_tglib.o $(O)/GLIB.DLL $(O)/LIBCX.DLL $(LINK)
+	$(LINK) /out:$@ $(B)/x_crt0.o $(B)/x_tglib.o $(O)/GLIB.DLL $(O)/LIBCX.DLL $(O)/KERNEL.IMP
+
+# POSIX SysV (gcc -mx32) + MC.EXE (file manager hibrido)
+$(B)/x_posix.o: ../libs/posix-lite/posix.c include/unistd.h include/dirent.h \
+		include/fcntl.h include/sys/stat.h $(HEADERS) | $(B)
+	$(HOSTCC) $(XGFLAGS) -c ../libs/posix-lite/posix.c -o $@
+$(O)/POSIXX.DLL: $(B)/x_posix.o $(O)/LIBCX.DLL $(LINK) $(O)/KERNEL.IMP
+	$(LINK) /dll /exportall /out:$@ $(B)/x_posix.o $(O)/LIBCX.DLL $(O)/KERNEL.IMP
+$(B)/x_mc.o: examples/mc.c include/curses.h include/glib.h $(HEADERS) | $(B)
+	$(HOSTCC) $(XGFLAGS) -c examples/mc.c -o $@
+$(O)/MC.EXE: $(B)/x_crt0.o $(B)/x_mc.o $(O)/TERM.DLL $(O)/GLIB.DLL $(O)/POSIXX.DLL $(O)/LIBCX.DLL $(LINK)
+	$(LINK) /out:$@ $(B)/x_crt0.o $(B)/x_mc.o $(O)/TERM.DLL $(O)/GLIB.DLL $(O)/POSIXX.DLL $(O)/LIBCX.DLL $(O)/KERNEL.IMP
 
 $(HCC): $(CC_SRC) cc/cc.h sox.h | $(B)
 	$(HOSTCC) $(HCFLAGS) -o $@ $(CC_SRC)
@@ -180,12 +240,24 @@ $(B)/%.obj: tests/%.c $(HCC) $(HEADERS)
 $(B)/%.exe: $(B)/%.obj $(O)/CRT0.OBJ $(O)/LIBC.DLL $(LINK)
 	$(LINK) /out:$@ $(O)/CRT0.OBJ $< $(O)/LIBC.DLL $(O)/KERNEL.IMP
 
+# t_posix precisa de POSIX.DLL (e o DLL no cwd do soxrun)
+$(B)/t_posix.exe: $(B)/t_posix.obj $(O)/CRT0.OBJ $(O)/LIBC.DLL $(O)/POSIX.DLL $(LINK)
+	$(LINK) /out:$@ $(O)/CRT0.OBJ $< $(O)/LIBC.DLL $(O)/POSIX.DLL $(O)/KERNEL.IMP
+
 test: all $(O)/HELLO2.EXE $(TESTS)
 	$(SOXRUN) -C $(O) HELLO2.EXE um "dois tres"
 	@for t in $(TESTS); do echo "== $$t"; cp $$t $(O)/TEST.EXE; $(SOXRUN) -C $(O) TEST.EXE || exit 1; done
 	$(HCC) -o $(B)/vmain.exe examples/vmain.cpp examples/vec.cpp
 	cp $(B)/vmain.exe $(O)/TEST.EXE
 	$(SOXRUN) -C $(O) TEST.EXE
+	@echo "== XHELLO (gcc -mx32)"
+	$(SOXRUN) -C $(O) XHELLO.EXE gcc-x32 ok
+	@echo "== TTERM (term shim)"
+	$(SOXRUN) -C $(O) TTERM.EXE
+	@echo "== TGLIB (glib subset)"
+	$(SOXRUN) -C $(O) TGLIB.EXE
+	@echo "== MC.EXE auto"
+	$(SOXRUN) -C $(O) MC.EXE auto
 
 # Exemplos compilados pelo CC.EXE (como no SO): multi-arquivo e DLL
 EXD = $(B)/ex

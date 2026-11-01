@@ -1,0 +1,10 @@
+term — shim ncurses minimo (Fase 3 do port MC)
+
+Fonte:   term.c
+Header:  c_compiler/include/curses.h
+Saida:   c_compiler/out/TERM.DLL  (gcc -mx32 + LIBCX)
+
+Tela logica 80x25; refresh() redesenha via k_clear/k_putc.
+Cores: init_pair/COLOR_PAIR guardados (ainda sem atributo VGA).
+
+Prova: examples/tterm.c -> TTERM.EXE

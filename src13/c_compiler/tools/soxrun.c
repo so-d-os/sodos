@@ -41,21 +41,38 @@ struct module {
 static struct module mods[MAXMOD];
 static char last_err[128];
 static const char* root_dir = ".";
+static char cwd_rel[200]; /* relativo a root_dir; vazio = raiz D:\ */
 
 /* ---------- caminhos ---------- */
+static void slash_to_host(char* s) {
+  for (; *s; s++)
+    if (*s == '\\') *s = '/';
+}
+
 static const char* host_path(const char* p, char* out, int max) {
   char cand[3][256];
+  char rel[256];
   const char* n = p;
   int i;
   struct stat st;
-  if (n[0] && n[1] == ':') n += 2;
-  while (*n == '\\' || *n == '/') n++;
-  snprintf(cand[0], 256, "%s/%s", root_dir, n);
+  {
+    int abs = (p[0] && p[1] == ':') || p[0] == '\\' || p[0] == '/';
+    if (n[0] && n[1] == ':') n += 2;
+    while (*n == '\\' || *n == '/') n++;
+    if (!abs && cwd_rel[0]) {
+      if (n[0]) snprintf(rel, sizeof rel, "%s/%s", cwd_rel, n);
+      else snprintf(rel, sizeof rel, "%s", cwd_rel);
+    } else {
+      snprintf(rel, sizeof rel, "%s", n);
+    }
+  }
+  slash_to_host(rel);
+  snprintf(cand[0], 256, "%s/%s", root_dir, rel);
   snprintf(cand[1], 256, "%s/", root_dir);
   snprintf(cand[2], 256, "%s/", root_dir);
-  for (i = 0; n[i]; i++) {
-    char u[2] = { (char)toupper((unsigned char)n[i]), 0 };
-    char l[2] = { (char)tolower((unsigned char)n[i]), 0 };
+  for (i = 0; rel[i]; i++) {
+    char u[2] = { (char)toupper((unsigned char)rel[i]), 0 };
+    char l[2] = { (char)tolower((unsigned char)rel[i]), 0 };
     strncat(cand[1], u, 255 - strlen(cand[1]));
     strncat(cand[2], l, 255 - strlen(cand[2]));
   }
@@ -136,6 +153,22 @@ static int k_fsave(const char* path, const char* data, int size) {
   fclose(f);
   return 0;
 }
+static int k_fread(const char* path, unsigned offset, char* buf, int len) {
+  char hp[300];
+  FILE* f = fopen(host_path(path, hp, sizeof hp), "rb");
+  int n;
+  if (!f || len < 1) {
+    if (f) fclose(f);
+    return -1;
+  }
+  if (fseek(f, (long)offset, SEEK_SET) != 0) {
+    fclose(f);
+    return -1;
+  }
+  n = (int)fread(buf, 1, (size_t)len, f);
+  fclose(f);
+  return n;
+}
 static int k_flist(int letter, char* out, int max) {
   DIR* d = opendir(root_dir);
   struct dirent* e;
@@ -155,6 +188,68 @@ static int k_flist(int letter, char* out, int max) {
   if (out && max > 0) out[pos < max ? pos : max - 1] = 0;
   closedir(d);
   return n;
+}
+static int k_dirlist(const char* path, char* out, int max) {
+  char hp[300];
+  DIR* d;
+  struct dirent* e;
+  int pos = 0;
+  if (!out || max < 2) return -1;
+  out[0] = 0;
+  host_path(path && path[0] ? path : "D:\\", hp, sizeof hp);
+  d = opendir(hp);
+  if (!d) return -1;
+  while ((e = readdir(d)) != NULL) {
+    char sub[400];
+    struct stat st;
+    int l;
+    if (e->d_name[0] == '.') continue;
+    l = (int)strlen(e->d_name);
+    if (pos + l + 3 >= max) break;
+    memcpy(out + pos, e->d_name, (size_t)l);
+    pos += l;
+    snprintf(sub, sizeof sub, "%s/%s", hp, e->d_name);
+    if (stat(sub, &st) == 0 && S_ISDIR(st.st_mode)) out[pos++] = '\\';
+    out[pos++] = '\n';
+  }
+  out[pos] = 0;
+  closedir(d);
+  return pos > 0 ? 1 : 0;
+}
+static void k_pwd(char* out, int max) {
+  int i = 0, j = 0;
+  if (!out || max < 4) return;
+  out[i++] = 'D';
+  out[i++] = ':';
+  out[i++] = '\\';
+  while (cwd_rel[j] && i < max - 1) {
+    char c = cwd_rel[j++];
+    out[i++] = (c == '/') ? '\\' : c;
+  }
+  out[i] = 0;
+}
+static int k_chdir(const char* path) {
+  char hp[300];
+  struct stat st;
+  const char* n;
+  if (!path || !path[0]) return 0;
+  host_path(path, hp, sizeof hp);
+  if (stat(hp, &st) != 0 || !S_ISDIR(st.st_mode)) return -1;
+  n = path;
+  if (n[0] && n[1] == ':') n += 2;
+  while (*n == '\\' || *n == '/') n++;
+  if (path[0] == '\\' || path[0] == '/' || (path[0] && path[1] == ':')) {
+    strncpy(cwd_rel, n, sizeof(cwd_rel) - 1);
+  } else if (cwd_rel[0]) {
+    char tmp[200];
+    snprintf(tmp, sizeof tmp, "%s/%s", cwd_rel, n);
+    strncpy(cwd_rel, tmp, sizeof(cwd_rel) - 1);
+  } else {
+    strncpy(cwd_rel, n, sizeof(cwd_rel) - 1);
+  }
+  cwd_rel[sizeof(cwd_rel) - 1] = 0;
+  slash_to_host(cwd_rel);
+  return 0;
 }
 static int k_drive(void) { return 'D'; }
 static int k_set_drive(int letter) { return letter == 'D' || letter == 'd' ? 0 : -1; }
@@ -469,7 +564,8 @@ static const struct {
   void* fn;
 } ktab[] = {
   E(k_putc), E(k_write), E(k_puts), E(k_getc), E(k_readline), E(k_clear),
-  E(k_fsize), E(k_fload), E(k_fsave), E(k_flist), E(k_drive), E(k_set_drive),
+  E(k_fsize), E(k_fload), E(k_fread), E(k_fsave), E(k_flist), E(k_dirlist), E(k_pwd), E(k_chdir),
+  E(k_drive), E(k_set_drive),
   E(k_malloc), E(k_free), E(k_realloc), E(k_msize), E(k_meminfo),
   E(k_exit), E(k_exec), E(k_shell), E(k_last_error), E(k_dll_load), E(k_dll_sym), E(k_dll_free),
   E(k_rdtsc), E(k_ms), E(k_date), E(k_random),

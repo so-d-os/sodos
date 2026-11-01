@@ -78,6 +78,17 @@ static int k_flist(int letter, char* out, int max) {
   return n;
 }
 
+static int k_dirlist(const char* path, char* out, int max) {
+  return file_list(path, out, max);
+}
+
+static void k_pwd(char* out, int max) { drives_pwd(out, max); }
+
+static int k_chdir(const char* path) {
+  if (!path || !path[0]) return 0;
+  return drives_chdir(path);
+}
+
 /* ---------- memoria ---------- */
 static void* k_malloc(uint32_t n) { return umalloc(n); }
 static void k_free(void* p) { ufree(p); }
@@ -236,6 +247,9 @@ static const struct kexp table[] = {
   EXP(k_fread),
   EXP(k_fsave),
   EXP(k_flist),
+  EXP(k_dirlist),
+  EXP(k_pwd),
+  EXP(k_chdir),
   EXP(k_drive),
   EXP(k_set_drive),
   EXP(k_malloc),

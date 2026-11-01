@@ -1,0 +1,10 @@
+glib — subset GLib (Fase 4 do port MC)
+
+Fonte:  glib.c
+Header: c_compiler/include/glib.h
+Saida:  c_compiler/out/GLIB.DLL  (gcc -mx32 + LIBCX)
+
+Tem: g_malloc/free/strdup/snprintf, GList/GSList, GString, GPtrArray,
+     g_strsplit, g_build_filename, g_get_monotonic_time
+
+Prova: examples/tglib.c -> TGLIB.EXE

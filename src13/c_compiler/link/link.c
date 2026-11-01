@@ -1,5 +1,6 @@
-/* link.c - Linker do SO: junta .OBJ (COBJ do cc ou ELF32 do gcc), .LIB e
+/* link.c - Linker do SO: junta .OBJ (COBJ do cc ou ELF do gcc), .LIB e
  * exports de .DLL/.IMP num .EXE ou .DLL no formato SOX (sox.h).
+ * ELF: i386 (EM_386) e x32 (ELF32 + EM_X86_64, gcc -mx32) - ponteiros 32 bits.
  *
  *   link [/out:X.EXE] [/dll] [/entry:nome] [/export:nome] [/exportall]
  *        [/stack:bytes] [/map] arquivos...
@@ -328,17 +329,37 @@ static int load_cobj(const char* name, const unsigned char* b, unsigned size) {
   return o;
 }
 
-/* ---------------- ELF32 relocavel (gcc -m32 -c) ---------------- */
+/* ---------------- ELF32 relocavel: i386 (-m32) ou x32 (-mx32) ---------------- */
 #define SHT_PROGBITS 1
 #define SHT_SYMTAB   2
+#define SHT_RELA     4
 #define SHT_NOBITS   8
 #define SHT_REL      9
 #define SHF_WRITE    1
 #define SHF_ALLOC    2
 #define SHF_EXEC     4
+#define EM_386       3
+#define EM_X86_64    62
+
+/* Converte tipo de reloc ELF -> COB. is_x64: EM_X86_64 (x32). Devolve 0 se ok. */
+static int elf_reloc_to_cob(unsigned rtype, int is_x64, unsigned* out) {
+  if (rtype == 0) return -1; /* NONE */
+  if (!is_x64) {
+    /* R_386_32 / PC32 / PLT32 */
+    if (rtype == 1) { *out = COB_REL_ABS32; return 0; }
+    if (rtype == 2 || rtype == 4) { *out = COB_REL_REL32; return 0; }
+    return 1;
+  }
+  /* R_X86_64_PC32 / PLT32 / 32 / 32S (sem GOT/64) */
+  if (rtype == 2 || rtype == 4) { *out = COB_REL_REL32; return 0; }
+  if (rtype == 10 || rtype == 11) { *out = COB_REL_ABS32; return 0; }
+  return 1;
+}
 
 static int load_elf(const char* name, const unsigned char* b, unsigned size) {
   unsigned shoff, shentsize, shnum, shstrndx;
+  unsigned machine;
+  int is_x64;
   const unsigned char* sh;
   const char* shstr;
   int o;
@@ -347,11 +368,18 @@ static int load_elf(const char* name, const unsigned char* b, unsigned size) {
   int symtab = -1;
   unsigned sym_count = 0;
   int sym_base;
-  if (size < 52 || b[4] != 1 || b[5] != 1 || rd16(b + 16) != 1 || rd16(b + 18) != 3) {
-    fprintf(stderr, "link: %s: ELF nao e relocavel i386\n", name);
+  if (size < 52 || b[4] != 1 || b[5] != 1 || rd16(b + 16) != 1) {
+    fprintf(stderr, "link: %s: ELF nao e relocavel ELF32\n", name);
     errors++;
     return -1;
   }
+  machine = rd16(b + 18);
+  if (machine != EM_386 && machine != EM_X86_64) {
+    fprintf(stderr, "link: %s: ELF maquina %u (quero i386 ou x86-64/x32)\n", name, machine);
+    errors++;
+    return -1;
+  }
+  is_x64 = (machine == EM_X86_64);
   shoff = rd32(b + 32);
   shentsize = rd16(b + 46);
   shnum = rd16(b + 48);
@@ -430,25 +458,33 @@ static int load_elf(const char* name, const unsigned char* b, unsigned size) {
     unsigned soff = rd32(s + 16);
     unsigned ssize = rd32(s + 20);
     unsigned target = rd32(s + 28);
+    unsigned entsize = (type == SHT_RELA) ? 12u : 8u;
     unsigned k;
-    if (type != SHT_REL) continue;
+    if (type != SHT_REL && type != SHT_RELA) continue;
     if (target >= shnum || map[target] < 0) continue;
-    for (k = 0; k + 8 <= ssize; k += 8) {
+    for (k = 0; k + entsize <= ssize; k += entsize) {
       unsigned roff = rd32(b + soff + k);
       unsigned info = rd32(b + soff + k + 4);
       unsigned rsym = info >> 8;
       unsigned rtype = info & 255;
       unsigned t;
-      if (rtype == 0) continue;
-      if (rtype == 1) t = COB_REL_ABS32;
-      else if (rtype == 2 || rtype == 4) t = COB_REL_REL32;
-      else {
-        fprintf(stderr, "link: %s: relocacao ELF tipo %u nao suportada (compile com -fno-pic)\n",
+      int rc;
+      struct sect* ts;
+      if (rsym >= sym_count) continue;
+      rc = elf_reloc_to_cob(rtype, is_x64, &t);
+      if (rc < 0) continue;
+      if (rc > 0) {
+        fprintf(stderr, "link: %s: relocacao ELF tipo %u nao suportada (gcc -mx32 -fno-pic)\n",
                 name, rtype);
         errors++;
         continue;
       }
-      if (rsym >= sym_count) continue;
+      /* RELA: addend explicito — grava no campo (modelo COB/R_386). */
+      if (type == SHT_RELA) {
+        unsigned addend = rd32(b + soff + k + 8);
+        ts = &sects[map[target]];
+        if (roff + 4 <= ts->size) wr32(ts->data + roff, addend);
+      }
       add_rel(o, map[target], roff, sym_base + (int)rsym, t);
     }
   }

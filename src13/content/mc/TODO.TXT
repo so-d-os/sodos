@@ -1,0 +1,16 @@
+Marcos do port hibrido (MC)
+==========================
+
+[x] Fase 0 - pastas content/mc + vendor/mc + docs
+[x] Fase 1 - posix-lite (POSIX.DLL: open/read/write/dirent/stat/chdir)
+[x] Fase 2 - gcc -mx32 -> ELF -> SOX; LIBCX.DLL + XHELLO.EXE
+[x] Fase 3 - term shim (TERM.DLL + curses.h; TTERM.EXE)
+[x] Fase 4 - glib subset (GLIB.DLL + glib.h; TGLIB.EXE)
+[x] Fase 5a - MC.EXE hibrido (dois paineis) no soxrun
+[ ] Fase 5b - linkar fontes GNU MC 4.8.33 (ainda ~270 .o + glib cheio)
+
+Fase 5a: examples/mc.c + POSIXX.DLL + TERM + GLIB + LIBCX
+  make -C c_compiler out/MC.EXE
+  soxrun -C out MC.EXE auto
+
+Fase 5b (proximo): ir puxando vendor/mc/src e lib/tty com stubs.

@@ -19,6 +19,10 @@ int k_fload(const char* path, char* buf, int max);
 int k_fread(const char* path, unsigned offset, char* buf, int len);
 int k_fsave(const char* path, const char* data, int size);
 int k_flist(int letter, char* out, int max);
+/* Lista pasta: linhas "NOME" ou "NOME\\" (dir), separadas por \\n. <0 erro. */
+int k_dirlist(const char* path, char* out, int max);
+void k_pwd(char* out, int max);
+int k_chdir(const char* path);
 int k_drive(void);
 int k_set_drive(int letter);
 
