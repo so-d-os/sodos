@@ -119,7 +119,7 @@ The USB tablet provides the absolute pointer position used by the desktop. All t
 | `make run-format` | Opens QEMU and prints the `fdisk`/`format`/`mount` commands |
 | `make debug` | Rebuilds the kernel with `-O0 -g` (old target; links only part of the kernel) |
 | `make iso` | `so.iso` El Torito from `os.img` |
-| `make iso-grub` | Multiboot ISO (`so-grub.iso`) — legacy target, older than the current modules |
+| `make iso-grub` | Multiboot2 ISO (`so-grub.iso`) — GRUB loads the current kernel |
 | `make install-usb` | Writes `os.img` to a device with `dd` (**overwrites the device**) |
 | `make format-disk` | Formats `disk.img` as FAT16 on Linux |
 | `make disk-files` | Copies compiler, libc, examples, fonts and `content/` to `D:` |
@@ -156,7 +156,7 @@ gdb -ex "target remote :1234" -ex "symbol-file kernel.elf" -ex "break kmain" -ex
 
 ### ISO and VirtualBox
 
-`make iso` builds `so.iso` with `os.img` as an El Torito boot image. `make iso-grub` builds a Multiboot ISO with `kernel_multiboot.elf`; that target predates the current split into modules (`module`, `sched`, `httpd`, commands) and may not link. VM instructions in [TESTAR_ISO.md](src13/TESTAR_ISO.md) and [VIRTUALBOX_SETUP.md](src13/VIRTUALBOX_SETUP.md).
+`make iso` builds `so.iso` with `os.img` as an El Torito boot image. `make iso-grub` builds an ISO whose GRUB loads `kernel_multiboot.elf` with Multiboot2 (the same kernel as `kernel.elf`). VM instructions in [TESTAR_ISO.md](src13/TESTAR_ISO.md) and [VIRTUALBOX_SETUP.md](src13/VIRTUALBOX_SETUP.md).
 
 ## How the system boots
 
@@ -898,7 +898,7 @@ dlls      loaded modules, base, size and references
 | Video does not open | Unsupported codec (H.264/HEVC/MPEG-1/2) |
 | BMP image does not open | `IMG.DLL` does not decode BMP |
 | Black screen in VirtualBox | Disable EFI and use BIOS; see [TESTAR_ISO.md](src13/TESTAR_ISO.md) |
-| `make debug`/`iso-grub` fail | Old targets that link only part of the kernel; use `make` + `run-gdb` |
+| `make debug` fails | Old target that links only part of the kernel; use `make` + `run-gdb` |
 
 ## Known limitations
 
@@ -911,7 +911,7 @@ dlls      loaded modules, base, size and references
 - **No access control**: the HTTP server on port 8797 runs commands without authentication.
 - **No `reboot`**; `shutdown` uses ACPI/the Bochs port without parsing the ACPI tables.
 - `IMG.DLL` does not decode BMP, although the desktop accepts `.BMP`.
-- `make debug` and `make iso-grub` are outdated relative to the current kernel.
+- `make debug` is outdated relative to the current kernel. `make iso-grub` loads that kernel through Multiboot2.
 - Stage 2 still loads `app.bin` at `0x58000` for compatibility, but the 64-bit kernel ignores that 32-bit application.
 
 ## Directory map

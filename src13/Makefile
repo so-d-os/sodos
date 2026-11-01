@@ -102,9 +102,9 @@ check-layout: boot.bin stage2.bin kernel.elf kernel.bin app.bin
 
 
 
-# Compila cabeçalho Multiboot
+# Cabecalho e stub Multiboot2. elf64 com codigo bits 32, igual ao kernel_entry.
 kernel/multiboot_header.o: kernel/multiboot_header.asm
-	$(AS) -f elf32 kernel/multiboot_header.asm -o kernel/multiboot_header.o
+	$(AS) -f elf64 kernel/multiboot_header.asm -o kernel/multiboot_header.o
 
 # Stubs de exceção (IDT/ISR)
 kernel/isr_stubs.o: kernel/isr_stubs.asm
@@ -181,29 +181,9 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(AS) -f elf64 kernel/kernel_entry.asm -o kernel/kernel_entry.o
 	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o kernel/mm.o net/net.o net/httpd.o kernel/module.o kernel/sched.o kernel/kexports.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
-# Kernel com suporte Multiboot para GRUB (caminho legado; o boot principal e BIOS)
-kernel_multiboot.elf: kernel/multiboot_header.o kernel/kernel.c kernel/bootinfo.c kernel/kernel_entry.asm fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/interrupt_stack.c kernel/trace.c kernel/isr_stubs.asm kernel/irq_stubs.asm
-	$(CC) $(CFLAGS) -c kernel/kernel.c -o kernel/kernel.o
-	$(CC) $(CFLAGS) -c kernel/bootinfo.c -o kernel/bootinfo.o
-	$(CC) $(CFLAGS) -c fs/files.c -o fs/files.o
-	$(CC) $(CFLAGS) -c net/net.c -o net/net.o
-	$(CC) $(CFLAGS) -c executables.c -o executables.o
-	$(CC) $(CFLAGS) -c fs/fat.c -o fs/fat.o
-	$(CC) $(CFLAGS) -c fs/partition.c -o fs/partition.o
-	$(CC) $(CFLAGS) -c fs/fat_format.c -o fs/fat_format.o
-	$(CC) $(CFLAGS) -c video/visual.c -o video/visual.o
-	$(CC) $(CFLAGS) -c video/font8x8_data.c -o video/font8x8_data.o
-	$(CC) $(CFLAGS) -c kernel/serial.c -o kernel/serial.o
-	$(CC) $(CFLAGS) -c kernel/idt.c -o kernel/idt.o
-	$(CC) $(CFLAGS) -c kernel/isr.c -o kernel/isr.o
-	$(CC) $(CFLAGS) -c kernel/pic.c -o kernel/pic.o
-	$(CC) $(CFLAGS) -c kernel/irq.c -o kernel/irq.o
-	$(CC) $(CFLAGS) -c kernel/interrupt_stack.c -o kernel/interrupt_stack.o
-	$(CC) $(CFLAGS) -c kernel/trace.c -o kernel/trace.o
-	$(AS) -f elf64 kernel/isr_stubs.asm -o kernel/isr_stubs.o
-	$(AS) -f elf64 kernel/irq_stubs.asm -o kernel/irq_stubs.o
-	$(AS) -f elf64 kernel/kernel_entry.asm -o kernel/kernel_entry.o
-	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/interrupt_stack.o kernel/trace.o net/net.o kernel/isr_stubs.o kernel/irq_stubs.o
+# Mesmo kernel de kernel.elf, com o stub Multiboot2 na frente. O GRUB carrega este ELF.
+kernel_multiboot.elf: kernel.elf kernel/multiboot_header.o kernel/linker_multiboot.ld
+	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o kernel/mm.o net/net.o net/httpd.o kernel/module.o kernel/sched.o kernel/kexports.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 
 kernel.bin: kernel.elf
@@ -603,7 +583,7 @@ install-usb: os.img
 	sudo dd if=os.img of=$$device bs=4M conv=fsync status=progress; \
 	echo "Concluído. Ajuste a ordem de boot da BIOS para iniciar pelo pendrive."
 
-# Gera ISO com GRUB (Multiboot)
+# ISO cujo GRUB carrega o kernel por Multiboot2.
 iso-grub: kernel_multiboot.elf
 	@if ! command -v grub-mkrescue >/dev/null 2>&1; then \
 	  echo "Erro: grub-mkrescue não encontrado. Instale com:"; \
@@ -616,8 +596,8 @@ iso-grub: kernel_multiboot.elf
 	echo 'set timeout=5' > iso_root/boot/grub/grub.cfg
 	echo 'set default=0' >> iso_root/boot/grub/grub.cfg
 	echo '' >> iso_root/boot/grub/grub.cfg
-	echo 'menuentry "Meu SO" {' >> iso_root/boot/grub/grub.cfg
-	echo '    multiboot /boot/kernel.elf' >> iso_root/boot/grub/grub.cfg
+	echo 'menuentry "SODOS" {' >> iso_root/boot/grub/grub.cfg
+	echo '    multiboot2 /boot/kernel.elf' >> iso_root/boot/grub/grub.cfg
 	echo '    boot' >> iso_root/boot/grub/grub.cfg
 	echo '}' >> iso_root/boot/grub/grub.cfg
 	grub-mkrescue -o so-grub.iso iso_root

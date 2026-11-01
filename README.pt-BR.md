@@ -2,7 +2,7 @@
 
 **Português** | [English](README.md)
 
-Sistema operacional educacional de 64 bits (*long mode*), freestanding, escrito em C e assembly. Sobe direto pela BIOS (`os.img`); há também um caminho Multiboot legado para GRUB. Não depende de libc do Linux. Tem shell estilo DOS, desktop gráfico com janelas, FAT16 com subpastas, rede NE2000 com TCP/IP, servidor HTTP com API de controle remoto, navegador com TLS 1.3, compilador C/C++ próprio que roda dentro do sistema, visualizador de imagens, player de vídeo MJPEG e rasterizador de fontes TrueType.
+Sistema operacional educacional de 64 bits (*long mode*), freestanding, escrito em C e assembly. Sobe direto pela BIOS (`os.img`); o GRUB carrega o mesmo kernel por Multiboot2. Não depende de libc do Linux. Tem shell estilo DOS, desktop gráfico com janelas, FAT16 com subpastas, rede NE2000 com TCP/IP, servidor HTTP com API de controle remoto, navegador com TLS 1.3, compilador C/C++ próprio que roda dentro do sistema, visualizador de imagens, player de vídeo MJPEG e rasterizador de fontes TrueType.
 
 O SODOS é projetado para ser o primeiro sistema operacional que pode ser comandado por uma API de inteligência artificial.
 
@@ -54,7 +54,7 @@ Os comandos de shell abaixo assumem a raiz do repositório; quando precisam do c
 ## O que tem dentro
 
 - **Kernel 64 bits** em long mode, paginação de 2 MB, heap de kernel e heap de usuário, tratador de exceções com despejo de registradores e pilha.
-- **Boot BIOS em dois estágios**: `boot.asm` (stage 1 de 512 bytes) carrega `stage2.asm`, que usa E820, valida a RAM de destino, carrega o kernel em `0x01000000` e entrega um `BootInfo` versionado; um caminho Multiboot legado para GRUB continua presente.
+- **Boot BIOS em dois estágios**: `boot.asm` (stage 1 de 512 bytes) carrega `stage2.asm`, que usa E820, valida a RAM de destino, carrega o kernel em `0x01000000` e entrega um `BootInfo` versionado; o GRUB usa o mesmo contrato via Multiboot2 (`multiboot_header.asm`).
 - **Shell DOS** com 33 comandos internos, histórico, TAB, subpastas e troca de unidade.
 - **FAT12 (leitura) e FAT16 (leitura e escrita)**, partições MBR, até 4 discos ATA, subpastas, cópia entre unidades e disco RAM.
 - **Desktop `win`**: janelas móveis e redimensionáveis, barra de tarefas, menu Iniciar, ícones, miniaturas, Bloco de notas, Gerenciador, Explorer em assembly e Command.
@@ -119,7 +119,7 @@ O tablet USB entrega a posição absoluta do ponteiro, usada pelo desktop. Todos
 | `make run-format` | Abre o QEMU e imprime os comandos de `fdisk`/`format`/`mount` |
 | `make debug` | Recompila o kernel com `-O0 -g` (alvo antigo; liga só parte do kernel) |
 | `make iso` | `so.iso` El Torito a partir de `os.img` |
-| `make iso-grub` | ISO Multiboot (`so-grub.iso`) — alvo legado, anterior aos módulos atuais |
+| `make iso-grub` | ISO Multiboot2 (`so-grub.iso`) — o GRUB carrega o kernel atual |
 | `make install-usb` | Grava `os.img` num dispositivo com `dd` (**sobrescreve o dispositivo**) |
 | `make format-disk` | Formata `disk.img` como FAT16 no Linux |
 | `make disk-files` | Copia compilador, libc, exemplos, fontes e `content/` para `D:` |
@@ -156,7 +156,7 @@ gdb -ex "target remote :1234" -ex "symbol-file kernel.elf" -ex "break kmain" -ex
 
 ### ISO e VirtualBox
 
-`make iso` gera `so.iso` com o `os.img` como imagem de boot El Torito. `make iso-grub` gera uma ISO Multiboot com `kernel_multiboot.elf`; esse alvo é anterior à separação atual em módulos (`module`, `sched`, `httpd`, comandos) e pode não ligar. Instruções de VM em [TESTAR_ISO.md](src13/TESTAR_ISO.md) e [VIRTUALBOX_SETUP.md](src13/VIRTUALBOX_SETUP.md).
+`make iso` gera `so.iso` com o `os.img` como imagem de boot El Torito. `make iso-grub` gera uma ISO cujo GRUB carrega `kernel_multiboot.elf` por Multiboot2 (o mesmo kernel de `kernel.elf`). Instruções de VM em [TESTAR_ISO.md](src13/TESTAR_ISO.md) e [VIRTUALBOX_SETUP.md](src13/VIRTUALBOX_SETUP.md).
 
 ## Como o sistema sobe
 
@@ -899,7 +899,7 @@ dlls      módulos carregados, base, tamanho e referências
 | Vídeo não abre | Codec não suportado (H.264/HEVC/MPEG-1/2) |
 | Imagem BMP não abre | `IMG.DLL` não decodifica BMP |
 | Tela preta no VirtualBox | Desmarque EFI e use BIOS; veja [TESTAR_ISO.md](src13/TESTAR_ISO.md) |
-| `make debug`/`iso-grub` falham | Alvos antigos que ligam um subconjunto do kernel; use `make` + `run-gdb` |
+| `make debug` falha | Alvo antigo que liga um subconjunto do kernel; use `make` + `run-gdb` |
 
 ## Limitações conhecidas
 
@@ -912,7 +912,7 @@ dlls      módulos carregados, base, tamanho e referências
 - **Sem controle de acesso**: o HTTP da porta 8797 executa comandos sem autenticação.
 - **Sem `reboot`**; `shutdown` usa ACPI/porta Bochs sem interpretar as tabelas ACPI.
 - `IMG.DLL` não decodifica BMP, embora o desktop aceite `.BMP`.
-- `make debug` e `make iso-grub` estão defasados em relação ao kernel atual.
+- `make debug` está defasado em relação ao kernel atual. `make iso-grub` carrega esse kernel por Multiboot2.
 - O stage 2 ainda carrega `app.bin` em `0x58000` por compatibilidade, mas o kernel de 64 bits ignora esse aplicativo de 32 bits.
 
 ## Mapa das pastas

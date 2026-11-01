@@ -113,7 +113,7 @@ Memória: texto em `0xB8000`, gráfico 13h em `0xA0000`.
 | **boot.asm** | Stage 1 (512 bytes). Real mode: lê `STAGE2_SECTORS` setores do LBA 1 para `0x7E00` via LBA estendido (ou CHS), grava `{boot_drive, kernel_lba}` em `0x4FF0` e salta para o stage 2. Não carrega o kernel nem entra em protected mode. |
 | **stage2.asm** | Stage 2 em `0x7E00`: habilita A20, coleta E820 em `0x5200`, valida as faixas do kernel/app contra regiões utilizáveis, carrega o kernel em `0x01000000` por bounce buffer + cópia em modo protegido, carrega `app.bin` em `0x58000`, preenche `BootInfo` e chama `kernel_entry` com `EBX = 0x5000`. |
 | **kernel_entry.asm** | Entrada 32-bit do kernel. Recebe `EBX = BootInfo*`, valida o magic, entra em long mode (identidade de 256 MiB + LFB) e chama `kmain(BootInfo*)` em cdecl; `esp` final `0x9FC00`, alinhado a 16. |
-| **multiboot_header.asm** | Caminho legado para GRUB/Multiboot: monta um `BootInfo` estático em 16 MiB, coloca o ponteiro em `EBX` e chama `kernel_entry`. Sem mapa E820 (o `mm` usa fallback). |
+| **multiboot_header.asm** | Carregador Multiboot2 para o GRUB: traduz mapa de memória e framebuffer para o `BootInfo` v1 em `0x5000`/`0x5200` e chama `kernel_entry`. O kernel C é o mesmo de `kernel.elf`. |
 | **isr_stubs.asm** | Stubs para exceções 0–31: macros `ISR_NOERR` (empilham err_code=0) e `ISR_ERR` (CPU já empilhou err_code); salvam registradores e segmentos; trocam para `fault_stack`; chamam `isr_dispatch(frame*)`; restauram pilha e fazem `iretq`. |
 | **irq_stubs.asm** | Stubs para IRQ 0–15 (vetores 32–47): empilham err_code=0 e int_no=32+irq; trocam para `irq_stack`; chamam `isr_dispatch`; restauram e `iretq`. EOI é enviado em C em `irq_handle`. |
 
@@ -166,7 +166,7 @@ Memória: texto em `0xB8000`, gráfico 13h em `0xA0000`.
 | Arquivo | Descrição |
 |---------|-----------|
 | **linker.ld** | Script de link: entrada `kernel_entry`, origem em `0x01000000`; seções `.text`, `.rodata`, `.data`, `.bss`; `format_buf_region` é símbolo absoluto em `0x80800` (não entra no `kernel.bin`). |
-| **linker_multiboot.ld** | Variante legada para kernel Multiboot (GRUB), também em `0x01000000`. |
+| **linker_multiboot.ld** | Link do kernel atual para o GRUB: cabeçalho Multiboot2 no início, entrada `multiboot_entry`, mesma base `0x01000000`. |
 | **tools/validate_layout.sh** | Valida tamanhos, entry point, `__bss_end`, segmentos `LOAD`, símbolo absoluto do format buffer e sobreposições antes de gerar `os.img`. |
 | **Makefile** | Compila kernel (`gcc -ffreestanding -m64`, `nasm -f elf64`), aplicativos 32 bits, stage 1, stage 2, `kernel.elf`/`kernel.bin` e `os.img`; mantém `run`, `run-log`, `debug`, `iso-grub`. |
 

@@ -247,7 +247,32 @@ IMAGE_MAX_SECTORS := 1048576
 Testes negativos usados na implementação: base antiga `0x10000`, stage 2 acima
 de `STAGE2_MAX_SIZE` e app acima do slot — todos falham com mensagem explícita.
 
-## 10. UEFI (etapa futura, não implementada)
+## 10. GRUB (Multiboot2)
+
+`kernel/multiboot_header.asm` é o carregador usado pelo GRUB desta máquina e
+pela ISO `make iso-grub`. O kernel C é o mesmo de `kernel.elf`; o link
+`kernel_multiboot.elf` só acrescenta o cabeçalho Multiboot2 e muda a entrada
+para `multiboot_entry`.
+
+O GRUB carrega o ELF em `0x01000000` e entra em modo protegido de 32 bits, com
+paginação desligada e `EAX = 0x36d76289`, `EBX` apontando para a informação
+Multiboot2. O stub:
+
+1. Copia essa estrutura para `0x60000` (no máximo 32 KiB).
+2. Preenche `BootInfo` v1 em `0x5000` com `firmware=UEFI`, `kernel_phys=0x01000000`
+   e `kernel_size` até `__bss_end`. `boot_drive` fica 0.
+3. Converte a tag de mapa de memória (tipo 6) em `BootMemEntry[]` em `0x5200`
+   (tipos 1–5 iguais ao E820; qualquer outro vira reservado; máximo 64).
+4. Se houver tag de framebuffer RGB (tipo 8, 24 ou 32 bpp), preenche `fb_*`.
+   Vermelho no byte baixo vira `BOOTINFO_FB_FORMAT_RGB`; azul no byte baixo
+   vira `BOOTINFO_FB_FORMAT_BGR`.
+5. Chama `kernel_entry` com `EBX = 0x5000`.
+
+O caminho BIOS (`boot.asm` + `stage2.asm` + `os.img`) continua sendo o boot
+principal no QEMU. Magic Multiboot2 ausente escreve `M` na serial e na VGA e
+para.
+
+## 11. UEFI (etapa futura, não implementada)
 
 O contrato permite um `sodos.efi` sem duplicar o kernel C:
 
@@ -269,7 +294,7 @@ O contrato permite um `sodos.efi` sem duplicar o kernel C:
 O `BootInfo` é versionado: campos novos podem ser adicionados apenas usando
 espaço reservado ou com `version=2`; offsets existentes da v1 não mudam.
 
-## 11. Como testar
+## 12. Como testar
 
 ```sh
 cd src13
