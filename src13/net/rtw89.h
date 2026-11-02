@@ -74,6 +74,12 @@ int rtw_rx_poll(struct rtw_rx* out);
 /* Registradores 0x0000-0x1FFFF em 'out' (RTW_DUMP_SIZE bytes). */
 #define RTW_DUMP_SIZE 0x20000u
 void rtw_dump_regs(uint8_t* out);
+/* Indices crus (placa << 16 | nosso) de RXQ, RPQ e ACH0, para o log. */
+/* Registradores de erro e enchimento dos aneis, no log. */
+void rtw_log_stall(void);
+/* Leitura crua de um registrador (0 sem placa), para o log. */
+uint32_t rtw_reg(uint32_t a);
+void rtw_ring_state(uint32_t* rxq, uint32_t* rpq, uint32_t* ach0);
 /* Texto da ultima falha. */
 const char* rtw_error(void);
 

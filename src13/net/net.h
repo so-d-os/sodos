@@ -55,6 +55,8 @@ const char* net_link_name(void);
 /* Pede endereco por DHCP. 0 = ok; -1 sem placa; -2 ninguem respondeu. */
 int net_dhcp(void);
 void net_get_addr(uint32_t* ip, uint32_t* mask, uint32_t* gw, uint32_t* dns);
+/* Falha de ARP/DNS/TCP com o WiFi ligado (wifi.c grava em U:\NET\WIFI.LOG). */
+void wifi_note(const char* what, uint32_t v);
 
 /* Prova de curl.asm depois de drives_init. Nao faz parte do boot normal. */
 void net_demo(void);

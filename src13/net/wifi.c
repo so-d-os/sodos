@@ -403,6 +403,12 @@ static int send_eapol(const uint8_t* body, int n) {
   return send_data(ap_bssid, b, n + 8);
 }
 
+/* Dados do AP depois de conectar: quantos vieram, quantos eram so para nos,
+ * quantos nao decifraram e quantos viraram Ethernet. Saem no WIFI.LOG. */
+static uint32_t rx_data, rx_ucast, rx_bad, rx_eth;
+/* Tudo que chegou no RXQ, beacons do AP, envios e relatorios de TX (RPQ). */
+static uint32_t rx_all, rx_bcn, tx_n, tx_fail, rpp_ok, rpp_noack;
+
 /* Um quadro 802.11 recebido. 1 = Ethernet em eth (*elen), 2 = tratado aqui
  * (EAPOL, desassociacao), 0 = ignorado. */
 static int rx_frame(const uint8_t* f, uint32_t len, uint8_t* eth, int cap, int* elen) {
@@ -422,6 +428,8 @@ static int rx_frame(const uint8_t* f, uint32_t len, uint8_t* eth, int cap, int* 
   if ((f[1] & 3) != 2 || !mac_same(f + 10, ap_bssid)) return 0;  /* FromDS, do nosso AP */
   if (!(f[4] & 1) && !mac_same(f + 4, chip.mac)) return 0;
   if (mac_same(f + 16, chip.mac)) return 0;  /* nosso broadcast voltando */
+  rx_data++;
+  if (!(f[4] & 1)) rx_ucast++;
   hl = 24;
   if (f[0] & 0x80) {
     hl += 2;
@@ -435,7 +443,10 @@ static int rx_frame(const uint8_t* f, uint32_t len, uint8_t* eth, int cap, int* 
     plen = (int)len - hl - 16;
     if (plen < 8) return 0;
     key = (rxf[4] & 1) ? sm.gtk : sm.ptk + 32;
-    if (wpa_ccmp_decrypt(key, rxf, hl, plen, 0) != 0) return 0;
+    if (wpa_ccmp_decrypt(key, rxf, hl, plen, 0) != 0) {
+      rx_bad++;
+      return 0;
+    }
     p = rxf + hl + 8;
   } else {
     plen = (int)len - hl;
@@ -470,6 +481,7 @@ static int rx_frame(const uint8_t* f, uint32_t len, uint8_t* eth, int cap, int* 
   eth[13] = p[7];
   for (k = 8; k < plen; k++) eth[14 + k - 8] = p[k];
   *elen = 14 + plen - 8;
+  rx_eth++;
   return 1;
 }
 
@@ -481,14 +493,26 @@ static int link_tx(const uint8_t* fr, int len) {
   b[6] = fr[12];
   b[7] = fr[13];
   for (k = 14; k < len; k++) b[8 + k - 14] = fr[k];
-  return send_data(fr, b, len - 14 + 8) == 0 ? 0 : -1;
+  tx_n++;
+  if (send_data(fr, b, len - 14 + 8) == 0) return 0;
+  tx_fail++;
+  return -1;
 }
 
 static int link_rx(uint8_t* out, int cap) {
   struct rtw_rx rx;
   int n;
   while (rtw_rx_poll(&rx)) {
+    if (rx.ring == 1) {
+      uint32_t o;
+      for (o = 0; o + 4 <= rx.len && o < 32; o += 4)
+        if ((rx.data[o + 1] >> 5) & 7u) rpp_noack++;
+        else rpp_ok++;
+      continue;
+    }
     if (rx.ring != 0 || rx.type != 0) continue;
+    rx_all++;
+    if (rx.len >= 24 && rx.data[0] == 0x80 && mac_same(rx.data + 16, ap_bssid)) rx_bcn++;
     if (rx_frame(rx.data, rx.len, out, cap, &n) == 1) return n;
   }
   return 0;
@@ -834,6 +858,99 @@ static int start_steps(const char* path) {
   }
   stage = 13;
   return 0;
+}
+
+void wifi_note(const char* what, uint32_t v) {
+  uint32_t a, b, c;
+  int n;
+  const char* t;
+  rtw_log(connected ? "[net] " : "[net] (AP desconectou) ");
+  rtw_log(what);
+  rtw_log_hex(v);
+  rtw_log(" | rx dados ");
+  rtw_log_hex(rx_data);
+  rtw_log(" unicast ");
+  rtw_log_hex(rx_ucast);
+  rtw_log(" sem decifrar ");
+  rtw_log_hex(rx_bad);
+  rtw_log(" ethernet ");
+  rtw_log_hex(rx_eth);
+  rtw_log("\n      rx total ");
+  rtw_log_hex(rx_all);
+  rtw_log(" beacons ");
+  rtw_log_hex(rx_bcn);
+  rtw_log(" | tx ");
+  rtw_log_hex(tx_n);
+  rtw_log(" recusados ");
+  rtw_log_hex(tx_fail);
+  rtw_log(" ok ");
+  rtw_log_hex(rpp_ok);
+  rtw_log(" sem ACK ");
+  rtw_log_hex(rpp_noack);
+  rtw_ring_state(&a, &b, &c);
+  rtw_log(" | RXQ ");
+  rtw_log_hex(a);
+  rtw_log(" RPQ ");
+  rtw_log_hex(b);
+  rtw_log(" ACH0 ");
+  rtw_log_hex(c);
+  rtw_log("\n");
+  rtw_log_stall();
+  if (tx_fail) {
+    rtw_log("      ultimo erro: ");
+    rtw_log(rtw_error());
+    rtw_log("\n");
+  }
+  t = rtw_log_text(&n);
+  file_save(WIFI_LOG_PATH, t, n);  /* sem mensagem: pode estar no desktop */
+}
+
+/* net wifi watch: pinga o gateway a cada 2 s por 'secs' segundos e anota
+ * os contadores, para ver quando o RX morre sem o navegador no meio. */
+int wifi_watch(int secs) {
+  uint32_t ip, mask, gw, dns, t0, a, b, c;
+  uint16_t seq = 1;
+  int ok = 0;
+  if (!connected) {
+    puts_k("WiFi nao conectado.\n");
+    return -1;
+  }
+  net_get_addr(&ip, &mask, &gw, &dns);
+  rtw_log("[watch] inicio\n");
+  rtw_log_stall();
+  t0 = net_ms();
+  while (net_ms() - t0 < (uint32_t)secs * 1000u) {
+    uint32_t rtt = 0;
+    int rc = net_ping(gw, seq++, 32, 1000, &rtt, 0);
+    if (rc == 0) ok++;
+    rtw_ring_state(&a, &b, &c);
+    rtw_log("[watch] ms ");
+    rtw_log_hex(net_ms() - t0);
+    rtw_log(rc == 0 ? " ping ok " : " ping falhou ");
+    rtw_log_hex(rtt);
+    rtw_log(" rx ");
+    rtw_log_hex(rx_all);
+    rtw_log(" bcn ");
+    rtw_log_hex(rx_bcn);
+    rtw_log(" tx ");
+    rtw_log_hex(tx_n);
+    rtw_log(" rpp ");
+    rtw_log_hex(rpp_ok);
+    rtw_log(" RXQ ");
+    rtw_log_hex(a);
+    rtw_log(" ptcl ");
+    rtw_log_hex(rtw_reg(0xC6C4u));
+    rtw_log(" hisr00 ");
+    rtw_log_hex(rtw_reg(0x10B4u));
+    rtw_log("\n");
+    puts_k(rc == 0 ? "." : "x");
+    net_delay(1000);
+  }
+  puts_k("\n");
+  rtw_log("[watch] fim\n");
+  rtw_log_stall();
+  save_log();
+  return ok;
 }
 
 int wifi_start(const char* path) {

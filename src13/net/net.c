@@ -9,6 +9,7 @@
 #include "serial.h"
 #include "shell.h"
 #include "mm.h"
+#include "drives.h"
 
 #define SLIRP_IP   0x0A00020Fu
 #define SLIRP_MASK 0xFFFFFF00u
@@ -191,6 +192,8 @@ static uint8_t wire[1600];
 static uint32_t arp_ip;
 static uint8_t arp_mac[6];
 static int arp_valid;
+static uint32_t arp_want;  /* IP que arp_resolve espera agora */
+static int hosts_loaded;   /* HOSTS.CFG lido (ver hosts_load) */
 
 static uint16_t dns_wait_id;
 static uint16_t dns_wait_port;
@@ -303,6 +306,15 @@ static int ne_tx(const uint8_t* frame, int len) {
   return 0;
 }
 
+/* Falha de rede vai para a COM1 e, no WiFi, para U:\NET\WIFI.LOG. */
+static void net_note(const char* what, uint32_t v) {
+  serial_puts("[net] ");
+  serial_puts(what);
+  serial_hex32(v);
+  serial_puts("\n");
+  if (nlink) wifi_note(what, v);
+}
+
 static void arp_learn(uint32_t ip, const uint8_t* mac) {
   int i;
   if (ip == 0 || ip == 0xFFFFFFFFu) return;
@@ -343,12 +355,20 @@ static int arp_resolve(uint32_t ip, uint8_t* mac) {
   int spins;
   if (arp_lookup(ip, mac) == 0) return 0;
   for (tries = 0; tries < 4; tries++) {
+    uint32_t t0;
+    arp_want = ip;
     arp_send(1, bcast, ip);
-    for (spins = 0; spins < 200000; spins++) {
+    /* Por tempo: no WiFi a volta do nic_poll e rapida e 200000 voltas
+     * acabavam antes da resposta do gateway chegar. */
+    time_poll();
+    t0 = ms_now;
+    for (spins = 0;; spins++) {
       nic_poll();
       if (arp_lookup(ip, mac) == 0) return 0;
+      if (pit_ok ? ms_now - t0 >= 500u : spins >= 200000) break;
     }
   }
+  net_note("arp sem resposta de ", ip);
   return -1;
 }
 
@@ -362,7 +382,8 @@ static void arp_rx(const uint8_t* f, int len) {
   op = rd16(f + 20);
   sip = rd32(f + 28);
   tip = rd32(f + 38);
-  arp_learn(sip, f + 22);
+  /* So uma entrada: o ARP de outra maquina da rede nao tira o gateway dela. */
+  if (sip == arp_want || tip == our_ip || !arp_valid) arp_learn(sip, f + 22);
   if (op == 1 && tip == our_ip)
     arp_send(2, f + 22, sip);
 }
@@ -674,6 +695,7 @@ int net_dhcp(void) {
     our_gw = dhcp_gw ? dhcp_gw : server;
     our_dns = dhcp_dns ? dhcp_dns : our_gw;
     arp_valid = 0;
+    hosts_loaded = 0;
     serial_puts("[dhcp] ack ");
     serial_hex32(our_ip);
     serial_puts("\n");
@@ -701,6 +723,7 @@ void net_attach(const struct net_link* l) {
     for (i = 0; i < 6; i++) our_mac[i] = l->mac[i];
   nic_ok = l ? 1 : ne_ok;
   arp_valid = 0;
+  hosts_loaded = 0;
   tcp_state = ST_CLOSED;
 }
 
@@ -735,6 +758,98 @@ static int parse_ip(const char* s, uint32_t* out) {
   return 0;
 }
 
+/* U:\NET\HOSTS.CFG, lido no primeiro nome depois de ligar a placa:
+ *   dns=1.1.1.1          servidor DNS (ate 3), perguntado antes do que veio do DHCP
+ *   93.184.215.14 nome   endereco fixo, sem perguntar ao DNS
+ * Linha com # e comentario. */
+#define HOSTS_PATH "U:\\NET\\HOSTS.CFG"
+#define HOSTS_MAX  16
+#define HOSTS_DNS  3
+struct host_ent {
+  uint32_t ip;
+  char name[64];
+};
+static struct host_ent hosts[HOSTS_MAX];
+static int hosts_n;
+static uint32_t hosts_dns[HOSTS_DNS];
+static int hosts_dns_n;
+
+static int is_blank(char c) {
+  return c == ' ' || c == '\t';
+}
+
+/* Proxima palavra de *s em out; 0 se a linha acabou. */
+static int hosts_word(const char** s, char* out, int max) {
+  const char* p = *s;
+  int k = 0;
+  while (is_blank(*p)) p++;
+  while (*p && !is_blank(*p) && *p != '=') {
+    if (k < max - 1) out[k++] = *p;
+    p++;
+  }
+  out[k] = 0;
+  *s = p;
+  return k;
+}
+
+static void hosts_line(const char* s) {
+  char a[64];
+  char b[64];
+  uint32_t ip;
+  while (is_blank(*s)) s++;
+  if (*s == '#' || !hosts_word(&s, a, (int)sizeof(a))) return;
+  if (dns_eq(a, "dns")) {
+    while (is_blank(*s)) s++;
+    if (*s == '=') s++;
+    if (hosts_word(&s, b, (int)sizeof(b)) && parse_ip(b, &ip) == 0 &&
+        hosts_dns_n < HOSTS_DNS)
+      hosts_dns[hosts_dns_n++] = ip;
+    return;
+  }
+  if (parse_ip(a, &ip) != 0) return;
+  while (hosts_n < HOSTS_MAX && hosts_word(&s, b, (int)sizeof(b))) {
+    int i;
+    for (i = 0; b[i]; i++) hosts[hosts_n].name[i] = b[i];
+    hosts[hosts_n].name[i] = 0;
+    hosts[hosts_n].ip = ip;
+    hosts_n++;
+  }
+}
+
+static void hosts_load(void) {
+  static char buf[2048];
+  char line[128];
+  int n, i, k;
+  hosts_loaded = 1;
+  hosts_n = 0;
+  hosts_dns_n = 0;
+  if (!drives_is_mounted('U') || file_size(HOSTS_PATH) <= 0) return;
+  n = file_load(HOSTS_PATH, buf, (int)sizeof(buf));
+  if (n <= 0) return;
+  for (i = 0; i < n;) {
+    k = 0;
+    while (i < n && buf[i] != '\n') {
+      if (k < (int)sizeof(line) - 1 && buf[i] != '\r') line[k++] = buf[i];
+      i++;
+    }
+    i++;
+    line[k] = 0;
+    hosts_line(line);
+  }
+  serial_puts("[net] HOSTS.CFG: dns ");
+  serial_hex32((uint32_t)hosts_dns_n);
+  serial_puts(" nomes ");
+  serial_hex32((uint32_t)hosts_n);
+  serial_puts("\n");
+}
+
+/* Servidor da tentativa 'n': os do HOSTS.CFG e por ultimo o do DHCP. */
+static uint32_t dns_server(int n) {
+  int total = hosts_dns_n + 1;
+  n %= total;
+  return n < hosts_dns_n ? hosts_dns[n] : our_dns;
+}
+
 /* Ate maxips enderecos. Segue CNAME. EDNS pede resposta maior que 512 bytes. */
 static int dns_lookup(const char* name, uint32_t* ips, int maxips, int depth) {
   uint8_t pkt[320];
@@ -749,6 +864,12 @@ static int dns_lookup(const char* name, uint32_t* ips, int maxips, int depth) {
     ips[0] = one;
     return 1;
   }
+  if (!hosts_loaded) hosts_load();
+  for (tries = 0; tries < hosts_n; tries++)
+    if (dns_eq(hosts[tries].name, name)) {
+      ips[0] = hosts[tries].ip;
+      return 1;
+    }
   dns_wait_id = (uint16_t)(dns_wait_id + 1);
   if (dns_wait_id == 0) dns_wait_id = 1;
   dns_wait_port = 53000;
@@ -781,7 +902,7 @@ static int dns_lookup(const char* name, uint32_t* ips, int maxips, int depth) {
   wr16(pkt + off + 8, 0);
   off += 10;
   cname[0] = 0;
-  for (tries = 0; tries < 4; tries++) {
+  for (tries = 0; tries < 4 + 2 * hosts_dns_n; tries++) {
     uint32_t spins = 0;
     uint32_t t0;
     uint8_t udp[8 + 320];
@@ -793,7 +914,11 @@ static int dns_lookup(const char* name, uint32_t* ips, int maxips, int depth) {
     wr16(udp + 4, (uint16_t)(8 + off));
     wr16(udp + 6, 0);
     mem_copy(udp + 8, pkt, off);
-    if (ip_send(our_dns, 17, udp, 8 + off) < 0) return -1;
+    if (ip_send(dns_server(tries), 17, udp, 8 + off) < 0) {
+      /* sem ARP para este servidor: tenta o proximo; o do DHCP e o ultimo */
+      if (dns_server(tries) == our_dns) return -1;
+      continue;
+    }
     time_poll();
     t0 = ms_now;
     for (;;) {
@@ -805,7 +930,10 @@ static int dns_lookup(const char* name, uint32_t* ips, int maxips, int depth) {
         if (w) break;
       }
     }
-    if (!dns_got) continue;
+    if (!dns_got) {
+      net_note("dns sem resposta de ", dns_server(tries));
+      continue;
+    }
     rc = dns_collect(dns_pkt, dns_pkt_len, name, ips, maxips, cname, (int)sizeof(cname));
     if (rc > 0) return rc;
     if (rc < 0) return -1;
@@ -1545,7 +1673,7 @@ static int api_connect(const char* host, int port) {
     if (c == 0) return 0;
   }
   tcp_state = ST_CLOSED;
-  serial_puts("[net] tcp falhou\n");
+  net_note("tcp sem resposta de ", ips[0]);
   return -1;
 }
 

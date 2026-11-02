@@ -7,7 +7,7 @@ static int usage(void) {
   puts_k("Uso: net [status]          placa e endereco atuais\n");
   puts_k("     net dhcp              pede endereco por DHCP\n");
   puts_k("     net wifi start [cfg]  conecta usando " WIFI_CFG_PATH "\n");
-  puts_k("     net wifi stop | status | test\n");
+  puts_k("     net wifi stop | status | test | watch [s]\n");
   return 1;
 }
 
@@ -56,6 +56,10 @@ static int do_wifi(int argc, char** argv) {
   if (name_eq(argv[2], "stop")) {
     wifi_stop();
     return 0;
+  }
+  if (name_eq(argv[2], "watch")) {
+    int secs = argc > 3 ? (int)str_to_uint32(argv[3], 10) : 40;
+    return wifi_watch(secs > 0 ? secs : 40) > 0 ? 0 : 1;
   }
   if (name_eq(argv[2], "test")) {
     int rc = wpa_selftest();

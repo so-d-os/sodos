@@ -28,3 +28,5 @@ int wifi_cfg_load(const char* path, struct wifi_cfg* c);
 int wifi_start(const char* cfg_path);
 void wifi_stop(void);
 void wifi_status(void);
+/* Pinga o gateway por secs segundos anotando o RX no WIFI.LOG. Pings ok. */
+int wifi_watch(int secs);

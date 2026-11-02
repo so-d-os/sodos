@@ -11,7 +11,7 @@
 #include "shell.h"
 #include "drives.h"
 #include "xhci.h"
-
+ 
 int strcmp(const char* a, const char* b); /* freestanding; definido mais abaixo */
 static int stricmp(const char* a, const char* b);
 

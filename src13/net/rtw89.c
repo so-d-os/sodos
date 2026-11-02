@@ -80,7 +80,7 @@ static void mask16(uint32_t a, uint16_t mask, uint16_t v) {
 }
 
 /* O notebook nao tem COM1: o log tambem fica aqui, e o wifi grava em WIFI.LOG. */
-static char logbuf[8192];
+static char logbuf[32768];
 static int loglen;
 
 void rtw_log(const char* s) {
@@ -347,6 +347,51 @@ static int efuse_logical(const uint8_t* phy, uint8_t* log) {
 
 /* ---------- interface ---------- */
 
+static int pci_cap(int bus, int dev, int fun, uint32_t id) {
+  int cap = (int)(pci_rd(bus, dev, fun, 0x34) & 0xFCu), guard;
+  for (guard = 0; cap && guard < 48; guard++) {
+    uint32_t c = pci_rd(bus, dev, fun, cap);
+    if ((c & 0xFFu) == id) return cap;
+    cap = (int)((c >> 8) & 0xFCu);
+  }
+  return 0;
+}
+
+/* Desliga ASPM (L0s/L1) e o CLKREQ no Link Control. Com o enlace entrando
+ * em L1 o DMA de RX travava (RXDMA_STUCK) uns 15-25 s depois de conectar,
+ * mesmo parado; e o disable_aspm_l1 / disable_clkreq do rtw89_pci. */
+static void aspm_off(int bus, int dev, int fun, const char* who) {
+  int cap = pci_cap(bus, dev, fun, 0x10);
+  uint32_t lc;
+  if (!cap) return;
+  lc = pci_rd(bus, dev, fun, cap + 0x10);
+  rlog("[rtw] ASPM ");
+  rlog(who);
+  rlog_hex(" LNKCTL antes=", lc);
+  pci_wr(bus, dev, fun, cap + 0x10, lc & 0xFFFFu & ~(3u | 0x100u));
+  rlog_hex("[rtw]   agora=", pci_rd(bus, dev, fun, cap + 0x10));
+}
+
+/* Ponte PCIe cujo barramento secundario e o da placa. */
+static void aspm_off_all(int bus, int dev, int fun) {
+  int b, d, f;
+  aspm_off(bus, dev, fun, "placa");
+  for (b = 0; b < 256; b++)
+    for (d = 0; d < 32; d++)
+      for (f = 0; f < 8; f++) {
+        uint32_t id = pci_rd(b, d, f, 0);
+        if (id == 0xFFFFFFFFu || id == 0) {
+          if (f == 0) break;
+          continue;
+        }
+        if (((pci_rd(b, d, f, 0x0C) >> 16) & 0x7Fu) == 1 &&
+            ((pci_rd(b, d, f, 0x18) >> 8) & 0xFFu) == (uint32_t)bus) {
+          aspm_off(b, d, f, "ponte");
+          return;
+        }
+      }
+}
+
 int rtw_probe(struct rtw_info* inf) {
   int bus, dev, fun;
   for (bus = 0; bus < 256; bus++) {
@@ -388,6 +433,7 @@ int rtw_probe(struct rtw_info* inf) {
         /* memoria + bus master, INTx desligado (o driver faz polling) */
         pci_wr(bus, dev, fun, 0x04, (cmd & 0xFFFFu) | 0x406u);
         if (pci_mmio_map(inf->bar, RTW_BAR_LEN) != 0) return fail("BAR fora do alcance");
+        aspm_off_all(bus, dev, fun);
         mmio = (volatile uint8_t*)(uintptr_t)inf->bar;
         rlog("[rtw] RTL8852BE em ");
         rtw_log_hex((uint32_t)((bus << 8) | (dev << 3) | fun));
@@ -480,8 +526,13 @@ int rtw_fw_pick(struct rtw_info* inf, const uint8_t* fw, uint32_t len) {
 
 /* Aneis de TX que o 8852BE usa (os outros ficam mascarados) e os dois de RX. */
 #define TX_RING_N 32
-#define RX_RING_N 16
+/* 16 enchia em ~1,5 s de beacons enquanto um EXE carregava do pendrive. */
+#define RX_RING_N 128
 #define RX_BUF_SIZE 11494u
+/* Distancia entre buffers: 11494 deixava os impares em endereco 2 mod 4 e o
+ * DMA de RX travava (RXDMA_STUCK) sempre num indice impar. O Linux usa skb
+ * alinhado; aqui cada buffer comeca em multiplo de 128. */
+#define RX_BUF_STRIDE ((RX_BUF_SIZE + 127u) & ~127u)
 #define CH12_BUF 2560u
 #define TXWD_BODY 24
 #define FWDL_PKT 2020u
@@ -505,7 +556,7 @@ static const struct txch txchs[] = {
 
 static uint8_t* tx_bd[TXCH_N];  /* TX_RING_N BDs de 8 bytes */
 static uint8_t* rx_bd[2];
-static uint8_t* rx_buf[2];      /* RX_RING_N buffers de RX_BUF_SIZE */
+static uint8_t* rx_buf[2];      /* RX_RING_N buffers de RX_BUF_SIZE, a cada RX_BUF_STRIDE */
 static uint8_t* h2c_buf;        /* TX_RING_N buffers de CH12_BUF para o CH12 */
 static uint32_t h2c_wp;
 static int dma_ready;
@@ -559,13 +610,13 @@ static int dma_mem(void) {
   if (!h2c_buf) return -1;
   for (i = 0; i < 2; i++) {
     rx_bd[i] = dma_alloc(RX_RING_N * 8u, 4096);
-    rx_buf[i] = dma_alloc(RX_RING_N * RX_BUF_SIZE, 4096);
+    rx_buf[i] = dma_alloc(RX_RING_N * RX_BUF_STRIDE, 4096);
     if (!rx_bd[i] || !rx_buf[i]) return -1;
     for (j = 0; j < RX_RING_N; j++) {
       uint8_t* bd = rx_bd[i] + j * 8;
       put16(bd, RX_BUF_SIZE);
       put16(bd + 2, 0);
-      put32(bd + 4, pa32(rx_buf[i] + (uint32_t)j * RX_BUF_SIZE));
+      put32(bd + 4, pa32(rx_buf[i] + (uint32_t)j * RX_BUF_STRIDE));
     }
   }
   dma_ready = 1;
@@ -853,6 +904,7 @@ int rtw_fw_load(struct rtw_info* inf, const uint8_t* file) {
 
 static uint32_t rx_wp[2];  /* proximo buffer a ler em cada anel (RXQ, RPQ) */
 static int rx_held = -1;   /* anel cujo buffer o chamador ainda esta lendo */
+static uint32_t rx_maxfill[2], rx_last_ms[2];  /* para o log de travamento */
 static uint8_t h2c_seq;
 
 /* rtw8852bx_mac_enable_bb_rf */
@@ -1093,6 +1145,7 @@ int rtw_rx_poll(struct rtw_rx* out) {
   static const uint32_t idx_reg[2] = {R_AX_RXQ_RXBD_IDX, R_AX_RPQ_RXBD_IDX};
   int q;
   if (rx_held >= 0) {
+    bzero(rx_buf[rx_held] + rx_wp[rx_held] * RX_BUF_STRIDE, 8);
     rx_wp[rx_held] = (rx_wp[rx_held] + 1u) % RX_RING_N;
     w16(idx_reg[rx_held], (uint16_t)rx_wp[rx_held]);
     rx_held = -1;
@@ -1102,7 +1155,10 @@ int rtw_rx_poll(struct rtw_rx* out) {
     uint8_t* b;
     uint32_t info, d0, dlen, off;
     if (hw == rx_wp[q]) continue;
-    b = rx_buf[q] + rx_wp[q] * RX_BUF_SIZE;
+    if ((hw + RX_RING_N - rx_wp[q]) % RX_RING_N > rx_maxfill[q])
+      rx_maxfill[q] = (hw + RX_RING_N - rx_wp[q]) % RX_RING_N;
+    rx_last_ms[q] = net_ms();
+    b = rx_buf[q] + rx_wp[q] * RX_BUF_STRIDE;
     __asm__ volatile ("mfence" ::: "memory");
     info = le32(b);
     d0 = le32(b + 4);
@@ -1144,6 +1200,43 @@ static int wait_c2h_ack(uint32_t ms) {
   }
 }
 
+/* Uma IMR: limpa 'clr' e liga 'set' (rtw89_write32_clr + _set). */
+static void imr(uint32_t a, uint32_t clr, uint32_t set) { w32(a, (r32(a) & ~clr) | set); }
+
+/* enable_imr_ax (DMAC e CMAC0) e err_imr_ctrl_ax(true), com os valores do
+ * rtw8852b_imr_info. Sem isto PTCL_IMR0 e RMAC ficam no reset (quase tudo
+ * ligado), um evento comum da CMAC vira erro L0, o firmware sobe para L1
+ * (HALT_C2H 0x10) e para o DMA de TX e RX esperando o driver. */
+static void enable_imr(void) {
+  /* DMAC */
+  imr(0x9430, 0x00003337u, 0x00003327u);  /* WDRLS_ERR_IMR */
+  imr(0x9D1C, 0, 0x00000008u);            /* SEC_DEBUG: IMR_ERROR */
+  imr(0x9BF4, 0x0000003Eu, 0);            /* MPDU_TX_ERR_IMR */
+  imr(0x9CF4, 0x0000000Bu, 0);            /* MPDU_RX_ERR_IMR */
+  imr(0x9EF0, 0x00000007u, 0x00000007u);  /* STA_SCHEDULER_ERR_IMR */
+  imr(0x9F1C, 0x0000030Fu, 0x00000101u);  /* TXPKTCTL_ERR_IMR_ISR */
+  imr(0x9F2C, 0x0000030Fu, 0x00000303u);  /* TXPKTCTL_ERR_IMR_ISR_B1 */
+  imr(0x8C38, 0x070FF0FFu, 0x070FF0FFu);  /* WDE_ERR_IMR */
+  imr(0x9038, 0x070FF0FFu, 0x070FF0DFu);  /* PLE_ERR_IMR */
+  imr(0x9A20, 0, 0x00000001u);            /* PKTIN_ERR_IMR */
+  imr(0x8850, 0xFF0FFFFFu, 0x0C000161u);  /* HOST_DISPATCHER_ERR_IMR */
+  imr(0x8854, 0xFF07FFFFu, 0x04000062u);  /* CPU_DISPATCHER_ERR_IMR */
+  imr(0x8858, 0x3F031F1Fu, 0);            /* OTHER_DISPATCHER_ERR_IMR */
+  imr(0x9840, 0x00001111u, 0x00001111u);  /* CPUIO_ERR_IMR */
+  imr(0x960C, 0, 0x00000001u);            /* BBRPT_COM_ERR_IMR_ISR */
+  imr(0x962C, 0x000000FFu, 0);            /* BBRPT_CHINFO_ERR_IMR_ISR */
+  imr(0x963C, 0, 0x00000001u);            /* BBRPT_DFS_ERR_IMR_ISR */
+  imr(0x966C, 0, 0x00000001u);            /* LA_ERRFLAG */
+  /* CMAC0 */
+  imr(0xC3E8, 0x00000003u, 0x00000001u);  /* SCHEDULE_ERR_IMR */
+  imr(0xC6C0, 0xFFFFFFFFu, 0x10800001u);  /* PTCL_IMR0 */
+  imr(0xC800, 0x0080C000u, 0x0000C000u);  /* DLE_CTRL */
+  imr(0xCEF4, 0x000FF000u, 0x000E4000u);  /* RMAC_ERR_ISR */
+  imr(0xCCEC, 0x00000780u, 0x00000780u);  /* TMAC_ERR_IMR_ISR */
+  w32(0x8520, 0xFFFFFFFFu);               /* DMAC_ERR_IMR */
+  w32(0xC160, 0xFFFFFFFFu);               /* CMAC_ERR_IMR */
+}
+
 int rtw_mac_init(void) {
   static const uint8_t ofld_cfg[8] = {0x09, 0x00, 0x00, 0x00, 0x5E, 0x00, 0x00, 0x00};
   if (!mmio || !dma_ready) return fail("firmware nao carregado");
@@ -1154,6 +1247,7 @@ int rtw_mac_init(void) {
   sys_init();
   if (dmac_init()) return -1;
   if (cmac_init()) return -1;
+  enable_imr();
   /* host rpr (PCIe: POH) */
   mask32(R_AX_WDRLS_CFG, B_AX_WDRLS_MODE_MASK, RTW89_RPR_MODE_POH);
   set32(R_AX_RLSRPT0_CFG0, B_AX_RLSRPT0_FLTR_MAP_MASK);
@@ -1994,4 +2088,60 @@ void rtw_dump_regs(uint8_t* out) {
   uint32_t a;
   if (!mmio) return;
   for (a = 0; a < RTW_DUMP_SIZE; a += 4) put32(out + a, r32(a));
+}
+
+/* Estado de erro da placa quando a rede para: pedido de SER do firmware
+ * (HALT_C2H), ISRs, DLE e quanto os aneis de RX chegaram a encher. */
+void rtw_log_stall(void) {
+  uint32_t now = net_ms();
+  int q;
+  if (!mmio) return;
+  rtw_log("      halt_c2h ");
+  rtw_log_hex(r32(R_AX_HALT_C2H_CTRL));
+  rtw_log(" ");
+  rtw_log_hex(r32(R_AX_HALT_C2H));
+  rtw_log(" hisr0 ");
+  rtw_log_hex(r32(0x01A4u));
+  rtw_log(" pcie_hisr00 ");
+  rtw_log_hex(r32(0x10B4u));
+  rtw_log(" dmac_err ");
+  rtw_log_hex(r32(0x8524u));
+  rtw_log(" cmac_err ");
+  rtw_log_hex(r32(0xC164u));
+  rtw_log("\n      ptcl_isr ");
+  rtw_log_hex(r32(0xC6C4u));
+  rtw_log(" sch_isr ");
+  rtw_log_hex(r32(0xC3ECu));
+  rtw_log(" rmac ");
+  rtw_log_hex(r32(0xCEF4u));
+  rtw_log(" tmac ");
+  rtw_log_hex(r32(0xCCECu));
+  rtw_log(" ptcl_imr ");
+  rtw_log_hex(r32(0xC6C0u));
+  rtw_log("\n      dle_empty ");
+  rtw_log_hex(r32(0x8430u));
+  rtw_log(" ");
+  rtw_log_hex(r32(0x8434u));
+  rtw_log(" dma_busy1 ");
+  rtw_log_hex(r32(R_AX_PCIE_DMA_BUSY1));
+  for (q = 0; q < 2; q++) {
+    const uint8_t* b = rx_buf[q] + rx_wp[q] * RX_BUF_STRIDE;
+    rtw_log(q ? " | RPQ" : " | RXQ");
+    rtw_log(" max ");
+    rtw_log_hex(rx_maxfill[q]);
+    rtw_log(" ms sem rx ");
+    rtw_log_hex(now - rx_last_ms[q]);
+    rtw_log(" prox ");
+    rtw_log_hex(le32(b + 4));
+  }
+  rtw_log("\n");
+}
+
+uint32_t rtw_reg(uint32_t a) { return mmio ? r32(a) : 0; }
+
+/* Indices crus (placa << 16 | nosso) de RXQ, RPQ e ACH0. */
+void rtw_ring_state(uint32_t* rxq, uint32_t* rpq, uint32_t* ach0) {
+  *rxq = mmio ? r32(R_AX_RXQ_RXBD_IDX) : 0;
+  *rpq = mmio ? r32(R_AX_RPQ_RXBD_IDX) : 0;
+  *ach0 = mmio ? r32(txchs[0].idx) : 0;
 }
