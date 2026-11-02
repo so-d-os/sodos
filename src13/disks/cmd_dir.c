@@ -19,12 +19,12 @@ int cmd_dir(int argc, char** argv) {
       if (c == '/') continue;
       if (c == 's' || c == 'S') flags |= DIR_SUB;
       else if (c == 'w' || c == 'W') flags |= DIR_WIDE;
-      else if (c == 'd' || c == 'D') flags |= DIR_COLS;
+      else if (c == 'd' || c == 'D') flags |= DIR_DIRS;
       else {
         puts_k("Uso: dir [pasta\\][*.ext] [/s] [/w] [/d]\n");
         puts_k("  /s  inclui as subpastas\n");
         puts_k("  /w  lista larga, em linhas\n");
-        puts_k("  /d  lista larga, por coluna\n");
+        puts_k("  /d  so as pastas\n");
         puts_k("  * e ? valem no nome: dir *.exe   dir ???.txt\n");
         return 1;
       }

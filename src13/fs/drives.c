@@ -764,16 +764,14 @@ static void dir_wide_cell(const struct dir_item* e, int last) {
   else put_pad(cell, DIR_WIDE_COL);
 }
 
-/* /w enche linha a linha; /d desce coluna a coluna. */
-static void dir_wide(struct dir_item* it, const int* sel, int n, int by_col) {
+static void dir_wide(struct dir_item* it, const int* sel, int n) {
   int rows = (n + DIR_WIDE_N - 1) / DIR_WIDE_N;
   int r, c;
   for (r = 0; r < rows; r++) {
     for (c = 0; c < DIR_WIDE_N; c++) {
-      int k = by_col ? c * rows + r : r * DIR_WIDE_N + c;
-      int nk = by_col ? (c + 1) * rows + r : k + 1;
+      int k = r * DIR_WIDE_N + c;
       if (k >= n) break;
-      dir_wide_cell(&it[sel[k]], c == DIR_WIDE_N - 1 || nk >= n);
+      dir_wide_cell(&it[sel[k]], c == DIR_WIDE_N - 1 || k + 1 >= n);
     }
     putc('\n');
   }
@@ -809,6 +807,7 @@ static int dir_walk(int idx, char L, const char* name, const char* pat, int flag
   }
   for (i = 0; i < n; i++) {
     if (!dir_match(pat, it[i].name)) continue;
+    if ((flags & DIR_DIRS) && !it[i].dir) continue;
     sel[cnt++] = i;
     if (it[i].dir) dirs++;
     else {
@@ -823,8 +822,8 @@ static int dir_walk(int idx, char L, const char* name, const char* pat, int flag
     puts_k(" Diretorio de ");
     print_where(L, name);
     putc('\n');
-    if (cnt == 0) puts_k("(nenhum arquivo)\n");
-    else if (flags & (DIR_WIDE | DIR_COLS)) dir_wide(it, sel, cnt, (flags & DIR_COLS) != 0);
+    if (cnt == 0) puts_k((flags & DIR_DIRS) ? "(nenhuma pasta)\n" : "(nenhum arquivo)\n");
+    else if (flags & DIR_WIDE) dir_wide(it, sel, cnt);
     else
       for (i = 0; i < cnt; i++) dir_line(&it[sel[i]]);
     put_num(files, 10);
@@ -900,7 +899,8 @@ void drives_dir(const char* spec, int flags) {
     puts_k("pasta nao encontrada\n");
     return;
   }
-  if ((flags & DIR_SUB) && !tot.shown) puts_k("arquivo nao encontrado\n");
+  if ((flags & DIR_SUB) && !tot.shown)
+    puts_k((flags & DIR_DIRS) ? "pasta nao encontrada\n" : "arquivo nao encontrado\n");
   if (flags & DIR_SUB) {
     puts_k("\n Total:\n");
     put_num(tot.files, 10);
