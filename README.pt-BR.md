@@ -456,11 +456,12 @@ Janela preta 80×40 com o mesmo interpretador do shell. Várias podem ficar aber
 | `WGET.EXE` | Baixa um arquivo por HTTP ou HTTPS (`WGET http://exemplo.com/a.txt`) |
 | `BAT.EXE` | Arquivo de lote (`BAT DEMO.BAT` ou só `DEMO.BAT`) |
 | `MC.EXE` | Gerenciador de arquivos de dois painéis no estilo do mc do Linux (fontes em `src13/mc`). Setas/Tab navegam, Enter entra na pasta ou roda `.EXE`/`.BAT`, Insert marca; F2 unidade, F3 ver (UTF-8 e hexa), F4 editar, F5 copiar, F6 mover/renomear, F7 criar pasta, F8 apagar (pastas com tudo dentro), F9 menu, F10 sair. Só no modo texto (fora do `win`) |
+| `GIT.EXE` | git mínimo (fontes em `src13/git`): `git clone https://github.com/dono/projeto [pasta]` baixa só o último commit por HTTPS; `git pull`, `git status` (mudados/apagados) e `git log`. Nomes longos viram 8.3 (`README~1.MD`); a lista fica em `_GIT\NAMES.TXT`. Só leitura: ainda não faz commit nem push |
 | `HELLO.EXE`, `HELLO2.EXE` | Exemplos de `argc`/`argv` |
 | `CRT0.OBJ`, `KERNEL.IMP` | Ponto de entrada e lista de exports do kernel |
 | `*.H`, `*.C`, `*.CPP`, `*.BAT` | Headers, libc, exemplos, fontes do `cc`/`link` e `DEMO.BAT` |
 
-Em `D:\SODOS\` ficam `FONTADV.EXE` e `FONTS\` com quatro TTF. `IMAGEVW.C` também vai para a raiz, como exemplo. Os fontes do MC vão para `D:\SRC\MC` com um `BUILD.BAT` que os compila com o `CC.EXE` do próprio SO.
+Em `D:\SODOS\` ficam `FONTADV.EXE` e `FONTS\` com quatro TTF. `IMAGEVW.C` também vai para a raiz, como exemplo. Os fontes do MC vão para `D:\SRC\MC` com um `BUILD.BAT` que os compila com o `CC.EXE` do próprio SO. Os fontes do git vão para `D:\SRC\GIT`, também com `BUILD.BAT`.
 
 `WGET` grava no máximo 4 MB e segue até 5 redirecionamentos. Sem nome de saída, o arquivo fica em 8.3 a partir do caminho da URL (`INDEX.HTM` se for `/`). `BAT` entende `REM`, `#`, `::`, `@`, `ECHO ON`/`OFF`, `SET N=valor`, `%N%`, `%1` a `%9`, `%*`, `GOTO :rotulo`, `IF [NOT] EXIST`, `IF [NOT] ERRORLEVEL n`, `IF [NOT] a==b`, `CALL` e `EXIT`. O que não for disso roda como linha do prompt. Dentro do SO: `CC WGET.C TLS.DLL` e `CC BAT.C`.
 

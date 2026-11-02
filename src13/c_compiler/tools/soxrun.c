@@ -206,9 +206,23 @@ static int k_fload(const char* path, char* buf, int max) {
   fclose(f);
   return n;
 }
+/* Como o kernel (fat_write_file), cria as pastas do caminho. */
+static void make_parents(char* hp) {
+  char* p;
+  for (p = hp + 1; *p; p++) {
+    if (*p != '/') continue;
+    *p = 0;
+    mkdir(hp, 0755);
+    *p = '/';
+  }
+}
 static int k_fsave(const char* path, const char* data, int size) {
   char hp[300];
   FILE* f = fopen(host_path(path, hp, sizeof hp), "wb");
+  if (!f) {
+    make_parents(hp);
+    f = fopen(hp, "wb");
+  }
   if (!f) return -1;
   if (size > 0 && fwrite(data, 1, (size_t)size, f) != (size_t)size) {
     fclose(f);

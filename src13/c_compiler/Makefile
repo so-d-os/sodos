@@ -41,7 +41,7 @@ all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/H
 	$(O)/BROWSER.EXE $(O)/IMAGEVW.EXE $(O)/VIDPLAY.EXE $(O)/FONTADV.EXE $(O)/COMMAND.EXE $(O)/HTTPD.EXE \
 	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
 	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
-	$(O)/POSIXX.DLL $(O)/MC.EXE
+	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/GIT.EXE
 
 # GUI.DLL (janela canvas do WIN) e o navegador, em varios arquivos
 $(B)/gui_gui.obj: gui/gui.c include/gui.h $(HCC) $(HEADERS) | $(B)
@@ -157,6 +157,11 @@ $(O)/POSIXX.DLL: $(B)/x_posix.o $(O)/LIBCX.DLL $(LINK) $(O)/KERNEL.IMP
 MC_SRC = ../mc/mc.c ../mc/scr.c ../mc/panel.c ../mc/ops.c ../mc/view.c
 $(O)/MC.EXE: $(MC_SRC) ../mc/mc.h $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
 	$(HCC) -o $@ $(MC_SRC)
+
+# GIT.EXE (../git): clone/pull raso por HTTPS, status e log. BUILD.BAT idem.
+GIT_SRC = ../git/git.c ../git/http.c ../git/pack.c ../git/sha1.c ../git/zinf.c
+$(O)/GIT.EXE: $(GIT_SRC) ../git/git.h $(O)/TLS.DLL $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
+	$(HCC) -o $@ $(GIT_SRC) $(O)/TLS.DLL
 
 $(HCC): $(CC_SRC) cc/cc.h sox.h | $(B)
 	$(HOSTCC) $(HCFLAGS) -o $@ $(CC_SRC)
