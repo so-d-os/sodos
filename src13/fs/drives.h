@@ -31,6 +31,22 @@ void drives_prompt(char* out, int max);
 /* 0 entrou. Sem argumento so imprime a pasta atual. */
 int drives_chdir(const char* spec);
 void drives_print_dir(const char* spec);
+
+/* Opcoes do dir: /s subpastas, /w largo, /d largo por coluna. */
+#define DIR_SUB  1
+#define DIR_WIDE 2
+#define DIR_COLS 4
+/* spec aceita * e ? no ultimo nome (*.exe, ???.txt). */
+void drives_dir(const char* spec, int flags);
+
+/* Uma entrada de pasta. date/time no formato FAT (0 = sem data). */
+struct dir_item {
+  char name[32];
+  uint32_t size;
+  uint16_t date;
+  uint16_t time;
+  uint8_t dir;
+};
 void drives_list(char letter);
 int drives_names(char letter, char out[][32], int max);
 char path_letter(const char* path);

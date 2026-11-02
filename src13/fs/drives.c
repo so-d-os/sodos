@@ -18,6 +18,8 @@ extern int fat_is_dir(const char* path);
 extern int fat_mkdir(const char* path);
 extern int fat_rmdir(const char* path);
 extern int fat_file_size(const char* filename);
+extern int fat_dir_items(const char* path, struct dir_item* out, int max);
+extern int fat_get_space_info(uint32_t* total_bytes, uint32_t* free_bytes);
 extern int get_partition_info(uint32_t drive, uint8_t partition_num, uint32_t* lba_start,
                              uint32_t* sector_count, uint8_t* type);
 
@@ -622,64 +624,303 @@ static void print_where(char L, const char* name) {
   puts_k("\n");
 }
 
-void drives_print_dir(const char* spec) {
+#define DIR_ITEMS_MAX 1024
+#define DIR_DEPTH_MAX 8
+#define DIR_WIDE_COL  15
+#define DIR_WIDE_N    5
+
+static char up_char(char c) {
+  return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+}
+
+static int has_wild(const char* s) {
+  for (; s && *s; s++)
+    if (*s == '*' || *s == '?') return 1;
+  return 0;
+}
+
+/* Glob de um pedaco (nome ou extensao). ? no fim tambem casa com nada,
+ * como no DOS: ???.txt pega AB.TXT. */
+static int glob_part(const char* p, int pn, const char* s, int sn) {
+  if (pn == 0) return sn == 0;
+  if (*p == '*') {
+    int k;
+    for (k = 0; k <= sn; k++)
+      if (glob_part(p + 1, pn - 1, s + k, sn - k)) return 1;
+    return 0;
+  }
+  if (sn == 0) return *p == '?' && glob_part(p + 1, pn - 1, s, 0);
+  if (*p != '?' && up_char(*p) != up_char(*s)) return 0;
+  return glob_part(p + 1, pn - 1, s + 1, sn - 1);
+}
+
+static int last_dot(const char* s) {
+  int i, d = -1;
+  for (i = 0; s[i]; i++)
+    if (s[i] == '.') d = i;
+  return d;
+}
+
+static int str_len(const char* s) {
+  int n = 0;
+  while (s[n]) n++;
+  return n;
+}
+
+/* Com ponto no padrao casa nome e extensao em separado (*.* pega LEIAME). */
+static int dir_match(const char* pat, const char* name) {
+  int pd, nd, pl, nl;
+  if (!pat || !pat[0]) return 1;
+  pl = str_len(pat);
+  nl = str_len(name);
+  pd = last_dot(pat);
+  if (pd < 0) return glob_part(pat, pl, name, nl);
+  nd = last_dot(name);
+  if (nd < 0) nd = nl;
+  if (!glob_part(pat, pd, name, nd)) return 0;
+  if (nd == nl) return glob_part(pat + pd + 1, pl - pd - 1, "", 0);
+  return glob_part(pat + pd + 1, pl - pd - 1, name + nd + 1, nl - nd - 1);
+}
+
+/* Numero com ponto de milhar, alinhado a direita em width. */
+static void put_num(uint32_t v, int width) {
+  char t[16];
+  int n = 0, d = 0;
+  do {
+    if (d && d % 3 == 0) t[n++] = '.';
+    t[n++] = (char)('0' + v % 10u);
+    v /= 10u;
+    d++;
+  } while (v);
+  while (width-- > n) putc(' ');
+  while (n) putc(t[--n]);
+}
+
+static void put_2(unsigned v) {
+  putc((char)('0' + (v / 10u) % 10u));
+  putc((char)('0' + v % 10u));
+}
+
+static void put_pad(const char* s, int width) {
+  int n = 0;
+  while (s[n] && n < width) putc(s[n++]);
+  while (n++ < width) putc(' ');
+}
+
+/* Le a pasta name da unidade idx (com o FAT carregado). -1 se nao e pasta. */
+static int dir_collect(int idx, char L, const char* name, struct dir_item* it, int max) {
+  char names[16][32];
+  char path[40];
+  int n, i;
+  if (drv_kind[idx] == DRV_FAT) return fat_dir_items(name, it, max);
+  if (name[0]) return -1;
+  n = drives_names(L, names, max < 16 ? max : 16);
+  for (i = 0; i < n; i++) {
+    int sz;
+    path[0] = L;
+    path[1] = ':';
+    copy_str(path + 2, (int)sizeof(path) - 2, names[i]);
+    sz = file_size(path);
+    copy_str(it[i].name, (int)sizeof(it[i].name), names[i]);
+    it[i].size = sz > 0 ? (uint32_t)sz : 0u;
+    it[i].date = 0;
+    it[i].time = 0;
+    it[i].dir = 0;
+  }
+  return n;
+}
+
+static void dir_line(const struct dir_item* e) {
+  put_pad(e->name, 13);
+  if (e->dir) puts_k("        <DIR>");
+  else put_num(e->size, 13);
+  /* Sem dia ou mes e data que o sistema nao gravou: fica em branco. */
+  if ((e->date & 31u) && ((e->date >> 5) & 15u) && ((e->date >> 5) & 15u) <= 12u) {
+    unsigned d = e->date, t = e->time;
+    unsigned y = 1980u + (d >> 9);
+    puts_k("  ");
+    put_2(d & 31u);
+    putc('/');
+    put_2((d >> 5) & 15u);
+    putc('/');
+    put_2(y / 100u);
+    put_2(y % 100u);
+    putc(' ');
+    put_2(t >> 11);
+    putc(':');
+    put_2((t >> 5) & 63u);
+  }
+  putc('\n');
+}
+
+static void dir_wide_cell(const struct dir_item* e, int last) {
+  char cell[34];
+  int k = 0, j = 0;
+  if (e->dir) cell[k++] = '[';
+  while (e->name[j] && k < DIR_WIDE_COL - 2) cell[k++] = e->name[j++];
+  if (e->dir) cell[k++] = ']';
+  cell[k] = 0;
+  if (last) puts_k(cell);
+  else put_pad(cell, DIR_WIDE_COL);
+}
+
+/* /w enche linha a linha; /d desce coluna a coluna. */
+static void dir_wide(struct dir_item* it, const int* sel, int n, int by_col) {
+  int rows = (n + DIR_WIDE_N - 1) / DIR_WIDE_N;
+  int r, c;
+  for (r = 0; r < rows; r++) {
+    for (c = 0; c < DIR_WIDE_N; c++) {
+      int k = by_col ? c * rows + r : r * DIR_WIDE_N + c;
+      int nk = by_col ? (c + 1) * rows + r : k + 1;
+      if (k >= n) break;
+      dir_wide_cell(&it[sel[k]], c == DIR_WIDE_N - 1 || nk >= n);
+    }
+    putc('\n');
+  }
+}
+
+struct dir_sum {
+  uint32_t files;
+  uint32_t dirs;
+  uint32_t bytes;
+  int shown;
+};
+
+/* Imprime uma pasta e, com DIR_SUB, as de dentro. */
+static int dir_walk(int idx, char L, const char* name, const char* pat, int flags,
+                    int depth, struct dir_sum* tot) {
+  struct dir_item* it;
+  int* sel;
+  int n, i, cnt = 0;
+  uint32_t files = 0, dirs = 0, bytes = 0;
+  it = (struct dir_item*)kmalloc(DIR_ITEMS_MAX * (uint32_t)sizeof(struct dir_item));
+  sel = (int*)kmalloc(DIR_ITEMS_MAX * (uint32_t)sizeof(int));
+  if (!it || !sel) {
+    if (it) kfree(it);
+    if (sel) kfree(sel);
+    puts_k("sem memoria\n");
+    return -1;
+  }
+  n = dir_collect(idx, L, name, it, DIR_ITEMS_MAX);
+  if (n < 0) {
+    kfree(it);
+    kfree(sel);
+    return -1;
+  }
+  for (i = 0; i < n; i++) {
+    if (!dir_match(pat, it[i].name)) continue;
+    sel[cnt++] = i;
+    if (it[i].dir) dirs++;
+    else {
+      files++;
+      bytes += it[i].size;
+    }
+  }
+  /* Com /s so mostra as pastas que tem algo que casa. */
+  if (cnt > 0 || !(flags & DIR_SUB)) {
+    if (tot->shown) putc('\n');
+    tot->shown = 1;
+    puts_k(" Diretorio de ");
+    print_where(L, name);
+    putc('\n');
+    if (cnt == 0) puts_k("(nenhum arquivo)\n");
+    else if (flags & (DIR_WIDE | DIR_COLS)) dir_wide(it, sel, cnt, (flags & DIR_COLS) != 0);
+    else
+      for (i = 0; i < cnt; i++) dir_line(&it[sel[i]]);
+    put_num(files, 10);
+    puts_k(" arquivo(s) ");
+    put_num(bytes, 15);
+    puts_k(" bytes\n");
+    put_num(dirs, 10);
+    puts_k(" pasta(s)\n");
+  }
+  tot->files += files;
+  tot->dirs += dirs;
+  tot->bytes += bytes;
+  if ((flags & DIR_SUB) && depth < DIR_DEPTH_MAX) {
+    for (i = 0; i < n; i++) {
+      char sub[64];
+      int k = 0, j = 0;
+      if (!it[i].dir) continue;
+      while (name[j] && k < (int)sizeof(sub) - 2) sub[k++] = name[j++];
+      if (k) sub[k++] = '\\';
+      for (j = 0; it[i].name[j] && k < (int)sizeof(sub) - 1; j++) sub[k++] = it[i].name[j];
+      sub[k] = 0;
+      dir_walk(idx, L, sub, pat, flags, depth + 1, tot);
+    }
+  }
+  kfree(it);
+  kfree(sel);
+  return 0;
+}
+
+void drives_dir(const char* spec, int flags) {
+  char dspec[64];
+  char pat[32];
   char L;
   char name[64];
   int idx;
-  path_parse(spec ? spec : "", &L, name, (int)sizeof(name));
+  int cut = -1;
+  int i;
+  struct dir_sum tot;
+  if (!spec) spec = "";
+  pat[0] = 0;
+  /* Ultimo nome com * ou ? vira o padrao; o resto e a pasta. */
+  for (i = 0; spec[i]; i++)
+    if (spec[i] == '\\' || spec[i] == '/' || spec[i] == ':') cut = i;
+  if (has_wild(spec + cut + 1)) {
+    copy_str(pat, (int)sizeof(pat), spec + cut + 1);
+    for (i = 0; i <= cut && i < (int)sizeof(dspec) - 1; i++) dspec[i] = spec[i];
+    dspec[i] = 0;
+  } else {
+    copy_str(dspec, (int)sizeof(dspec), spec);
+  }
+  path_parse(dspec, &L, name, (int)sizeof(name));
   idx = letter_idx(L);
   if (!drv_ready(idx)) {
     putc(L ? L : '?');
     puts_k(": nao montado\n");
     return;
   }
-  puts_k(" Diretorio de ");
-  print_where(L, name);
+  /* dir arquivo.txt: mostra so ele, a partir da pasta de cima. */
+  if (!pat[0] && name[0] && drv_kind[idx] == DRV_FAT && !fat_is_dir(name)) {
+    int s = -1;
+    for (i = 0; name[i]; i++)
+      if (name[i] == '\\') s = i;
+    copy_str(pat, (int)sizeof(pat), name + s + 1);
+    name[s < 0 ? 0 : s] = 0;
+  }
+  if (!pat[0] && name[0] && drv_kind[idx] != DRV_FAT) {
+    copy_str(pat, (int)sizeof(pat), name);
+    name[0] = 0;
+  }
+  tot.files = tot.dirs = tot.bytes = 0;
+  tot.shown = 0;
+  if (dir_walk(idx, L, name, pat, flags, 0, &tot) != 0) {
+    puts_k("pasta nao encontrada\n");
+    return;
+  }
+  if ((flags & DIR_SUB) && !tot.shown) puts_k("arquivo nao encontrado\n");
+  if (flags & DIR_SUB) {
+    puts_k("\n Total:\n");
+    put_num(tot.files, 10);
+    puts_k(" arquivo(s) ");
+    put_num(tot.bytes, 15);
+    puts_k(" bytes\n");
+    put_num(tot.dirs, 10);
+    puts_k(" pasta(s)\n");
+  }
   if (drv_kind[idx] == DRV_FAT) {
-    char output[2048];
-    int n = fat_list_dir(name, output, (int)sizeof(output));
-    int p = 0;
-    if (n < 0) {
-      puts_k("pasta nao encontrada\n");
-      return;
-    }
-    if (n == 0) {
-      puts_k("(vazio)\n");
-      return;
-    }
-    while (output[p]) {
-      char line[16];
-      int k = 0;
-      int dir = 0;
-      while (output[p] && output[p] != '\n' && k < 14) line[k++] = output[p++];
-      line[k] = 0;
-      if (output[p] == '\n') p++;
-      if (k > 0 && line[k - 1] == '\\') {
-        line[k - 1] = 0;
-        dir = 1;
-      }
-      if (dir) puts_k("<DIR>  ");
-      else puts_k("       ");
-      puts_k(line);
-      puts_k("\n");
-    }
-    return;
-  }
-  if (name[0]) {
-    puts_k("esta unidade nao tem pastas\n");
-    return;
-  }
-  {
-    char names[16][32];
-    int n = drives_names(L, names, 16);
-    int i;
-    if (n <= 0) puts_k("(vazio)\n");
-    for (i = 0; i < n; i++) {
-      puts_k("       ");
-      puts_k(names[i]);
-      puts_k("\n");
+    uint32_t total, livre;
+    if (fat_get_space_info(&total, &livre) == 0) {
+      put_num(livre, 37);
+      puts_k(" bytes livres\n");
     }
   }
+}
+
+void drives_print_dir(const char* spec) {
+  drives_dir(spec, 0);
 }
 
 int drives_names(char letter, char out[][32], int max) {

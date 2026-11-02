@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include "disk.h"
 #include "sched.h"
+#include "drives.h"
 
 // Estrutura do Boot Sector FAT
 struct fat_boot_sector {
@@ -884,6 +885,33 @@ int fat_list_dir(const char* path, char* output, int max_output) {
   }
   output[pos] = 0;
   return pos;
+}
+
+/* Como fat_list_dir, mas com tamanho e data. Quantas copiou; -1 se nao e pasta. */
+int fat_dir_items(const char* path, struct dir_item* out, int max) {
+  struct dir_view v;
+  int n = 0;
+  int i;
+  if (!out || max <= 0 || fat_type == 0) return -1;
+  if (dir_at(path, &v) != 0) return -1;
+  for (i = 0; i < v.count && n < max; i++) {
+    unsigned char n0 = (unsigned char)v.ents[i].name[0];
+    unsigned char attr;
+    if (n0 == 0x00) break;
+    if (n0 == 0xE5) continue;
+    attr = v.ents[i].attributes;
+    if ((attr & 0x0F) == 0x0F) continue;
+    if (attr & 0x08) continue;
+    if (entry_dot(&v.ents[i])) continue;
+    fat_name_to_string(&v.ents[i], out[n].name);
+    if (!out[n].name[0]) continue;
+    out[n].dir = (attr & 0x10) ? 1 : 0;
+    out[n].size = out[n].dir ? 0 : v.ents[i].size;
+    out[n].date = v.ents[i].date;
+    out[n].time = v.ents[i].time;
+    n++;
+  }
+  return n;
 }
 
 // Lista arquivos do diretório raiz

@@ -4,8 +4,33 @@
 extern int fat_mkdir(const char* path);
 extern int fat_rmdir(const char* path);
 
+/* dir [unidade:][pasta\][padrao] [/s] [/w] [/d] */
 int cmd_dir(int argc, char** argv) {
-  drives_print_dir(argc >= 2 ? argv[1] : "");
+  const char* spec = "";
+  int flags = 0;
+  int i, j;
+  for (i = 1; i < argc; i++) {
+    if (argv[i][0] != '/') {
+      spec = argv[i];
+      continue;
+    }
+    for (j = 1; argv[i][j]; j++) {
+      char c = argv[i][j];
+      if (c == '/') continue;
+      if (c == 's' || c == 'S') flags |= DIR_SUB;
+      else if (c == 'w' || c == 'W') flags |= DIR_WIDE;
+      else if (c == 'd' || c == 'D') flags |= DIR_COLS;
+      else {
+        puts_k("Uso: dir [pasta\\][*.ext] [/s] [/w] [/d]\n");
+        puts_k("  /s  inclui as subpastas\n");
+        puts_k("  /w  lista larga, em linhas\n");
+        puts_k("  /d  lista larga, por coluna\n");
+        puts_k("  * e ? valem no nome: dir *.exe   dir ???.txt\n");
+        return 1;
+      }
+    }
+  }
+  drives_dir(spec, flags);
   return 0;
 }
 
