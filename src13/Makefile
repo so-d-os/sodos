@@ -434,7 +434,7 @@ format-disk:
 # exemplos e os fontes do proprio cc/link (para recompilar dentro do SO).
 # Fontes do MC em D:\SRC\MC e do git em D:\SRC\GIT, compilados no proprio SODOS por BUILD.BAT.
 MC_SRC = mc/mc.h mc/mc.c mc/scr.c mc/panel.c mc/ops.c mc/view.c mc/BUILD.BAT
-GIT_SRC = git/git.h git/git.c git/http.c git/pack.c git/sha1.c git/zinf.c git/BUILD.BAT
+GIT_SRC = git/git.h git/git.c git/http.c git/pack.c git/sha1.c git/zinf.c git/BUILD.BAT git/GETSODOS.BAT
 
 DISK_FILES = c_compiler/out/*.EXE c_compiler/out/*.DLL c_compiler/out/*.OBJ \
 	c_compiler/out/*.IMP c_compiler/include/*.h c_compiler/include/sys/*.h \
