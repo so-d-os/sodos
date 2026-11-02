@@ -51,10 +51,22 @@ struct fat_dir_entry {
 static struct fat_boot_sector* boot_sector = (struct fat_boot_sector*)0xA00000;
 static uint8_t* fat_table = (uint8_t*)0xA01000;
 static struct fat_dir_entry* root_dir = (struct fat_dir_entry*)0xA41000;
-/* Diretorio aberto (\temp\net\ e outros). 32 KB, termina em 0xA59000,
- * antes do kmalloc em 0xA80000. Nao pode ir para o BSS do kernel. */
-#define SUBDIR_MAX 0x8000u
+/* Diretorio aberto (\temp\net\ e outros). 64 KB (dois clusters de 32 KB,
+ * os de um FAT16 de 2 GB), termina em 0xA61000, antes do kmalloc em 0xA80000.
+ * Nao pode ir para o BSS do kernel. */
+#define SUBDIR_MAX 0x10000u
 static struct fat_dir_entry* sub_dir = (struct fat_dir_entry*)0xA51000;
+
+/* Setores da FAT mudados desde o ultimo flush_fat: so eles vao para o disco
+ * (um pendrive grava cada setor devagar e a FAT de 2 GB tem 256). */
+static uint8_t fat_dirty[FAT_TABLE_MAX / 512u / 8u];
+
+static void mem_zero(void* p, uint32_t n);
+
+static void fat_mark(uint32_t byte_off) {
+  uint32_t s = byte_off / 512u;
+  fat_dirty[s >> 3] |= (uint8_t)(1u << (s & 7u));
+}
 
 static int fat_type = 0; // 0 = não montado, 12 = FAT12, 16 = FAT16
 static uint32_t bytes_per_sector = 512;
@@ -155,6 +167,10 @@ int fat_mount(void) {
   /* Validar antes de alterar globais (evita deixar sectors_per_cluster=0 e causar div/0 em df/copy) */
   if (boot_sector->bytes_per_sector == 0 || boot_sector->sectors_per_cluster == 0)
     return -1; /* boot sector inválido (ex.: partição não formatada) */
+  /* O resto do arquivo le e grava de 512 em 512 bytes. */
+  if (boot_sector->bytes_per_sector != 512 || boot_sector->fat_count == 0 ||
+      boot_sector->reserved_sectors == 0)
+    return -1;
 
   bytes_per_sector = boot_sector->bytes_per_sector;
   sectors_per_cluster = boot_sector->sectors_per_cluster;
@@ -197,6 +213,7 @@ int fat_mount(void) {
   }
   
   // Lê a FAT
+  mem_zero(fat_dirty, sizeof(fat_dirty));
   if (read_sectors(first_fat_sector, boot_sector->sectors_per_fat_16, fat_table) != 0) {
     fat_type = 0;
     return -4;
@@ -903,6 +920,7 @@ int fat_list_files(char* output, int max_output) {
 static void write_fat16_cluster(uint16_t cluster, uint16_t value) {
   uint16_t* fat16 = (uint16_t*)fat_table;
   fat16[cluster] = value;
+  fat_mark((uint32_t)cluster * 2u);
 }
 
 // Encontra cluster livre
@@ -927,22 +945,21 @@ static void free_chain(uint16_t cluster) {
   while (cluster >= 2 && cluster < 0xFFF0u && guard++ < 0x10000) {
     uint16_t next = fat16[cluster];
     fat16[cluster] = 0;
+    fat_mark((uint32_t)cluster * 2u);
     cluster = next;
   }
 }
 
-// Escreve FAT de volta no disco
+// Escreve de volta no disco os setores mudados da FAT, em todas as copias
 static void flush_fat(void) {
   uint8_t* fat_buf = (uint8_t*)fat_table;
-  // Escreve primeira FAT
-  for (uint32_t i = 0; i < boot_sector->sectors_per_fat_16; i++) {
-    write_sector(first_fat_sector + i, fat_buf + (i * bytes_per_sector));
+  uint32_t n = boot_sector->sectors_per_fat_16;
+  for (uint32_t i = 0; i < n; i++) {
+    if (!(fat_dirty[i >> 3] & (1u << (i & 7u)))) continue;
+    for (uint32_t f = 0; f < boot_sector->fat_count; f++)
+      write_sector(first_fat_sector + f * n + i, fat_buf + (i * bytes_per_sector));
   }
-  // Escreve segunda FAT também (cópia)
-  uint32_t second_fat = first_fat_sector + boot_sector->sectors_per_fat_16;
-  for (uint32_t i = 0; i < boot_sector->sectors_per_fat_16; i++) {
-    write_sector(second_fat + i, fat_buf + (i * bytes_per_sector));
-  }
+  mem_zero(fat_dirty, sizeof(fat_dirty));
 }
 
 // Escreve diretório raiz de volta no disco

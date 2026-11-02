@@ -136,6 +136,7 @@ int cmd_df(int argc, char** argv);
 int cmd_dstat(int argc, char** argv);
 int cmd_visual(int argc, char** argv);
 int cmd_mouse(int argc, char** argv);
+int cmd_usb(int argc, char** argv);
 int cmd_win(int argc, char** argv);
 int cmd_ping(int argc, char** argv);
 int cmd_dlls(int argc, char** argv);

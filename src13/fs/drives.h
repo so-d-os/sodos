@@ -9,6 +9,10 @@ int drives_is_mounted(char letter);
 const char* drives_kind_name(char letter);
 int drives_mount_ram(char letter);
 int drives_mount_fat(uint32_t ata_drive, char letter, uint32_t partition_num);
+/* Pendrive USB (FAT12/16) em U:. U: tambem monta sozinho no primeiro uso. */
+int drives_mount_usb(void);
+/* 0 com a unidade montada e o FAT dela carregado (para quem chama fat_* direto). */
+int drives_use(char letter);
 void drives_print_status(void);
 void drives_automount(void);
 

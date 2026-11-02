@@ -2,7 +2,8 @@
 #include "drives.h"
 #include "mm.h"
 
-#define COPY_MAX 32768
+/* Arquivo inteiro na memoria alta: programas e DLLs passam de 200 KB. */
+#define COPY_MAX (8u * 1024u * 1024u)
 
 static void copy_name(char* dst, int max, const char* src) {
   int i = 0;
@@ -47,15 +48,24 @@ int cmd_copy(int argc, char** argv) {
     return 1;
   }
 
-  buf = (char*)kmalloc(COPY_MAX);
+  n = file_size(argv[1]);
+  if (n < 0) {
+    puts_k("arquivo nao encontrado\n");
+    return 1;
+  }
+  if ((uint32_t)n >= COPY_MAX) {
+    puts_k("arquivo grande demais\n");
+    return 1;
+  }
+  buf = (char*)umalloc_owned((uint32_t)n + 2u, 0);
   if (!buf) {
     puts_k("sem memoria\n");
     return 1;
   }
-  n = file_load(argv[1], buf, COPY_MAX);
+  n = file_load(argv[1], buf, n + 2);
   if (n < 0) {
     puts_k("arquivo nao encontrado\n");
-    kfree(buf);
+    ufree(buf);
     return 1;
   }
 
@@ -70,10 +80,10 @@ int cmd_copy(int argc, char** argv) {
 
   if (file_save(dest_path, buf, n) != 0) {
     puts_k("nao copiou\n");
-    kfree(buf);
+    ufree(buf);
     return 1;
   }
-  kfree(buf);
+  ufree(buf);
   puts_k("copiado ");
   puts_k(dest_path);
   puts_k(" (");

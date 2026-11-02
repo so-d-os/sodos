@@ -33,6 +33,10 @@ int cmd_md(int argc, char** argv) {
     puts_k("md so funciona em disco FAT\n");
     return 1;
   }
+  if (drives_use(L) != 0) {
+    puts_k("pasta invalida\n");
+    return 1;
+  }
   rc = fat_mkdir(name);
   if (rc == 1) puts_k("ja existe\n");
   else if (rc != 0) puts_k("nao criou a pasta\n");
@@ -54,6 +58,10 @@ int cmd_rd(int argc, char** argv) {
   }
   if (drives_kind_name(L)[0] != 'F') {
     puts_k("rd so funciona em disco FAT\n");
+    return 1;
+  }
+  if (drives_use(L) != 0) {
+    puts_k("pasta invalida\n");
     return 1;
   }
   rc = fat_rmdir(name);

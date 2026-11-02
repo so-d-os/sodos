@@ -10,6 +10,7 @@
 #include "serial.h"
 #include "shell.h"
 #include "drives.h"
+#include "xhci.h"
 
 int strcmp(const char* a, const char* b); /* freestanding; definido mais abaixo */
 static int stricmp(const char* a, const char* b);
@@ -195,6 +196,7 @@ int disk_read_sector(uint32_t drive, uint32_t lba, void* buffer) {
   TRACE_FUNC("disk_read");
   trace_event("disk_read_args", drive, lba, (uint32_t)buffer);
   if (buffer == 0) return -2;
+  if (drive == DISK_USB) return xhci_disk_read(lba, buffer);
   if ((uint32_t)buffer < 0x1000u) return -1; /* evita IVT/IDT/BDA */
   uint32_t buf_addr = (uint32_t)buffer;
   if (buf_addr < 0x60000u || buf_addr + 512 > 0x100000u) return -1;
@@ -230,6 +232,7 @@ int disk_write_sector(uint32_t drive, uint32_t lba, void* buffer) {
   TRACE_FUNC("disk_write");
   trace_event("disk_write_args", drive, lba, (uint32_t)buffer);
   if (buffer == 0) return -2;
+  if (drive == DISK_USB) return xhci_disk_write(lba, buffer);
   if ((uint32_t)buffer < 0x1000u) return -1;
   uint32_t buf_addr = (uint32_t)buffer;
   if (buf_addr < 0x60000u || buf_addr + 512 > 0x100000u) return -1;
@@ -1187,6 +1190,7 @@ void kmain(const struct BootInfo* bi) {
   register_builtin("ata", cmd_dstat);
   register_builtin("visual", cmd_visual);
   register_builtin("mouse", cmd_mouse);
+  register_builtin("usb", cmd_usb);
   register_builtin("win", cmd_win);
   register_builtin("win.exe", cmd_win);
   register_builtin("ping", cmd_ping);

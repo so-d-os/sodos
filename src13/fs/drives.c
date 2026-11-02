@@ -1,6 +1,9 @@
 #include "drives.h"
 #include "shell.h"
 #include "mm.h"
+#include "disk.h"
+#include "net.h"
+#include "xhci.h"
 
 extern void fat_set_drive(uint32_t drive);
 extern void fat_set_partition_offset(uint32_t offset);
@@ -29,6 +32,12 @@ static uint32_t drv_ata[26];
 static char cur_letter = 'C';
 /* Pasta atual de cada unidade, sem a letra e sem barra no inicio. */
 static char cur_dir[26][48];
+static uint32_t drv_lba[26];   /* inicio da particao FAT */
+/* fat.c guarda um FAT por vez: a unidade dele agora (-1 = nenhuma valida). */
+static int fat_cur = -1;
+#define USB_LETTER 'U'
+static uint32_t usb_gen;       /* xhci_disk_gen() do pendrive montado em U: */
+static uint32_t usb_try_ms;    /* ultima procura sem achar (0 = nenhuma) */
 
 static struct mem_file d_ram[D_RAM_MAX];
 static int d_ram_count;
@@ -44,12 +53,110 @@ static char norm_letter(char L) {
   return L;
 }
 
+/* Carrega em fat.c o FAT da unidade idx, se for outro que o carregado. */
+static int fat_use(int idx) {
+  if (fat_cur == idx) return 0;
+  fat_cur = -1;
+  fat_set_drive(drv_ata[idx]);
+  fat_set_partition_offset(drv_lba[idx]);
+  if (fat_mount() != 0) return -1;
+  fat_cur = idx;
+  return 0;
+}
+
+/* Pendrive em U:: a primeira particao FAT12/16 do MBR ou, sem particao
+ * nenhuma, o disco inteiro (alguns pendrives vem assim). */
+static int usb_mount(void) {
+  int idx = letter_idx(USB_LETTER);
+  uint32_t lba = 0;
+  uint8_t type = 0;
+  uint8_t s0[512];
+  int p, rc, found = 0, fat32 = 0;
+  if (xhci_disk_init() != 0) return -1;
+  if (drv_kind[idx] == DRV_FAT && usb_gen == xhci_disk_gen()) return 0;
+  if (fat_cur == idx) fat_cur = -1;
+  drv_kind[idx] = DRV_NONE;
+  cur_dir[idx][0] = '\0';
+  if (disk_read_sector(DISK_USB, 0, s0) != 0) return -1;
+  if ((s0[54] == 'F' && s0[55] == 'A' && s0[56] == 'T') ||
+      (s0[82] == 'F' && s0[83] == 'A' && s0[84] == 'T')) {
+    found = 1;  /* boot sector FAT no setor 0, sem MBR */
+  }
+  /* Tabela do MBR lida aqui mesmo (o read_mbr do fdisk escreve log na tela). */
+  for (p = 0; p < 4 && !found && s0[510] == 0x55 && s0[511] == 0xAA; p++) {
+    const uint8_t* e = s0 + 446 + p * 16;
+    type = e[4];
+    lba = e[8] | ((uint32_t)e[9] << 8) | ((uint32_t)e[10] << 16) | ((uint32_t)e[11] << 24);
+    if (type == 0x01 || type == 0x04 || type == 0x06 || type == 0x0E) found = 1;
+    else if (type == 0x0B || type == 0x0C) fat32 = 1;
+  }
+  if (!found) {
+    puts_k(fat32 ? "U: o pendrive esta em FAT32; o SODOS le FAT12/FAT16.\n"
+                 : "U: o pendrive nao tem particao FAT.\n");
+    return -2;
+  }
+  fat_cur = -1;
+  fat_set_drive(DISK_USB);
+  fat_set_partition_offset(lba);
+  rc = fat_mount();
+  if (rc != 0) {
+    puts_k(rc == -2 ? "U: o pendrive esta em FAT32; o SODOS le FAT12/FAT16.\n"
+                    : "U: o pendrive nao tem FAT12/FAT16.\n");
+    return -2;
+  }
+  drv_kind[idx] = DRV_FAT;
+  drv_ata[idx] = DISK_USB;
+  drv_lba[idx] = lba;
+  fat_cur = idx;
+  usb_gen = xhci_disk_gen();
+  puts_k("U: pendrive montado (");
+  puts_k(xhci_disk_name());
+  puts_k(").\n");
+  return 0;
+}
+
+/* 1 se a unidade existe. U: liga o pendrive no primeiro uso e de novo
+ * quando ele e trocado; sem pendrive, procura no maximo uma vez por segundo. */
+static int drv_present(int idx) {
+  if (idx < 0) return 0;
+  if (idx == letter_idx(USB_LETTER) &&
+      (drv_kind[idx] == DRV_NONE || !xhci_disk_sectors() || usb_gen != xhci_disk_gen())) {
+    if (drv_kind[idx] != DRV_NONE && !xhci_disk_sectors()) {
+      drv_kind[idx] = DRV_NONE;
+      if (fat_cur == idx) fat_cur = -1;
+    }
+    if (!usb_try_ms || !net_has_clock() || net_ms() - usb_try_ms >= 1000u) {
+      usb_try_ms = 0;
+      if (usb_mount() != 0) usb_try_ms = net_ms() | 1u;
+    }
+  }
+  return drv_kind[idx] != DRV_NONE;
+}
+
+/* 1 se a unidade pode ser lida agora (com o FAT dela carregado). */
+static int drv_ready(int idx) {
+  if (!drv_present(idx)) return 0;
+  if (drv_kind[idx] == DRV_FAT && fat_use(idx) != 0) return 0;
+  return 1;
+}
+
+int drives_use(char letter) {
+  return drv_ready(letter_idx(letter)) ? 0 : -1;
+}
+
+int drives_mount_usb(void) {
+  usb_try_ms = 0;
+  return usb_mount();
+}
+
 void drives_init(void) {
   int i;
   for (i = 0; i < 26; i++) {
     drv_kind[i] = DRV_NONE;
     drv_ata[i] = 0;
+    drv_lba[i] = 0;
   }
+  fat_cur = -1;
   drv_kind['C' - 'A'] = DRV_RAM;
   cur_letter = 'C';
   d_ram_count = 0;
@@ -73,15 +180,13 @@ char drives_current(void) {
 int drives_set_current(char letter) {
   char L = norm_letter(letter);
   int i = letter_idx(L);
-  if (i < 0 || drv_kind[i] == DRV_NONE) return -1;
+  if (!drv_present(i)) return -1;
   cur_letter = L;
   return 0;
 }
 
 int drives_is_mounted(char letter) {
-  int i = letter_idx(letter);
-  if (i < 0) return 0;
-  return drv_kind[i] != DRV_NONE;
+  return drv_present(letter_idx(letter));
 }
 
 const char* drives_kind_name(char letter) {
@@ -106,18 +211,20 @@ int drives_mount_fat(uint32_t ata_drive, char letter, uint32_t partition_num) {
   int i = letter_idx(letter);
   int result;
   if (i < 0) return -1;
+  fat_cur = -1;
   fat_set_drive(ata_drive);
   result = get_partition_info(ata_drive, (uint8_t)partition_num, &lba_start, &sector_count, &type);
   if (result != 0) {
     puts_k("Particao nao encontrada. Usando disco inteiro.\n");
-    fat_set_partition_offset(0);
-  } else {
-    fat_set_partition_offset(lba_start);
+    lba_start = 0;
   }
+  fat_set_partition_offset(lba_start);
   result = fat_mount();
   if (result != 0) return result;
   drv_kind[i] = DRV_FAT;
   drv_ata[i] = ata_drive;
+  drv_lba[i] = lba_start;
+  fat_cur = i;
   return 0;
 }
 
@@ -129,11 +236,14 @@ void drives_automount(void) {
   if (drv_kind[idx] != DRV_NONE) return;
   if (get_partition_info(1, 0, &lba, &count, &type) != 0) return;
   if (type != 0x04 && type != 0x06 && type != 0x0E) return;
+  fat_cur = -1;
   fat_set_drive(1);
   fat_set_partition_offset(lba);
   if (fat_mount() != 0) return;
   drv_kind[idx] = DRV_FAT;
   drv_ata[idx] = 1;
+  drv_lba[idx] = lba;
+  fat_cur = idx;
   puts_k("D: FAT16 montado (disco 1).\n");
 }
 
@@ -145,7 +255,10 @@ void drives_print_status(void) {
     putc((char)('A' + i));
     puts_k(":  ");
     puts_k(drives_kind_name((char)('A' + i)));
-    if (drv_kind[i] == DRV_FAT) {
+    if (drv_kind[i] == DRV_FAT && drv_ata[i] == DISK_USB) {
+      puts_k("  USB ");
+      puts_k(xhci_disk_name());
+    } else if (drv_kind[i] == DRV_FAT) {
       puts_k("  ATA ");
       {
         char n[12];
@@ -291,7 +404,7 @@ int file_read_at(const char* path, uint32_t offset, char* buf, int len) {
   path_parse(path, &L, name, sizeof(name));
   if (name[0] == '\0') return -1;
   idx = letter_idx(L);
-  if (idx < 0 || drv_kind[idx] == DRV_NONE) return -2;
+  if (!drv_ready(idx)) return -2;
   if (drv_kind[idx] == DRV_FAT) return fat_read_span(name, offset, buf, (uint32_t)len);
   if (L == 'D') {
     struct mem_file* f = d_find(name);
@@ -316,7 +429,7 @@ int file_load(const char* path, char* buf, int max_size) {
   path_parse(path, &L, name, sizeof(name));
   if (name[0] == '\0') return -1;
   idx = letter_idx(L);
-  if (idx < 0 || drv_kind[idx] == DRV_NONE) return -2;
+  if (!drv_ready(idx)) return -2;
   buf[0] = '\0';
   if (drv_kind[idx] == DRV_FAT) {
     n = fat_read_file(name, buf, (uint32_t)(max_size - 1));
@@ -364,7 +477,7 @@ int file_size(const char* path) {
   path_parse(path, &L, name, sizeof(name));
   if (name[0] == '\0') return -1;
   idx = letter_idx(L);
-  if (idx < 0 || drv_kind[idx] == DRV_NONE) return -2;
+  if (!drv_ready(idx)) return -2;
   if (drv_kind[idx] == DRV_FAT) return fat_file_size(name);
   if (L == 'D') {
     struct mem_file* f = d_find(name);
@@ -388,7 +501,7 @@ int file_save(const char* path, const char* data, int size) {
   path_parse(path, &L, name, sizeof(name));
   if (name[0] == '\0') return -1;
   idx = letter_idx(L);
-  if (idx < 0 || drv_kind[idx] == DRV_NONE) return -2;
+  if (!drv_ready(idx)) return -2;
   if (drv_kind[idx] == DRV_FAT)
     return fat_write_file(name, data, (uint32_t)size);
   if (L == 'D')
@@ -456,7 +569,7 @@ int drives_chdir(const char* spec) {
   }
   path_parse(spec, &L, name, (int)sizeof(name));
   idx = letter_idx(L);
-  if (idx < 0 || drv_kind[idx] == DRV_NONE) {
+  if (!drv_ready(idx)) {
     puts_k("unidade nao montada\n");
     return -1;
   }
@@ -484,7 +597,7 @@ int file_list(const char* path, char* out, int max) {
   out[0] = 0;
   path_parse(path ? path : "", &L, name, (int)sizeof(name));
   idx = letter_idx(L);
-  if (idx < 0 || drv_kind[idx] == DRV_NONE) return -1;
+  if (!drv_ready(idx)) return -1;
   if (drv_kind[idx] == DRV_FAT) return fat_list_dir(name, out, max);
   /* RAM / embutidos: so a raiz da unidade. */
   if (name[0]) return -1;
@@ -515,7 +628,7 @@ void drives_print_dir(const char* spec) {
   int idx;
   path_parse(spec ? spec : "", &L, name, (int)sizeof(name));
   idx = letter_idx(L);
-  if (idx < 0 || drv_kind[idx] == DRV_NONE) {
+  if (!drv_ready(idx)) {
     putc(L ? L : '?');
     puts_k(": nao montado\n");
     return;
@@ -575,7 +688,7 @@ int drives_names(char letter, char out[][32], int max) {
   int n = 0;
   int i;
   if (!out || max <= 0) return 0;
-  if (idx < 0 || drv_kind[idx] == DRV_NONE) return 0;
+  if (!drv_ready(idx)) return 0;
   if (drv_kind[idx] == DRV_FAT) {
     char tmp[1024];
     int pos = 0;
@@ -608,7 +721,7 @@ int drives_names(char letter, char out[][32], int max) {
 void drives_list(char letter) {
   int idx = letter_idx(letter);
   char L = norm_letter(letter);
-  if (idx < 0 || drv_kind[idx] == DRV_NONE) {
+  if (!drv_ready(idx)) {
     putc(L ? L : '?');
     puts_k(": nao montado. Use: mount D:   ou   mount 1 D:\n");
     return;
@@ -710,7 +823,7 @@ int drives_enum_paths(char out[][48], int max) {
   int n = 0;
   int i;
   if (!out || max <= 0) return 0;
-  if (drv_kind['D' - 'A'] == DRV_FAT) {
+  if (drv_kind['D' - 'A'] == DRV_FAT && fat_use('D' - 'A') == 0) {
     n = enum_one_dir(out, n, max, "user\\default\\desktop");
     n = enum_one_dir(out, n, max, "");
   } else if (drv_kind['D' - 'A'] == DRV_RAM) {

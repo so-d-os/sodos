@@ -100,7 +100,7 @@ qemu-system-x86_64 -m 256 -usb -device usb-tablet
   -drive format=raw,file=disk2.img,if=ide,index=2
 ```
 
-O tablet USB entrega a posição absoluta do ponteiro, usada pelo desktop. Num PC de verdade sem porta PS/2 de mouse (notebooks atuais), um mouse USB numa porta do próprio PC funciona pelo driver xHCI (`kernel/xhci.c`); para testar no QEMU, acrescente `-device qemu-xhci -device usb-mouse`. Todos os alvos da tabela de `make` abaixo rodam em `src13/`.
+O tablet USB entrega a posição absoluta do ponteiro, usada pelo desktop. Num PC de verdade sem porta PS/2 de mouse (notebooks atuais), um mouse USB funciona pelo driver xHCI (`kernel/xhci.c`), numa porta do PC ou atrás de um hub USB 2; para testar no QEMU, acrescente `-device qemu-xhci -device usb-mouse`. Um pendrive vira `U:` ([Pendrive USB](#pendrive-usb-u)). Todos os alvos da tabela de `make` abaixo rodam em `src13/`.
 
 ### Alvos do `make`
 
@@ -199,9 +199,10 @@ Não há preempção: cada programa roda até devolver o controle em `gui_event`
 |---|---|
 | `C:` | Disco RAM: 7 arquivos embutidos + até 16 arquivos criados (começam com 1 KB, crescem até 32 KB). Some ao desligar |
 | `D:` | ATA 1 = `disk.img` (256 MB). Montado sozinho no boot se a partição 0 for FAT12/FAT16 |
+| `U:` | Pendrive USB (xHCI), FAT12/FAT16. Montado na primeira vez que `U:` é usado; veja [Pendrive USB](#pendrive-usb-u) |
 | outras letras | Criadas com `mount` a partir de qualquer ATA/partição (ou como disco RAM) |
 
-O kernel mantém **um único disco FAT ativo por vez**: montar outro passa a atender todas as letras FAT com o novo disco. `C:` é sempre RAM.
+Várias unidades FAT podem ficar montadas ao mesmo tempo (`D:`, `E:`, `U:`...). O kernel guarda uma FAT na memória e a relê do disco quando um comando passa para outra unidade. `C:` é sempre RAM.
 
 `disk2.img` (ATA 2, 100 MB) não é montado sozinho.
 
@@ -211,14 +212,14 @@ O kernel mantém **um único disco FAT ativo por vez**: montar outro passa a ate
 - FAT32, exFAT e nomes longos (VFAT LFN) não são suportados: nomes são **8.3**, exibidos em maiúsculas.
 - Subpastas até 8 componentes de 12 caracteres, com `.` e `..`.
 - Partições primárias MBR (4 entradas); sem partições estendidas, GPT ou lógica.
-- Escrita: a FAT e a raiz ficam em RAM e são gravadas no disco a cada alteração (as duas cópias da FAT), sem cache adiado.
+- Escrita: a FAT e a raiz ficam em RAM e são gravadas no disco a cada alteração (só os setores da FAT que mudaram, em todas as cópias), sem cache adiado.
 
 | Limite | Valor |
 |---|---|
 | Raiz do FAT | até 64 KB; o `format` cria 512 entradas |
-| Diretório aberto | 32 KB (cadeia de até 64 clusters) |
+| Diretório aberto | 64 KB (cadeia de até 64 clusters) |
 | Caminho | 8 componentes de até 12 caracteres |
-| `copy` | arquivos de até 32 KB |
+| `copy` | arquivos de até 8 MB (no heap alto) |
 | `type` / `edit` | 2 KB por arquivo |
 | `cat` | 4 KB |
 | `asm` | fonte de 16 KB, código de 32 KB, 64 rótulos |
@@ -266,6 +267,32 @@ O `disk-files` exige o QEMU **fechado**: o sistema regrava a FAT ao desligar e a
 mcopy -o -i src13/disk.img@@512 MEUAPP.C ::/MEUAPP.C
 ```
 
+### Pendrive USB (`U:`)
+
+Um pendrive no controlador xHCI vira `U:` na primeira vez que `U:` é usado (`dir U:`, `U:`, `copy U:\HELLO.EXE D:`), numa porta do PC ou atrás de um hub USB 2 (muitos notebooks têm um soldado na placa). Tirar, recolocar ou trocar o pendrive é percebido no acesso seguinte.
+
+- `U:` é a primeira partição FAT12/FAT16 do MBR, ou o pendrive inteiro quando o setor 0 já é um boot sector FAT. FAT32, o formato de fábrica da maioria dos pendrives, é recusado com uma mensagem.
+- Programas rodam direto de `U:`. As DLLs são procuradas na pasta atual e na raiz da unidade do programa, depois em `D:` e `C:`: num PC sem disco ATA, deixe-as em `U:\`.
+- `usb` lista os controladores e dispositivos (hub, mouse, pendrive, com o caminho da porta como o Linux mostra, ex.: `4.1`) e procura o pendrive; `mount U:` monta de novo.
+- A leitura vem em blocos de 16 KB (`READ(10)`); a escrita vai setor a setor, e só os setores da FAT que mudaram são gravados.
+
+Preparar um pendrive no Linux: uma partição FAT16 de pouco menos de 2 GB (clusters de 32 KB). Isso **apaga** a tabela de partições do pendrive:
+
+```bash
+lsblk                                                     # ache o pendrive, ex.: /dev/sdX
+echo 'start=2048, size=4096000, type=6' | sudo sfdisk /dev/sdX
+sudo mkfs.fat -F 16 -s 64 -n SODOS /dev/sdX1
+```
+
+No QEMU (`usb.img` com o mesmo layout, feito com `sfdisk`, `mkfs.fat --offset 2048` e `mcopy -i usb.img@@1M`):
+
+```bash
+qemu-system-x86_64 ... -device qemu-xhci,id=xhci \
+  -drive if=none,id=stick,format=raw,file=usb.img -device usb-storage,bus=xhci.0,drive=stick
+```
+
+Atrás de um hub: `-device usb-hub,bus=xhci.0,port=1` e `port=1.1` no `usb-storage`.
+
 ### Caminhos
 
 `[X:][\][pasta\...]nome`, com `\` ou `/`, maiúsculas ou minúsculas. Um `X:` sozinho troca a unidade corrente. O prompt mostra o diretório atual (`D:\USER\DEFAULT> `).
@@ -302,7 +329,7 @@ Não há Ctrl (Ctrl+C não interrompe um comando); a única combinação é `Ctr
 | `rd pasta` | Remove pasta vazia (só FAT16) |
 | `type arquivo` | Mostra um arquivo de qualquer unidade (2 KB) |
 | `cat arquivo` | Mostra um arquivo da unidade FAT montada (4 KB) |
-| `copy origem destino` | Copia entre unidades (32 KB); `copy c:hello.asm d:` |
+| `copy origem destino` | Copia entre unidades (até 8 MB); `copy c:hello.asm d:`, `copy U:\HELLO.EXE D:` |
 | `clear` / `cls` | Limpa a tela |
 | `history` | Histórico numerado (só da sessão) |
 | `pause` | Espera uma tecla |
@@ -310,10 +337,11 @@ Não há Ctrl (Ctrl+C não interrompe um comando); a única combinação é `Ctr
 | `load nome` | Carrega um binário embutido antigo: `hello`, `testapp`, `editor`. São i386 e não executam no kernel de 64 bits |
 | `asm arquivo.asm` | Monta um subconjunto de long mode em `0x58000` e grava `NOME.BIN` ao lado |
 | `run` | Executa o código montado por `asm` nesta sessão |
-| `mount` | Monta RAM ou FAT, ou lista as unidades |
+| `mount` | Monta RAM, FAT ou o pendrive (`mount U:`), ou lista as unidades |
 | `fdisk list [drive]` / `fdisk create ...` | Lista e cria partições |
 | `format partição rótulo` | Formata FAT16 (sempre ATA 1) |
-| `disks` | Lista os discos ATA 0–3 |
+| `disks` | Lista os discos ATA 0–3 e o pendrive USB |
+| `usb` | Controladores xHCI e dispositivos USB (hub, mouse, pendrive); procura o pendrive |
 | `df` | Espaço total/usado/livre do FAT montado |
 | `free` | Heaps do kernel e de usuário |
 | `dstat` / `ata` | Último acesso ATA (drive, LBA, status, error) |
@@ -905,10 +933,10 @@ dlls      módulos carregados, base, tamanho e referências
 ## Limitações conhecidas
 
 - **Sem preempção** e sem proteção de memória: tudo roda em ring 0, com um único espaço de endereçamento. Um laço infinito num programa trava a máquina.
-- **Um FAT ativo por vez**; sem FAT32, exFAT, LFN, partições estendidas ou GPT.
+- **Sem FAT32**, exFAT, LFN, partições estendidas ou GPT; passar de uma unidade FAT para outra relê a FAT do disco.
 - **Um TCP de cliente por vez**; sem DHCP, IPv6 ou soquetes UDP genéricos.
-- **Sem áudio**, sem USB de armazenamento, sem disquete, sem DMA.
-- **USB só para o mouse**: um mouse HID boot numa porta raiz de um controlador xHCI; sem hubs, sem teclado USB, sem touchpad I2C.
+- **Sem áudio**, sem disquete, sem DMA.
+- **USB só para o mouse e o pendrive**: um mouse HID boot e um disco mass storage bulk-only num controlador xHCI, nas portas do PC ou atrás de hubs USB 2; sem hubs USB 3, sem teclado USB, sem touchpad I2C.
 - **Nomes 8.3** no FAT; arquivos de `make disk-files` são copiados em maiúsculas.
 - **Sem Ctrl** no shell; não há como interromper um comando em execução.
 - **Sem controle de acesso**: o HTTP da porta 8797 executa comandos sem autenticação.
@@ -924,7 +952,7 @@ Caminhos relativos a `src13/`, exceto a primeira linha:
 | Pasta ou arquivo | Conteúdo |
 |---|---|
 | raiz | `README.md`, `README.pt-BR.md`, `LICENSE` (GPLv3) e `.git` |
-| `kernel/` | `kmain`, boot, linker, IDT/ISR/IRQ/PIC, memória, escalonador, loader SOX, exports, Ctrl+Alt+Del/reinício (`reboot.c`), o mouse USB pelo xHCI (`xhci.c`) e o driver ATA (`disk.h`) |
+| `kernel/` | `kmain`, boot, linker, IDT/ISR/IRQ/PIC, memória, escalonador, loader SOX, exports, Ctrl+Alt+Del/reinício (`reboot.c`), o mouse e o pendrive USB pelo xHCI (`xhci.c`) e o driver ATA (`disk.h`) |
 | `fs/` | FAT12/16, partições MBR, unidades e arquivos (`fat`, `partition`, `drives`, `files`) |
 | `net/` | NE2000, ARP/IPv4/ICMP/UDP/TCP/DNS e o HTTP da porta 8797 |
 | `video/` | Desktop, janelas, mouse, cursor, fonte VGA e o modo gráfico |

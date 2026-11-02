@@ -1,6 +1,10 @@
 #pragma once
 #include <stdint.h>
 
+/* Drives 0..3 sao os ATA; DISK_USB e o pendrive do xHCI (kernel/xhci.c),
+ * que aceita buffer em qualquer endereco. */
+#define DISK_USB 0x80u
+
 /* Assinatura única em todo o projeto: (drive, lba, buffer). Nunca passar buffer NULL. */
 int disk_read_sector(uint32_t drive, uint32_t lba, void* buffer);
 int disk_write_sector(uint32_t drive, uint32_t lba, void* buffer);

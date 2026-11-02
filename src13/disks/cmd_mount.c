@@ -36,7 +36,18 @@ int cmd_mount(int argc, char** argv) {
     puts_k("  mount D:        disco RAM em D:\n");
     puts_k("  mount 1 D:      disco ATA 1 (disk.img) em D:\n");
     puts_k("  mount 1 D: 0    particao 0 do ATA 1 em D:\n");
+    puts_k("  mount U:        pendrive USB (FAT12/FAT16) em U:\n");
     return 0;
+  }
+
+  if (is_drive_letter(argv[1]) && (argv[1][0] == 'U' || argv[1][0] == 'u')) {
+    result = drives_mount_usb();
+    if (result == 0) {
+      puts_k("Ex.: dir U:   copy U:\\HELLO.EXE D:\n");
+      return 0;
+    }
+    if (result == -1) puts_k("Nenhum pendrive USB. Veja: usb\n");
+    return 1;
   }
 
   if (is_drive_letter(argv[1]) || is_ram_word(argv[1])) {

@@ -336,6 +336,9 @@ No caminho GRUB/UEFI não existe modo texto em `0xB8000` nem registros VGA.
   `mouse` usam o mouse USB pelo xHCI (`kernel/xhci.c`), por polling.  O BAR
   do controlador é mapeado sem cache em tempo de execução (o OVMF o põe acima
   de 4 GB).
+- O pendrive vira `U:` pelo mesmo driver, numa porta do PC ou atrás do hub
+  USB 2 que muitos notebooks têm na placa.  No boot UEFI o SODOS sempre toma
+  o controlador do firmware (não há emulação PS/2 depois do ExitBootServices).
 
 Para testar sem hardware real, use o OVMF com uma placa sem portas Bochs VBE:
 
@@ -343,5 +346,6 @@ Para testar sem hardware real, use o OVMF com uma placa sem portas Bochs VBE:
 make iso-grub
 qemu-system-x86_64 -m 256 -bios /usr/share/ovmf/OVMF.fd -cdrom so-grub.iso \
   -vga none -device bochs-display -serial stdio \
-  -device qemu-xhci -device usb-mouse
+  -device qemu-xhci,id=xhci -device usb-mouse \
+  -drive if=none,id=stick,format=raw,file=usb.img -device usb-storage,bus=xhci.0,drive=stick
 ```
