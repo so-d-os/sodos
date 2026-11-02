@@ -40,6 +40,7 @@ int format_fat16(uint32_t drive, uint32_t lba_start, uint32_t total_sectors, con
 #include "net.h"
 #include "httpd.h"
 #include "module.h"
+#include "keymap.h"
 
 const struct executable_entry* find_executable(const char* name) {
   for (int i = 0; i < executable_count; i++) {
@@ -273,7 +274,7 @@ int disk_write_sector(uint32_t drive, uint32_t lba, void* buffer) {
 void vga_put_at(int r, int c, unsigned char ch) {
   if (r < 0 || r >= 25 || c < 0 || c >= 80) return;
   if (ch < 32) ch = '.';
-  VGA[r * 80 + c] = (uint16_t)ch | (uint16_t)(0x07u << 8);
+  VGA[r * 80 + c] = (uint16_t)(uint8_t)ch | (uint16_t)(0x07u << 8);
 }
 
 void update_cursor(void) {
@@ -353,7 +354,7 @@ void putc(char c) {
     update_cursor();
     return;
   }
-  VGA[row * 80 + col] = (uint16_t)c | (uint16_t)(0x07 << 8);
+  VGA[row * 80 + col] = (uint16_t)(uint8_t)c | (uint16_t)(0x07 << 8);
   col++;
   if (col >= 80) { 
     col = 0; 
@@ -406,29 +407,7 @@ void clear_screen(void) {
   update_cursor();
 }
 
-// Estado das teclas modificadoras
-static int shift_pressed = 0;
-
-// Scancodes para teclas modificadoras
-#define SCANCODE_LSHIFT  0x2A
-#define SCANCODE_RSHIFT  0x36
-
-// Partial scancode set 1 -> ascii (sem shift)
-static const char scancode_map[128] = {
-  0,  27, '1','2','3','4','5','6','7','8','9','0','-','=','\b',
-  '\t','q','w','e','r','t','y','u','i','o','p','[',']','\n',0,'a',
-  's','d','f','g','h','j','k','l',';','\'','`',0,'\\','z','x','c',
-  'v','b','n','m',',','.','/',0,'*',0,' ',
-};
-
-// Mapa com Shift pressionado
-static const char scancode_map_shift[128] = {
-  0,  27, '!','@','#','$','%','^','&','*','(',')','_','+','\b',
-  '\t','Q','W','E','R','T','Y','U','I','O','P','{','}','\n',0,'A',
-  'S','D','F','G','H','J','K','L',':','"','~',0,'|','Z','X','C',
-  'V','B','N','M','<','>','?',0,'*',0,' ',
-};
-
+// Shift, AltGr, Caps Lock e o layout (keyb br|us) ficam em keymap.c
 // Scancodes para setas (extended keys)
 #define SCANCODE_UP    0x48
 #define SCANCODE_DOWN  0x50
@@ -497,6 +476,12 @@ static int kb_read(unsigned char* sc) {
 static int get_char(void) {
   unsigned char sc;
 
+  /* Tecla que sobrou de acento sem combinacao (~ e x -> ~ depois x). */
+  {
+    int p = keymap_pending();
+    if (p) return p;
+  }
+
   /* Polling puro. Sem hlt e sem IRQ0: o timer no vetor 8 (antes do remap)
    * caia no handler de #DF e o iret executava lixo em 0x9FC00 (#UD). */
   for (;;) {
@@ -532,23 +517,9 @@ static int get_char(void) {
     return ext_keys[sc];
   }
 
-  if (sc == SCANCODE_LSHIFT || sc == SCANCODE_RSHIFT) {
-    shift_pressed = 1;
-    return 0;
-  }
-  if (sc == (SCANCODE_LSHIFT | 0x80) || sc == (SCANCODE_RSHIFT | 0x80)) {
-    shift_pressed = 0;
-    return 0;
-  }
   if (sc & 0x80)
     return 0;
-
-  if (sc < 128) {
-    if (shift_pressed)
-      return scancode_map_shift[sc];
-    return scancode_map[sc];
-  }
-  return 0;
+  return keymap_char(sc);
 }
 
 int shell_get_char(void) {
@@ -1093,6 +1064,65 @@ static int finish_exe(const char* path, int argc, char** argv) {
 }
 
 /* Uma linha do prompt. line e alterada. history=1 grava no historico. */
+static int exec_line(char* line, int history);
+
+/* Pipe: "type x | more". A saida da esquerda vai para pipe_buf (umalloc,
+ * na primeira vez); a direita le com shell_pipe_getc. Um | por linha. */
+#define PIPE_MAX (256u * 1024u)
+static char* pipe_buf;
+static uint32_t pipe_len;
+static uint32_t pipe_pos;
+static int pipe_on;
+static int pipe_full;
+
+static void pipe_out(char c) {
+  if (c == '\f') return;   /* cls nao vai para o pipe */
+  if (pipe_len < PIPE_MAX) pipe_buf[pipe_len++] = c;
+  else pipe_full = 1;
+}
+
+int shell_pipe_active(void) { return pipe_on; }
+
+int shell_pipe_getc(void) {
+  if (!pipe_on || pipe_pos >= pipe_len) return -1;
+  return (unsigned char)pipe_buf[pipe_pos++];
+}
+
+/* '|' fora de aspas, ou 0 */
+static char* find_pipe(char* line) {
+  int quoted = 0;
+  for (; *line; line++) {
+    if (*line == '"') quoted = !quoted;
+    else if (*line == '|' && !quoted) return line;
+  }
+  return 0;
+}
+
+static int exec_pipe(char* left, char* right) {
+  void (*prev)(char) = shell_out_fn;
+  int rc;
+  if (pipe_on || find_pipe(right)) {
+    puts_k("pipe: so um | por linha\n");
+    return 1;
+  }
+  if (!pipe_buf) pipe_buf = (char*)umalloc_owned(PIPE_MAX, 0);
+  if (!pipe_buf) {
+    puts_k("pipe: sem memoria\n");
+    return 1;
+  }
+  pipe_len = 0;
+  pipe_pos = 0;
+  pipe_full = 0;
+  shell_out_fn = pipe_out;
+  exec_line(left, 0);
+  shell_out_fn = prev;
+  if (pipe_full) puts_k("pipe: saida cortada em 256 KB\n");
+  pipe_on = 1;
+  rc = exec_line(right, 0);
+  pipe_on = 0;
+  return rc;
+}
+
 static int exec_line(char* line, int history) {
   char raw[256];
   char* argv[16];
@@ -1108,6 +1138,13 @@ static int exec_line(char* line, int history) {
     }
     raw[k] = '\0';
     if (raw[0]) add_to_history(raw);
+  }
+  {
+    char* bar = find_pipe(line);
+    if (bar) {
+      *bar = '\0';
+      return exec_pipe(line, bar + 1);
+    }
   }
   argc = tokenize(line, argv, 16);
   if (argc == 0) return 0;
@@ -1220,6 +1257,8 @@ void kmain(const struct BootInfo* bi) {
   register_builtin("cls", cmd_cls);
   register_builtin("history", cmd_history);
   register_builtin("type", cmd_type);
+  register_builtin("more", cmd_more);
+  register_builtin("keyb", cmd_keyb);
   register_builtin("pause", cmd_pause);
   register_builtin("load", cmd_load);
   register_builtin("edit", cmd_edit);
@@ -1251,6 +1290,7 @@ void kmain(const struct BootInfo* bi) {
 
   drives_init();
   drives_automount();
+  keyb_load_cfg();
   net_demo();
   {
     char path[64];

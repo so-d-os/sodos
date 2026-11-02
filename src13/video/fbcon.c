@@ -9,7 +9,7 @@
 #define CELL_W 8
 #define CELL_H 16
 
-extern const uint8_t font8x16_cp437[256][16];
+extern const uint8_t font8x16_cp850[256][16];
 
 volatile uint16_t* vga_text = (volatile uint16_t*)0xB8000;
 
@@ -93,7 +93,7 @@ int fbcon_init(const struct BootInfo* bi) {
 }
 
 static void draw_cell(int idx, uint16_t cell, int with_cursor) {
-  const uint8_t* g = font8x16_cp437[cell & 0xFFu];
+  const uint8_t* g = font8x16_cp850[cell & 0xFFu];
   uint32_t fg = pal[(cell >> 8) & 0x0Fu];
   uint32_t bg = pal[(cell >> 12) & 0x0Fu];
   uint32_t x0 = org_x + (uint32_t)(idx % COLS) * CELL_W * (uint32_t)scale;

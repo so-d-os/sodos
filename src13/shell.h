@@ -130,6 +130,22 @@ int cmd_cd(int argc, char** argv);
 int cmd_md(int argc, char** argv);
 int cmd_rd(int argc, char** argv);
 int cmd_cat(int argc, char** argv);
+int cmd_more(int argc, char** argv);
+int cmd_keyb(int argc, char** argv);
+/* Le KEYB.CFG (br/us) de D:\ ou U:\. Chamado no boot. */
+void keyb_load_cfg(void);
+
+/* Pipe "a | b": a saida de a fica guardada e b le com shell_pipe_getc
+ * (-1 no fim). Fora de um pipe, shell_pipe_active() e 0. */
+int shell_pipe_active(void);
+int shell_pipe_getc(void);
+
+/* Texto de arquivo na tela (cmd_more.c): UTF-8 vira CP850; more pagina.
+ * text_put devolve 1 se o usuario saiu do more. */
+void text_begin(int more);
+int text_put(const char* s, int n);
+void text_end(void);
+int text_file(const char* path, int more);
 int cmd_fdisk(int argc, char** argv);
 int cmd_format(int argc, char** argv);
 int cmd_copy(int argc, char** argv);

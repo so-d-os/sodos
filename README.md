@@ -220,8 +220,8 @@ Several FAT drives can be mounted at once (`D:`, `E:`, `U:`...). The kernel keep
 | Open directory | 64 KB (chain of up to 64 clusters) |
 | Path | 8 components of up to 12 characters |
 | `copy` | files up to 8 MB (in the high heap) |
-| `type` / `edit` | 2 KB per file |
-| `cat` | 4 KB |
+| `edit` | 2 KB per file |
+| Pipe (`a \| more`) | 256 KB of output |
 | `asm` | 16 KB source, 32 KB code, 64 labels |
 | Clusters | from the BPB; `format` picks 8/16/32 KB to fit FAT16 |
 
@@ -327,8 +327,10 @@ No Ctrl (Ctrl+C does not interrupt a command); the only combination is `Ctrl+Alt
 | `cd [path]` | Enters a directory; with no argument shows the current directory |
 | `md dir` | Creates a directory (FAT16 only) |
 | `rd dir` | Removes an empty directory (FAT16 only) |
-| `type file` | Shows a file from any drive (2 KB) |
-| `cat file` | Shows a file from the mounted FAT drive (4 KB) |
+| `type file` / `cat file` | Shows a whole file from any drive. UTF-8 text (made on Linux) is shown with accents |
+| `more file` | Shows a file one screen at a time: `Space` next screen, `Enter` next line, `q`/`Esc`/`Ctrl+C` quits |
+| `cmd \| more` | Pipe: the output of the left command goes to the right one (`type x.txt \| more`, `dir /s \| more`, `help \| more`). One `\|` per line; an `.EXE` on the right reads the pipe as its input |
+| `keyb [br\|us]` | Keyboard layout: `br` ABNT2 (default: `ç`, dead keys for ´, grave, ~, ^ and ¨, AltGr) or `us`. Saved in `KEYB.CFG` on `D:` (or `U:`) and loaded at boot |
 | `copy source dest` | Copies between drives (up to 8 MB); `copy c:hello.asm d:`, `copy U:\HELLO.EXE D:` |
 | `clear` / `cls` | Clears the screen |
 | `history` | Numbered history (session only) |

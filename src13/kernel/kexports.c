@@ -42,8 +42,11 @@ static void k_puts(const char* s) {
   while (*s) con_out(*s++);
 }
 
+/* Do lado direito de um pipe ("type x | prog") a entrada vem do pipe;
+ * no fim dele k_getc devolve -1 e k_readline -1. */
 static int k_getc(void) {
   int c;
+  if (shell_pipe_active()) return shell_pipe_getc();
   do {
     c = shell_get_char();
   } while (c == 0);
@@ -53,6 +56,13 @@ static int k_getc(void) {
 static int k_readline(char* buf, int max) {
   int n = 0;
   if (!buf || max < 2) return -1;
+  if (shell_pipe_active()) {
+    int c = -1;
+    while (n < max - 1 && (c = shell_pipe_getc()) >= 0 && c != '\n')
+      if (c != '\r') buf[n++] = (char)c;
+    buf[n] = '\0';
+    return (c < 0 && n == 0) ? -1 : n;
+  }
   shell_read_line(buf, max);
   while (buf[n]) n++;
   return n;

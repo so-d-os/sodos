@@ -1,26 +1,21 @@
 #!/usr/bin/env python3
-"""Gera video/font8x16_data.c: fonte 8x16 em ordem CP437 a partir de um PSF.
+"""Gera video/font8x16_data.c: fonte 8x16 em ordem CP850 a partir de um PSF.
 
 Uso: python3 tools/mkfont16.py /usr/share/consolefonts/Lat15-VGA16.psf.gz video/font8x16_data.c
 
-Sem BIOS (UEFI/GOP) nao ha fonte da VGA para copiar; o kernel usa esta.
+CP850 e a pagina do DOS em portugues: tem ã õ Á Ê Ó etc., que a CP437
+da BIOS nao tem. O kernel usa esta fonte no modo texto VGA e no fbcon.
 Glifos que o PSF nao tem viram '?'.
 """
 import gzip
 import os
 import sys
 
-# CP437 0x80..0xFF -> Unicode
-CP437_HI = (
-    "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»"
-    "░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀"
-    "αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ "
-)
-# CP437 0x01..0x1F (simbolos graficos do BIOS)
+# 0x01..0x1F: simbolos graficos do BIOS (iguais na CP437 e na CP850)
 CP437_LO = "☺☻♥♦♣♠•◘○◙♂♀♪♫☼►◄↕‼¶§▬↨↑↓→←∟↔▲▼"
 
 
-def cp437_char(i):
+def cp850_char(i):
     if i == 0:
         return " "
     if i < 0x20:
@@ -29,7 +24,7 @@ def cp437_char(i):
         return chr(i)
     if i == 0x7F:
         return "⌂"
-    return CP437_HI[i - 0x80]
+    return bytes([i]).decode("cp850")
 
 
 def load_psf(path):
@@ -63,13 +58,13 @@ def main():
     q = umap.get("?", 0x3F)
     lines = [
         "/* Gerado por tools/mkfont16.py a partir de %s (dominio publico). */" % os.path.basename(src),
-        "/* Fonte 8x16 em ordem CP437, igual a da BIOS VGA; usada sem BIOS (UEFI). */",
+        "/* Fonte 8x16 em ordem CP850 (DOS em portugues); modo texto VGA e fbcon. */",
         "#include <stdint.h>",
-        "const uint8_t font8x16_cp437[256][16] = {",
+        "const uint8_t font8x16_cp850[256][16] = {",
     ]
     missing = 0
     for i in range(256):
-        g = umap.get(cp437_char(i))
+        g = umap.get(cp850_char(i))
         if g is None:
             g = q
             missing += 1

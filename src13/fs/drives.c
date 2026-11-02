@@ -419,7 +419,29 @@ int file_read_at(const char* path, uint32_t offset, char* buf, int len) {
     for (i = 0; i < n; i++) buf[i] = f->content[offset + (uint32_t)i];
     return n;
   }
-  return -1;
+  {
+    /* C: arquivos na RAM e embutidos no kernel */
+    struct mem_file* f = find_mem_file(name);
+    const struct file_entry* fe = f ? 0 : find_file(name);
+    const char* data;
+    int size;
+    int n;
+    int i;
+    if (f) {
+      data = f->content;
+      size = f->size;
+    } else if (fe) {
+      data = fe->content;
+      size = (int)fe->size;
+    } else {
+      return -1;
+    }
+    if (offset >= (uint32_t)size) return 0;
+    n = size - (int)offset;
+    if (n > len) n = len;
+    for (i = 0; i < n; i++) buf[i] = data[offset + (uint32_t)i];
+    return n;
+  }
 }
 
 int file_load(const char* path, char* buf, int max_size) {

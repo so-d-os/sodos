@@ -220,8 +220,8 @@ Várias unidades FAT podem ficar montadas ao mesmo tempo (`D:`, `E:`, `U:`...). 
 | Diretório aberto | 64 KB (cadeia de até 64 clusters) |
 | Caminho | 8 componentes de até 12 caracteres |
 | `copy` | arquivos de até 8 MB (no heap alto) |
-| `type` / `edit` | 2 KB por arquivo |
-| `cat` | 4 KB |
+| `edit` | 2 KB por arquivo |
+| Pipe (`a \| more`) | 256 KB de saída |
 | `asm` | fonte de 16 KB, código de 32 KB, 64 rótulos |
 | Clusters | vindos do BPB; `format` escolhe 8/16/32 KB até caber em FAT16 |
 
@@ -327,8 +327,10 @@ Não há Ctrl (Ctrl+C não interrompe um comando); a única combinação é `Ctr
 | `cd [caminho]` | Entra numa pasta; sem argumento mostra o diretório atual |
 | `md pasta` | Cria pasta (só FAT16) |
 | `rd pasta` | Remove pasta vazia (só FAT16) |
-| `type arquivo` | Mostra um arquivo de qualquer unidade (2 KB) |
-| `cat arquivo` | Mostra um arquivo da unidade FAT montada (4 KB) |
+| `type arquivo` / `cat arquivo` | Mostra o arquivo inteiro, de qualquer unidade. Texto UTF-8 (feito no Linux) aparece com acentos |
+| `more arquivo` | Mostra uma tela por vez: `Espaço` próxima tela, `Enter` próxima linha, `q`/`Esc`/`Ctrl+C` sai |
+| `cmd \| more` | Pipe: a saída do comando da esquerda vai para o da direita (`type x.txt \| more`, `dir /s \| more`, `help \| more`). Um `\|` por linha; um `.EXE` à direita lê o pipe como entrada |
+| `keyb [br\|us]` | Layout do teclado: `br` ABNT2 (padrão: `ç`, acentos ´, crase, ~, ^ e ¨, AltGr) ou `us`. Fica em `KEYB.CFG` no `D:` (ou `U:`) e vale no boot |
 | `copy origem destino` | Copia entre unidades (até 8 MB); `copy c:hello.asm d:`, `copy U:\HELLO.EXE D:` |
 | `clear` / `cls` | Limpa a tela |
 | `history` | Histórico numerado (só da sessão) |

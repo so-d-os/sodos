@@ -17,6 +17,7 @@
 #include "net.h"
 #include "sched.h"
 #include "visual.h"
+#include "keymap.h"
 #include "bootinfo.h"
 #include "fbcon.h"
 #include "xhci.h"
@@ -72,7 +73,7 @@ static int lfb_probe_rw(volatile uint8_t* base) {
 }
 
 extern const uint8_t font8x8_basic[95][8];
-extern const uint8_t font8x16_cp437[256][16];
+extern const uint8_t font8x16_cp850[256][16];
 extern uint32_t mod_depth;
 
 /* Fonte 8x16 da BIOS (256 chars x 32 bytes na plane 2). */
@@ -262,29 +263,21 @@ static void vga_font_plane_leave(void) {
 static void font_load_builtin(void) {
   for (int ch = 0; ch < 256; ch++)
     for (int row = 0; row < 32; row++)
-      vga_bios_font[ch * 32 + row] = row < 16 ? font8x16_cp437[ch][row] : 0;
+      vga_bios_font[ch * 32 + row] = row < 16 ? font8x16_cp850[ch][row] : 0;
   vga_bios_font_ok = 1;
 }
 
+/* A BIOS deixa a fonte CP437 (sem ã, õ, Á...). O SODOS usa CP850, a pagina
+ * do DOS em portugues: a fonte embutida vai para a VGA no boot e volta para
+ * la a cada saida do modo grafico. */
 void vga_capture_bios_font(void) {
-  volatile uint8_t* vga = (volatile uint8_t*)0xA0000;
-  int nonzero = 0;
+  font_load_builtin();
   if (!vga_legacy()) {
-    font_load_builtin();
-    serial_puts("[vga] UEFI: fonte 8x16 embutida\n");
+    serial_puts("[vga] UEFI: fonte 8x16 CP850 embutida\n");
     return;
   }
-  vga_font_plane_enter();
-  for (int i = 0; i < 256 * 32; i++) {
-    uint8_t b = vga[i];
-    vga_bios_font[i] = b;
-    if (b) nonzero = 1;
-  }
-  vga_font_plane_leave();
-  vga_bios_font_ok = nonzero;
-  serial_puts(nonzero ? "[vga] fonte BIOS 8x16 guardada\n" : "[vga] fonte BIOS vazia, usando a embutida\n");
-  if (!nonzero)
-    font_load_builtin();
+  vga_restore_bios_font();
+  serial_puts("[vga] fonte 8x16 CP850 carregada\n");
 }
 
 static void vga_restore_bios_font(void) {
@@ -760,20 +753,6 @@ static void gfx_frame_end(void) {
     gfx_offscreen = 0;
   }
 }
-
-static const char scancode_map[128] = {
-  0,  27, '1','2','3','4','5','6','7','8','9','0','-','=','\b',
-  '\t','q','w','e','r','t','y','u','i','o','p','[',']','\n',0,'a',
-  's','d','f','g','h','j','k','l',';','\'','`',0,'\\','z','x','c',
-  'v','b','n','m',',','.','/',0,'*',0,' ',
-};
-
-static const char scancode_map_shift[128] = {
-  0,  27, '!','@','#','$','%','^','&','*','(',')','_','+','\b',
-  '\t','Q','W','E','R','T','Y','U','I','O','P','{','}','\n',0,'A',
-  'S','D','F','G','H','J','K','L',':','"','~',0,'|','Z','X','C',
-  'V','B','N','M','<','>','?',0,'*',0,' ',
-};
 
 static const uint8_t* glyph16(unsigned char c) {
   if (vga_bios_font_ok)
@@ -3146,8 +3125,8 @@ static int gui_key_event(uint8_t data, int* key) {
     int was_e0 = gui.e0;
     gui.e0 = 0;
     if (!k && !was_e0) {
-      char c = gui.shift ? scancode_map_shift[data] : scancode_map[data];
-      k = (unsigned char)c;
+      int c = keymap_char(data);
+      k = c;
       if (c == '\n') k = '\r';
     }
     if (!k) return 0;
@@ -5736,7 +5715,7 @@ static int win_wm_run(void) {
         continue;
       }
       {
-        char c = shift_on ? scancode_map_shift[sc] : scancode_map[sc];
+        char c = (char)keymap_char(sc);
         if (c == 27) {
           if (note_dlg) {
             note_dlg = 0;
@@ -6009,7 +5988,7 @@ gfx_restart:
       }
 
       {
-        char c = shift_on ? scancode_map_shift[sc] : scancode_map[sc];
+        char c = (char)keymap_char(sc);
         if (c == 27) {
           serial_puts("[visual] ESC (map)\n");
           break;

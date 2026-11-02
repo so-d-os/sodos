@@ -5,7 +5,7 @@
 void visual_run(void);
 /* Desktop tipo Windows 3.1/95. ESC restaura modo texto 80x25. */
 void win_run(void);
-/* Copia a fonte 8x16 da BIOS (chamar no boot, ainda em modo texto). */
+/* Carrega a fonte 8x16 CP850 (chamar no boot, ainda em modo texto). */
 void vga_capture_bios_font(void);
 /* Forca modo texto 80x25 para que panic/exception seja visivel (ex.: em isr_dispatch). */
 void vga_force_text_mode(void);

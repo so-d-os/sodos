@@ -2,6 +2,7 @@
 #include "reboot.h"
 #include "serial.h"
 #include "visual.h"
+#include "keymap.h"
 
 static inline void outb(uint16_t port, uint8_t val) {
   __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -79,6 +80,7 @@ void kbd_watch(uint8_t sc) {
   if (sc == 0xFA || sc == 0xFE)   /* ACK / resend do controlador */
     return;
 
+  keymap_watch(ext, key, up);
   side = ext ? 2 : 1;
   if (key == 0x1D) {
     if (up) kw_ctrl &= (uint8_t)~side;
