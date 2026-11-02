@@ -3722,10 +3722,53 @@ static void wm_exec(struct wm_win* wins, int* focus, int big, const char* path) 
     app_status_set("executou");
 }
 
-/* Icones de D:\user\default\desktop. Pasta termina sem barra.
+/* Atalho gravado em D:\... e o arquivo ficou no pendrive: procura o mesmo
+ * caminho em U: e depois so o nome na raiz de U:. 1 achou (caminho em out). */
+static int desk_find(const char* path, char* out, int max) {
+  char alt[48];
+  const char* leaf;
+  char L;
+  int i, j;
+  if (!path || !path[0] || max < 4) return 0;
+  if (path[1] != ':') {
+    if (file_size(path) < 0) return 0;
+    wm_copy_str(out, max, path);
+    return 1;
+  }
+  L = path[0];
+  if (L >= 'a' && L <= 'z') L = (char)(L - 32);
+  if (drives_is_mounted(L) && file_size(path) >= 0) {
+    wm_copy_str(out, max, path);
+    return 1;
+  }
+  if (L == 'U') return 0;
+  if (!drives_is_mounted('U') && drives_mount_usb() != 0) return 0;
+  wm_copy_str(alt, (int)sizeof(alt), path);
+  alt[0] = 'U';
+  if (file_size(alt) >= 0) {
+    wm_copy_str(out, max, alt);
+    return 1;
+  }
+  leaf = path + 2;
+  for (i = 2; path[i]; i++)
+    if (path[i] == '\\' || path[i] == '/') leaf = path + i + 1;
+  if (!leaf[0] || leaf == path + 3) return 0;
+  j = 0;
+  alt[j++] = 'U';
+  alt[j++] = ':';
+  alt[j++] = '\\';
+  for (i = 0; leaf[i] && j < (int)sizeof(alt) - 1; i++) alt[j++] = leaf[i];
+  alt[j] = '\0';
+  if (file_size(alt) < 0) return 0;
+  wm_copy_str(out, max, alt);
+  return 1;
+}
+
+/* Icones de D:\user\default\desktop (ou da mesma pasta em U:). Pasta termina sem barra.
  * Imagem com miniatura ao lado (NOME.THM) aparece como a propria figura. */
 #define DESK_MAX 24
 #define DESK_ROOT "D:\\user\\default\\desktop\\"
+#define DESK_ROOT_USB "U:\\user\\default\\desktop\\"
 struct desk_item {
   char name[16];
   char path[48];
@@ -3812,10 +3855,15 @@ static void desk_load(void) {
   const char* prefix = DESK_ROOT;
   int plen = 0;
   desk_free();
-  if (!drives_is_mounted('D')) return;
-  while (prefix[plen]) plen++;
-  n = file_list(DESK_ROOT, list, (int)sizeof(list));
+  n = drives_is_mounted('D') ? file_list(DESK_ROOT, list, (int)sizeof(list)) : -1;
+  if (n <= 0) {
+    /* sem D: (notebook com boot pelo GRUB): a mesma pasta no pendrive */
+    prefix = DESK_ROOT_USB;
+    if (!drives_is_mounted('U') && drives_mount_usb() != 0) return;
+    n = file_list(prefix, list, (int)sizeof(list));
+  }
   if (n <= 0) return;
+  while (prefix[plen]) plen++;
   p = 0;
   while (p < n && desk_n < DESK_MAX) {
     struct desk_item* it;
@@ -3980,16 +4028,17 @@ static int desk_hit(int mx, int my, int icon, int ch, int scale, int sw, int sh,
 }
 
 static void wm_open_browser(struct wm_win* wins, int* focus, int big) {
+  char exe[48];
   if (gui_raise_title("Navegador")) return;
-  if (drives_is_mounted('D') && file_size("D:\\BROWSER.EXE") > 0) {
-    wm_exec(wins, focus, big, "D:\\BROWSER.EXE");
+  if (desk_find("D:\\BROWSER.EXE", exe, (int)sizeof(exe)) && file_size(exe) > 0) {
+    wm_exec(wins, focus, big, exe);
     return;
   }
   {
     int nw = wm_new_run_window(wins, big, "Navegador", 0);
-    serial_puts("[visual] sem D:BROWSER.EXE (make disk-files)\n");
+    serial_puts("[visual] sem D:BROWSER.EXE nem U:BROWSER.EXE (make disk-files)\n");
     if (nw >= 0) {
-      run_puts("D:\\BROWSER.EXE nao encontrado.\n\n"
+      run_puts("BROWSER.EXE nao encontrado em D:\\ nem em U:\\.\n\n"
                "Feche o QEMU e rode no Linux/WSL:\n"
                "  make disk-files\n"
                "  make run\n");
@@ -4001,8 +4050,9 @@ static void wm_open_browser(struct wm_win* wins, int* focus, int big) {
 
 static void wm_open_video(struct wm_win* wins, int* focus, int big, const char* file) {
   char* argv[3];
-  if (drives_is_mounted('D') && file_size("D:\\VIDPLAY.EXE") > 0 && file) {
-    argv[0] = "D:\\VIDPLAY.EXE";
+  char exe[48];
+  if (file && desk_find("D:\\VIDPLAY.EXE", exe, (int)sizeof(exe)) && file_size(exe) > 0) {
+    argv[0] = exe;
     argv[1] = (char*)file;
     argv[2] = 0;
     wm_exec_sox(wins, focus, big, argv[0], app_win, 2, argv);
@@ -4011,7 +4061,7 @@ static void wm_open_video(struct wm_win* wins, int* focus, int big, const char* 
   {
     int nw = wm_new_run_window(wins, big, "Video", 0);
     if (nw >= 0) {
-      run_puts("D:\\VIDPLAY.EXE nao encontrado.\n\n"
+      run_puts("VIDPLAY.EXE nao encontrado em D:\\ nem em U:\\.\n\n"
                "Feche o QEMU e rode:\n"
                "  make disk-files\n"
                "  make run\n");
@@ -4023,8 +4073,9 @@ static void wm_open_video(struct wm_win* wins, int* focus, int big, const char* 
 
 static void wm_open_image(struct wm_win* wins, int* focus, int big, const char* file) {
   char* argv[3];
-  if (drives_is_mounted('D') && file_size("D:\\IMAGEVW.EXE") > 0 && file) {
-    argv[0] = "D:\\IMAGEVW.EXE";
+  char exe[48];
+  if (file && desk_find("D:\\IMAGEVW.EXE", exe, (int)sizeof(exe)) && file_size(exe) > 0) {
+    argv[0] = exe;
     argv[1] = (char*)file;
     argv[2] = 0;
     wm_exec_sox(wins, focus, big, argv[0], app_win, 2, argv);
@@ -4033,7 +4084,7 @@ static void wm_open_image(struct wm_win* wins, int* focus, int big, const char* 
   {
     int nw = wm_new_run_window(wins, big, "Imagem", 0);
     if (nw >= 0) {
-      run_puts("D:\\IMAGEVW.EXE nao encontrado.\n\n"
+      run_puts("IMAGEVW.EXE nao encontrado em D:\\ nem em U:\\.\n\n"
                "Feche o QEMU e rode:\n"
                "  make disk-files\n"
                "  make run\n");
@@ -4639,8 +4690,11 @@ static void chrome_paint_over(void) {
 }
 
 static void host_open_advanced(struct wm_win* wins, int* focus, int big) {
+  char exe[48];
   if (gui_raise_title("Fontes avancadas")) return;
-  wm_exec(wins, focus, big, "D:\\SODOS\\FONTADV.EXE");
+  if (!desk_find("D:\\SODOS\\FONTADV.EXE", exe, (int)sizeof(exe)))
+    wm_copy_str(exe, (int)sizeof(exe), "D:\\SODOS\\FONTADV.EXE");
+  wm_exec(wins, focus, big, exe);
 }
 
 static int chrome_in_browser(int x, int y) {
@@ -5395,8 +5449,12 @@ static int win_wm_run(void) {
               wm_open_image(wins, &focus, big, desk_items[desk_i].path);
             else if (desk_items[desk_i].image == 2)
               wm_open_video(wins, &focus, big, desk_items[desk_i].path);
-            else if (app_is_prog(desk_items[desk_i].name))
-              wm_exec(wins, &focus, big, desk_items[desk_i].path);
+            else if (app_is_prog(desk_items[desk_i].name)) {
+              char exe[48];
+              if (!desk_find(desk_items[desk_i].path, exe, (int)sizeof(exe)))
+                wm_copy_str(exe, (int)sizeof(exe), desk_items[desk_i].path);
+              wm_exec(wins, &focus, big, exe);
+            }
             else {
               int nw = wm_new_run_window(wins, big, desk_items[desk_i].name, 0);
               if (nw >= 0) {
