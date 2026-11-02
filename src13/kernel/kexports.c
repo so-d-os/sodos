@@ -18,20 +18,28 @@ static void (*con_hook)(char c);
 void kexp_set_console_hook(void (*hook)(char c)) { con_hook = hook; }
 
 /* ---------- console ---------- */
-static void k_putc(int c) {
+/* Cada chamada de console e um ponto de Ctrl+C (con_break_poll). */
+static void con_out(int c) {
   if (con_hook) con_hook((char)c);
   else putc((char)c);
 }
 
+static void k_putc(int c) {
+  con_break_poll();
+  con_out(c);
+}
+
 static void k_write(const char* s, int n) {
   int i;
+  con_break_poll();
   if (!s) return;
-  for (i = 0; i < n; i++) k_putc(s[i]);
+  for (i = 0; i < n; i++) con_out(s[i]);
 }
 
 static void k_puts(const char* s) {
+  con_break_poll();
   if (!s) return;
-  while (*s) k_putc(*s++);
+  while (*s) con_out(*s++);
 }
 
 static int k_getc(void) {
@@ -152,7 +160,11 @@ static uint32_t rdtsc_lo(uint32_t* hi) {
 }
 
 static uint32_t k_rdtsc(uint32_t* hi) { return rdtsc_lo(hi); }
-static uint32_t k_ms(void) { return net_ms(); }
+/* Lacos de espera costumam ler o relogio: tambem e ponto de Ctrl+C. */
+static uint32_t k_ms(void) {
+  con_break_poll();
+  return net_ms();
+}
 
 static int cmos_in(int reg) {
   shell_outb(0x70, (uint8_t)reg);
@@ -207,10 +219,28 @@ static void k_random(uint8_t* out, int n) {
 /* ---------- rede ---------- */
 static int k_net_ready(void) { return net_ready(); }
 static int k_dns(const char* host, uint32_t* ip) { return net_resolve(host, ip); }
-static int k_tcp_connect(const char* host, int port) { return net_tcp_connect(host, port); }
+static uint32_t tcp_pid;   /* programa dono da conexao da API */
+
+static int k_tcp_connect(const char* host, int port) {
+  int rc = net_tcp_connect(host, port);
+  if (rc == 0) tcp_pid = mod_current_pid();
+  return rc;
+}
 static int k_tcp_send(const void* d, int n) { return net_tcp_send(d, n); }
-static int k_tcp_recv(void* d, int cap) { return net_tcp_recv(d, cap); }
-static void k_tcp_close(void) { net_tcp_close(); }
+static int k_tcp_recv(void* d, int cap) {
+  con_break_poll();
+  return net_tcp_recv(d, cap);
+}
+static void k_tcp_close(void) {
+  net_tcp_close();
+  tcp_pid = 0;
+}
+
+void kexp_release_pid(uint32_t pid) {
+  if (!pid || tcp_pid != pid) return;
+  net_tcp_close();
+  tcp_pid = 0;
+}
 
 /* ---------- janela canvas do WIN (visual.c) ---------- */
 static int k_gui_open(const char* title) { return gui_open(title); }

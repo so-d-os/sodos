@@ -6,6 +6,8 @@
 #include "drives.h"
 #include "shell.h"
 #include "serial.h"
+#include "reboot.h"
+#include "kexports.h"
 #include "c_compiler/sox.h"
 
 void* kexport_find(const char* name);
@@ -523,9 +525,11 @@ int mod_exec(const char* path, int argc, char** argv) {
       exe_drive = prev_drive;
       return MOD_ERR_MEMORY;
     }
+    kbd_break_take();   /* Ctrl+C antigo (do prompt) nao mata o novo */
     rc = mod_call_entry(mods[id].base + mods[id].entry, nargc, av, av);
   }
   dyn_release_pid(pid);
+  kexp_release_pid(pid);
   unload(id);
   um_set_owner(prev_owner);
   cur_pid = prev_pid;

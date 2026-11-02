@@ -1,6 +1,7 @@
-/* reboot.c - Ctrl+Alt+Del e reinicio do PC (freestanding) */
+/* reboot.c - Ctrl+Alt+Del, Ctrl+C e reinicio do PC (freestanding) */
 #include "reboot.h"
 #include "serial.h"
+#include "visual.h"
 
 static inline void outb(uint16_t port, uint8_t val) {
   __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -48,6 +49,13 @@ static int kw_e0;
 static int kw_skip;   /* Pause: E1 1D 45 E1 9D C5 nao e Ctrl */
 static uint8_t kw_ctrl;
 static uint8_t kw_alt;
+static int kw_break;
+
+int kbd_break_take(void) {
+  int b = kw_break;
+  kw_break = 0;
+  return b;
+}
 
 void kbd_watch(uint8_t sc) {
   int ext = kw_e0;
@@ -80,6 +88,11 @@ void kbd_watch(uint8_t sc) {
   if (key == 0x38) {
     if (up) kw_alt &= (uint8_t)~side;
     else kw_alt |= side;
+    return;
+  }
+  /* 0x2E: C. E0 46: Break (Ctrl+Pause). O WIN trata Ctrl+C como tecla. */
+  if (!up && kw_ctrl && ((key == 0x2E && !ext) || (key == 0x46 && ext))) {
+    if (!win_screen_size(0, 0)) kw_break = 1;
     return;
   }
   /* 0x53: Delete (E0 53) ou o Del do teclado numerico. */

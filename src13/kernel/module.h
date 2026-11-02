@@ -13,6 +13,8 @@
 #define MOD_ERR_IMPORT   -1003
 #define MOD_ERR_DEPTH    -1004
 int mod_exec(const char* path, int argc, char** argv);
+/* Codigo de saida de um programa DOS encerrado com Ctrl+C (ASCII ETX). */
+#define MOD_EXIT_BREAK 3
 
 /* Procura o programa como o shell faz: nome, nome.EXE, na unidade corrente e em D:. */
 int mod_find_exe(const char* name, char* out, int max);

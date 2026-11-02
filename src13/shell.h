@@ -49,6 +49,9 @@ void goto_xy(int r, int c);
 void clear_line_from_cursor(void);
 void pause(void);
 int shell_get_char(void);
+/* Le o teclado sem bloquear e, se veio Ctrl+C, encerra o programa DOS
+ * em execucao (nao retorna). Fora de programa ou no WIN nao faz nada. */
+void con_break_poll(void);
 
 #define KEY_UP    0x100
 #define KEY_DOWN  0x101

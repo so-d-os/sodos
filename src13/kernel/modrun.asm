@@ -7,6 +7,9 @@
 ; Cada chamada guarda o proprio rsp em cur_ctx (moldura ligada), nao numa
 ; pilha pelo nivel. Um programa pode terminar antes de outro que comecou
 ; depois: o cur_ctx de quem esta parado fica salvo na tarefa.
+;
+; mod_exit pode vir do meio de uma chamada ao kernel (exit, Ctrl+C), sem
+; passar pelos epilogos do programa: por isso r13-r15 tambem sao salvos aqui.
 bits 64
 
 global mod_call_entry
@@ -24,6 +27,9 @@ mod_call_entry:
   push rbx
   push rbp
   push r12
+  push r13
+  push r14
+  push r15
   push qword [rel cur_ctx]
   mov [rel cur_ctx], rsp
   mov eax, [rel mod_depth]
@@ -42,6 +48,9 @@ mod_ret:
   mov rsp, [rel cur_ctx]
   pop r12
   mov [rel cur_ctx], r12
+  pop r15
+  pop r14
+  pop r13
   pop r12
   pop rbp
   pop rbx
@@ -50,6 +59,9 @@ mod_full:
   mov rsp, [rel cur_ctx]
   pop r12
   mov [rel cur_ctx], r12
+  pop r15
+  pop r14
+  pop r13
   pop r12
   pop rbp
   pop rbx

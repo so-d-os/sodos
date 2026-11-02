@@ -438,21 +438,72 @@ static const char scancode_map_shift[128] = {
 #define SCANCODE_PGDN  0x51
 #define SCANCODE_ESC   0x01
 
-static int get_char(void) {
+/* Ctrl+C e regra do kernel: um programa DOS (.EXE fora do WIN) e encerrado
+ * quando chama o console (k_putc, k_getc, ...) ou o relogio. Sem IRQ de
+ * teclado, um laco que nunca chama o kernel nao tem como ser parado.
+ * Scancodes lidos por con_break_poll ficam aqui ate get_char pedi-los;
+ * eles ja passaram por kbd_watch. */
+#define KB_PEND 32
+static unsigned char kb_pend[KB_PEND];
+static int kb_head, kb_tail;
+extern uint32_t mod_depth;
+void mod_exit(int code);
+
+static int break_applies(void) {
+  return mod_depth > 0 && !win_screen_size(0, 0);
+}
+
+static void break_fire(void) {
+  if (!break_applies() || !kbd_break_take()) return;
+  kb_head = kb_tail = 0;
+  serial_puts("[break] Ctrl+C\n");
+  puts_k("^C\n");
+  mod_exit(MOD_EXIT_BREAK);
+}
+
+void con_break_poll(void) {
   unsigned char st;
+  if (!break_applies()) return;
+  /* Para no primeiro byte do mouse: ele nao e nosso. */
+  while (((st = inb(0x64)) & 1) && !(st & 0x20)) {
+    unsigned char sc = inb(0x60);
+    kbd_watch(sc);
+    if (((kb_head + 1) % KB_PEND) != kb_tail) {
+      kb_pend[kb_head] = sc;
+      kb_head = (kb_head + 1) % KB_PEND;
+    }
+  }
+  break_fire();
+}
+
+/* Proximo scancode: primeiro os guardados, depois a porta. 0 se nao ha. */
+static int kb_read(unsigned char* sc) {
+  unsigned char st;
+  if (kb_head != kb_tail) {
+    *sc = kb_pend[kb_tail];
+    kb_tail = (kb_tail + 1) % KB_PEND;
+    return 1;
+  }
+  st = inb(0x64);
+  if (!(st & 1))
+    return 0;
+  *sc = inb(0x60);
+  if (st & 0x20)
+    return 0;
+  kbd_watch(*sc);
+  return 1;
+}
+
+static int get_char(void) {
   unsigned char sc;
 
   /* Polling puro. Sem hlt e sem IRQ0: o timer no vetor 8 (antes do remap)
    * caia no handler de #DF e o iret executava lixo em 0x9FC00 (#UD). */
   for (;;) {
     net_poll();
-    st = inb(0x64);
-    if (!(st & 1))
+    if (!kb_read(&sc))
       continue;
-    sc = inb(0x60);
-    if (st & 0x20)
-      continue;
-    kbd_watch(sc);
+    break_fire();
     if (sc == 0xFA || sc == 0xFE)
       continue;
     break;
@@ -460,10 +511,10 @@ static int get_char(void) {
 
   if (sc == 0xE0) {
     int n = 100000;
-    while (!(inb(0x64) & 1) && --n > 0) { }
-    if (!(inb(0x64) & 1)) return 0;
-    sc = inb(0x60);
-    kbd_watch(sc);
+    int got;
+    while (!(got = kb_read(&sc)) && --n > 0) { }
+    if (!got) return 0;
+    break_fire();
     if (sc & 0x80) return 0;
     /* Tabela propria. Um if/switch denso o gcc vira jmp [reg*4]
      * e um buraco dessa tabela executa INT3 (#BP). */
