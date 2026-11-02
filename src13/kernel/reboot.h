@@ -12,3 +12,7 @@ void kbd_watch(uint8_t sc);
 /* 1 se houve Ctrl+C ou Ctrl+Break desde a ultima chamada (e limpa o aviso).
  * No WIN o aviso nao e registrado: la Ctrl+C e tecla comum. */
 int kbd_break_take(void);
+
+/* 1 enquanto um dos Ctrl esta apertado (ja vale para a tecla que
+ * get_char acabou de devolver). */
+int kbd_ctrl_down(void);
