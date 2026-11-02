@@ -14,6 +14,7 @@
  *         -sys "texto"  mensagem de sistema
  *         -raw   -p sem template de chat (continua o texto)
  *         -tok "texto"  so mostra os ids dos tokens
+ *         -utf8  terminal em UTF-8 (soxrun no Linux); sem ela, CP850
  *
  * O arquivo inteiro fica na memoria e o heap do SODOS vai ate 256 MB: cabem
  * modelos de ~200 MB, como o SmolLM2-135M-Instruct Q8_0 (145 MB).
@@ -1158,6 +1159,105 @@ static int detok(int id, char* o, int max) {
   return n;
 }
 
+/* ---------------- CP850 <-> UTF-8 ---------------- */
+/* O modelo fala UTF-8; o console e o teclado do SODOS usam CP850 (como o
+ * AGENT.EXE). -utf8 desliga a conversao (terminal do Linux no soxrun). */
+static int g_utf8;
+
+/* U+00A0..U+00FF -> CP850 (igual ao mc/view.c e ao agent.c) */
+static const u8 latin1_cp850[96] = {
+  0xFF, 0xAD, 0xBD, 0x9C, 0xCF, 0xBE, 0xDD, 0xF5, 0xF9, 0xB8, 0xA6, 0xAE,
+  0xAA, 0xF0, 0xA9, 0xEE, 0xF8, 0xF1, 0xFD, 0xFC, 0xEF, 0xE6, 0xF4, 0xFA,
+  0xF7, 0xFB, 0xA7, 0xAF, 0xAC, 0xAB, 0xF3, 0xA8, 0xB7, 0xB5, 0xB6, 0xC7,
+  0x8E, 0x8F, 0x92, 0x80, 0xD4, 0x90, 0xD2, 0xD3, 0xDE, 0xD6, 0xD7, 0xD8,
+  0xD1, 0xA5, 0xE3, 0xE0, 0xE2, 0xE5, 0x99, 0x9E, 0x9D, 0xEB, 0xE9, 0xEA,
+  0x9A, 0xED, 0xE8, 0xE1, 0x85, 0xA0, 0x83, 0xC6, 0x84, 0x86, 0x91, 0x87,
+  0x8A, 0x82, 0x88, 0x89, 0x8D, 0xA1, 0x8C, 0x8B, 0xD0, 0xA4, 0x95, 0xA2,
+  0x93, 0xE4, 0x94, 0xF6, 0x9B, 0x97, 0xA3, 0x96, 0x81, 0xEC, 0xE7, 0x98,
+};
+
+/* Aspas, tracos, setas e molduras; o resto vira '?'. */
+static const u16 uni_from[] = {
+  0x2018, 0x2019, 0x201C, 0x201D, 0x2013, 0x2014, 0x2022, 0x2026, 0x20AC,
+  0x2500, 0x2502, 0x250C, 0x2510, 0x2514, 0x2518, 0x251C, 0x2524, 0x252C,
+  0x2534, 0x253C, 0x2550, 0x2551, 0x2554, 0x2557, 0x255A, 0x255D, 0x2588,
+  0x2591, 0x2592, 0x2593, 0x2192, 0x2190, 0x2191, 0x2193,
+};
+static const u8 uni_to[] = {
+  0x27, 0x27, 0x22, 0x22, 0x2D, 0x2D, 0x07, 0x2E, 0x45,
+  0xC4, 0xB3, 0xDA, 0xBF, 0xC0, 0xD9, 0xC3, 0xB4, 0xC2,
+  0xC1, 0xC5, 0xCD, 0xBA, 0xC9, 0xBB, 0xC8, 0xBC, 0xDB,
+  0xB0, 0xB1, 0xB2, 0x1A, 0x1B, 0x18, 0x19,
+};
+
+static u8 uni_cp850(u32 c) {
+  u32 i;
+  if (c < 0x80) return (u8)c;
+  if (c >= 0xA0 && c <= 0xFF) return latin1_cp850[c - 0xA0];
+  for (i = 0; i < sizeof(uni_to); i++)
+    if (uni_from[i] == c) return uni_to[i];
+  return '?';
+}
+
+static u32 cp850_uni(u8 c) {
+  u32 i;
+  if (c < 0x80) return c;
+  for (i = 0; i < 96; i++)
+    if (latin1_cp850[i] == c) return 0xA0 + i;
+  for (i = 0; i < sizeof(uni_to); i++)
+    if (uni_to[i] == c) return uni_from[i];
+  return '?';
+}
+
+/* Saida de tokens: um caractere UTF-8 pode vir partido entre dois tokens. */
+static u32 o_cp;
+static int o_need;
+
+static void out_text(const char* s, int n) {
+  char b[256];
+  int i, k = 0;
+  if (g_utf8) {
+    outn(s, n);
+    return;
+  }
+  for (i = 0; i < n; i++) {
+    u8 c = (u8)s[i];
+    if (k > (int)sizeof(b) - 2) {
+      outn(b, k);
+      k = 0;
+    }
+    if (o_need) {
+      if ((c & 0xC0) == 0x80) {
+        o_cp = (o_cp << 6) | (c & 63);
+        if (--o_need == 0) b[k++] = (char)uni_cp850(o_cp);
+        continue;
+      }
+      o_need = 0;
+      b[k++] = '?';
+    }
+    if (c < 0x80) b[k++] = (char)c;
+    else if ((c & 0xE0) == 0xC0) { o_cp = c & 31; o_need = 1; }
+    else if ((c & 0xF0) == 0xE0) { o_cp = c & 15; o_need = 2; }
+    else if ((c & 0xF8) == 0xF0) { o_cp = c & 7; o_need = 3; }
+    else b[k++] = '?';
+  }
+  if (k) outn(b, k);
+}
+
+/* Texto do usuario (teclado/argv em CP850) para UTF-8, em memoria nova. */
+static char* in_text(const char* s) {
+  u32 n = (u32)strlen(s), i;
+  char* o = (char*)xmalloc(n * 3 + 1);
+  int k = 0;
+  if (g_utf8) {
+    CPY(o, s, n + 1);
+    return o;
+  }
+  for (i = 0; i < n; i++) k += utf8_put(cp850_uni((u8)s[i]), o + k);
+  o[k] = 0;
+  return o;
+}
+
 /* ---------------- amostragem ---------------- */
 static u64 rng = 0x2545F4914F6CDD1Dull;
 static float temp = 0.3f, topp = 0.9f, rep_pen = 1.1f;
@@ -1266,7 +1366,7 @@ static int generate(int maxn, unsigned* ms) {
     int id = sample(lg), len;
     if (is_stop(id)) break;
     len = detok(id, buf, sizeof(buf));
-    if (len) outn(buf, len);
+    if (len) out_text(buf, len);
     remember(id);
     n++;
     if (g_pos >= n_ctx) {
@@ -1362,9 +1462,10 @@ static float s_atof(const char* s) {
 
 static void usage(void) {
   out("uso: llama MODELO.GGU [-p \"pergunta\"] [-n N] [-t temp] [-c ctx] [-s semente]\n"
-      "                      [-r pen] [-sys \"texto\"] [-raw] [-tok \"texto\"]\n"
+      "                      [-r pen] [-sys \"texto\"] [-raw] [-tok \"texto\"] [-utf8]\n"
       "  Roda um LLM GGUF do Hugging Face (llama/qwen2; F16, Q8_0, Q4_0).\n"
-      "  Ex.: SmolLM2-135M-Instruct-Q8_0.gguf copiado como SMOL135.GGU\n");
+      "  Ex.: SmolLM2-135M-Instruct-Q8_0.gguf copiado como SMOL135.GGU,\n"
+      "       Qwen2.5-0.5B-Instruct-Q8_0.gguf como QWEN05.GGU (pede 1 GB de RAM)\n");
   k_exit(1);
 }
 
@@ -1416,10 +1517,14 @@ int main(int argc, char** argv) {
     else if (!strcmp(a, "-tok") && more) tokstr = argv[++i];
     else if (!strcmp(a, "-r") && more) rep_pen = s_atof(argv[++i]);
     else if (!strcmp(a, "-raw")) raw = 1;
+    else if (!strcmp(a, "-utf8")) g_utf8 = 1;
     else if (a[0] == '-' || model) usage();
     else model = a;
   }
   if (!model) usage();
+  if (prompt) prompt = in_text(prompt);
+  if (g_sys) g_sys = in_text(g_sys);
+  if (tokstr) tokstr = in_text(tokstr);
   if (!seeded) {
     unsigned hi = 0, lo = k_rdtsc(&hi);
     rng ^= ((u64)hi << 32) | lo;
@@ -1484,6 +1589,7 @@ int main(int argc, char** argv) {
   out("Chat: escreva e Enter. /reset limpa a conversa, /sair termina.\n");
   {
     static char line[2048];
+    char* uline;
     int first = 1;
     for (;;) {
       int n, len;
@@ -1501,15 +1607,17 @@ int main(int argc, char** argv) {
         out("(conversa limpa)\n");
         continue;
       }
-      turn(line, first);
+      uline = in_text(line);
+      turn(uline, first);
       if (g_pos + n_ptok + 8 > n_ctx) {
         out("(contexto cheio: conversa reiniciada)\n");
         g_pos = 0;
         n_recent = 0;
         n_ptok = 0;
-        turn(line, 1);
+        turn(uline, 1);
       }
       first = 0;
+      k_free(uline);
       if (feed() < 0) {
         out("(mensagem grande demais)\n");
         g_pos = 0;
