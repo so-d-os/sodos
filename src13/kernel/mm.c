@@ -1,7 +1,7 @@
 /* mm.c - First-fit. Cada bloco guarda o tamanho total, inclusive o cabecalho.
- * Duas arenas: a do kernel (kmalloc, 2 MB em 0xA80000) e a alta (umalloc, logo
- * apos o kernel, ate o limite da identidade de 1 GB) para programas, DLLs e
- * buffers grandes.
+ * Duas arenas: a do kernel (kmalloc, 2 MB em 0xA80000) e a alta (umalloc, a
+ * maior regiao E820 abaixo de 4 GB, coberta pela identidade de kernel_entry)
+ * para programas, DLLs e buffers grandes.
  *
  * Desde o boot em dois estagios o kernel fica em 0x01000000.  A arena alta e
  * escolhida a partir do mapa E820 entregue no BootInfo: nunca testamos (nem
@@ -9,6 +9,7 @@
  */
 #include "mm.h"
 #include "bootinfo.h"
+#include "serial.h"
 
 /* O kernel fica em 0x01000000.  A FAT ocupa 0xA00000-0xA59000 e o heap do
  * kernel fica em 0xA80000-0xC7FFFF, abaixo do kernel. */
@@ -16,7 +17,10 @@
 #define MM_HEAP_END   0x00C80000u
 #define MM_ALIGN      16u
 
-/* Limite da identidade montada por kernel_entry (512 paginas de 2 MB). */
+/* Limite da identidade montada por kernel_entry (4 GB menos uma pagina de
+ * 2 MB, para que fim de arena e ponteiros caibam em 32 bits).  Sem E820 o
+ * teste de RAM para em 1 GB: acima disso pode haver MMIO. */
+#define UM_MAP_MAX    0xFFE00000u
 #define UM_PROBE_MAX  0x40000000u
 #define UM_STEP       0x00100000u
 #define UM_START      0x01000000u
@@ -117,6 +121,204 @@ static uint32_t kernel_reserved_end(const struct BootInfo* bi) {
   return end;
 }
 
+/* ---------------- RAM acima de 4 GB ----------------
+ * kernel_entry so monta identidade ate 4 GB.  Aqui completamos o mesmo PDPT
+ * (GB 4..HM_MAX_GB-1) com paginas de 2 MB, so onde o E820 diz que ha RAM, e
+ * entregamos essas regioes a um alocador de 64 bits (hmalloc).  Programas
+ * x32 nao enxergam esses enderecos; quem usa e o kernel. */
+#define HM_MAX_GB     64u
+#define HM_FIRST_GB   4u
+#define HM_MAX_ARENAS 8u
+#define HM_PAGE       0x200000ULL
+#define HM_GB         0x40000000ULL
+
+struct hm_hdr {
+  uint64_t size;
+  uint32_t free;
+  uint32_t owner;
+};
+
+struct harena {
+  uint64_t start;
+  uint64_t end;
+};
+
+static uint64_t hm_pd[HM_MAX_GB - HM_FIRST_GB][512] __attribute__((aligned(4096)));
+static struct harena hm_arenas[HM_MAX_ARENAS];
+static uint32_t hm_count;
+
+static void hm_add_arena(uint64_t s, uint64_t e) {
+  uint32_t i;
+  if (e <= s + UM_MIN_SIZE) return;
+  /* Regioes vizinhas no E820 viram uma so. */
+  for (i = 0; i < hm_count; ++i) {
+    if (hm_arenas[i].end == s) {
+      hm_arenas[i].end = e;
+      return;
+    }
+  }
+  if (hm_count >= HM_MAX_ARENAS) return;
+  hm_arenas[hm_count].start = s;
+  hm_arenas[hm_count].end = e;
+  hm_count++;
+}
+
+/* Mapeia [s,e) (alinhados a 2 MB) na identidade; devolve 0 se nao conseguiu. */
+static int hm_map(uint64_t* pdpt, uint64_t s, uint64_t e) {
+  uint64_t a;
+  for (a = s; a < e; a += HM_PAGE) {
+    uint32_t gb = (uint32_t)(a / HM_GB);
+    uint32_t idx = (uint32_t)((a % HM_GB) / HM_PAGE);
+    uint64_t* pd;
+    if (gb < HM_FIRST_GB || gb >= HM_MAX_GB) return 0;
+    if (pdpt[gb] & 1u) {
+      if (pdpt[gb] & 0x80u) continue;  /* pagina de 1 GB ja montada */
+      pd = (uint64_t*)(uintptr_t)(pdpt[gb] & 0x000FFFFFFFFFF000ULL);
+    } else {
+      pd = hm_pd[gb - HM_FIRST_GB];
+      pdpt[gb] = (uint64_t)(uintptr_t)pd | 3u;
+    }
+    if (!(pd[idx] & 1u)) pd[idx] = a | 0x83u;  /* P | RW | PS, write-back */
+  }
+  return 1;
+}
+
+static void hm_init(const struct BootInfo* bi) {
+  const struct BootMemEntry* map;
+  uint64_t cr3;
+  uint64_t* pml4;
+  uint64_t* pdpt;
+  uint32_t i;
+  uint64_t total = 0;
+
+  hm_count = 0;
+  map = bootinfo_mem_map(bi);
+  if (!bi || !map || bi->mem_count == 0) return;
+  __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+  pml4 = (uint64_t*)(uintptr_t)(cr3 & 0x000FFFFFFFFFF000ULL);
+  if (!(pml4[0] & 1u)) return;
+  pdpt = (uint64_t*)(uintptr_t)(pml4[0] & 0x000FFFFFFFFFF000ULL);
+
+  for (i = 0; i < bi->mem_count; ++i) {
+    uint64_t b = map[i].base;
+    uint64_t e = b + map[i].length;
+    if (map[i].type != BOOTINFO_MEM_USABLE || map[i].length == 0) continue;
+    if (e < b) continue;
+    if (b < 0x100000000ULL) b = 0x100000000ULL;
+    if (e > (uint64_t)HM_MAX_GB * HM_GB) e = (uint64_t)HM_MAX_GB * HM_GB;
+    b = (b + HM_PAGE - 1u) & ~(HM_PAGE - 1u);
+    e &= ~(HM_PAGE - 1u);
+    if (e <= b) continue;
+    if (!hm_map(pdpt, b, e)) continue;
+    hm_add_arena(b, e);
+  }
+  __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+
+  for (i = 0; i < hm_count; ++i) {
+    struct hm_hdr* h = (struct hm_hdr*)(uintptr_t)hm_arenas[i].start;
+    h->size = hm_arenas[i].end - hm_arenas[i].start;
+    h->free = 1;
+    h->owner = 0;
+    total += h->size;
+  }
+  serial_puts("[mm] RAM acima de 4 GB: ");
+  serial_hex32((uint32_t)(total >> 20));
+  serial_puts(" MB em ");
+  serial_hex32(hm_count);
+  serial_puts(" regioes\n");
+}
+
+static int hm_ok(const struct harena* a, const struct hm_hdr* h) {
+  uint64_t p = (uint64_t)(uintptr_t)h;
+  if (p < a->start || p >= a->end) return 0;
+  if (h->size < sizeof(struct hm_hdr)) return 0;
+  if (h->size > a->end - p) return 0;
+  return 1;
+}
+
+static void hm_merge(const struct harena* a, struct hm_hdr* h) {
+  for (;;) {
+    struct hm_hdr* nxt = (struct hm_hdr*)((uint8_t*)h + h->size);
+    if ((uint64_t)(uintptr_t)nxt >= a->end || !hm_ok(a, nxt) || !nxt->free) return;
+    h->size += nxt->size;
+  }
+}
+
+int hm_ready(void) { return hm_count != 0; }
+
+void* hmalloc(uint64_t nbytes) {
+  uint64_t need;
+  uint32_t i;
+  if (nbytes == 0) return 0;
+  need = (nbytes + sizeof(struct hm_hdr) + (MM_ALIGN - 1u)) & ~(uint64_t)(MM_ALIGN - 1u);
+  if (need < nbytes) return 0;
+  for (i = 0; i < hm_count; ++i) {
+    const struct harena* a = &hm_arenas[i];
+    struct hm_hdr* h = (struct hm_hdr*)(uintptr_t)a->start;
+    while (hm_ok(a, h)) {
+      if (h->free) hm_merge(a, h);
+      if (h->free && h->size >= need) {
+        uint64_t rest = h->size - need;
+        if (rest >= sizeof(struct hm_hdr) + MM_ALIGN) {
+          struct hm_hdr* nxt = (struct hm_hdr*)((uint8_t*)h + need);
+          nxt->size = rest;
+          nxt->free = 1;
+          nxt->owner = 0;
+          h->size = need;
+        }
+        h->free = 0;
+        h->owner = 0;
+        return (uint8_t*)h + sizeof(struct hm_hdr);
+      }
+      h = (struct hm_hdr*)((uint8_t*)h + h->size);
+    }
+  }
+  return 0;
+}
+
+void hfree(void* ptr) {
+  uint32_t i;
+  uint64_t p;
+  if (!ptr) return;
+  p = (uint64_t)(uintptr_t)ptr - sizeof(struct hm_hdr);
+  for (i = 0; i < hm_count; ++i) {
+    const struct harena* a = &hm_arenas[i];
+    struct hm_hdr* h = (struct hm_hdr*)(uintptr_t)p;
+    if (p < a->start || p >= a->end) continue;
+    if (!hm_ok(a, h) || h->free) return;
+    h->free = 1;
+    hm_merge(a, h);
+    return;
+  }
+}
+
+void hm_stats(uint64_t* total, uint64_t* used, uint64_t* free_bytes, uint64_t* largest) {
+  uint64_t t = 0, u = 0, f = 0, big = 0;
+  uint32_t i;
+  for (i = 0; i < hm_count; ++i) {
+    const struct harena* a = &hm_arenas[i];
+    struct hm_hdr* h = (struct hm_hdr*)(uintptr_t)a->start;
+    t += a->end - a->start;
+    while (hm_ok(a, h)) {
+      if (h->free) {
+        f += h->size;
+        if (h->size > big) big = h->size;
+      } else {
+        u += h->size;
+      }
+      h = (struct hm_hdr*)((uint8_t*)h + h->size);
+    }
+  }
+  if (total) *total = t;
+  if (used) *used = u;
+  if (free_bytes) *free_bytes = f;
+  if (largest) *largest = big;
+}
+
+uint32_t hm_regions(void) { return hm_count; }
+uint64_t hm_region_start(uint32_t i) { return i < hm_count ? hm_arenas[i].start : 0; }
+uint64_t hm_region_end(uint32_t i) { return i < hm_count ? hm_arenas[i].end : 0; }
+
 void mm_init(void) {
   const struct BootInfo* bi = bootinfo_get();
   const struct BootMemEntry* map;
@@ -132,7 +334,7 @@ void mm_init(void) {
 
   map = bootinfo_mem_map(bi);
   if (bi && map && bi->mem_count != 0) {
-    /* A maior regiao livre ate UM_PROBE_MAX: firmwares de notebook deixam
+    /* A maior regiao livre ate UM_MAP_MAX: firmwares de notebook deixam
      * buracos reservados que cortariam a primeira regiao. */
     uint64_t best_s = 0, best_e = 0;
     for (i = 0; i < bi->mem_count; ++i) {
@@ -144,7 +346,7 @@ void mm_init(void) {
       if (b > 0xFFFFFFFFULL) continue;
       e = b + len;
       if (e < b) e = 0x100000000ULL;
-      if (e > UM_PROBE_MAX) e = UM_PROBE_MAX;
+      if (e > UM_MAP_MAX) e = UM_MAP_MAX;
       if (e <= start) continue;
       s = (b > start) ? b : start;
       s = (s + UM_ALIGN_BIG - 1u) & ~(uint64_t)(UM_ALIGN_BIG - 1u);
@@ -157,6 +359,7 @@ void mm_init(void) {
     /* A arena baixa e fixa; so a habilitamos se o E820 disser que e RAM. */
     if (kend >= MM_HEAP_END && range_usable(bi, MM_HEAP_START, MM_HEAP_END))
       arena_init(&low, MM_HEAP_START, MM_HEAP_END);
+    hm_init(bi);
   } else {
     uint32_t top = probe_ram_end(start);
     if (top >= start + UM_MIN_SIZE)

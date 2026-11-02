@@ -15,10 +15,59 @@ static void put_hex(uint32_t n) {
     putc(hex[(n >> (i * 4)) & 0xF]);
 }
 
+static void put_hex64(uint64_t n) {
+  static const char hex[] = "0123456789ABCDEF";
+  int i;
+  puts_k("0x");
+  for (i = 15; i >= 0; i--)
+    putc(hex[(n >> (i * 4)) & 0xF]);
+}
+
+static void put_mb(uint64_t n) {
+  put_u32((uint32_t)(n >> 20));
+  puts_k(" MB");
+}
+
+/* "free teste": escreve e confere uma palavra de 64 bits a cada 4 KB do maior
+ * bloco acima de 4 GB.  Valida mapeamento e RAM sem levar minutos. */
+static int high_test(void) {
+  uint64_t total, used, free_b, largest, n, i, bad = 0;
+  volatile uint64_t* p;
+  hm_stats(&total, &used, &free_b, &largest);
+  if (largest <= 64u) {
+    puts_k("Sem RAM livre acima de 4 GB.\n");
+    return 1;
+  }
+  n = largest - 64u;
+  p = (volatile uint64_t*)hmalloc(n);
+  if (!p) {
+    puts_k("hmalloc falhou.\n");
+    return 1;
+  }
+  puts_k("Testando ");
+  put_mb(n);
+  puts_k(" em ");
+  put_hex64((uint64_t)(uintptr_t)p);
+  puts_k("...\n");
+  n /= 8u;
+  for (i = 0; i < n; i += 512u) p[i] = (uint64_t)(uintptr_t)&p[i] ^ 0x5A3CA55AC33C0FF0ULL;
+  for (i = 0; i < n; i += 512u)
+    if (p[i] != ((uint64_t)(uintptr_t)&p[i] ^ 0x5A3CA55AC33C0FF0ULL)) bad++;
+  hfree((void*)p);
+  if (bad) {
+    puts_k("ERRO: ");
+    put_u32((uint32_t)bad);
+    puts_k(" paginas com valor errado.\n");
+    return 1;
+  }
+  puts_k("OK.\n");
+  return 0;
+}
+
 int cmd_free(int argc, char** argv) {
   uint32_t total, used, free_b, largest;
-  (void)argc;
-  (void)argv;
+  if (argc > 1 && (strcmp(argv[1], "teste") == 0 || strcmp(argv[1], "TESTE") == 0))
+    return high_test();
   mm_stats(&total, &used, &free_b, &largest);
   puts_k("Heap ");
   put_hex(mm_heap_start());
@@ -53,6 +102,26 @@ int cmd_free(int argc, char** argv) {
     puts_k(" KB\n");
   } else {
     puts_k("\nHeap alto indisponivel (pouca RAM).\n");
+  }
+  if (hm_ready()) {
+    uint64_t t, u, f, big;
+    uint32_t i;
+    hm_stats(&t, &u, &f, &big);
+    puts_k("\nAcima de 4 GB (so kernel)\n");
+    for (i = 0; i < hm_regions(); i++) {
+      puts_k("  ");
+      put_hex64(hm_region_start(i));
+      puts_k("-");
+      put_hex64(hm_region_end(i));
+      puts_k("\n");
+    }
+    puts_k("Total  ");
+    put_mb(t);
+    puts_k("\nUsado  ");
+    put_mb(u);
+    puts_k("\nLivre  ");
+    put_mb(f);
+    puts_k("\n");
   }
   return 0;
 }

@@ -12,7 +12,7 @@
  *   6. mouse: deixa um Normal TRB no interrupt IN e le cada relatorio;
  *   7. disco: CBW, dados e CSW nos dois endpoints bulk (READ(10), WRITE(10)).
  * Um mouse e um disco por vez. Hub USB 3 (SuperSpeed) nao.
- * A memoria e toda de identidade (fisico = virtual) abaixo de 1 GB. */
+ * A memoria e toda de identidade (fisico = virtual) abaixo de 4 GB. */
 #include <stdint.h>
 #include "xhci.h"
 #include "bootinfo.h"

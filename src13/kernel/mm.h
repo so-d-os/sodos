@@ -25,3 +25,13 @@ uint32_t usize(void* ptr);
 /* Libera tudo que o programa 'owner' deixou alocado ao sair. */
 void ufree_owner(uint32_t owner);
 void um_stats(uint32_t* total, uint32_t* used, uint32_t* free_bytes, uint32_t* largest);
+
+/* RAM acima de 4 GB, mapeada em identidade por mm_init.  Ponteiros de 64 bits:
+ * so o kernel usa (programas x32 nao alcancam esses enderecos). */
+int hm_ready(void);
+void* hmalloc(uint64_t nbytes);
+void hfree(void* ptr);
+void hm_stats(uint64_t* total, uint64_t* used, uint64_t* free_bytes, uint64_t* largest);
+uint32_t hm_regions(void);
+uint64_t hm_region_start(uint32_t i);
+uint64_t hm_region_end(uint32_t i);

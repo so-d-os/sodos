@@ -28,9 +28,9 @@ APP_CFLAGS=-ffreestanding -fno-pic -fno-stack-protector -fno-pie -nostdlib -O2 -
 	-m32 -march=i386 -mtune=i386 -mno-sse -mno-mmx -mno-3dnow \
 	-Werror -Wstrict-prototypes -I.
 APP_LDFLAGS=-m elf_i386
-# 256 MB cobre o probe de mm.c (UM_PROBE_MAX) e as paginas de 2 MB do kernel_entry.
+# 4 GB: o kernel_entry mapeia 0..4 GB e mm.c usa a maior regiao E820 abaixo de 4 GB (~3 GB no QEMU).
 # -usb -device usb-tablet: o QEMU entrega a posicao absoluta do ponteiro.
-QEMU=qemu-system-x86_64 -m 256 -usb -device usb-tablet
+QEMU=qemu-system-x86_64 -m 4096 -usb -device usb-tablet
 
 # VirtualBox (Windows/WSL).  wslpath/cygpath convertem o caminho para o
 # PowerShell; em Linux nativo o alvo vbox avisa que nao ha suporte.

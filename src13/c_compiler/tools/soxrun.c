@@ -455,6 +455,16 @@ static void* low_alloc(size_t n) {
   size_t total = (n + 15u) & ~(size_t)15u;
   void* mem = mmap(NULL, total + sizeof(struct lowblk), PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+  /* MAP_32BIT so usa os primeiros 2 GB: blocos grandes (modelos do LLAMA)
+   * vao para 2..4 GB, que ponteiros de 32 bits ainda alcancam. */
+  if (mem == MAP_FAILED) {
+    unsigned long a;
+    for (a = 0x80000000ul; a + total + sizeof(struct lowblk) <= 0xFFFF0000ul; a += 0x4000000ul) {
+      mem = mmap((void*)a, total + sizeof(struct lowblk), PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+      if (mem != MAP_FAILED) break;
+    }
+  }
   if (mem == MAP_FAILED) return NULL;
   b = (struct lowblk*)mem;
   b->size = total;

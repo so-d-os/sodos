@@ -8,9 +8,11 @@
 ;
 ; O ponto de entrada continua sendo kernel_entry.  Qualquer carregador que
 ; respeite o contrato entrega o mesmo BootInfo ao mesmo kmain() 64 bits.
-; Paginas de 2 MB, identidade, 1 GB (o diretorio 0x3000 inteiro; ver mm.c).
-; Tabelas em 0x1000/0x2000/0x3000. O diretorio 0x6000 cobre o framebuffer
-; Bochs em 0xE0000000 e o candidato 0xFD000000. GDT em 0x4000.
+; Paginas de 2 MB, identidade, 4 GB: diretorios 0x3000 (GB 0), 0x8000 (GB 1),
+; 0x9000 (GB 2) e 0x6000 (GB 3); ver mm.c.  Tabelas em 0x1000/0x2000.  No GB 3
+; o buraco PCI fica UC pelos MTRRs do firmware; o framebuffer Bochs em
+; 0xE0000000 e o candidato 0xFD000000 ganham UC explicito. GDT em 0x4000.
+; 0x8000-0x9FFF era o stage2; ele ja terminou quando chegamos aqui.
 ; BootInfo fica em 0x5000 e o mapa E820 em 0x5200; nada aqui os sobrescreve.
 
 bits 32
@@ -58,12 +60,33 @@ kernel_entry:
     add edi, 8
     loop .fill
 
-    ; 3 GB..4 GB: so o LFB (16 MB em 0xE0000000 e em 0xFD000000).
-    ; Sem isto o win le 0xE0000000 e toma page fault.
-    xor eax, eax
-    mov edi, 0x6000
+    ; 1 GB..3 GB: diretorios 0x8000 e 0x9000 (contiguos, 1024 entradas).
     mov ecx, 1024
-    rep stosd
+    mov eax, 0x40000083
+    mov edi, 0x8000
+.fill12:
+    mov [edi], eax
+    mov dword [edi+4], 0
+    add eax, 0x200000
+    add edi, 8
+    loop .fill12
+    mov dword [0x2008], 0x8003
+    mov dword [0x200C], 0
+    mov dword [0x2010], 0x9003
+    mov dword [0x2014], 0
+
+    ; 3 GB..4 GB: identidade inteira (RAM abaixo do buraco PCI em notebooks)
+    ; e o LFB (16 MB em 0xE0000000 e em 0xFD000000) marcado UC por cima.
+    ; Sem isto o win le 0xE0000000 e toma page fault.
+    mov ecx, 512
+    mov eax, 0xC0000083
+    mov edi, 0x6000
+.fill3:
+    mov [edi], eax
+    mov dword [edi+4], 0
+    add eax, 0x200000
+    add edi, 8
+    loop .fill3
     mov dword [0x2018], 0x6003
     mov dword [0x201C], 0
 
@@ -90,7 +113,7 @@ kernel_entry:
     ; Framebuffer entregue pelo carregador (GOP via GRUB): pode estar em
     ; qualquer lugar (0xD0000000 numa AMD, BAR alto acima de 4 GB...).
     ; Mapeia 64 MB a partir de fb_addr, write-combining (PAT 1 = WC abaixo).
-    ; GB 0 usa o diretorio 0x3000, GB 3 o 0x6000; os demais ganham 0x7000.
+    ; GB 0..3 usam os diretorios 0x3000/0x8000/0x9000/0x6000; acima, 0x7000.
     mov eax, [ebp + 56]
     mov edx, [ebp + 60]
     mov ecx, eax
@@ -110,6 +133,12 @@ kernel_entry:
     jb .fbi_done
     jmp .fbi_map
 .fbi_not0:
+    mov edi, 0x8000
+    cmp ecx, 1
+    je .fbi_map
+    mov edi, 0x9000
+    cmp ecx, 2
+    je .fbi_map
     mov edi, 0x6000
     cmp ecx, 3
     je .fbi_map

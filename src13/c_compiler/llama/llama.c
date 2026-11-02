@@ -1,10 +1,11 @@
 /* llama.c - LLAMA.EXE: roda um LLM local no formato GGUF (Hugging Face).
  *
- * Arquiteturas llama (SmolLM, TinyLlama...) e qwen2. Pesos F32, F16, Q8_0 e
- * Q4_0. Tokenizador BPE do GPT-2 (tokenizer.ggml.model = gpt2) com os
- * pre-tokenizadores do GPT-2/SmolLM e do Qwen2/Llama 3. Um nucleo, SSE2.
+ * Arquiteturas llama (SmolLM, TinyLlama...) e qwen2. Pesos F32, F16, Q8_0,
+ * Q4_0, Q4_1 e Q6_K (o Q4_0 do bartowski poe a saida em Q6_K e algumas
+ * ffn_down em Q4_1). Tokenizador BPE do GPT-2 (tokenizer.ggml.model = gpt2)
+ * com os pre-tokenizadores do GPT-2/SmolLM e do Qwen2/Llama 3. Um nucleo, SSE2.
  *
- *   llama MODELO.GGU                 chat (ChatML)
+ *   llama MODELO.GGU                 chat (ChatML ou DeepSeek-R1)
  *   llama MODELO.GGU -p "pergunta"   uma resposta e sai
  * opcoes: -n N   maximo de tokens por resposta (padrao 256)
  *         -t T   temperatura (padrao 0.3; 0 = sempre o mais provavel)
@@ -16,8 +17,9 @@
  *         -tok "texto"  so mostra os ids dos tokens
  *         -utf8  terminal em UTF-8 (soxrun no Linux); sem ela, CP850
  *
- * O arquivo inteiro fica na memoria e o heap do SODOS vai ate 256 MB: cabem
- * modelos de ~200 MB, como o SmolLM2-135M-Instruct Q8_0 (145 MB).
+ * O arquivo inteiro fica na memoria; o heap do SODOS e a maior regiao de RAM
+ * abaixo de 4 GB (QEMU -m 4096: ~3 GB), entao cabe o DeepSeek-R1-Distill-
+ * Qwen-1.5B Q4_0 (1,07 GB).
  * Compilado com gcc -mx32 -msse2: o cc do SODOS nao tem ponto flutuante e o
  * kernel liga o SSE em kernel_entry.asm.
  */
@@ -180,7 +182,7 @@ static float h2f(u16 h) {
 }
 
 /* ---------------- GGUF ---------------- */
-enum { T_F32 = 0, T_F16 = 1, T_Q4_0 = 2, T_Q8_0 = 8 };
+enum { T_F32 = 0, T_F16 = 1, T_Q4_0 = 2, T_Q4_1 = 3, T_Q8_0 = 8, T_Q6_K = 14 };
 
 struct str { const char* s; u32 n; };
 
@@ -287,6 +289,8 @@ static int tsize(int type, int cols, u32* bytes) {
   else if (type == T_F16) *bytes = (u32)cols * 2;
   else if (type == T_Q8_0 && cols % 32 == 0) *bytes = (u32)cols / 32 * 34;
   else if (type == T_Q4_0 && cols % 32 == 0) *bytes = (u32)cols / 32 * 18;
+  else if (type == T_Q4_1 && cols % 32 == 0) *bytes = (u32)cols / 32 * 20;
+  else if (type == T_Q6_K && cols % 256 == 0) *bytes = (u32)cols / 256 * 210;
   else return -1;
   return 0;
 }
@@ -320,7 +324,7 @@ static int get_w(struct w* w, const char* name, int cols, int rows, int required
       out(name);
       out(" tipo ");
       out_int(t->type);
-      die(" nao suportado (use F32, F16, Q8_0 ou Q4_0)");
+      die(" nao suportado (use F32, F16, Q8_0, Q4_0, Q4_1 ou Q6_K)");
     }
     if (t->off + (u64)rb * rows > (u64)(g_file + g_fsize - g_data)) die("tensor fora do arquivo");
     w->d = g_data + t->off;
@@ -526,6 +530,7 @@ static void setup_model(void) {
 /* ---------------- matvec ---------------- */
 static i8* g_xq;     /* ativacao quantizada Q8_0 */
 static float* g_xd;  /* escala por bloco de 32 */
+static float* g_xs;  /* escala * soma dos 32 valores (o minimo do Q4_1) */
 
 static void quantize_x(const float* x, int n) {
   int b, j;
@@ -536,13 +541,17 @@ static void quantize_x(const float* x, int n) {
       float a = xb[j] < 0 ? -xb[j] : xb[j];
       if (a > amax) amax = a;
     }
+    int sum = 0;
     d = amax / 127.0f;
     id = d > 0 ? 1.0f / d : 0.0f;
     g_xd[b] = d;
     for (j = 0; j < 32; j++) {
       float v = xb[j] * id;
-      g_xq[b * 32 + j] = (i8)(int)(v + (v >= 0 ? 0.5f : -0.5f));
+      int qv = (int)(v + (v >= 0 ? 0.5f : -0.5f));
+      g_xq[b * 32 + j] = (i8)qv;
+      sum += qv;
     }
+    g_xs[b] = d * (float)sum;
   }
 }
 
@@ -592,6 +601,66 @@ static float dot_q4_0(const u8* row, int nb) {
   return hsum(acc);
 }
 
+/* Q4_1: 32 valores d*q + m, q em 0..15 */
+static float dot_q4_1(const u8* row, int nb) {
+  const v16qi m4 = { 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15 };
+  v4sf acc = { 0, 0, 0, 0 };
+  const i8* xq = g_xq;
+  float mins = 0;
+  int b;
+  for (b = 0; b < nb; b++, row += 20, xq += 32) {
+    u16 dh, mh;
+    v16qi q = ld16(row + 4), lo, hi;
+    v4si p;
+    CPY(&dh, row, 2);
+    CPY(&mh, row + 2, 2);
+    lo = q & m4;
+    hi = (v16qi)((v8hu)q >> 4) & m4;
+    p = dot16(lo, ld16(xq)) + dot16(hi, ld16(xq + 16));
+    acc += __builtin_convertvector(p, v4sf) * (f16tab[dh] * g_xd[b]);
+    mins += f16tab[mh] * g_xs[b];
+  }
+  return hsum(acc) + mins;
+}
+
+/* Q6_K: blocos de 256 = ql[128] qh[64] escalas[16] (int8) d (f16).  Cada
+ * metade de 128 valores sai de 64 bytes de ql e 32 de qh, em quatro faixas de
+ * 32; cada grupo de 16 tem a sua escala.  A ativacao segue em Q8 de 32. */
+static float dot_q6_k(const u8* row, int nb) {
+  const v16qi m4 = { 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15 };
+  const v16qi m30 = { 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48 };
+  const v16qi m32 = { 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32 };
+  v4sf acc = { 0, 0, 0, 0 };
+  int b, half, c;
+  for (b = 0; b < nb; b++, row += 210) {
+    const u8 *ql = row, *qh = row + 128;
+    const i8* sc = (const i8*)(row + 192);
+    u16 dh;
+    float d;
+    CPY(&dh, row + 208, 2);
+    d = f16tab[dh];
+    for (half = 0; half < 2; half++, ql += 64, qh += 32, sc += 8) {
+      int base = b * 256 + half * 128;
+      for (c = 0; c < 2; c++) {
+        v16qi l0 = ld16(ql + c * 16), l1 = ld16(ql + 32 + c * 16), h = ld16(qh + c * 16);
+        v16qi q1 = ((l0 & m4) | ((v16qi)((v8hu)h << 4) & m30)) - m32;
+        v16qi q2 = ((l1 & m4) | ((v16qi)((v8hu)h << 2) & m30)) - m32;
+        v16qi q3 = (((v16qi)((v8hu)l0 >> 4) & m4) | (h & m30)) - m32;
+        v16qi q4 = (((v16qi)((v8hu)l1 >> 4) & m4) | ((v16qi)((v8hu)h >> 2) & m30)) - m32;
+        int o = base + c * 16;
+        acc += __builtin_convertvector(dot16(q1, ld16(g_xq + o)), v4sf) * (d * sc[c] * g_xd[o / 32]);
+        acc += __builtin_convertvector(dot16(q2, ld16(g_xq + o + 32)), v4sf) *
+               (d * sc[c + 2] * g_xd[o / 32 + 1]);
+        acc += __builtin_convertvector(dot16(q3, ld16(g_xq + o + 64)), v4sf) *
+               (d * sc[c + 4] * g_xd[o / 32 + 2]);
+        acc += __builtin_convertvector(dot16(q4, ld16(g_xq + o + 96)), v4sf) *
+               (d * sc[c + 6] * g_xd[o / 32 + 3]);
+      }
+    }
+  }
+  return hsum(acc);
+}
+
 static float dot_f32(const u8* row, const float* x, int n) {
   float s = 0, v;
   int i;
@@ -619,10 +688,12 @@ static void matvec(float* o, const struct w* w, const float* x) {
   u32 rb = 0;
   const u8* row = w->d;
   tsize(w->type, w->cols, &rb);
-  if (w->type == T_Q8_0 || w->type == T_Q4_0) quantize_x(x, w->cols);
+  if (w->type != T_F32 && w->type != T_F16) quantize_x(x, w->cols);
   for (r = 0; r < w->rows; r++, row += rb) {
     if (w->type == T_Q8_0) o[r] = dot_q8_0(row, nb);
     else if (w->type == T_Q4_0) o[r] = dot_q4_0(row, nb);
+    else if (w->type == T_Q4_1) o[r] = dot_q4_1(row, nb);
+    else if (w->type == T_Q6_K) o[r] = dot_q6_k(row, w->cols / 256);
     else if (w->type == T_F16) o[r] = dot_f16(row, x, w->cols);
     else o[r] = dot_f32(row, x, w->cols);
   }
@@ -641,15 +712,41 @@ static void get_row(float* o, const struct w* w, int r) {
       CPY(&h, row + i * 2, 2);
       o[i] = f16tab[h];
     }
-  } else {
-    int bs = w->type == T_Q8_0 ? 34 : 18;
-    for (i = 0; i < w->cols / 32; i++, row += bs) {
+  } else if (w->type == T_Q6_K) {
+    for (i = 0; i < w->cols / 256; i++, row += 210) {
+      const u8 *ql = row, *qh = row + 128;
+      const i8* sc = (const i8*)(row + 192);
+      float* y = o + i * 256;
       u16 dh;
       float d;
-      CPY(&dh, row, 2);
+      int half;
+      CPY(&dh, row + 208, 2);
       d = f16tab[dh];
+      for (half = 0; half < 2; half++, ql += 64, qh += 32, sc += 8, y += 128)
+        for (j = 0; j < 32; j++) {
+          int is = j / 16;
+          y[j] = d * sc[is] * (float)(((ql[j] & 15) | ((qh[j] & 3) << 4)) - 32);
+          y[j + 32] = d * sc[is + 2] * (float)(((ql[j + 32] & 15) | (((qh[j] >> 2) & 3) << 4)) - 32);
+          y[j + 64] = d * sc[is + 4] * (float)(((ql[j] >> 4) | (((qh[j] >> 4) & 3) << 4)) - 32);
+          y[j + 96] = d * sc[is + 6] * (float)(((ql[j + 32] >> 4) | (((qh[j] >> 6) & 3) << 4)) - 32);
+        }
+    }
+  } else {
+    int bs = w->type == T_Q8_0 ? 34 : w->type == T_Q4_1 ? 20 : 18;
+    for (i = 0; i < w->cols / 32; i++, row += bs) {
+      u16 dh, mh;
+      float d, m;
+      CPY(&dh, row, 2);
+      CPY(&mh, row + 2, 2);
+      d = f16tab[dh];
+      m = f16tab[mh];
       if (w->type == T_Q8_0)
         for (j = 0; j < 32; j++) o[i * 32 + j] = d * (float)((const i8*)row)[2 + j];
+      else if (w->type == T_Q4_1)
+        for (j = 0; j < 16; j++) {
+          o[i * 32 + j] = d * (float)(row[4 + j] & 15) + m;
+          o[i * 32 + j + 16] = d * (float)(row[4 + j] >> 4) + m;
+        }
       else
         for (j = 0; j < 16; j++) {
           o[i * 32 + j] = d * (float)((row[2 + j] & 15) - 8);
@@ -782,6 +879,7 @@ static void alloc_state(int want_ctx) {
   logits = (float*)xmalloc((u32)n_vocab * 4);
   g_xq = (i8*)xmalloc(mx);
   g_xd = (float*)xmalloc(mx / 32 * 4 + 4);
+  g_xs = (float*)xmalloc(mx / 32 * 4 + 4);
   inv_freq = (double*)xmalloc((u32)rot_dim / 2 * 8 + 8);
   for (i = 0; i < rot_dim / 2; i++) inv_freq[i] = m_exp(-(2.0 * i / rot_dim) * m_log(rope_base));
   /* contexto: o pedido, ou o que couber na memoria livre (reserva 4 MB) */
@@ -942,7 +1040,7 @@ static void tok_init(void) {
   }
   k_free(buf);
   if (seq(g_pre, "smollm")) pre_kind = 1;
-  else if (seq(g_pre, "qwen2")) pre_kind = 2;
+  else if (seq(g_pre, "qwen2") || seq(g_pre, "deepseek-r1-qwen")) pre_kind = 2;
   else if (seq(g_pre, "llama3") || seq(g_pre, "llama-bpe")) pre_kind = 3;
 }
 
@@ -1332,7 +1430,8 @@ static int g_pos;
 static int* ptok;
 static int n_ptok;
 static int im_start = -1, im_end = -1, endoftext = -1;
-static int chatml;
+static int ds_user = -1, ds_asst = -1;  /* <｜User｜> e <｜Assistant｜> do DeepSeek-R1 */
+static int chatml, deepseek;
 static char* g_sys;
 
 static void p_text(const char* s) { tokenize(s, (int)strlen(s), ptok, &n_ptok, n_ctx); }
@@ -1419,7 +1518,14 @@ static void default_sys(void) {
 }
 
 static void turn(const char* user, int first) {
-  if (chatml) {
+  if (deepseek) {
+    /* {bos}{sistema}<｜User｜>texto<｜Assistant｜>; a vez fecha com o eos */
+    if (first && bos_id >= 0) p_id(bos_id);
+    if (first && g_sys && *g_sys) p_text(g_sys);
+    p_id(ds_user);
+    p_text(user);
+    p_id(ds_asst);
+  } else if (chatml) {
     if (first && g_sys && *g_sys) {
       p_id(im_start);
       p_text("system\n");
@@ -1463,9 +1569,9 @@ static float s_atof(const char* s) {
 static void usage(void) {
   out("uso: llama MODELO.GGU [-p \"pergunta\"] [-n N] [-t temp] [-c ctx] [-s semente]\n"
       "                      [-r pen] [-sys \"texto\"] [-raw] [-tok \"texto\"] [-utf8]\n"
-      "  Roda um LLM GGUF do Hugging Face (llama/qwen2; F16, Q8_0, Q4_0).\n"
+      "  Roda um LLM GGUF do Hugging Face (llama/qwen2; F16, Q8_0, Q4_0, Q4_1, Q6_K).\n"
       "  Ex.: SmolLM2-135M-Instruct-Q8_0.gguf copiado como SMOL135.GGU,\n"
-      "       Qwen2.5-0.5B-Instruct-Q8_0.gguf como QWEN05.GGU (pede 1 GB de RAM)\n");
+      "       DeepSeek-R1-Distill-Qwen-1.5B-Q4_0.gguf como DEEPSEEK.GGU (pede 2 GB de RAM)\n");
   k_exit(1);
 }
 
@@ -1541,6 +1647,9 @@ int main(int argc, char** argv) {
   im_end = vocab_find("<|im_end|>", 10);
   endoftext = vocab_find("<|endoftext|>", 13);
   chatml = im_start >= 0 && im_end >= 0;
+  ds_user = vocab_find("<\xEF\xBD\x9C" "User\xEF\xBD\x9C>", 12);
+  ds_asst = vocab_find("<\xEF\xBD\x9C" "Assistant\xEF\xBD\x9C>", 17);
+  deepseek = ds_user >= 0 && ds_asst >= 0;
   if (tokstr) {
     int n = 0, cap = (int)strlen(tokstr) + 8;
     int* o = (int*)xmalloc((u32)cap * 4);
@@ -1628,7 +1737,11 @@ int main(int argc, char** argv) {
       n = generate(maxn, &ms);
       stats(n, ms);
       /* fecha a vez do assistente */
-      if (chatml) {
+      if (deepseek) {
+        p_id(eos_id);
+        if (g_pos + n_ptok <= n_ctx) feed();
+        else n_ptok = 0;
+      } else if (chatml) {
         p_id(im_end);
         p_text("\n");
         if (g_pos + n_ptok <= n_ctx) feed();
