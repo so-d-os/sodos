@@ -4,7 +4,10 @@
  * versao do chip e o efuse (MAC gravado, tipo de RFE, cristal) e reconhece
  * o firmware lido do pendrive.
  * Etapa 2: prepara a DMAC e os aneis de DMA e envia o firmware pelo CH12.
- * Ainda nao liga o radio (BB/RF).
+ * Etapa 3: termina a MAC e confere a resposta do firmware (C2H) no RX.
+ * Etapa 4: tabelas do radio (BB/RF), canal e recepcao de beacons. Ainda sem
+ * as calibracoes (DACK, IQK, DPK, TSSI) e sem os ganhos do efuse.
+ * Etapa 5: estacao no firmware e envio de quadros de gerencia (autenticacao).
  * O log ([rtw]) vai para a COM1 e para um buffer (rtw_log_text). */
 #pragma once
 #include <stdint.h>
@@ -36,6 +39,41 @@ int rtw_fw_pick(struct rtw_info* inf, const uint8_t* fw, uint32_t len);
 /* Etapa 2: DLE/HFC, aneis de DMA do PCIe e envio do firmware escolhido por
  * rtw_fw_pick (file = o arquivo inteiro). 0 = firmware rodando. */
 int rtw_fw_load(struct rtw_info* inf, const uint8_t* file);
+/* Etapa 3: resto da MAC (DMAC/CMAC), libera os canais de DMA e manda um H2C
+ * esperando o ack do firmware pelo anel de RX. 0 = firmware respondeu. */
+int rtw_mac_init(void);
+
+/* Etapa 4: tabelas BB/RF, NCTL, caminhos de RX e o canal (20 MHz); deixa o
+ * filtro aberto para beacons de qualquer rede. 0 = radio ligado. */
+int rtw_radio_init(int channel);
+
+/* RCK e DACK (calibracoes de inicio; rtw_radio_init ja chama). */
+void rtw_rfk_init(void);
+
+/* Etapa 5: porta 0, potencia de TX, o macid 0 como estacao no firmware e a
+ * CAM de enderecos (nosso MAC e o BSSID do AP, para a placa dar e receber ACK). */
+int rtw_sta_init(const uint8_t* mac, const uint8_t* bssid);
+/* Depois da associacao: CAM, firmware e porta no modo infraestrutura. */
+int rtw_sta_connect(const uint8_t* mac, const uint8_t* bssid, uint32_t aid);
+/* Quadro de gerencia completo (sem FCS) pela fila B0MG. 0 = entregue a placa. */
+int rtw_tx_mgmt(const uint8_t* frame, uint32_t len);
+/* Quadro de dados completo (sem FCS) pela fila de melhor esforco (ACH0). */
+int rtw_tx_data(const uint8_t* frame, uint32_t len);
+int rtw_tx_mgmt_done(void);
+
+/* Um buffer recebido. data/desc apontam para o anel e valem ate a proxima
+ * chamada. type: 0 = quadro 802.11, 1 = status de PPDU, 10 = C2H. */
+struct rtw_rx {
+  int ring;  /* 0 = RXQ, 1 = RPQ */
+  int fs, ls, type;
+  uint32_t len;
+  const uint8_t* desc;
+  const uint8_t* data;
+};
+int rtw_rx_poll(struct rtw_rx* out);
+/* Registradores 0x0000-0x1FFFF em 'out' (RTW_DUMP_SIZE bytes). */
+#define RTW_DUMP_SIZE 0x20000u
+void rtw_dump_regs(uint8_t* out);
 /* Texto da ultima falha. */
 const char* rtw_error(void);
 

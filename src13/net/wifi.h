@@ -9,6 +9,7 @@
 #define WIFI_CFG_PATH "U:\\NET\\WIFI.CFG"
 #define WIFI_FW_PATH  "U:\\NET\\RTW8852B.BIN"
 #define WIFI_LOG_PATH "U:\\NET\\WIFI.LOG"
+#define WIFI_REGS_PATH "U:\\NET\\REGS.BIN"
 
 struct wifi_cfg {
   char ssid[33];

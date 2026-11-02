@@ -607,12 +607,16 @@ int wpa_eapol_rx(struct wpa_sm* sm, const uint8_t* p, int len, uint8_t* out, int
     if (i < 8 && older) return -1;
   }
   if ((info & KI_PAIR) && !(info & KI_MIC)) {
-    /* msg 1/4: ANonce. Responde com SNonce e o RSN IE. */
+    /* msg 1/4: ANonce. Responde com SNonce e o RSN IE. Uma msg 1 repetida
+     * (mesmo ANonce) reaproveita o SNonce, como manda o 802.11. */
+    int same = sm->state == WPA_PTK_START && !wdiff(sm->anonce, p + EK_NONCE, 32);
     wcopy(sm->anonce, p + EK_NONCE, 32);
     wcopy(sm->replay, p + EK_REPLAY, 8);
     sm->have_replay = 1;
-    make_nonce(sm, sm->snonce);
-    derive_ptk(sm);
+    if (!same) {
+      make_nonce(sm, sm->snonce);
+      derive_ptk(sm);
+    }
     sm->state = WPA_PTK_START;
     return build_key(sm, (uint16_t)(2 | KI_PAIR | KI_MIC), sm->snonce,
                      wpa_rsn_ie, (int)sizeof(wpa_rsn_ie), out, cap);
