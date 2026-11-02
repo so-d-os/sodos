@@ -19,6 +19,7 @@
 #include "visual.h"
 #include "bootinfo.h"
 #include "fbcon.h"
+#include "xhci.h"
 #include "c_compiler/sox.h"
 
 static inline void outl(uint16_t port, uint32_t v) {
@@ -831,7 +832,11 @@ static void ps2_wait_write(void) {
   while ((inb(0x64) & 2)) { }
 }
 
-static void ps2_mouse_init(void) {
+/* 1 se um mouse PS/2 (de verdade ou emulado pelo firmware) respondeu 0xFA ao F4.
+ * Sem porta auxiliar (notebooks atuais), o F4 vai ao teclado ou some. */
+static int ps2_mouse_init(void) {
+  uint32_t t0, spins = 0;
+  int ack = 0;
   ps2_wait_write();
   outb(0x64, 0xA8);
   for (volatile int i = 0; i < 10000; i++) { }
@@ -839,8 +844,18 @@ static void ps2_mouse_init(void) {
   outb(0x64, 0xD4);
   ps2_wait_write();
   outb(0x60, 0xF4);
-  for (volatile int i = 0; i < 50000; i++) { }
-  while (inb(0x64) & 1) (void)inb(0x60);
+  t0 = net_ms();
+  for (;;) {
+    uint8_t st = inb(0x64);
+    if (st & 1) {
+      uint8_t b = inb(0x60);
+      if ((st & 0x20) && b == 0xFA) ack = 1;
+      continue;
+    }
+    if (ack) break;
+    if (net_has_clock() ? (net_ms() - t0) >= 50u : ++spins > 2000000u) break;
+  }
+  return ack;
 }
 
 /* Alguns controladores deixam a porta 1 (teclado) desativada apos comandos ao auxiliar. */
@@ -1397,6 +1412,22 @@ static int input_poll(uint8_t packet[3], int* pkt_idx, uint8_t* sc, int* abs_pos
     packet[2] = 0;
     *abs_pos = 1;
     return 1;
+  }
+  {
+    /* Mouse USB no xHCI (PC de verdade): relativo, ja aplicado aqui como o tablet. */
+    int dx, dy, dz, b;
+    if (xhci_mouse_poll(&dx, &dy, &dz, &b)) {
+      sys_mouse_place(sys_mx + dx, sys_my + dy);
+      dz = -dz;
+      if (dz > 3) dz = 3;
+      if (dz < -3) dz = -3;
+      tablet_dz += dz;
+      packet[0] = (uint8_t)b;
+      packet[1] = 0;
+      packet[2] = 0;
+      *abs_pos = 1;
+      return 1;
+    }
   }
   return -1;
 }
@@ -5825,9 +5856,11 @@ gfx_restart:
               (int)(gfx_h - 8 - text_area_y0), col_bg);
   }
 
-  ps2_mouse_init();
-  ps2_enable_keyboard_port();
-  tablet_hw_init();
+  {
+    int ps2_ok = ps2_mouse_init();
+    ps2_enable_keyboard_port();
+    if (tablet_hw_init() != 0) (void)xhci_mouse_init(ps2_ok);
+  }
   {
     int n = 0;
     while ((inb(0x64) & 1) && n < 200) {

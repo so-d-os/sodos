@@ -100,7 +100,7 @@ qemu-system-x86_64 -m 256 -usb -device usb-tablet
   -drive format=raw,file=disk2.img,if=ide,index=2
 ```
 
-O tablet USB entrega a posição absoluta do ponteiro, usada pelo desktop. Todos os alvos da tabela de `make` abaixo rodam em `src13/`.
+O tablet USB entrega a posição absoluta do ponteiro, usada pelo desktop. Num PC de verdade sem porta PS/2 de mouse (notebooks atuais), um mouse USB numa porta do próprio PC funciona pelo driver xHCI (`kernel/xhci.c`); para testar no QEMU, acrescente `-device qemu-xhci -device usb-mouse`. Todos os alvos da tabela de `make` abaixo rodam em `src13/`.
 
 ### Alvos do `make`
 
@@ -318,7 +318,7 @@ Não há Ctrl (Ctrl+C não interrompe um comando); a única combinação é `Ctr
 | `free` | Heaps do kernel e de usuário |
 | `dstat` / `ata` | Último acesso ATA (drive, LBA, status, error) |
 | `visual` | Demonstração gráfica 320×200 (ou VBE); `Esc` volta |
-| `mouse` | Teste do mouse PS/2 (posição, botões, pacote cru); `Esc` sai |
+| `mouse` | Teste do mouse, PS/2 ou USB/xHCI (posição, botões, pacote cru); `Esc` sai |
 | `win` / `win.exe` | Entra no desktop gráfico; `Esc` volta ao texto |
 | `ping host [-n nº] [-l bytes]` | ICMP; ex.: `ping 10.0.2.2`, `ping example.com -n 2` |
 | `dlls` | Módulos SOX carregados |
@@ -402,7 +402,7 @@ Janela preta 80×40 com o mesmo interpretador do shell. Várias podem ficar aber
 ### Outros
 
 - `visual` abre uma demonstração gráfica separada, sem janelas.
-- `mouse` mostra o pacote PS/2 cru e os botões.
+- `mouse` mostra o pacote PS/2 cru (ou o relatório USB) e os botões.
 - Não existe tecla de *printscreen* dentro do SO; a captura é feita pelo HTTP (`/win/printscreen`).
 
 ## Aplicativos do sistema
@@ -861,7 +861,7 @@ Não suportados (o player mostra o motivo na janela): H.264 (`avc1`/`avc3`), HEV
 
 ### Serial e logs
 
-O kernel escreve em COM1 (115200 8N1) com prefixos `[kernel]`, `[net]`, `[mod]`, `[httpd]`, `[visual]`, `[mouse]` e `[exc]`.
+O kernel escreve em COM1 (115200 8N1) com prefixos `[kernel]`, `[net]`, `[mod]`, `[httpd]`, `[visual]`, `[mouse]`, `[xhci]` e `[exc]`.
 
 | Alvo | Onde fica |
 |---|---|
@@ -908,6 +908,7 @@ dlls      módulos carregados, base, tamanho e referências
 - **Um FAT ativo por vez**; sem FAT32, exFAT, LFN, partições estendidas ou GPT.
 - **Um TCP de cliente por vez**; sem DHCP, IPv6 ou soquetes UDP genéricos.
 - **Sem áudio**, sem USB de armazenamento, sem disquete, sem DMA.
+- **USB só para o mouse**: um mouse HID boot numa porta raiz de um controlador xHCI; sem hubs, sem teclado USB, sem touchpad I2C.
 - **Nomes 8.3** no FAT; arquivos de `make disk-files` são copiados em maiúsculas.
 - **Sem Ctrl** no shell; não há como interromper um comando em execução.
 - **Sem controle de acesso**: o HTTP da porta 8797 executa comandos sem autenticação.
@@ -923,7 +924,7 @@ Caminhos relativos a `src13/`, exceto a primeira linha:
 | Pasta ou arquivo | Conteúdo |
 |---|---|
 | raiz | `README.md`, `README.pt-BR.md`, `LICENSE` (GPLv3) e `.git` |
-| `kernel/` | `kmain`, boot, linker, IDT/ISR/IRQ/PIC, memória, escalonador, loader SOX, exports, Ctrl+Alt+Del/reinício (`reboot.c`) e o driver ATA (`disk.h`) |
+| `kernel/` | `kmain`, boot, linker, IDT/ISR/IRQ/PIC, memória, escalonador, loader SOX, exports, Ctrl+Alt+Del/reinício (`reboot.c`), o mouse USB pelo xHCI (`xhci.c`) e o driver ATA (`disk.h`) |
 | `fs/` | FAT12/16, partições MBR, unidades e arquivos (`fat`, `partition`, `drives`, `files`) |
 | `net/` | NE2000, ARP/IPv4/ICMP/UDP/TCP/DNS e o HTTP da porta 8797 |
 | `video/` | Desktop, janelas, mouse, cursor, fonte VGA e o modo gráfico |

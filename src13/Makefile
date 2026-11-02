@@ -124,7 +124,7 @@ DISKS_CMD_O = $(DISKS_CMD_C:.c=.o)
 
 CMD_O = $(SHELL_CMD_O) $(DISKS_CMD_O)
 
-kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/reboot.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c kernel/mm.c net/net.c net/httpd.c kernel/module.c kernel/sched.c kernel/kexports.c $(SHELL_CMD_C) $(DISKS_CMD_C) shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
+kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/reboot.c kernel/xhci.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c kernel/mm.c net/net.c net/httpd.c kernel/module.c kernel/sched.c kernel/kexports.c $(SHELL_CMD_C) $(DISKS_CMD_C) shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
 	$(CC) $(CFLAGS) -c kernel/kernel.c -o kernel/kernel.o
 	$(CC) $(CFLAGS) -c kernel/bootinfo.c -o kernel/bootinfo.o
 	$(CC) $(CFLAGS) -c kernel/mm.c -o kernel/mm.o
@@ -149,6 +149,7 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(CC) $(CFLAGS) -c kernel/pic.c -o kernel/pic.o
 	$(CC) $(CFLAGS) -c kernel/irq.c -o kernel/irq.o
 	$(CC) $(CFLAGS) -c kernel/reboot.c -o kernel/reboot.o
+	$(CC) $(CFLAGS) -c kernel/xhci.c -o kernel/xhci.o
 	$(CC) $(CFLAGS) -c kernel/interrupt_stack.c -o kernel/interrupt_stack.o
 	$(CC) $(CFLAGS) -c kernel/trace.c -o kernel/trace.o
 	$(CC) $(CFLAGS) -c shell/cmd_help.c -o shell/cmd_help.o
@@ -182,11 +183,11 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(AS) -f elf64 kernel/irq_stubs.asm -o kernel/irq_stubs.o
 	$(AS) -f elf64 kernel/modrun.asm -o kernel/modrun.o
 	$(AS) -f elf64 kernel/kernel_entry.asm -o kernel/kernel_entry.o
-	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/reboot.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o kernel/mm.o net/net.o net/httpd.o kernel/module.o kernel/sched.o kernel/kexports.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o kernel/mm.o net/net.o net/httpd.o kernel/module.o kernel/sched.o kernel/kexports.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 # Mesmo kernel de kernel.elf, com o stub Multiboot2 na frente. O GRUB carrega este ELF.
 kernel_multiboot.elf: kernel.elf kernel/multiboot_header.o kernel/linker_multiboot.ld
-	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/reboot.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o kernel/mm.o net/net.o net/httpd.o kernel/module.o kernel/sched.o kernel/kexports.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o kernel/mm.o net/net.o net/httpd.o kernel/module.o kernel/sched.o kernel/kexports.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 
 kernel.bin: kernel.elf
@@ -508,7 +509,7 @@ run-format: os.img disk.img disk2.img
 CFLAGS_DEBUG=-ffreestanding -fno-pic -fno-stack-protector -fno-pie -nostdlib -O0 -g \
 	-m64 -mcmodel=small -mno-red-zone -march=x86-64 -mno-sse -mno-mmx -Werror -Wstrict-prototypes \
 	-I. -Ikernel -Ifs -Inet -Ivideo
-debug: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/reboot.c kernel/interrupt_stack.c kernel/trace.c
+debug: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/reboot.c kernel/xhci.c kernel/interrupt_stack.c kernel/trace.c
 	$(CC) $(CFLAGS_DEBUG) -c kernel/kernel.c -o kernel/kernel.o
 	$(CC) $(CFLAGS_DEBUG) -c kernel/bootinfo.c -o kernel/bootinfo.o
 	$(CC) $(CFLAGS_DEBUG) -c fs/files.c -o fs/files.o
@@ -526,13 +527,14 @@ debug: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/pa
 	$(CC) $(CFLAGS_DEBUG) -c kernel/pic.c -o kernel/pic.o
 	$(CC) $(CFLAGS_DEBUG) -c kernel/irq.c -o kernel/irq.o
 	$(CC) $(CFLAGS_DEBUG) -c kernel/reboot.c -o kernel/reboot.o
+	$(CC) $(CFLAGS_DEBUG) -c kernel/xhci.c -o kernel/xhci.o
 	$(CC) $(CFLAGS_DEBUG) -c kernel/interrupt_stack.c -o kernel/interrupt_stack.o
 	$(CC) $(CFLAGS_DEBUG) -c kernel/trace.c -o kernel/trace.o
 	$(CC) $(CFLAGS_DEBUG) -c net/net.c -o net/net.o
 	$(AS) -f elf64 kernel/isr_stubs.asm -o kernel/isr_stubs.o
 	$(AS) -f elf64 kernel/irq_stubs.asm -o kernel/irq_stubs.o
 	$(AS) -f elf64 kernel/kernel_entry.asm -o kernel/kernel_entry.o
-	$(LD) $(LDFLAGS) -T kernel/linker.ld -o kernel.elf kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/reboot.o kernel/interrupt_stack.o kernel/trace.o net/net.o kernel/isr_stubs.o kernel/irq_stubs.o
+	$(LD) $(LDFLAGS) -T kernel/linker.ld -o kernel.elf kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o net/net.o kernel/isr_stubs.o kernel/irq_stubs.o
 	$(MAKE) boot.bin kernel.bin
 	$(MAKE) os.img
 

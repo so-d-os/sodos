@@ -332,11 +332,16 @@ No caminho GRUB/UEFI não existe modo texto em `0xB8000` nem registros VGA.
   gerada por `tools/mkfont16.py`.
 - O `WIN` usa o próprio framebuffer GOP (resolução fixa, a que o GRUB
   escolheu) quando o firmware é UEFI; no BIOS continua com o Bochs VBE.
+- Notebooks atuais não têm porta PS/2 de mouse: o desktop e o comando
+  `mouse` usam o mouse USB pelo xHCI (`kernel/xhci.c`), por polling.  O BAR
+  do controlador é mapeado sem cache em tempo de execução (o OVMF o põe acima
+  de 4 GB).
 
 Para testar sem hardware real, use o OVMF com uma placa sem portas Bochs VBE:
 
 ```bash
 make iso-grub
 qemu-system-x86_64 -m 256 -bios /usr/share/ovmf/OVMF.fd -cdrom so-grub.iso \
-  -vga none -device bochs-display -serial stdio
+  -vga none -device bochs-display -serial stdio \
+  -device qemu-xhci -device usb-mouse
 ```
