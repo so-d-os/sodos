@@ -3,7 +3,12 @@
 Comandos para discos, partições e sistema de arquivos FAT:
 
 - **mount** – monta partição e sistema FAT
-- **dir** – lista arquivos no disco (FAT)
+- **dir** – lista a pasta com tamanho, data e hora de cada arquivo
+  - `dir *.exe`, `dir ???.txt`, `dir sub\*.asm` – curingas `*` e `?` no último nome
+  - `/s` – inclui as subpastas, com total geral no fim
+  - `/w` – lista larga em 5 colunas, pastas entre colchetes
+  - `/d` – só as pastas
+  - as opções se combinam: `dir /d /w`, `dir /s *.txt`
 - **cat** – exibe conteúdo de arquivo no disco
 - **fdisk** – listar/criar partições (list, create)
 - **format** – formata partição FAT16

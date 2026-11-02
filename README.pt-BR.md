@@ -323,7 +323,7 @@ Não há Ctrl (Ctrl+C não interrompe um comando); a única combinação é `Ctr
 | `help` | Lista os nomes dos comandos |
 | `echo palavras...` | Imprime o resto da linha; `echo texto > ARQ` grava um arquivo no disco RAM |
 | `ls` | Arquivos do disco RAM e embutidos (não é o disco FAT) |
-| `dir [caminho]` | Diretório do FAT (marca `<DIR>`) |
+| `dir [caminho][padrão] [/s] [/w] [/d]` | Lista a pasta: nome, tamanho (`1.234.567`) ou `<DIR>`, data e hora, totais e bytes livres. `*` e `?` no último nome (`dir *.exe`, `dir ???.txt`, `dir sub\*.asm`); `/s` inclui as subpastas, `/w` lista larga em 5 colunas (`[PASTA]`), `/d` só as pastas. As opções se combinam (`dir /d /w`, `dir /s *.txt`) |
 | `cd [caminho]` | Entra numa pasta; sem argumento mostra o diretório atual |
 | `md pasta` | Cria pasta (só FAT16) |
 | `rd pasta` | Remove pasta vazia (só FAT16) |

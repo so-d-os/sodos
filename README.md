@@ -323,7 +323,7 @@ No Ctrl (Ctrl+C does not interrupt a command); the only combination is `Ctrl+Alt
 | `help` | Lists the command names |
 | `echo words...` | Prints the rest of the line; `echo text > FILE` writes a file to the RAM disk |
 | `ls` | RAM-disk and embedded files (not the FAT disk) |
-| `dir [path]` | FAT directory (marks `<DIR>`) |
+| `dir [path][pattern] [/s] [/w] [/d]` | Lists a directory: name, size (`1.234.567`) or `<DIR>`, date and time, totals and free bytes. `*` and `?` in the last name (`dir *.exe`, `dir ???.txt`, `dir sub\*.asm`); `/s` includes subdirectories, `/w` wide list in 5 columns (`[DIR]`), `/d` directories only. Options combine (`dir /d /w`, `dir /s *.txt`) |
 | `cd [path]` | Enters a directory; with no argument shows the current directory |
 | `md dir` | Creates a directory (FAT16 only) |
 | `rd dir` | Removes an empty directory (FAT16 only) |
