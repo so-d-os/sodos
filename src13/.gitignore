@@ -56,3 +56,6 @@ libs/**/*.o
 libs/**/*.obj
 libs/**/*.EXE
 libs/**/*.DLL
+
+# Chave da API do AGENT.EXE (nao versionar)
+AGENT.CFG

@@ -90,16 +90,29 @@ static jmp_buf* exit_jmp[16];
 static int exit_code[16];
 static int exec_depth;
 
+/* k_shell_capture desvia a saida para ca */
+static char* cap_buf;
+static int cap_len, cap_max, cap_cut;
+static void cap_put(const char* s, int n) {
+  while (n-- > 0) {
+    if (cap_len < cap_max - 1) cap_buf[cap_len++] = *s;
+    else cap_cut = 1;
+    s++;
+  }
+}
 static void k_putc(int c) {
   char ch = (char)c;
+  if (cap_buf) { cap_put(&ch, 1); return; }
   fwrite(&ch, 1, 1, stdout);
   if (ch == '\n') fflush(stdout);
 }
 static void k_write(const char* s, int n) {
+  if (cap_buf) { if (s) cap_put(s, n); return; }
   if (s && n > 0) fwrite(s, 1, (size_t)n, stdout);
   fflush(stdout);
 }
 static void k_puts(const char* s) {
+  if (cap_buf) { if (s) cap_put(s, (int)strlen(s)); return; }
   if (s) fputs(s, stdout);
   fflush(stdout);
 }
@@ -669,7 +682,8 @@ static int k_shell(char* line) {
   if (k_ci_start(p, "echo") && (p[4] == 0 || p[4] == ' ' || p[4] == '\t')) {
     p += 4;
     while (*p == ' ' || *p == '\t') p++;
-    printf("%s\n", p);
+    k_puts(p);
+    k_putc('\n');
     return 0;
   }
   while (*p && argc < 16) {
@@ -682,9 +696,30 @@ static int k_shell(char* line) {
   if (argc == 0) return 0;
   rc = k_exec(argv[0], argc, argv);
   if (rc <= -1000) {
-    fprintf(stderr, "Bad command or file name\n");
+    k_puts("Bad command or file name\n");
     return 1;
   }
+  return rc;
+}
+
+static int k_shell_capture(char* line, char* out, int max, int* len) {
+  char* sbuf = cap_buf;
+  int slen = cap_len, smax = cap_max, scut = cap_cut;
+  int rc;
+  if (len) *len = 0;
+  if (!out || max < 1) return k_shell(line);
+  fflush(stdout);
+  cap_buf = out;
+  cap_len = 0;
+  cap_max = max;
+  cap_cut = 0;
+  rc = k_shell(line);
+  out[cap_len] = 0;
+  if (len) *len = cap_cut ? -cap_len : cap_len;
+  cap_buf = sbuf;
+  cap_len = slen;
+  cap_max = smax;
+  cap_cut = scut;
   return rc;
 }
 
@@ -708,7 +743,7 @@ static const struct {
   E(k_drive), E(k_set_drive), E(k_dir), E(k_fdelete), E(k_mkdir), E(k_rmdir), E(k_dfree),
   E(k_vput), E(k_cursor),
   E(k_malloc), E(k_free), E(k_realloc), E(k_msize), E(k_meminfo),
-  E(k_exit), E(k_exec), E(k_shell), E(k_last_error), E(k_dll_load), E(k_dll_sym), E(k_dll_free),
+  E(k_exit), E(k_exec), E(k_shell), E(k_shell_capture), E(k_last_error), E(k_dll_load), E(k_dll_sym), E(k_dll_free),
   E(k_rdtsc), E(k_ms), E(k_date), E(k_random),
   E(k_net_ready), E(k_dns), E(k_tcp_connect), E(k_tcp_send), E(k_tcp_recv), E(k_tcp_close),
   E(k_gui_open), E(k_gui_size), E(k_gui_font), E(k_gui_event),

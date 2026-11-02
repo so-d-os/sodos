@@ -197,6 +197,44 @@ static int k_shell(char* line) {
   return rc;
 }
 
+/* Como k_shell, mas a saida (comando interno ou .EXE) vai para out, com 0
+ * no fim. *len recebe quantos bytes vieram; o que passar de max-1 e cortado
+ * e *len fica negativo. Devolve o codigo do comando. */
+static char* cap_buf;
+static int cap_len, cap_max, cap_cut;
+
+static void cap_out(char c) {
+  if (c == '\f') return;
+  if (cap_len < cap_max - 1) cap_buf[cap_len++] = c;
+  else cap_cut = 1;
+}
+
+static int k_shell_capture(char* line, char* out, int max, int* len) {
+  char* sbuf = cap_buf;
+  int slen = cap_len, smax = cap_max, scut = cap_cut;
+  void (*prev)(char) = shell_get_out();
+  void (*hook)(char) = con_hook;
+  int rc;
+  if (len) *len = 0;
+  if (!out || max < 1) return k_shell(line);
+  cap_buf = out;
+  cap_len = 0;
+  cap_max = max;
+  cap_cut = 0;
+  con_hook = 0;
+  shell_set_out(cap_out);
+  rc = k_shell(line);
+  shell_set_out(prev);
+  con_hook = hook;
+  out[cap_len] = 0;
+  if (len) *len = cap_cut ? -cap_len : cap_len;
+  cap_buf = sbuf;
+  cap_len = slen;
+  cap_max = smax;
+  cap_cut = scut;
+  return rc;
+}
+
 static int k_exec(const char* path, int argc, char** argv) {
   char full[64];
   char* wide[32];
@@ -365,6 +403,7 @@ static const struct kexp table[] = {
   EXP(k_exit),
   EXP(k_exec),
   EXP(k_shell),
+  EXP(k_shell_capture),
   EXP(k_last_error),
   EXP(k_dll_load),
   EXP(k_dll_sym),

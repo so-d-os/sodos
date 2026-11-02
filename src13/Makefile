@@ -509,6 +509,8 @@ disk-files: disk.img
 	@for f in $(GIT_SRC); do \
 	  mcopy -o -i $(DISK)@@512 "$$f" "::/SRC/GIT/$$(basename "$$f" | tr 'a-z' 'A-Z')" || exit 1; \
 	done
+	@# AGENT.CFG tem a chave da API: fica fora do git, vai so para o disco
+	@if [ -f AGENT.CFG ]; then mcopy -o -i $(DISK)@@512 AGENT.CFG ::/AGENT.CFG || exit 1; fi
 	@mdir -i $(DISK)@@512 -w ::/
 
 # Sobe o QEMU e mostra os comandos para formatar o disco (digite no prompt do QEMU)

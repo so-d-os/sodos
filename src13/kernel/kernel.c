@@ -983,6 +983,7 @@ void uint32_to_string(uint32_t n, char* str, int max_len) {
 }
 
 // very simple tokenizer (modest limits)
+/* O ultimo argv leva o resto da linha, com os espacos: nada se perde. */
 static int tokenize(char* line, char** argv, int maxargv) {
   int argc = 0;
   char* p = line;
@@ -990,6 +991,7 @@ static int tokenize(char* line, char** argv, int maxargv) {
     while (*p == ' ') ++p;
     if (!*p) break;
     argv[argc++] = p;
+    if (argc == maxargv) break;
     while (*p && *p != ' ') ++p;
     if (*p == ' ') *p++ = '\0';
   }
@@ -1128,7 +1130,7 @@ static int exec_pipe(char* left, char* right) {
 
 static int exec_line(char* line, int history) {
   char raw[256];
-  char* argv[16];
+  char* argv[31]; /* o loader passa ate 31 */
   int argc;
   int i;
   char letter = 0;
@@ -1149,7 +1151,7 @@ static int exec_line(char* line, int history) {
       return exec_pipe(line, bar + 1);
     }
   }
-  argc = tokenize(line, argv, 16);
+  argc = tokenize(line, argv, 31);
   if (argc == 0) return 0;
   if (argc == 1 && drive_switch(argv[0], &letter)) {
     if (drives_set_current(letter) != 0) {
