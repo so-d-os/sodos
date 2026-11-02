@@ -8,7 +8,7 @@
 ;
 ; O ponto de entrada continua sendo kernel_entry.  Qualquer carregador que
 ; respeite o contrato entrega o mesmo BootInfo ao mesmo kmain() 64 bits.
-; Paginas de 2 MB, identidade, 256 MB (igual a QEMU -m 256 e ao probe de mm.c).
+; Paginas de 2 MB, identidade, 1 GB (o diretorio 0x3000 inteiro; ver mm.c).
 ; Tabelas em 0x1000/0x2000/0x3000. O diretorio 0x6000 cobre o framebuffer
 ; Bochs em 0xE0000000 e o candidato 0xFD000000. GDT em 0x4000.
 ; BootInfo fica em 0x5000 e o mapa E820 em 0x5200; nada aqui os sobrescreve.
@@ -48,7 +48,7 @@ kernel_entry:
     mov dword [0x2000], 0x3003
     mov dword [0x2004], 0
 
-    mov ecx, 128
+    mov ecx, 512
     mov eax, 0x83
     mov edi, 0x3000
 .fill:
@@ -106,7 +106,7 @@ kernel_entry:
     mov edi, 0x3000
     test ecx, ecx
     jnz .fbi_not0
-    cmp eax, 0x10000000           ; abaixo de 256 MB ja esta em identidade
+    cmp eax, 0x10000000           ; abaixo de 256 MB: memoria do kernel, nao vira WC
     jb .fbi_done
     jmp .fbi_map
 .fbi_not0:
@@ -158,9 +158,16 @@ kernel_entry:
     mov word  [0x4100], 23
     mov dword [0x4102], 0x4000
 
+    ; CR4: PAE, OSFXSR e OSXMMEXCPT (SSE para programas; o kernel e -mno-sse).
+    ; CR0: MP=1, EM=0, TS=0, NE=1. Todo x86-64 tem SSE2.
     mov eax, cr4
-    or eax, 1 << 5
+    or eax, (1 << 5) | (1 << 9) | (1 << 10)
     mov cr4, eax
+    mov eax, cr0
+    and eax, ~((1 << 2) | (1 << 3))
+    or eax, (1 << 1) | (1 << 5)
+    mov cr0, eax
+    fninit
 
     mov eax, 0x1000
     mov cr3, eax

@@ -41,7 +41,7 @@ all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/H
 	$(O)/BROWSER.EXE $(O)/IMAGEVW.EXE $(O)/VIDPLAY.EXE $(O)/FONTADV.EXE $(O)/COMMAND.EXE $(O)/HTTPD.EXE \
 	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
 	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
-	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/GIT.EXE $(O)/AGENT.EXE
+	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/GIT.EXE $(O)/AGENT.EXE $(O)/LLAMA.EXE
 
 # GUI.DLL (janela canvas do WIN) e o navegador, em varios arquivos
 $(B)/gui_gui.obj: gui/gui.c include/gui.h $(HCC) $(HEADERS) | $(B)
@@ -105,6 +105,13 @@ $(O)/AGENT.EXE: agent/agent.c $(O)/TLS.DLL $(HCC) $(HEADERS) $(O)/KERNEL.IMP
 
 $(O)/BAT.EXE: examples/bat.c $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
 	$(HCC) -o $@ examples/bat.c
+
+# LLAMA.EXE: LLM GGUF local. gcc -mx32 com SSE2 (o kernel liga o SSE).
+LLGFLAGS = $(filter-out -mno-sse -mno-mmx -O2,$(XGFLAGS)) -msse2 -O3 -fno-math-errno
+$(B)/x_llama.o: llama/llama.c $(HEADERS) | $(B)
+	$(HOSTCC) $(LLGFLAGS) -c $< -o $@
+$(O)/LLAMA.EXE: $(B)/x_crt0.o $(B)/x_llama.o $(O)/LIBCX.DLL $(LINK) $(O)/KERNEL.IMP
+	$(LINK) /out:$@ $(B)/x_crt0.o $(B)/x_llama.o $(O)/LIBCX.DLL $(O)/KERNEL.IMP
 
 # posix-lite: subset POSIX sobre k_* (port MC)
 $(B)/posix_posix.obj: ../libs/posix-lite/posix.c include/unistd.h include/dirent.h \

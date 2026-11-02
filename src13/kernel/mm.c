@@ -1,6 +1,6 @@
 /* mm.c - First-fit. Cada bloco guarda o tamanho total, inclusive o cabecalho.
  * Duas arenas: a do kernel (kmalloc, 2 MB em 0xA80000) e a alta (umalloc, logo
- * apos o kernel, ate o limite da identidade de 256 MB) para programas, DLLs e
+ * apos o kernel, ate o limite da identidade de 1 GB) para programas, DLLs e
  * buffers grandes.
  *
  * Desde o boot em dois estagios o kernel fica em 0x01000000.  A arena alta e
@@ -16,8 +16,8 @@
 #define MM_HEAP_END   0x00C80000u
 #define MM_ALIGN      16u
 
-/* Limite da identidade montada por kernel_entry (128 paginas de 2 MB). */
-#define UM_PROBE_MAX  0x10000000u
+/* Limite da identidade montada por kernel_entry (512 paginas de 2 MB). */
+#define UM_PROBE_MAX  0x40000000u
 #define UM_STEP       0x00100000u
 #define UM_START      0x01000000u
 #define UM_MIN_SIZE   0x00400000u
@@ -132,6 +132,9 @@ void mm_init(void) {
 
   map = bootinfo_mem_map(bi);
   if (bi && map && bi->mem_count != 0) {
+    /* A maior regiao livre ate UM_PROBE_MAX: firmwares de notebook deixam
+     * buracos reservados que cortariam a primeira regiao. */
+    uint64_t best_s = 0, best_e = 0;
     for (i = 0; i < bi->mem_count; ++i) {
       uint64_t b = map[i].base;
       uint64_t len = map[i].length;
@@ -145,11 +148,12 @@ void mm_init(void) {
       if (e <= start) continue;
       s = (b > start) ? b : start;
       s = (s + UM_ALIGN_BIG - 1u) & ~(uint64_t)(UM_ALIGN_BIG - 1u);
-      if (e > s + UM_MIN_SIZE) {
-        arena_init(&high, (uint32_t)s, (uint32_t)e);
-        break;
+      if (e > s + UM_MIN_SIZE && e - s > best_e - best_s) {
+        best_s = s;
+        best_e = e;
       }
     }
+    if (best_e) arena_init(&high, (uint32_t)best_s, (uint32_t)best_e);
     /* A arena baixa e fixa; so a habilitamos se o E820 disser que e RAM. */
     if (kend >= MM_HEAP_END && range_usable(bi, MM_HEAP_START, MM_HEAP_END))
       arena_init(&low, MM_HEAP_START, MM_HEAP_END);
