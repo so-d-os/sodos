@@ -429,6 +429,10 @@ format-disk:
 # Nomes em maiusculo 8.3 para o mtools nao criar entradas de nome longo.
 # Tudo vai para a raiz do D: em maiusculas: binarios, headers, fontes da libc,
 # exemplos e os fontes do proprio cc/link (para recompilar dentro do SO).
+# Fontes do MC em D:\SRC\MC, compilados no proprio SODOS por BUILD.BAT.
+MC_SRC = c_compiler/examples/mc.c libs/term/term.c libs/glib/glib.c \
+	libs/posix-lite/posix.c tools/mc/BUILD.BAT
+
 DISK_FILES = c_compiler/out/*.EXE c_compiler/out/*.DLL c_compiler/out/*.OBJ \
 	c_compiler/out/*.IMP c_compiler/include/*.h c_compiler/include/sys/*.h \
 	c_compiler/lib/*.c \
@@ -492,6 +496,11 @@ disk-files: disk.img
 	  [ -f "$$f" ] || continue; \
 	  n=$$(basename "$$f" | tr 'a-z' 'A-Z'); \
 	  mcopy -o -i $(DISK)@@512 "$$f" "::/SODOS/FONTS/$$n" || exit 1; \
+	done
+	@if ! mdir -i $(DISK)@@512 ::/SRC >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SRC; fi
+	@if ! mdir -i $(DISK)@@512 ::/SRC/MC >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SRC/MC; fi
+	@for f in $(MC_SRC); do \
+	  mcopy -o -i $(DISK)@@512 "$$f" "::/SRC/MC/$$(basename "$$f" | tr 'a-z' 'A-Z')" || exit 1; \
 	done
 	@mdir -i $(DISK)@@512 -w ::/
 
