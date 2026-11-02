@@ -15,15 +15,21 @@ static void copy_name(char* dst, int max, const char* src) {
   dst[i] = '\0';
 }
 
+static int name_len(const char* s) {
+  int n = 0;
+  while (s[n]) n++;
+  return n;
+}
+
 int cmd_copy(int argc, char** argv) {
   char src_letter;
   char dst_letter;
   char src_name[64];
   char dst_name[64];
   char dest_path[80];
+  struct dir_item probe;
   char* buf;
   int n;
-  int i;
 
   if (argc < 3) {
     puts_k("Uso: copy origem destino\n");
@@ -37,8 +43,14 @@ int cmd_copy(int argc, char** argv) {
     puts_k("origem invalida\n");
     return 1;
   }
-  if (dst_name[0] == '\0')
-    copy_name(dst_name, (int)sizeof(dst_name), src_name);
+  /* Destino que e pasta (".", "temp", "d:", "u:\\src"): grava la dentro com o mesmo nome. */
+  if (dst_name[0] == '\0' || drives_items(argv[2], &probe, 1) >= 0) {
+    int len = name_len(dst_name);
+    const char* base = src_name + name_len(src_name);
+    while (base > src_name && base[-1] != '\\') base--;
+    if (len > 0 && len < (int)sizeof(dst_name) - 1) dst_name[len++] = '\\';
+    copy_name(dst_name + len, (int)sizeof(dst_name) - len, base);
+  }
   if (!drives_is_mounted(src_letter)) {
     puts_k("origem nao montada\n");
     return 1;
@@ -69,14 +81,11 @@ int cmd_copy(int argc, char** argv) {
     return 1;
   }
 
+  /* dst_name ja vem da raiz: o \\ impede o file_save de somar a pasta atual de novo. */
   dest_path[0] = dst_letter;
   dest_path[1] = ':';
-  i = 0;
-  while (dst_name[i] && i < (int)sizeof(dest_path) - 3) {
-    dest_path[2 + i] = dst_name[i];
-    i++;
-  }
-  dest_path[2 + i] = '\0';
+  dest_path[2] = '\\';
+  copy_name(dest_path + 3, (int)sizeof(dest_path) - 3, dst_name);
 
   if (file_save(dest_path, buf, n) != 0) {
     puts_k("nao copiou\n");
