@@ -1,4 +1,5 @@
 #include "shell.h"
+#include "reboot.h"
 
 #define SCANCODE_ESC 0x01
 
@@ -63,6 +64,7 @@ int cmd_mouse(int argc, char** argv) {
       }
     } else {
       uint8_t sc = shell_inb(0x60);
+      kbd_watch(sc);
       if (sc == SCANCODE_ESC) break;
     }
 

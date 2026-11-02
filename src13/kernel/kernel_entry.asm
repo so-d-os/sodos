@@ -87,6 +87,67 @@ kernel_entry:
     add edi, 8
     loop .fb_fd
 
+    ; Framebuffer entregue pelo carregador (GOP via GRUB): pode estar em
+    ; qualquer lugar (0xD0000000 numa AMD, BAR alto acima de 4 GB...).
+    ; Mapeia 64 MB a partir de fb_addr, write-combining (PAT 1 = WC abaixo).
+    ; GB 0 usa o diretorio 0x3000, GB 3 o 0x6000; os demais ganham 0x7000.
+    mov eax, [ebp + 56]
+    mov edx, [ebp + 60]
+    mov ecx, eax
+    or ecx, edx
+    jz .fbi_done
+    cmp edx, 0x80                 ; >= 512 GB: fora do PDPT unico
+    jae .fbi_done
+    mov ecx, eax
+    shr ecx, 30
+    mov esi, edx
+    shl esi, 2
+    or ecx, esi                   ; ECX = indice no PDPT (GB)
+    mov edi, 0x3000
+    test ecx, ecx
+    jnz .fbi_not0
+    cmp eax, 0x10000000           ; abaixo de 256 MB ja esta em identidade
+    jb .fbi_done
+    jmp .fbi_map
+.fbi_not0:
+    mov edi, 0x6000
+    cmp ecx, 3
+    je .fbi_map
+    push eax
+    push ecx
+    xor eax, eax
+    mov edi, 0x7000
+    mov ecx, 1024
+    rep stosd
+    pop ecx
+    pop eax
+    mov edi, 0x7000
+    mov dword [0x2000 + ecx*8], 0x7003
+    mov dword [0x2004 + ecx*8], 0
+.fbi_map:
+    mov esi, eax
+    shr esi, 21
+    and esi, 511                  ; primeira entrada no diretorio
+    and eax, 0xFFE00000
+    or eax, 0x8B                  ; P | RW | PWT | PS -> PAT 1 (WC)
+    mov ecx, 32
+.fbi_loop:
+    cmp esi, 512
+    jae .fbi_done
+    mov [edi + esi*8], eax
+    mov [edi + esi*8 + 4], edx
+    add eax, 0x200000
+    inc esi
+    loop .fbi_loop
+.fbi_done:
+
+    ; PAT: entrada 1 (PWT=1, PCD=0) vira write-combining; o resto e o padrao.
+    ; So o framebuffer acima usa PWT sozinho.
+    mov ecx, 0x277
+    mov eax, 0x00070106
+    mov edx, 0x00070406
+    wrmsr
+
     ; GDT: nulo, codigo 64 (0x08), dados (0x10)
     mov dword [0x4000], 0
     mov dword [0x4004], 0

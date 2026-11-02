@@ -12,7 +12,8 @@ static uint32_t trace_c[TRACE_SIZE];
 static uint32_t trace_head = 0;
 static uint32_t trace_count = 0;
 
-static volatile uint16_t* const VGA = (volatile uint16_t*)0xB8000;
+#include "fbcon.h"
+#define VGA vga_text  /* 0xB8000, ou a copia do fbcon no UEFI */
 
 static void vga_putc(int row, int col, char c) {
   if (row >= 0 && row < 25 && col >= 0 && col < 80)

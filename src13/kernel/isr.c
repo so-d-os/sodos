@@ -7,7 +7,8 @@
 
 extern void trace_dump_vga(int row);
 
-static volatile uint16_t* const VGA = (volatile uint16_t*)0xB8000;
+#include "fbcon.h"
+#define VGA vga_text  /* 0xB8000, ou a copia do fbcon no UEFI */
 #define ATTR 0x1F00  /* fundo azul, texto branco */
 
 static void vga_putc(int row, int col, char c) {
@@ -198,6 +199,7 @@ void isr_dispatch(isr_frame_t* f) {
   row = dump_backtrace(f->ebp, row);
 
   trace_dump_vga(row);
+  fbcon_sync();
 
   for (;;) {
     __asm__ volatile ("hlt");
@@ -219,6 +221,7 @@ void isr_df_panic(isr_frame_t* f) {
   vga_puts_at(row++, &c, "!!! DOUBLE FAULT (#DF) !!!");
   c = 0;
   vga_puts_at(row++, &c, "Panic stack in use. System halted.");
+  fbcon_sync();
   for (;;) {
     __asm__ volatile ("hlt");
   }

@@ -25,6 +25,17 @@ header_start:
     dd 6
     dd 8
 
+    ; Pede um framebuffer linear de 32 bpp (largura/altura 0 = o GRUB escolhe).
+    ; Sem esta tag o GRUB EFI responde "no suitable video mode found" e o
+    ; kernel fica sem tela: no UEFI nao ha modo texto em 0xB8000.
+    align 8
+    dw 5
+    dw 1
+    dd 20
+    dd 0
+    dd 0
+    dd 32
+
     align 8
     dw 0
     dw 0

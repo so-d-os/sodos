@@ -46,6 +46,7 @@ entrada; o contrato `BootInfo` e `kmain()` permanecem os mesmos.
 | `0x00004FF0` | Parâmetros stage 1 → stage 2: `boot_drive` (u32), `kernel_lba` (u32). |
 | `0x00005000` | `BootInfo` (128 bytes, fixo). |
 | `0x00005200` | Mapa E820 (`64 × 24 = 1536` bytes, até `0x5800`). |
+| `0x00007000` | Diretório de páginas extra para o framebuffer GOP fora dos GB 0 e 3 (só no caminho UEFI). |
 | `0x00007C00` | Stage 1 (setor 0 da imagem). |
 | `0x00007E00` | Stage 2 (máximo 56 setores / `0x7000` bytes). |
 | `0x0000FC00` | Topo da pilha real do stage 2 (cresce para baixo; stage 2 termina até `0xEE00`). |
@@ -65,6 +66,7 @@ entrada; o contrato `BootInfo` e `kmain()` permanecem os mesmos.
 | `0x01200000` | Início típico do heap alto (`umalloc`), dinâmico após `__bss_end`. |
 | `0x0FFE0000` | Limite do heap alto (identidade de 256 MiB montada por `kernel_entry`). |
 | `0xE0000000` / `0xFD000000` | LFB Bochs/QEMU mapeado pelo kernel. |
+| `fb_addr` do BootInfo | Framebuffer GOP (UEFI), 64 MiB mapeados em write-combining (PAT 1). |
 
 O kernel não ocupa mais a memória baixa.  A carga em 16 MiB libera o antigo
 intervalo de 288 KiB (`0x10000`–`0x58000`) e permite imagens de vários MiB.  O
@@ -314,3 +316,27 @@ visual      # modo gráfico; ESC volta ao texto
 
 O log serial deve mostrar `BootInfo v1, firmware=BIOS`, o endereço
 `kernel=0x01000000`, `e820=` e `OS Ready.`/`shell ready`.
+
+## 8. UEFI: vídeo sem VGA
+
+No caminho GRUB/UEFI não existe modo texto em `0xB8000` nem registros VGA.
+
+- `multiboot_header.asm` pede ao GRUB um framebuffer linear de 32 bpp (tag 5).
+  Sem essa tag o GRUB EFI responde `no suitable video mode found`.
+- `kernel_entry.asm` mapeia 64 MiB a partir de `fb_addr` (qualquer endereço
+  abaixo de 512 GiB) e programa a PAT para que a entrada 1 (PWT sozinho) seja
+  write-combining.
+- `video/fbcon.c` desenha o modo texto 80x25 no framebuffer: o shell escreve em
+  `vga_text` (uma cópia em RAM) e `fbcon_sync()` pinta as células alteradas,
+  com escala inteira e centralizado.  A fonte é `video/font8x16_data.c`,
+  gerada por `tools/mkfont16.py`.
+- O `WIN` usa o próprio framebuffer GOP (resolução fixa, a que o GRUB
+  escolheu) quando o firmware é UEFI; no BIOS continua com o Bochs VBE.
+
+Para testar sem hardware real, use o OVMF com uma placa sem portas Bochs VBE:
+
+```bash
+make iso-grub
+qemu-system-x86_64 -m 256 -bios /usr/share/ovmf/OVMF.fd -cdrom so-grub.iso \
+  -vga none -device bochs-display -serial stdio
+```

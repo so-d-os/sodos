@@ -120,6 +120,7 @@ O tablet USB entrega a posição absoluta do ponteiro, usada pelo desktop. Todos
 | `make debug` | Recompila o kernel com `-O0 -g` (alvo antigo; liga só parte do kernel) |
 | `make iso` | `so.iso` El Torito a partir de `os.img` |
 | `make iso-grub` | ISO Multiboot2 (`so-grub.iso`) — o GRUB carrega o kernel atual |
+| `make grub` | Recompila o kernel Multiboot2 e o copia para a entrada SODOS do GRUB desta máquina (`/boot/sodos`, via `sudo`); cria a entrada com `tools/grub-entry.sh` se ela não existir |
 | `make install-usb` | Grava `os.img` num dispositivo com `dd` (**sobrescreve o dispositivo**) |
 | `make format-disk` | Formata `disk.img` como FAT16 no Linux |
 | `make disk-files` | Copia compilador, libc, exemplos, fontes e `content/` para `D:` |
@@ -286,7 +287,7 @@ O laço principal lê uma linha e chama `shell_exec_line`. Se o primeiro token f
 | `Esc` | Limpa a linha inteira |
 | `Enter` | Executa |
 
-Não há Ctrl (Ctrl+C não interrompe um comando). A linha tem no máximo 255 caracteres; o tokenizador separa só por espaços e aceita até 16 argumentos. Não há curingas, pipes ou aspas.
+Não há Ctrl (Ctrl+C não interrompe um comando); a única combinação é `Ctrl+Alt+Del`, que reinicia a máquina, no shell e no desktop. A linha tem no máximo 255 caracteres; o tokenizador separa só por espaços e aceita até 16 argumentos. Não há curingas, pipes ou aspas.
 
 ### Comandos internos
 
@@ -910,7 +911,7 @@ dlls      módulos carregados, base, tamanho e referências
 - **Nomes 8.3** no FAT; arquivos de `make disk-files` são copiados em maiúsculas.
 - **Sem Ctrl** no shell; não há como interromper um comando em execução.
 - **Sem controle de acesso**: o HTTP da porta 8797 executa comandos sem autenticação.
-- **Sem `reboot`**; `shutdown` usa ACPI/porta Bochs sem interpretar as tabelas ACPI.
+- **Sem comando `reboot`**: `Ctrl+Alt+Del` reinicia (pulso do 8042, porta `0xCF9` ou triple fault, nessa ordem). `shutdown` usa ACPI/porta Bochs sem interpretar as tabelas ACPI e não desliga um PC real.
 - `IMG.DLL` não decodifica BMP, embora o desktop aceite `.BMP`.
 - `make debug` está defasado em relação ao kernel atual. `make iso-grub` carrega esse kernel por Multiboot2.
 - O stage 2 ainda carrega `app.bin` em `0x58000` por compatibilidade, mas o kernel de 64 bits ignora esse aplicativo de 32 bits.
@@ -922,7 +923,7 @@ Caminhos relativos a `src13/`, exceto a primeira linha:
 | Pasta ou arquivo | Conteúdo |
 |---|---|
 | raiz | `README.md`, `README.pt-BR.md`, `LICENSE` (GPLv3) e `.git` |
-| `kernel/` | `kmain`, boot, linker, IDT/ISR/IRQ/PIC, memória, escalonador, loader SOX, exports e o driver ATA (`disk.h`) |
+| `kernel/` | `kmain`, boot, linker, IDT/ISR/IRQ/PIC, memória, escalonador, loader SOX, exports, Ctrl+Alt+Del/reinício (`reboot.c`) e o driver ATA (`disk.h`) |
 | `fs/` | FAT12/16, partições MBR, unidades e arquivos (`fat`, `partition`, `drives`, `files`) |
 | `net/` | NE2000, ARP/IPv4/ICMP/UDP/TCP/DNS e o HTTP da porta 8797 |
 | `video/` | Desktop, janelas, mouse, cursor, fonte VGA e o modo gráfico |

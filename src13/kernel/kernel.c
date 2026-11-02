@@ -5,6 +5,7 @@
 #include "bootinfo.h"
 #include "idt.h"
 #include "pic.h"
+#include "reboot.h"
 #include "trace.h"
 #include "serial.h"
 #include "shell.h"
@@ -32,6 +33,7 @@ int get_partition_info(uint32_t drive, uint8_t partition_num, uint32_t* lba_star
 int format_fat16(uint32_t drive, uint32_t lba_start, uint32_t total_sectors, const char* volume_label);
 
 #include "visual.h"
+#include "fbcon.h"
 #include "drives.h"
 #include "mm.h"
 #include "net.h"
@@ -128,7 +130,8 @@ int write_mem_bytes(const char* filename, const char* content, int size) {
 
 typedef void (*puts_fn)(const char*);
 
-static volatile uint16_t* const VGA = (uint16_t*)0xB8000;
+/* 0xB8000 no BIOS; no UEFI, a copia em RAM que o fbcon desenha. */
+#define VGA vga_text
 static int row = 0, col = 0;
 
 static inline unsigned char inb(unsigned short port) {
@@ -272,6 +275,10 @@ void vga_put_at(int r, int c, unsigned char ch) {
 
 void update_cursor(void) {
   int pos = row * 80 + col;
+  if (fbcon_active()) {
+    fbcon_cursor(pos);
+    return;
+  }
   outb(0x3D4, 0x0F);
   outb(0x3D5, (unsigned char)(pos & 0xFF));
   outb(0x3D4, 0x0E);
@@ -366,6 +373,7 @@ void clear_line_from_cursor(void) {
   for (int i = start_col; i < 80; i++) {
     VGA[row * 80 + i] = (uint16_t)0x0720; // space
   }
+  fbcon_sync();
 }
 
 static void erase_chars(int count) {
@@ -441,6 +449,7 @@ static int get_char(void) {
     sc = inb(0x60);
     if (st & 0x20)
       continue;
+    kbd_watch(sc);
     if (sc == 0xFA || sc == 0xFE)
       continue;
     break;
@@ -451,6 +460,7 @@ static int get_char(void) {
     while (!(inb(0x64) & 1) && --n > 0) { }
     if (!(inb(0x64) & 1)) return 0;
     sc = inb(0x60);
+    kbd_watch(sc);
     if (sc & 0x80) return 0;
     /* Tabela propria. Um if/switch denso o gcc vira jmp [reg*4]
      * e um buraco dessa tabela executa INT3 (#BP). */
@@ -1118,6 +1128,7 @@ void kmain(const struct BootInfo* bi) {
   /* So depois de zerar a BSS: g_bootinfo vive nela. */
   bootinfo_set(bi);
   serial_init();
+  fbcon_init(bi);
   serial_puts("\n[kernel] BootInfo v1, firmware=");
   serial_puts(bi->firmware == BOOTINFO_FIRMWARE_BIOS ? "BIOS" :
               (bi->firmware == BOOTINFO_FIRMWARE_UEFI ? "UEFI" : "unknown"));

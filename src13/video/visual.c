@@ -2,12 +2,14 @@
  * visual.c - Modo grafico
  * QEMU (-vga std, 16 MB) e v86 (WebAssembly, 16 MB) falam Bochs VBE.
  * Tenta 1920x1080, depois modos menores, em 32 bpp.
+ * UEFI: usa o framebuffer GOP que o GRUB entregou (resolucao fixa).
  * Sem Bochs VBE: VGA modo 13h 320x200.
  */
 #include <stdint.h>
 #include "serial.h"
 #include "shell.h"
 #include "pic.h"
+#include "reboot.h"
 #include "drives.h"
 #include "mm.h"
 #include "module.h"
@@ -15,6 +17,8 @@
 #include "net.h"
 #include "sched.h"
 #include "visual.h"
+#include "bootinfo.h"
+#include "fbcon.h"
 #include "c_compiler/sox.h"
 
 static inline void outl(uint16_t port, uint32_t v) {
@@ -67,6 +71,7 @@ static int lfb_probe_rw(volatile uint8_t* base) {
 }
 
 extern const uint8_t font8x8_basic[95][8];
+extern const uint8_t font8x16_cp437[256][16];
 extern uint32_t mod_depth;
 
 /* Fonte 8x16 da BIOS (256 chars x 32 bytes na plane 2). */
@@ -153,8 +158,10 @@ static uint16_t bochs_vbe_read(uint16_t index) {
   return inw(VBE_DISPI_IOPORT_DATA);
 }
 
-/* 1 = Bochs LFB 32 bpp; 0 = modo 13h 8 bpp */
+/* 1 = LFB 32 bpp (Bochs ou GOP); 0 = modo 13h 8 bpp */
 static int gfx_bochs;
+/* 1 = o LFB e o framebuffer GOP do UEFI: sem registros Bochs, sem troca de modo */
+static int gfx_gop;
 static int gfx_live;
 static uint32_t gfx_w;
 static uint32_t gfx_h;
@@ -250,9 +257,22 @@ static void vga_font_plane_leave(void) {
   vga_text_cursor_underline();
 }
 
+/* Sem fonte na VGA (UEFI, ou BIOS que nao a deixou): usa a 8x16 embutida. */
+static void font_load_builtin(void) {
+  for (int ch = 0; ch < 256; ch++)
+    for (int row = 0; row < 32; row++)
+      vga_bios_font[ch * 32 + row] = row < 16 ? font8x16_cp437[ch][row] : 0;
+  vga_bios_font_ok = 1;
+}
+
 void vga_capture_bios_font(void) {
   volatile uint8_t* vga = (volatile uint8_t*)0xA0000;
   int nonzero = 0;
+  if (!vga_legacy()) {
+    font_load_builtin();
+    serial_puts("[vga] UEFI: fonte 8x16 embutida\n");
+    return;
+  }
   vga_font_plane_enter();
   for (int i = 0; i < 256 * 32; i++) {
     uint8_t b = vga[i];
@@ -261,7 +281,9 @@ void vga_capture_bios_font(void) {
   }
   vga_font_plane_leave();
   vga_bios_font_ok = nonzero;
-  serial_puts(nonzero ? "[vga] fonte BIOS 8x16 guardada\n" : "[vga] fonte BIOS vazia\n");
+  serial_puts(nonzero ? "[vga] fonte BIOS 8x16 guardada\n" : "[vga] fonte BIOS vazia, usando a embutida\n");
+  if (!nonzero)
+    font_load_builtin();
 }
 
 static void vga_restore_bios_font(void) {
@@ -346,6 +368,10 @@ static void vga_dac_restore_std16(void) {
 }
 
 void vga_force_text_mode(void) {
+  if (!vga_legacy()) {
+    fbcon_suspend(0);
+    return;
+  }
   bochs_vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
   vga_mode_text();
   vga_dac_restore_std16();
@@ -511,7 +537,31 @@ static int bochs_try_mode(void) {
   return 0;
 }
 
+/* UEFI: o framebuffer que o GRUB pediu ao GOP.  Resolucao fixa. */
+static int gop_try_mode(void) {
+  const struct BootInfo* bi = bootinfo_get();
+  if (vga_legacy() || !bi || !bi->fb_addr || bi->fb_bpp != 32) return 0;
+  gfx_lfb = (volatile uint8_t*)(uintptr_t)bi->fb_addr;
+  gfx_w = bi->fb_width;
+  gfx_h = bi->fb_height;
+  gfx_pitch_bytes = bi->fb_pitch;
+  gfx_bochs = 1;
+  gfx_gop = 1;
+  gfx_mode_sel = -1;
+  serial_puts("[visual] GOP ");
+  serial_u16((uint16_t)gfx_w);
+  serial_puts("x");
+  serial_u16((uint16_t)gfx_h);
+  serial_puts("x32\n");
+  return 1;
+}
+
 static void bochs_disable_if_needed(void) {
+  if (gfx_gop) {
+    gfx_gop = 0;
+    gfx_bochs = 0;
+    return;
+  }
   if (gfx_bochs) {
     bochs_vbe_write(VBE_DISPI_INDEX_X_OFFSET, 0);
     bochs_vbe_write(VBE_DISPI_INDEX_Y_OFFSET, 0);
@@ -666,7 +716,7 @@ static void gfx_buf_init(void) {
   gfx_offscreen = 0;
   gfx_dbuf = 0;
   gfx_back = 0;
-  if (gfx_bochs) {
+  if (gfx_bochs && !gfx_gop) {
     uint32_t vram = 0;
     uint32_t frame = gfx_w * gfx_h * 4u;
     uint16_t vh = bochs_vbe_read(VBE_DISPI_INDEX_VIRT_HEIGHT);
@@ -1334,6 +1384,7 @@ static int input_poll(uint8_t packet[3], int* pkt_idx, uint8_t* sc, int* abs_pos
         *pkt_idx = 1;
         return -1;
       }
+      kbd_watch(data);
       *sc = data;
       return 0;
     }
@@ -5705,8 +5756,9 @@ static void gfx_session_run(int session) {
   cursor_saved = 0;
 gfx_restart:
   gfx_bochs = 0;
+  gfx_gop = 0;
 
-  if (!bochs_try_mode()) {
+  if (!gop_try_mode() && !bochs_try_mode()) {
     vga_mode13h();
     gfx_w = FB13_W;
     gfx_h = FB13_H;
@@ -5741,6 +5793,7 @@ gfx_restart:
 
   gfx_buf_init();
   gfx_live = 1;
+  fbcon_suspend(1);
   font_cell_w = FONT_W;
   font_cell_h = vga_bios_font_ok ? FONT_H : 8;
 
@@ -5943,8 +5996,12 @@ gfx_session_leave:
   gfx_mode_sel = -1;
   serial_puts("[visual] modo texto 80x25 + DAC\n");
   bochs_disable_if_needed();
-  vga_mode_text();
-  vga_dac_restore_std16();
+  if (vga_legacy()) {
+    vga_mode_text();
+    vga_dac_restore_std16();
+  } else {
+    fbcon_suspend(0);
+  }
   clear_screen();
   serial_puts("[visual] fim\n");
 }
