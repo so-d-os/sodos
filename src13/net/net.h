@@ -40,6 +40,22 @@ int net_srv_send(const void* data, int len);
 /* Relogio em ms do PIT; so anda enquanto alguem consulta (polling). */
 uint32_t net_ms(void);
 
+/* Outra placa no lugar da NE2000 (o WiFi). tx manda um quadro Ethernet
+ * (0 = ok); rx copia o proximo quadro recebido e devolve o tamanho, 0 sem
+ * nada. mac fica valido enquanto a placa estiver ligada. NULL desliga. */
+struct net_link {
+  const char* name;
+  const uint8_t* mac;
+  int (*tx)(const uint8_t* frame, int len);
+  int (*rx)(uint8_t* frame, int cap);
+};
+void net_attach(const struct net_link* l);
+/* "NE2000", o nome da placa ligada por net_attach, ou NULL sem placa. */
+const char* net_link_name(void);
+/* Pede endereco por DHCP. 0 = ok; -1 sem placa; -2 ninguem respondeu. */
+int net_dhcp(void);
+void net_get_addr(uint32_t* ip, uint32_t* mask, uint32_t* gw, uint32_t* dns);
+
 /* Prova de curl.asm depois de drives_init. Nao faz parte do boot normal. */
 void net_demo(void);
 

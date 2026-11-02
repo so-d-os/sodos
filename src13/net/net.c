@@ -1,6 +1,7 @@
 /* Pilha minima: NE2000 em polling, ARP, IPv4, UDP (DNS A) e um cliente TCP.
  * Porta em 0x7C000 (magic NET1, connect/send/recv/close) para o curl.asm.
- * Endereco fixo do SLIRP: 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3. */
+ * Endereco do SLIRP no boot: 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3.
+ * net_dhcp pede outro; net_attach troca a NE2000 por outra placa (WiFi). */
 #include <stdint.h>
 #include "net.h"
 #include "httpd.h"
@@ -9,10 +10,10 @@
 #include "shell.h"
 #include "mm.h"
 
-#define OUR_IP   0x0A00020Fu
-#define OUR_MASK 0xFFFFFF00u
-#define OUR_GW   0x0A000202u
-#define OUR_DNS  0x0A000203u
+#define SLIRP_IP   0x0A00020Fu
+#define SLIRP_MASK 0xFFFFFF00u
+#define SLIRP_GW   0x0A000202u
+#define SLIRP_DNS  0x0A000203u
 #define GATE     0x0007C000u
 #define NET_MAGIC 0x3154454Eu
 
@@ -116,6 +117,15 @@ static uint16_t ip_checksum(const uint8_t* h, int n) {
 
 static uint16_t nic_io;
 static int nic_ok;
+/* Endereco atual: o do SLIRP no boot, o do DHCP depois de net_dhcp. */
+static uint32_t our_ip = SLIRP_IP;
+static uint32_t our_mask = SLIRP_MASK;
+static uint32_t our_gw = SLIRP_GW;
+static uint32_t our_dns = SLIRP_DNS;
+/* Placa que nao e a NE2000 (o WiFi). Entrega e recebe quadros Ethernet. */
+static const struct net_link* nlink;
+static int ne_ok;
+static uint8_t ne_mac[6];
 static int polling;
 
 /* PIT canal 0 em modo 2, divisor 1193: um estouro por milissegundo. */
@@ -277,6 +287,7 @@ static int ne_tx(const uint8_t* frame, int len) {
   int n;
   int spins;
   if (!nic_ok || len < 14) return -1;
+  if (nlink) return nlink->tx(frame, len > 1514 ? 1514 : len);
   if (len > 1514) len = 1514;
   n = len < 60 ? 60 : len;
   for (i = 0; i < len; i++) wire[i] = frame[i];
@@ -313,7 +324,7 @@ static void arp_send(uint16_t op, const uint8_t* dmac, uint32_t dip) {
   f[19] = 4;
   wr16(f + 20, op);
   for (i = 0; i < 6; i++) f[22 + i] = our_mac[i];
-  wr32(f + 28, OUR_IP);
+  wr32(f + 28, our_ip);
   for (i = 0; i < 6; i++) f[32 + i] = (op == 2) ? dmac[i] : 0;
   wr32(f + 38, dip);
   ne_tx(f, 42);
@@ -352,7 +363,7 @@ static void arp_rx(const uint8_t* f, int len) {
   sip = rd32(f + 28);
   tip = rd32(f + 38);
   arp_learn(sip, f + 22);
-  if (op == 1 && tip == OUR_IP)
+  if (op == 1 && tip == our_ip)
     arp_send(2, f + 22, sip);
 }
 
@@ -363,7 +374,7 @@ static int ip_send(uint32_t dst, uint8_t proto, const uint8_t* data, int len) {
   int total;
   int i;
   if (len < 0 || len > 1480) return -1;
-  hop = ((dst ^ OUR_IP) & OUR_MASK) ? OUR_GW : dst;
+  hop = ((dst ^ our_ip) & our_mask) ? our_gw : dst;
   if (arp_resolve(hop, hopmac) < 0) return -1;
   mem_set(f, 0, 14 + 20);
   for (i = 0; i < 6; i++) f[i] = hopmac[i];
@@ -376,7 +387,7 @@ static int ip_send(uint32_t dst, uint8_t proto, const uint8_t* data, int len) {
   wr16(f + 20, 0x4000);
   f[22] = 64;
   f[23] = proto;
-  wr32(f + 26, OUR_IP);
+  wr32(f + 26, our_ip);
   wr32(f + 30, dst);
   wr16(f + 24, ip_checksum(f + 14, 20));
   for (i = 0; i < len; i++) f[34 + i] = data[i];
@@ -504,6 +515,48 @@ static int dns_collect(const uint8_t* p, int len, const char* qname,
   return nips;
 }
 
+/* ---------- DHCP (cliente) ---------- */
+
+static uint32_t dhcp_xid;
+static int dhcp_type;  /* ultima resposta: 2 OFFER, 5 ACK, 6 NAK */
+static uint32_t dhcp_yiaddr;
+static uint32_t dhcp_server;
+static uint32_t dhcp_mask;
+static uint32_t dhcp_gw;
+static uint32_t dhcp_dns;
+static uint32_t dhcp_lease;
+
+static void dhcp_rx(const uint8_t* p, int n) {
+  int i;
+  int type = 0;
+  if (n < 240 || p[0] != 2 || rd32(p + 4) != dhcp_xid) return;
+  if (!mac_eq(p + 28, our_mac) || rd32(p + 236) != 0x63825363u) return;
+  dhcp_server = 0;
+  dhcp_mask = 0xFFFFFF00u;
+  dhcp_gw = 0;
+  dhcp_dns = 0;
+  dhcp_lease = 0;
+  for (i = 240; i < n && p[i] != 255;) {
+    uint8_t o = p[i];
+    uint8_t l;
+    if (o == 0) { i++; continue; }
+    if (i + 2 > n) break;
+    l = p[i + 1];
+    if (i + 2 + l > n) break;
+    if (o == 53 && l >= 1) type = p[i + 2];
+    else if (o == 54 && l >= 4) dhcp_server = rd32(p + i + 2);
+    else if (o == 1 && l >= 4) dhcp_mask = rd32(p + i + 2);
+    else if (o == 3 && l >= 4) dhcp_gw = rd32(p + i + 2);
+    else if (o == 6 && l >= 4) dhcp_dns = rd32(p + i + 2);
+    else if (o == 51 && l >= 4) dhcp_lease = rd32(p + i + 2);
+    i += 2 + l;
+  }
+  if (type != 2 && type != 5 && type != 6) return;
+  if (dhcp_type == 2 && type == 2) return;  /* fica com a primeira oferta */
+  dhcp_yiaddr = rd32(p + 16);
+  dhcp_type = type;
+}
+
 static void udp_rx(uint32_t src, const uint8_t* p, int len) {
   uint16_t sport;
   uint16_t dport;
@@ -515,6 +568,10 @@ static void udp_rx(uint32_t src, const uint8_t* p, int len) {
   dport = rd16(p + 2);
   ulen = rd16(p + 4);
   if (ulen < 8 || ulen > len) return;
+  if (dport == 68 && sport == 67) {
+    dhcp_rx(p + 8, ulen - 8);
+    return;
+  }
   if (dport != dns_wait_port || sport != 53) return;
   p += 8;
   n = ulen - 8;
@@ -523,6 +580,133 @@ static void udp_rx(uint32_t src, const uint8_t* p, int len) {
   mem_copy(dns_pkt, p, n);
   dns_pkt_len = n;
   dns_got = 1;
+}
+
+/* DISCOVER (1) ou REQUEST (3), em broadcast de 0.0.0.0. */
+static int dhcp_send(int type, uint32_t want, uint32_t server) {
+  uint8_t* f = txframe;
+  uint8_t* b = f + 14 + 20 + 8;
+  int n = 240;
+  int i;
+  mem_set(f, 0, 14 + 20 + 8 + 300);
+  for (i = 0; i < 6; i++) f[i] = 0xFF;
+  for (i = 0; i < 6; i++) f[6 + i] = our_mac[i];
+  wr16(f + 12, 0x0800);
+  b[0] = 1;
+  b[1] = 1;
+  b[2] = 6;
+  wr32(b + 4, dhcp_xid);
+  wr16(b + 10, 0x8000);  /* resposta em broadcast: ainda nao temos IP */
+  for (i = 0; i < 6; i++) b[28 + i] = our_mac[i];
+  wr32(b + 236, 0x63825363u);
+  b[n++] = 53; b[n++] = 1; b[n++] = (uint8_t)type;
+  b[n++] = 61; b[n++] = 7; b[n++] = 1;
+  for (i = 0; i < 6; i++) b[n++] = our_mac[i];
+  if (type == 3) {
+    b[n++] = 50; b[n++] = 4; wr32(b + n, want); n += 4;
+    b[n++] = 54; b[n++] = 4; wr32(b + n, server); n += 4;
+  }
+  b[n++] = 12; b[n++] = 5;
+  mem_copy(b + n, "sodos", 5);
+  n += 5;
+  b[n++] = 55; b[n++] = 3; b[n++] = 1; b[n++] = 3; b[n++] = 6;
+  b[n++] = 255;
+  if (n < 300) n = 300;
+  wr16(f + 34, 68);
+  wr16(f + 36, 67);
+  wr16(f + 38, (uint16_t)(8 + n));
+  f[14] = 0x45;
+  wr16(f + 16, (uint16_t)(20 + 8 + n));
+  wr16(f + 18, ip_id++);
+  f[22] = 64;
+  f[23] = 17;
+  wr32(f + 26, 0);
+  wr32(f + 30, 0xFFFFFFFFu);
+  wr16(f + 24, ip_checksum(f + 14, 20));
+  return ne_tx(f, 14 + 20 + 8 + n);
+}
+
+/* Espera dhcp_type mudar para um de 'want' (mascara de bits). */
+static int dhcp_wait(uint32_t want, uint32_t ms) {
+  uint32_t spins = 0;
+  uint32_t t0;
+  time_poll();
+  t0 = ms_now;
+  for (;;) {
+    nic_poll();
+    if (want & (1u << dhcp_type)) return dhcp_type;
+    {
+      int w = wait_done(&spins, t0, ms, 8000000u);
+      if (w == 2) return -3;
+      if (w) return -2;
+    }
+  }
+}
+
+int net_dhcp(void) {
+  uint32_t old_ip = our_ip;
+  int tries;
+  if (!nic_ok) return -1;
+  dhcp_xid = 0x534F0000u ^ (ms_now * 2654435761u) ^ ((uint32_t)our_mac[5] << 8);
+  our_ip = 0;
+  for (tries = 0; tries < 4; tries++) {
+    int rc;
+    uint32_t offer, server;
+    dhcp_type = 0;
+    dhcp_xid++;
+    serial_puts("[dhcp] discover\n");
+    if (dhcp_send(1, 0, 0) < 0) break;
+    rc = dhcp_wait(1u << 2, 3000);
+    if (rc == -3) break;
+    if (rc < 0) continue;
+    offer = dhcp_yiaddr;
+    server = dhcp_server;
+    serial_puts("[dhcp] offer ");
+    serial_hex32(offer);
+    serial_puts("\n");
+    dhcp_type = 0;
+    if (dhcp_send(3, offer, server) < 0) break;
+    rc = dhcp_wait((1u << 5) | (1u << 6), 3000);
+    if (rc == -3) break;
+    if (rc != 5) continue;
+    our_ip = dhcp_yiaddr;
+    our_mask = dhcp_mask;
+    our_gw = dhcp_gw ? dhcp_gw : server;
+    our_dns = dhcp_dns ? dhcp_dns : our_gw;
+    arp_valid = 0;
+    serial_puts("[dhcp] ack ");
+    serial_hex32(our_ip);
+    serial_puts("\n");
+    return 0;
+  }
+  our_ip = old_ip;
+  return -2;
+}
+
+void net_get_addr(uint32_t* ip, uint32_t* mask, uint32_t* gw, uint32_t* dns) {
+  if (ip) *ip = our_ip;
+  if (mask) *mask = our_mask;
+  if (gw) *gw = our_gw;
+  if (dns) *dns = our_dns;
+}
+
+void net_attach(const struct net_link* l) {
+  int i;
+  if (l && !nlink)
+    for (i = 0; i < 6; i++) ne_mac[i] = our_mac[i];
+  if (!l && nlink)
+    for (i = 0; i < 6; i++) our_mac[i] = ne_mac[i];
+  nlink = l;
+  if (l)
+    for (i = 0; i < 6; i++) our_mac[i] = l->mac[i];
+  nic_ok = l ? 1 : ne_ok;
+  arp_valid = 0;
+  tcp_state = ST_CLOSED;
+}
+
+const char* net_link_name(void) {
+  if (nlink) return nlink->name;
+  return nic_ok ? "NE2000" : 0;
 }
 
 static int parse_ip(const char* s, uint32_t* out) {
@@ -609,7 +793,7 @@ static int dns_lookup(const char* name, uint32_t* ips, int maxips, int depth) {
     wr16(udp + 4, (uint16_t)(8 + off));
     wr16(udp + 6, 0);
     mem_copy(udp + 8, pkt, off);
-    if (ip_send(OUR_DNS, 17, udp, 8 + off) < 0) return -1;
+    if (ip_send(our_dns, 17, udp, 8 + off) < 0) return -1;
     time_poll();
     t0 = ms_now;
     for (;;) {
@@ -687,8 +871,8 @@ static void tcp_raw(uint8_t flags, const uint8_t* data, int len, uint32_t seq, i
   }
   for (i = 0; i < len; i++) seg[hdr + i] = data[i];
   sum = 0;
-  sum += (OUR_IP >> 16) & 0xFFFFu;
-  sum += OUR_IP & 0xFFFFu;
+  sum += (our_ip >> 16) & 0xFFFFu;
+  sum += our_ip & 0xFFFFu;
   sum += (tcp_dip >> 16) & 0xFFFFu;
   sum += tcp_dip & 0xFFFFu;
   sum += 6;
@@ -729,7 +913,7 @@ static void tcp_input(uint32_t src, const uint8_t* seg, int len) {
   int plen;
   const uint8_t* data;
   if (tcp_state == ST_CLOSED || len < 20) return;
-  if (!tcp_csum_ok(src, OUR_IP, seg, len)) return;
+  if (!tcp_csum_ok(src, our_ip, seg, len)) return;
   sport = rd16(seg);
   dport = rd16(seg + 2);
   if (dport != tcp_sport || sport != tcp_dport || src != tcp_dip) return;
@@ -852,8 +1036,8 @@ static void sv_raw(uint8_t flags, const uint8_t* data, int len, uint32_t seq, in
   }
   for (i = 0; i < len; i++) seg[hdr + i] = data[i];
   sum = 0;
-  sum += (OUR_IP >> 16) & 0xFFFFu;
-  sum += OUR_IP & 0xFFFFu;
+  sum += (our_ip >> 16) & 0xFFFFu;
+  sum += our_ip & 0xFFFFu;
   sum += (sv_rip >> 16) & 0xFFFFu;
   sum += sv_rip & 0xFFFFu;
   sum += 6;
@@ -892,7 +1076,7 @@ static void srv_input(uint32_t src, const uint8_t* seg, int len) {
   int doff, flags, plen;
   const uint8_t* data;
   if (sv_state == SV_OFF || len < 20) return;
-  if (!tcp_csum_ok(src, OUR_IP, seg, len)) return;
+  if (!tcp_csum_ok(src, our_ip, seg, len)) return;
   sport = rd16(seg);
   dport = rd16(seg + 2);
   if (dport != sv_port) return;
@@ -1099,7 +1283,8 @@ static void ip_rx(const uint8_t* p, int len) {
   if (total < ihl || total > len) return;
   if ((rd16(p + 6) & 0x3FFF) != 0) return;
   dst = rd32(p + 16);
-  if (dst != OUR_IP) return;
+  /* Sem endereco (DHCP no meio), o UDP para a porta 68 tambem entra. */
+  if (dst != our_ip && !(p[9] == 17 && (dst == 0xFFFFFFFFu || our_ip == 0))) return;
   mem_copy(hdr, p, ihl);
   got = rd16(p + 10);
   hdr[10] = 0;
@@ -1165,7 +1350,12 @@ static void nic_poll(void) {
   time_poll();
   if (!nic_ok || polling) return;
   polling = 1;
-  while (n++ < 8 && ne_rx_one()) {}
+  if (nlink) {
+    int len;
+    while (n++ < 8 && (len = nlink->rx(rxframe, (int)sizeof(rxframe))) > 0) eth_rx(rxframe, len);
+  } else {
+    while (n++ < 8 && ne_rx_one()) {}
+  }
   polling = 0;
   srv_pump();
   httpd_poll();
@@ -1440,6 +1630,7 @@ void net_init(void) {
   for (i = 0; i < 5; i++) g[i] = 0;
   if (nic_find(&io) == 0 && ne_reset(io) == 0) {
     nic_ok = 1;
+    ne_ok = 1;
     gate_set(NET_MAGIC, fn_bits((void*)api_connect), fn_bits((void*)api_send),
              fn_bits((void*)api_recv), fn_bits((void*)api_close));
     puts_k("Rede IPv4 10.0.2.15. Comandos: ping, asm curl.asm\n");

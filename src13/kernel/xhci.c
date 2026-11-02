@@ -269,6 +269,10 @@ static int mmio_map(uint64_t phys, uint64_t len) {
   return 0;
 }
 
+int pci_mmio_map(uint64_t phys, uint64_t len) {
+  return mmio_map(phys, len);
+}
+
 /* Log do driver na COM1, com os prefixos [xhci]. */
 static void xlog(const char* s) {
   serial_puts(s);

@@ -37,3 +37,6 @@ int xhci_disk_write(uint32_t lba, const void* buf);
 
 /* Controladores e dispositivos, um por linha (comando usb). */
 int xhci_describe(char* out, int max);
+
+/* Mapeia um BAR de PCI em identidade, sem cache (outros drivers usam). 0 = ok. */
+int pci_mmio_map(uint64_t phys, uint64_t len);
