@@ -26,6 +26,34 @@ int k_chdir(const char* path);
 int k_drive(void);
 int k_set_drive(int letter);
 
+/* Uma entrada de pasta. date/time no formato FAT (0 = sem data):
+ * dia = date & 31, mes = (date >> 5) & 15, ano = 1980 + (date >> 9);
+ * hora = time >> 11, minuto = (time >> 5) & 63. */
+struct k_dirent {
+  char name[32];
+  unsigned size;
+  unsigned short date;
+  unsigned short time;
+  unsigned char dir;
+  unsigned char pad[3];
+};
+/* Pasta "U:\\SRC": quantas entradas (sem . e ..); -1 se nao e pasta. */
+int k_dir(const char* path, struct k_dirent* out, int max);
+/* Apaga arquivo (aceita * e ?): 0, ou quantos com * e ?. -1 nao achou,
+ * -3 e pasta, -4 somente leitura, -5 unidade sem apagar, -2 invalido. */
+int k_fdelete(const char* path);
+/* 0 ok; mkdir 1 = ja existe; rmdir -2 = nao vazia, -3 = nao e pasta. */
+int k_mkdir(const char* path);
+int k_rmdir(const char* path);
+/* Espaco em KB de um disco FAT; -1 se nao for. */
+int k_dfree(int letter, unsigned* total_kb, unsigned* free_kb);
+
+/* tela de texto 80x25: celulas caractere | cor << 8 (cor = fundo << 4 | frente).
+ * -1 no WIN ou com a saida desviada: ai so ha k_putc. */
+int k_vput(int row, int col, const unsigned short* cells, int n);
+/* cursor na linha/coluna; row < 0 esconde */
+void k_cursor(int row, int col);
+
 /* memoria do programa (liberada sozinha quando ele termina) */
 void* k_malloc(unsigned n);
 void k_free(void* p);

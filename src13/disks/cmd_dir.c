@@ -1,9 +1,6 @@
 #include "shell.h"
 #include "drives.h"
 
-extern int fat_mkdir(const char* path);
-extern int fat_rmdir(const char* path);
-
 /* dir [unidade:][pasta\][padrao] [/s] [/w] [/d] */
 int cmd_dir(int argc, char** argv) {
   const char* spec = "";
@@ -40,58 +37,66 @@ int cmd_cd(int argc, char** argv) {
 }
 
 int cmd_md(int argc, char** argv) {
-  char L;
-  char name[64];
-  int idx_ok;
   int rc;
   if (argc < 2) {
     puts_k("Uso: md pasta\n");
     return 1;
   }
-  path_parse(argv[1], &L, name, (int)sizeof(name));
-  if (!name[0] || !drives_is_mounted(L)) {
-    puts_k("pasta invalida\n");
-    return 1;
-  }
-  idx_ok = drives_kind_name(L)[0] == 'F';
-  if (!idx_ok) {
-    puts_k("md so funciona em disco FAT\n");
-    return 1;
-  }
-  if (drives_use(L) != 0) {
-    puts_k("pasta invalida\n");
-    return 1;
-  }
-  rc = fat_mkdir(name);
+  rc = drives_mkdir(argv[1]);
   if (rc == 1) puts_k("ja existe\n");
+  else if (rc == -5) puts_k("md so funciona em disco FAT\n");
   else if (rc != 0) puts_k("nao criou a pasta\n");
   return rc == 0 ? 0 : 1;
 }
 
 int cmd_rd(int argc, char** argv) {
-  char L;
-  char name[64];
   int rc;
   if (argc < 2) {
     puts_k("Uso: rd pasta\n");
     return 1;
   }
-  path_parse(argv[1], &L, name, (int)sizeof(name));
-  if (!name[0] || !drives_is_mounted(L)) {
-    puts_k("pasta invalida\n");
-    return 1;
-  }
-  if (drives_kind_name(L)[0] != 'F') {
-    puts_k("rd so funciona em disco FAT\n");
-    return 1;
-  }
-  if (drives_use(L) != 0) {
-    puts_k("pasta invalida\n");
-    return 1;
-  }
-  rc = fat_rmdir(name);
+  rc = drives_rmdir(argv[1]);
   if (rc == -2) puts_k("pasta nao esta vazia\n");
   else if (rc == -3) puts_k("nao e pasta\n");
+  else if (rc == -5) puts_k("rd so funciona em disco FAT\n");
   else if (rc != 0) puts_k("nao removeu a pasta\n");
   return rc == 0 ? 0 : 1;
+}
+
+/* del arquivo | del *.tmp. *.* pergunta antes. */
+int cmd_del(int argc, char** argv) {
+  const char* s;
+  const char* leaf;
+  int rc;
+  if (argc < 2) {
+    puts_k("Uso: del arquivo   (aceita * e ?: del *.tmp)\n");
+    return 1;
+  }
+  leaf = argv[1];
+  for (s = argv[1]; *s; s++)
+    if (*s == '\\' || *s == '/' || *s == ':') leaf = s + 1;
+  if ((leaf[0] == '*' && leaf[1] == 0) ||
+      (leaf[0] == '*' && leaf[1] == '.' && leaf[2] == '*' && leaf[3] == 0)) {
+    int c;
+    puts_k("Apagar todos os arquivos da pasta (s/n)? ");
+    do c = shell_get_char(); while (c == 0);
+    putc((char)c);
+    putc('\n');
+    if (c != 's' && c != 'S') return 1;
+  }
+  rc = drives_del(argv[1]);
+  if (rc > 0) {
+    char n[12];
+    uint32_to_string((uint32_t)rc, n, sizeof(n));
+    puts_k(n);
+    puts_k(" arquivo(s) apagado(s)\n");
+    return 0;
+  }
+  if (rc == 0) return 0;
+  if (rc == -1) puts_k("arquivo nao encontrado\n");
+  else if (rc == -3) puts_k("e pasta; use rd\n");
+  else if (rc == -4) puts_k("arquivo somente leitura\n");
+  else if (rc == -5) puts_k("del so funciona em disco FAT e em D: na RAM\n");
+  else puts_k("unidade ou pasta invalida\n");
+  return 1;
 }

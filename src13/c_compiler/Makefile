@@ -145,16 +145,18 @@ $(B)/x_tglib.o: examples/tglib.c include/glib.h $(HEADERS) | $(B)
 $(O)/TGLIB.EXE: $(B)/x_crt0.o $(B)/x_tglib.o $(O)/GLIB.DLL $(O)/LIBCX.DLL $(LINK)
 	$(LINK) /out:$@ $(B)/x_crt0.o $(B)/x_tglib.o $(O)/GLIB.DLL $(O)/LIBCX.DLL $(O)/KERNEL.IMP
 
-# POSIX SysV (gcc -mx32) + MC.EXE (file manager hibrido)
+# POSIX SysV (gcc -mx32)
 $(B)/x_posix.o: ../libs/posix-lite/posix.c include/unistd.h include/dirent.h \
 		include/fcntl.h include/sys/stat.h $(HEADERS) | $(B)
 	$(HOSTCC) $(XGFLAGS) -c ../libs/posix-lite/posix.c -o $@
 $(O)/POSIXX.DLL: $(B)/x_posix.o $(O)/LIBCX.DLL $(LINK) $(O)/KERNEL.IMP
 	$(LINK) /dll /exportall /out:$@ $(B)/x_posix.o $(O)/LIBCX.DLL $(O)/KERNEL.IMP
-$(B)/x_mc.o: examples/mc.c include/curses.h include/glib.h $(HEADERS) | $(B)
-	$(HOSTCC) $(XGFLAGS) -c examples/mc.c -o $@
-$(O)/MC.EXE: $(B)/x_crt0.o $(B)/x_mc.o $(O)/TERM.DLL $(O)/GLIB.DLL $(O)/POSIXX.DLL $(O)/LIBCX.DLL $(LINK)
-	$(LINK) /out:$@ $(B)/x_crt0.o $(B)/x_mc.o $(O)/TERM.DLL $(O)/GLIB.DLL $(O)/POSIXX.DLL $(O)/LIBCX.DLL $(O)/KERNEL.IMP
+
+# MC.EXE (../mc): file manager de dois paineis, so com LIBC.DLL. No SO o
+# BUILD.BAT da pasta compila os mesmos fontes com o CC.EXE.
+MC_SRC = ../mc/mc.c ../mc/scr.c ../mc/panel.c ../mc/ops.c ../mc/view.c
+$(O)/MC.EXE: $(MC_SRC) ../mc/mc.h $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
+	$(HCC) -o $@ $(MC_SRC)
 
 $(HCC): $(CC_SRC) cc/cc.h sox.h | $(B)
 	$(HOSTCC) $(HCFLAGS) -o $@ $(CC_SRC)

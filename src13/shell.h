@@ -62,6 +62,9 @@ void con_break_poll(void);
 #define KEY_HOME  0x106
 #define KEY_END   0x107
 #define KEY_DEL   0x108
+#define KEY_INS   0x109
+/* F1..F12 = KEY_F(1)..KEY_F(12), como no curses */
+#define KEY_F(n)  (0x140 + (n))
 
 int strcmp(const char* a, const char* b);
 uint32_t str_to_uint32(const char* str, uint32_t base);
@@ -129,6 +132,7 @@ int cmd_dir(int argc, char** argv);
 int cmd_cd(int argc, char** argv);
 int cmd_md(int argc, char** argv);
 int cmd_rd(int argc, char** argv);
+int cmd_del(int argc, char** argv);
 int cmd_cat(int argc, char** argv);
 int cmd_more(int argc, char** argv);
 int cmd_keyb(int argc, char** argv);

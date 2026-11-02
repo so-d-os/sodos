@@ -19,6 +19,9 @@ extern int fat_mkdir(const char* path);
 extern int fat_rmdir(const char* path);
 extern int fat_file_size(const char* filename);
 extern int fat_dir_items(const char* path, struct dir_item* out, int max);
+extern int fat_delete(const char* path);
+extern int fat_mkdir(const char* path);
+extern int fat_rmdir(const char* path);
 extern int fat_get_space_info(uint32_t* total_bytes, uint32_t* free_bytes);
 extern int get_partition_info(uint32_t drive, uint8_t partition_num, uint32_t* lba_start,
                              uint32_t* sector_count, uint8_t* type);
@@ -939,6 +942,115 @@ void drives_dir(const char* spec, int flags) {
       puts_k(" bytes livres\n");
     }
   }
+}
+
+/* Apaga um arquivo de D: na RAM: o ultimo vem para o lugar dele. */
+static int d_delete(const char* name) {
+  struct mem_file* f = d_find(name);
+  struct mem_file t;
+  if (!f) return -1;
+  d_ram_count--;
+  t = *f;
+  *f = d_ram[d_ram_count];
+  d_ram[d_ram_count] = t;
+  d_ram[d_ram_count].name[0] = '\0';
+  d_ram[d_ram_count].size = 0;
+  return 0;
+}
+
+/* Apaga um arquivo (0) ou, com * e ? no nome, todos que casam (quantos).
+ * -1 nao achou, -2 pasta/unidade invalida, -3 e pasta, -4 somente leitura,
+ * -5 a unidade nao deixa apagar. */
+int drives_del(const char* spec) {
+  char dspec[64];
+  char pat[32];
+  char L;
+  char name[64];
+  char full[96];
+  struct dir_item* it;
+  int idx, n, i, k, cut = -1, done = 0, rc;
+  if (!spec || !spec[0]) return -2;
+  for (i = 0; spec[i]; i++)
+    if (spec[i] == '\\' || spec[i] == '/' || spec[i] == ':') cut = i;
+  pat[0] = 0;
+  if (has_wild(spec + cut + 1)) {
+    copy_str(pat, (int)sizeof(pat), spec + cut + 1);
+    for (i = 0; i <= cut && i < (int)sizeof(dspec) - 1; i++) dspec[i] = spec[i];
+    dspec[i] = 0;
+  } else {
+    copy_str(dspec, (int)sizeof(dspec), spec);
+  }
+  path_parse(dspec, &L, name, (int)sizeof(name));
+  idx = letter_idx(L);
+  if (idx < 0 || !drv_ready(idx)) return -2;
+  if (drv_kind[idx] != DRV_FAT && !(L == 'D' && drv_kind[idx] == DRV_RAM)) return -5;
+  if (!pat[0]) {
+    if (drv_kind[idx] == DRV_FAT) return fat_delete(name);
+    return d_delete(name);
+  }
+  it = (struct dir_item*)kmalloc(DIR_ITEMS_MAX * (uint32_t)sizeof(struct dir_item));
+  if (!it) return -2;
+  n = dir_collect(idx, L, name, it, DIR_ITEMS_MAX);
+  if (n < 0) {
+    kfree(it);
+    return -2;
+  }
+  for (i = 0; i < n; i++) {
+    if (it[i].dir || !dir_match(pat, it[i].name)) continue;
+    k = 0;
+    if (name[0]) {
+      copy_str(full, (int)sizeof(full) - 14, name);
+      k = str_len(full);
+      full[k++] = '\\';
+    }
+    copy_str(full + k, (int)sizeof(full) - k, it[i].name);
+    if (drv_kind[idx] == DRV_FAT) {
+      if (drv_ready(idx)) rc = fat_delete(full);
+      else rc = -2;
+    } else {
+      rc = d_delete(full);
+    }
+    if (rc == 0) done++;
+  }
+  kfree(it);
+  return done > 0 ? done : -1;
+}
+
+/* Itens da pasta path (com tamanho e data). -1 se nao e pasta. */
+int drives_items(const char* path, struct dir_item* out, int max) {
+  char L;
+  char name[64];
+  int idx;
+  path_parse(path, &L, name, (int)sizeof(name));
+  idx = letter_idx(L);
+  if (idx < 0 || !drv_ready(idx)) return -1;
+  return dir_collect(idx, L, name, out, max);
+}
+
+/* md/rd: os codigos de fat_mkdir/fat_rmdir; -5 se nao e disco FAT. */
+static int dir_op(const char* path, int make) {
+  char L;
+  char name[64];
+  int idx;
+  path_parse(path, &L, name, (int)sizeof(name));
+  idx = letter_idx(L);
+  if (!name[0] || idx < 0 || !drv_ready(idx)) return -1;
+  if (drv_kind[idx] != DRV_FAT) return -5;
+  return make ? fat_mkdir(name) : fat_rmdir(name);
+}
+
+int drives_mkdir(const char* path) { return dir_op(path, 1); }
+int drives_rmdir(const char* path) { return dir_op(path, 0); }
+
+/* Espaco da unidade em KB. -1 se nao e disco FAT montado. */
+int drives_space(char letter, uint32_t* total_kb, uint32_t* free_kb) {
+  int idx = letter_idx(letter);
+  uint32_t t, f;
+  if (idx < 0 || !drv_ready(idx) || drv_kind[idx] != DRV_FAT) return -1;
+  if (fat_get_space_info(&t, &f) != 0) return -1;
+  if (total_kb) *total_kb = t / 1024u;
+  if (free_kb) *free_kb = f / 1024u;
+  return 0;
 }
 
 void drives_print_dir(const char* spec) {

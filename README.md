@@ -327,6 +327,7 @@ No Ctrl (Ctrl+C does not interrupt a command); the only combination is `Ctrl+Alt
 | `cd [path]` | Enters a directory; with no argument shows the current directory |
 | `md dir` | Creates a directory (FAT16 only) |
 | `rd dir` | Removes an empty directory (FAT16 only) |
+| `del file` / `erase file` | Deletes a file (FAT16, or `D:` in RAM). `*` and `?` delete every match (`del *.tmp`, `del u:\temp\*.log`); `del *.*` asks first |
 | `type file` / `cat file` | Shows a whole file from any drive. UTF-8 text (made on Linux) is shown with accents |
 | `more file` | Shows a file one screen at a time: `Space` next screen, `Enter` next line, `q`/`Esc`/`Ctrl+C` quits |
 | `cmd \| more` | Pipe: the output of the left command goes to the right one (`type x.txt \| more`, `dir /s \| more`, `help \| more`). One `\|` per line; an `.EXE` on the right reads the pipe as its input |
@@ -454,11 +455,12 @@ Black 80×40 window with the same shell interpreter. Several can be open; the `e
 | `HTTPS.EXE` | GET over TLS (`HTTPS example.com /`) |
 | `WGET.EXE` | Downloads a file over HTTP or HTTPS (`WGET http://example.com/a.txt`) |
 | `BAT.EXE` | Batch file (`BAT DEMO.BAT` or just `DEMO.BAT`) |
+| `MC.EXE` | Two-panel file manager in the style of Linux mc (sources in `src13/mc`). Arrows/Tab move, Enter enters a directory or runs `.EXE`/`.BAT`, Insert marks; F2 drive, F3 view (UTF-8 and hex), F4 edit, F5 copy, F6 move/rename, F7 make directory, F8 delete (directories with everything inside), F9 menu, F10 quit. Text mode only (outside `win`) |
 | `HELLO.EXE`, `HELLO2.EXE` | `argc`/`argv` examples |
 | `CRT0.OBJ`, `KERNEL.IMP` | Entry point and kernel export list |
 | `*.H`, `*.C`, `*.CPP`, `*.BAT` | Headers, libc, examples, the `cc`/`link` sources and `DEMO.BAT` |
 
-`D:\SODOS\` holds `FONTADV.EXE` and `FONTS\` with four TTFs. `IMAGEVW.C` also goes to the root, as an example.
+`D:\SODOS\` holds `FONTADV.EXE` and `FONTS\` with four TTFs. `IMAGEVW.C` also goes to the root, as an example. The MC sources go to `D:\SRC\MC` with a `BUILD.BAT` that builds them with the system's own `CC.EXE`.
 
 `WGET` stores at most 4 MB and follows up to 5 redirects. With no output name, the file is 8.3 taken from the URL path (`INDEX.HTM` for `/`). `BAT` understands `REM`, `#`, `::`, `@`, `ECHO ON`/`OFF`, `SET N=value`, `%N%`, `%1` through `%9`, `%*`, `GOTO :label`, `IF [NOT] EXIST`, `IF [NOT] ERRORLEVEL n`, `IF [NOT] a==b`, `CALL` and `EXIT`. Anything else runs as a prompt line. Inside the OS: `CC WGET.C TLS.DLL` and `CC BAT.C`.
 

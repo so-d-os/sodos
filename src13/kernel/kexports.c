@@ -9,6 +9,7 @@
 #include "module.h"
 #include "kexports.h"
 #include "visual.h"
+#include "fbcon.h"
 
 void mod_exit(int code);
 void shell_read_line(char* buf, int max);
@@ -105,6 +106,63 @@ static void k_pwd(char* out, int max) { drives_pwd(out, max); }
 static int k_chdir(const char* path) {
   if (!path || !path[0]) return 0;
   return drives_chdir(path);
+}
+
+/* Itens de uma pasta com tamanho e data (struct dir_item = k_dirent). */
+static int k_dir(const char* path, struct dir_item* out, int max) {
+  if (!path || !out || max <= 0) return -1;
+  return drives_items(path, out, max);
+}
+
+/* Apaga arquivo (aceita * e ?). 0 ou quantos; <0 erro (drives_del). */
+static int k_fdelete(const char* path) { return path ? drives_del(path) : -1; }
+static int k_mkdir(const char* path) { return path ? drives_mkdir(path) : -1; }
+static int k_rmdir(const char* path) { return path ? drives_rmdir(path) : -1; }
+static int k_dfree(int letter, uint32_t* total_kb, uint32_t* free_kb) {
+  return drives_space((char)letter, total_kb, free_kb);
+}
+
+/* ---------- tela de texto 80x25 ---------- */
+/* Celulas caractere | cor << 8, como na VGA. No WIN, ou com a saida
+ * desviada (pipe), nao ha tela de celulas: devolve -1. */
+static int text_screen_ok(void) {
+  return !con_hook && !shell_get_out();
+}
+
+static int k_vput(int row, int col, const uint16_t* cells, int n) {
+  int pos, i;
+  if (!text_screen_ok()) return -1;
+  if (!cells || row < 0 || row >= 25 || col < 0 || col >= 80) return 0;
+  pos = row * 80 + col;
+  if (n > 80 * 25 - pos) n = 80 * 25 - pos;
+  for (i = 0; i < n; i++) vga_text[pos + i] = cells[i];
+  fbcon_sync();
+  return 0;
+}
+
+/* Cursor em (row, col); row < 0 esconde. */
+static int cur_hidden;
+static uint8_t cur_start;
+
+static void k_cursor(int row, int col) {
+  if (!text_screen_ok()) return;
+  if (row < 0 || row >= 25 || col < 0 || col >= 80) {
+    if (fbcon_active()) {
+      fbcon_cursor(-1);
+    } else if (vga_legacy() && !cur_hidden) {
+      shell_outb(0x3D4, 0x0A);
+      cur_start = shell_inb(0x3D5);
+      shell_outb(0x3D5, (uint8_t)(cur_start | 0x20));
+    }
+    cur_hidden = 1;
+    return;
+  }
+  if (cur_hidden && !fbcon_active() && vga_legacy()) {
+    shell_outb(0x3D4, 0x0A);
+    shell_outb(0x3D5, (uint8_t)(cur_start & (uint8_t)~0x20));
+  }
+  cur_hidden = 0;
+  goto_xy(row, col);
 }
 
 /* ---------- memoria ---------- */
@@ -290,6 +348,13 @@ static const struct kexp table[] = {
   EXP(k_dirlist),
   EXP(k_pwd),
   EXP(k_chdir),
+  EXP(k_dir),
+  EXP(k_fdelete),
+  EXP(k_mkdir),
+  EXP(k_rmdir),
+  EXP(k_dfree),
+  EXP(k_vput),
+  EXP(k_cursor),
   EXP(k_drive),
   EXP(k_set_drive),
   EXP(k_malloc),

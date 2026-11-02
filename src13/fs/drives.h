@@ -38,6 +38,14 @@ void drives_print_dir(const char* spec);
 #define DIR_DIRS 4
 /* spec aceita * e ? no ultimo nome (*.exe, ???.txt). */
 void drives_dir(const char* spec, int flags);
+/* del: 0 apagou, >0 quantos (com * e ?), <0 erro (ver drives.c). */
+int drives_del(const char* spec);
+/* md/rd por caminho completo: 0 ok, 1 ja existe (md), -2 nao vazia (rd),
+ * -3 nao e pasta (rd), -5 nao e disco FAT, -1 outro erro. */
+int drives_mkdir(const char* path);
+int drives_rmdir(const char* path);
+/* Espaco em KB de uma unidade FAT. -1 se nao for. */
+int drives_space(char letter, uint32_t* total_kb, uint32_t* free_kb);
 
 /* Uma entrada de pasta. date/time no formato FAT (0 = sem data). */
 struct dir_item {
@@ -47,6 +55,8 @@ struct dir_item {
   uint16_t time;
   uint8_t dir;
 };
+/* Itens de uma pasta ("U:\\SRC"). Quantos; -1 se nao e pasta. */
+int drives_items(const char* path, struct dir_item* out, int max);
 void drives_list(char letter);
 int drives_names(char letter, char out[][32], int max);
 char path_letter(const char* path);

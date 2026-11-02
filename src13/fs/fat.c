@@ -857,6 +857,32 @@ int fat_rmdir(const char* path) {
   return 0;
 }
 
+/* 0 apagou. -1 nao existe. -3 e pasta. -4 somente leitura.
+ * Marca tambem as entradas de nome longo (LFN) que vem antes. */
+int fat_delete(const char* path) {
+  struct dir_view parent;
+  char leaf[13];
+  struct fat_dir_entry* e;
+  uint16_t cluster;
+  int i;
+  if (fat_type != 16 || !path || !path[0]) return -1;
+  if (open_parent(path, &parent, leaf, 0) != 0) return -1;
+  e = dir_find(&parent, leaf, 0);
+  if (!e) return dir_find(&parent, leaf, 1) ? -3 : -1;
+  if (e->attributes & 0x01) return -4;
+  cluster = e->cluster;
+  for (i = (int)(e - parent.ents) - 1; i >= 0; i--) {
+    if ((parent.ents[i].attributes & 0x0F) != 0x0F) break;
+    if ((unsigned char)parent.ents[i].name[0] == 0xE5) break;
+    parent.ents[i].name[0] = (char)0xE5;
+  }
+  e->name[0] = (char)0xE5;
+  if (dir_flush(&parent) != 0) return -1;
+  if (cluster >= 2) free_chain(cluster);
+  flush_fat();
+  return 0;
+}
+
 /* Linhas "NOME" ou "NOME\\" se for pasta. path vazio lista a raiz. -1 se nao e pasta. */
 int fat_list_dir(const char* path, char* output, int max_output) {
   struct dir_view v;

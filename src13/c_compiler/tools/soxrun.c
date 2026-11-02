@@ -103,10 +103,74 @@ static void k_puts(const char* s) {
   if (s) fputs(s, stdout);
   fflush(stdout);
 }
+/* Tela de celulas de k_vput. Com SOX_SCREEN=pref, cada k_getc grava a tela
+ * em pref-N.bin (4000 bytes, caractere e cor), para conferir o desenho. */
+static unsigned short vscreen[25 * 80];
+static int vscreen_used;
+static int vscreen_frame;
+
+static void vscreen_dump(void) {
+  const char* pref = getenv("SOX_SCREEN");
+  char name[300];
+  FILE* f;
+  if (!pref || !vscreen_used) return;
+  snprintf(name, sizeof name, "%s-%d.bin", pref, vscreen_frame++);
+  f = fopen(name, "wb");
+  if (!f) return;
+  fwrite(vscreen, 2, 25 * 80, f);
+  fclose(f);
+}
+
+/* Com SOX_KEYS="DOWN,F5,ENTER,x" as teclas vem dali (nomes ou um caractere);
+ * no fim, 26 (fim de arquivo). */
+static int key_token(const char* t, int n) {
+  static const struct { const char* name; int code; } names[] = {
+    {"UP", 0x100}, {"DOWN", 0x101}, {"LEFT", 0x102}, {"RIGHT", 0x103},
+    {"PGUP", 0x104}, {"PGDN", 0x105}, {"HOME", 0x106}, {"END", 0x107},
+    {"DEL", 0x108}, {"INS", 0x109}, {"ENTER", '\n'}, {"TAB", '\t'},
+    {"ESC", 27}, {"BS", 8}, {"SPACE", ' '}, {"COMMA", ','},
+  };
+  unsigned i;
+  if (n == 1) return (unsigned char)t[0];
+  if (n >= 2 && t[0] == 'F' && t[1] >= '1' && t[1] <= '9') return 0x140 + atoi(t + 1);
+  for (i = 0; i < sizeof names / sizeof names[0]; i++)
+    if ((int)strlen(names[i].name) == n && strncmp(names[i].name, t, (size_t)n) == 0)
+      return names[i].code;
+  return '?';
+}
+
 static int k_getc(void) {
-  int c = getchar();
+  static const char* keys;
+  static int keys_init;
+  int c;
+  vscreen_dump();
+  if (!keys_init) {
+    keys = getenv("SOX_KEYS");
+    keys_init = 1;
+  }
+  if (keys) {
+    const char* e;
+    if (!*keys) return 26;
+    e = strchr(keys, ',');
+    if (!e) e = keys + strlen(keys);
+    c = key_token(keys, (int)(e - keys));
+    keys = *e ? e + 1 : e;
+    return c;
+  }
+  c = getchar();
   return c == EOF ? 26 : c;
 }
+
+static int k_vput(int row, int col, const unsigned short* cells, int n) {
+  int pos;
+  if (row < 0 || row >= 25 || col < 0 || col >= 80 || !cells) return 0;
+  pos = row * 80 + col;
+  if (n > 2000 - pos) n = 2000 - pos;
+  if (n > 0) memcpy(vscreen + pos, cells, (size_t)n * 2);
+  vscreen_used = 1;
+  return 0;
+}
+static void k_cursor(int row, int col) { (void)row; (void)col; }
 static int k_readline(char* buf, int max) {
   int n;
   fflush(stdout);
@@ -249,6 +313,68 @@ static int k_chdir(const char* path) {
   }
   cwd_rel[sizeof(cwd_rel) - 1] = 0;
   slash_to_host(cwd_rel);
+  return 0;
+}
+struct k_dirent {
+  char name[32];
+  unsigned size;
+  unsigned short date;
+  unsigned short time;
+  unsigned char dir;
+  unsigned char pad[3];
+};
+static int k_dir(const char* path, struct k_dirent* out, int max) {
+  char hp[300];
+  DIR* d;
+  struct dirent* e;
+  int n = 0;
+  host_path(path && path[0] ? path : "D:\\", hp, sizeof hp);
+  d = opendir(hp);
+  if (!d) return -1;
+  while ((e = readdir(d)) != NULL && n < max) {
+    char sub[600];
+    struct stat st;
+    struct tm tm;
+    if (e->d_name[0] == '.') continue;
+    snprintf(sub, sizeof sub, "%s/%s", hp, e->d_name);
+    if (stat(sub, &st) != 0) continue;
+    memset(&out[n], 0, sizeof out[n]);
+    snprintf(out[n].name, sizeof out[n].name, "%s", e->d_name);
+    out[n].dir = S_ISDIR(st.st_mode) ? 1 : 0;
+    out[n].size = out[n].dir ? 0 : (unsigned)st.st_size;
+    if (localtime_r(&st.st_mtime, &tm)) {
+      out[n].date = (unsigned short)(((tm.tm_year - 80) << 9) | ((tm.tm_mon + 1) << 5) | tm.tm_mday);
+      out[n].time = (unsigned short)((tm.tm_hour << 11) | (tm.tm_min << 5) | (tm.tm_sec / 2));
+    }
+    n++;
+  }
+  closedir(d);
+  return n;
+}
+static int k_fdelete(const char* path) {
+  char hp[300];
+  struct stat st;
+  host_path(path, hp, sizeof hp);
+  if (stat(hp, &st) != 0) return -1;
+  if (S_ISDIR(st.st_mode)) return -3;
+  return unlink(hp) == 0 ? 0 : -2;
+}
+static int k_mkdir(const char* path) {
+  char hp[300];
+  struct stat st;
+  host_path(path, hp, sizeof hp);
+  if (stat(hp, &st) == 0) return 1;
+  return mkdir(hp, 0755) == 0 ? 0 : -1;
+}
+static int k_rmdir(const char* path) {
+  char hp[300];
+  host_path(path, hp, sizeof hp);
+  return rmdir(hp) == 0 ? 0 : -2;
+}
+static int k_dfree(int letter, unsigned* total_kb, unsigned* free_kb) {
+  (void)letter;
+  if (total_kb) *total_kb = 2u * 1024u * 1024u;
+  if (free_kb) *free_kb = 1234567u;
   return 0;
 }
 static int k_drive(void) { return 'D'; }
@@ -565,7 +691,8 @@ static const struct {
 } ktab[] = {
   E(k_putc), E(k_write), E(k_puts), E(k_getc), E(k_readline), E(k_clear),
   E(k_fsize), E(k_fload), E(k_fread), E(k_fsave), E(k_flist), E(k_dirlist), E(k_pwd), E(k_chdir),
-  E(k_drive), E(k_set_drive),
+  E(k_drive), E(k_set_drive), E(k_dir), E(k_fdelete), E(k_mkdir), E(k_rmdir), E(k_dfree),
+  E(k_vput), E(k_cursor),
   E(k_malloc), E(k_free), E(k_realloc), E(k_msize), E(k_meminfo),
   E(k_exit), E(k_exec), E(k_shell), E(k_last_error), E(k_dll_load), E(k_dll_sym), E(k_dll_free),
   E(k_rdtsc), E(k_ms), E(k_date), E(k_random),

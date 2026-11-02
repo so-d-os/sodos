@@ -433,8 +433,7 @@ format-disk:
 # Tudo vai para a raiz do D: em maiusculas: binarios, headers, fontes da libc,
 # exemplos e os fontes do proprio cc/link (para recompilar dentro do SO).
 # Fontes do MC em D:\SRC\MC, compilados no proprio SODOS por BUILD.BAT.
-MC_SRC = c_compiler/examples/mc.c libs/term/term.c libs/glib/glib.c \
-	libs/posix-lite/posix.c tools/mc/BUILD.BAT
+MC_SRC = mc/mc.h mc/mc.c mc/scr.c mc/panel.c mc/ops.c mc/view.c mc/BUILD.BAT
 
 DISK_FILES = c_compiler/out/*.EXE c_compiler/out/*.DLL c_compiler/out/*.OBJ \
 	c_compiler/out/*.IMP c_compiler/include/*.h c_compiler/include/sys/*.h \

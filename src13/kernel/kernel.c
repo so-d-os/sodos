@@ -513,12 +513,15 @@ static int get_char(void) {
       [0x47] = KEY_HOME,
       [0x4F] = KEY_END,
       [0x53] = KEY_DEL,
+      [0x52] = KEY_INS,
     };
     return ext_keys[sc];
   }
 
   if (sc & 0x80)
     return 0;
+  if (sc >= 0x3B && sc <= 0x44) return KEY_F(sc - 0x3A);
+  if (sc == 0x57 || sc == 0x58) return KEY_F(sc - 0x57 + 11);
   return keymap_char(sc);
 }
 
@@ -1269,6 +1272,8 @@ void kmain(const struct BootInfo* bi) {
   register_builtin("cd", cmd_cd);
   register_builtin("md", cmd_md);
   register_builtin("rd", cmd_rd);
+  register_builtin("del", cmd_del);
+  register_builtin("erase", cmd_del);
   register_builtin("cat", cmd_cat);
   register_builtin("fdisk", cmd_fdisk);
   register_builtin("format", cmd_format);

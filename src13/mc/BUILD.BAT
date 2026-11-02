@@ -7,7 +7,7 @@ set lib=D:\
 if not exist D:\STDIO.H set inc=U:\INCLUDE\
 if not exist D:\LIBC.DLL set lib=U:\
 echo Compilando MC.EXE (headers em %inc%, DLLs em %lib%)
-cc -I %inc% -L %lib% -o MC.EXE mc.c term.c glib.c posix.c
+cc -I %inc% -L %lib% -o MC.EXE mc.c scr.c panel.c ops.c view.c
 if errorlevel 1 goto erro
 echo MC.EXE pronto. Rode:  mc
 goto fim
