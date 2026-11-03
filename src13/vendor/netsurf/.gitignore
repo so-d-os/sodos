@@ -1,0 +1,12 @@
+# Gerado por sodos/setup.sh, build.sh e link.sh
+netsurf-all-*.tar.gz
+tree/
+hosttools/
+build-sodos.log
+sodos/obj/
+sodos/run/*.EXE
+sodos/run/*.DLL
+sodos/run/*.ppm
+sodos/run/*.png
+sodos/run/*.log
+sodos/run/*.TXT

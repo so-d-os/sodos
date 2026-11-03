@@ -760,14 +760,144 @@ static int k_shell_capture(char* line, char* out, int max, int* len) {
   return rc;
 }
 
-/* sem WIN: a janela nunca abre (como no shell do DOS) */
-static int k_gui_open(const char* t) { (void)t; return -1; }
+/* Sem SOX_GUI a janela nunca abre (como no shell do DOS).
+ * SOX_GUI=800x600 abre uma janela em memoria; cada k_gui_present grava
+ * SOX_GUI_OUT (padrao gui) como .ppm. SOX_GUI_EVENTS e um roteiro:
+ * "wait:500,click:120:80,drag:130:90,up,key:a,key:ENTER,wheel:3:x:y,close".
+ * wait so passa em gui_event com timeout; no fim do roteiro vem CLOSE. */
+static unsigned char* gui_fb;
+static int gui_w, gui_h, gui_frames;
+static const char* gui_script;
+static unsigned gui_wait_end;
+static int gui_wait_on;
+
+static int k_gui_open(const char* t) {
+  const char* g = getenv("SOX_GUI");
+  (void)t;
+  if (!g || sscanf(g, "%dx%d", &gui_w, &gui_h) != 2 || gui_w < 1 || gui_h < 1) return -1;
+  free(gui_fb);
+  gui_fb = (unsigned char*)calloc((size_t)gui_w * gui_h, 3);
+  gui_script = getenv("SOX_GUI_EVENTS");
+  return gui_fb ? 0 : -1;
+}
 static void k_gui_nop(void) {}
-static void k_gui_size(int* w, int* h) { *w = 0; *h = 0; }
+static void k_gui_close(void) {
+  free(gui_fb);
+  gui_fb = 0;
+}
+static void k_gui_size(int* w, int* h) { *w = gui_fb ? gui_w : 0; *h = gui_fb ? gui_h : 0; }
 static void k_gui_font(int* cw, int* ch) { *cw = 8; *ch = 16; }
-static int k_gui_event(int* ev, int ms) { (void)ms; ev[0] = 3; return -1; }
+static void k_gui_present(void) {
+  const char* pref = getenv("SOX_GUI_OUT");
+  char name[300];
+  FILE* f;
+  if (!gui_fb) return;
+  snprintf(name, sizeof name, "%s.ppm", pref ? pref : "gui");
+  f = fopen(name, "wb");
+  if (!f) return;
+  fprintf(f, "P6\n%d %d\n255\n", gui_w, gui_h);
+  fwrite(gui_fb, 3, (size_t)gui_w * gui_h, f);
+  fclose(f);
+  gui_frames++;
+}
+static void k_gui_fill(int x, int y, int w, int h, unsigned rgb) {
+  int yy, xx;
+  if (!gui_fb) return;
+  for (yy = y; yy < y + h; yy++)
+    for (xx = x; xx < x + w; xx++) {
+      unsigned char* d;
+      if (xx < 0 || yy < 0 || xx >= gui_w || yy >= gui_h) continue;
+      d = gui_fb + ((size_t)yy * gui_w + xx) * 3;
+      d[0] = (unsigned char)(rgb >> 16);
+      d[1] = (unsigned char)(rgb >> 8);
+      d[2] = (unsigned char)rgb;
+    }
+}
+static int k_gui_event(int* ev, int ms) {
+  const char* e;
+  char tok[64];
+  int n;
+  ev[0] = ev[1] = ev[2] = ev[3] = 0;
+  if (!gui_fb) {
+    ev[0] = 3;
+    return -1;
+  }
+  for (;;) {
+    if (!gui_script || !*gui_script) {
+      ev[0] = 3;
+      return 3;
+    }
+    e = strchr(gui_script, ',');
+    if (!e) e = gui_script + strlen(gui_script);
+    n = (int)(e - gui_script);
+    if (n >= (int)sizeof tok) n = (int)sizeof tok - 1;
+    memcpy(tok, gui_script, (size_t)n);
+    tok[n] = 0;
+    if (strncmp(tok, "wait:", 5) == 0) {
+      /* tempo real: o programa pode esperar com timeout 0 e k_ms */
+      int left, step;
+      if (!gui_wait_on) {
+        gui_wait_end = k_ms() + (unsigned)atoi(tok + 5);
+        gui_wait_on = 1;
+      }
+      left = (int)(gui_wait_end - k_ms());
+      if (ms < 0 || left <= 0) {
+        gui_wait_on = 0;
+        gui_script = *e ? e + 1 : e;
+        continue;
+      }
+      step = ms < left ? ms : left;
+      usleep((useconds_t)(step > 0 ? step : 1) * 1000);
+      return 0;
+    }
+    gui_script = *e ? e + 1 : e;
+    if (sscanf(tok, "click:%d:%d", &ev[1], &ev[2]) == 2) {
+      ev[0] = 1;
+      ev[3] = 1;
+    } else if (sscanf(tok, "drag:%d:%d", &ev[1], &ev[2]) == 2) {
+      ev[0] = 5;
+    } else if (strcmp(tok, "up") == 0) {
+      ev[0] = 4;
+    } else if (sscanf(tok, "wheel:%d", &ev[3]) == 1) {
+      /* wheel:N ou wheel:N:x:y (sem x:y, no meio da janela) */
+      ev[0] = 6;
+      ev[1] = gui_w / 2;
+      ev[2] = gui_h / 2;
+      sscanf(tok, "wheel:%d:%d:%d", &ev[3], &ev[1], &ev[2]);
+    } else if (strncmp(tok, "key:", 4) == 0) {
+      static const struct { const char* name; int code; } names[] = {
+        {"UP", 0x101}, {"DOWN", 0x102}, {"LEFT", 0x103}, {"RIGHT", 0x104},
+        {"PGUP", 0x105}, {"PGDN", 0x106}, {"HOME", 0x107}, {"END", 0x108},
+        {"DEL", 0x109}, {"ENTER", 13}, {"TAB", 9}, {"ESC", 27}, {"BS", 8},
+        {"SPACE", ' '}, {"COMMA", ','},
+      };
+      unsigned i;
+      ev[0] = 2;
+      ev[3] = (unsigned char)tok[4];
+      for (i = 0; i < sizeof names / sizeof names[0]; i++)
+        if (strcmp(tok + 4, names[i].name) == 0) ev[3] = names[i].code;
+    } else {
+      ev[0] = 3;
+    }
+    return ev[0];
+  }
+}
 static void k_gui_pixels(int x, int y, int w, int h, const void* p, int stride) {
-  (void)x; (void)y; (void)w; (void)h; (void)p; (void)stride;
+  int yy, xx;
+  if (!gui_fb || !p) return;
+  for (yy = 0; yy < h; yy++) {
+    const unsigned char* row = (const unsigned char*)p + (size_t)yy * stride;
+    if (y + yy < 0 || y + yy >= gui_h) continue;
+    for (xx = 0; xx < w; xx++) {
+      const unsigned char* q = row + xx * 4;
+      unsigned char* d;
+      if (x + xx < 0 || x + xx >= gui_w || q[3] < 128) continue;
+      d = gui_fb + ((size_t)(y + yy) * gui_w + x + xx) * 3;
+      d[0] = q[0];
+      d[1] = q[1];
+      d[2] = q[2];
+    }
+  }
 }
 
 #define E(n) { #n, (void*)n }
@@ -784,9 +914,9 @@ static const struct {
   E(k_rdtsc), E(k_ms), E(k_date), E(k_time), E(k_random),
   E(k_net_ready), E(k_dns), E(k_tcp_connect), E(k_tcp_send), E(k_tcp_recv), E(k_tcp_close),
   E(k_gui_open), E(k_gui_size), E(k_gui_font), E(k_gui_event),
-  { "k_gui_close", (void*)k_gui_nop }, { "k_gui_title", (void*)k_gui_nop },
-  { "k_gui_fill", (void*)k_gui_nop }, { "k_gui_text", (void*)k_gui_nop },
-  { "k_gui_present", (void*)k_gui_nop },
+  E(k_gui_close), { "k_gui_title", (void*)k_gui_nop },
+  E(k_gui_fill), { "k_gui_text", (void*)k_gui_nop },
+  E(k_gui_present),
   E(k_gui_pixels),
 };
 

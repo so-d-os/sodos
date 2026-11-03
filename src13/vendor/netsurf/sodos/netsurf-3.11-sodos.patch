@@ -1,0 +1,566 @@
+--- a/Makefile
++++ b/Makefile
+@@ -65,7 +65,7 @@
+   NSBUILD_TARG := $(NSGENBIND_TARG)
+ else
+   ifeq ($(TARGET),framebuffer)
+-    NSLIB_TARG := $(NSLIB_ALL_TARG) $(NSLIB_SVGTINY_TARG)  $(NSLIB_FB_TARG)
++    NSLIB_TARG := $(NSLIB_ALL_TARG) $(NSLIB_FB_TARG)
+     NSBUILD_TARG := $(NSGENBIND_TARG)
+   else
+     ifeq ($(TARGET),amiga)
+@@ -110,7 +110,7 @@
+ 
+ # prefixed install macro for each host sub target
+ define do_build_prefix_install
+-	$(MAKE) install --directory=$1 HOST=$(BUILD) PREFIX=$(TMP_PREFIX) Q=$(Q) DESTDIR=
++	$(MAKE) install --directory=$1 HOST=$(BUILD) CC=cc PREFIX=$(TMP_PREFIX) Q=$(Q) DESTDIR=
+ 
+ endef
+ 
+--- a/libdom/Makefile.config
++++ b/libdom/Makefile.config
+@@ -6,7 +6,7 @@
+ 
+ # Build the expat binding?
+ # yes | no
+-WITH_EXPAT_BINDING := yes
++WITH_EXPAT_BINDING := no
+ 
+ # Build the hubbub binding?
+ # yes | no
+--- a/libnsfb/Makefile
++++ b/libnsfb/Makefile
+@@ -43,10 +43,10 @@
+ NSFB_XCB_PKG_NAMES := xcb xcb-icccm xcb-image xcb-keysyms xcb-atom
+ 
+ # determine which surface handlers can be compiled based upon avalable library
+-$(eval $(call pkg_config_package_available,NSFB_VNC_AVAILABLE,libvncserver))
+-$(eval $(call pkg_config_package_available,NSFB_SDL_AVAILABLE,sdl))
+-$(eval $(call pkg_config_package_available,NSFB_XCB_AVAILABLE,$(NSFB_XCB_PKG_NAMES)))
+-$(eval $(call pkg_config_package_available,NSFB_WLD_AVAILABLE,wayland-client))
++NSFB_VNC_AVAILABLE := no
++NSFB_SDL_AVAILABLE := no
++NSFB_XCB_AVAILABLE := no
++NSFB_WLD_AVAILABLE := no
+ 
+ # Flags and setup for each support library
+ ifeq ($(NSFB_SDL_AVAILABLE),yes)
+--- a/libnsfb/include/libnsfb.h
++++ b/libnsfb/include/libnsfb.h
+@@ -42,6 +42,7 @@
+     NSFB_SURFACE_LINUX, /**< Linux framebuffer surface */
+     NSFB_SURFACE_ABLE, /**< ABLE framebuffer surface */
+     NSFB_SURFACE_RAM, /**< RAM surface */
++    NSFB_SURFACE_SODOS, /**< SODOS WIN window */
+     NSFB_SURFACE_COUNT, /**< The number of surface kinds */
+ };
+ 
+@@ -82,6 +83,9 @@
+  */
+ enum nsfb_type_e nsfb_type_from_name(const char *name);
+ 
++/** SODOS: registra as superficies sodos e ram (sem construtores ELF). */
++void nsfb_sodos_register(void);
++
+ /** Create a nsfb context.
+  *
+  * This creates a framebuffer surface context.
+--- a/libnsfb/src/surface/Makefile
++++ b/libnsfb/src/surface/Makefile
+@@ -1,7 +1,7 @@
+ # Sources
+ 
+ # Common surface code and heap based surface handler
+-SURFACE_HANDLER_yes := surface.c ram.c
++SURFACE_HANDLER_yes := surface.c ram.c sodos.c
+ 
+ # optional surface handlers
+ SURFACE_HANDLER_$(NSFB_SDL_AVAILABLE) += sdl.c
+--- a/libnsfb/src/surface/sodos.c
++++ b/libnsfb/src/surface/sodos.c
+@@ -0,0 +1,324 @@
++/*
++ * sodos.c - superficie da libnsfb para a janela do WIN no SODOS.
++ *
++ * O framebuffer fica em memoria (ABGR8888 = bytes R,G,B,A, o formato de
++ * k_gui_pixels). update() copia o retangulo sujo para a janela e input()
++ * apresenta antes de esperar evento. O cursor do mouse e o do kernel.
++ *
++ * Licenced under the MIT License,
++ *                http://www.opensource.org/licenses/mit-license.php
++ */
++
++#include <stdbool.h>
++#include <stdlib.h>
++#include <so.h>
++
++#include "libnsfb.h"
++#include "libnsfb_plot.h"
++#include "libnsfb_event.h"
++
++#include "nsfb.h"
++#include "surface.h"
++#include "plot.h"
++#include "cursor.h"
++
++#define SODOS_EV_NONE  0
++#define SODOS_EV_DOWN  1
++#define SODOS_EV_KEY   2
++#define SODOS_EV_CLOSE 3
++#define SODOS_EV_UP    4
++#define SODOS_EV_DRAG  5
++#define SODOS_EV_WHEEL 6
++
++#define SODOS_KEY_UP    0x101
++#define SODOS_KEY_DOWN  0x102
++#define SODOS_KEY_LEFT  0x103
++#define SODOS_KEY_RIGHT 0x104
++#define SODOS_KEY_PGUP  0x105
++#define SODOS_KEY_PGDN  0x106
++#define SODOS_KEY_HOME  0x107
++#define SODOS_KEY_END   0x108
++#define SODOS_KEY_DEL   0x109
++
++/* fila de eventos ja traduzidos (uma tecla do SODOS vira varios do nsfb) */
++#define QMAX 32
++static nsfb_event_t queue[QMAX];
++static int q_head, q_count;
++static int win_open, dirty, button_down;
++
++static void q_push(enum nsfb_event_type_e type, int code, int x, int y)
++{
++    nsfb_event_t *e;
++    if (q_count >= QMAX)
++        return;
++    e = &queue[(q_head + q_count) % QMAX];
++    e->type = type;
++    if (type == NSFB_EVENT_MOVE_ABSOLUTE) {
++        e->value.vector.x = x;
++        e->value.vector.y = y;
++        e->value.vector.z = 0;
++    } else if (type == NSFB_EVENT_CONTROL) {
++        e->value.controlcode = code;
++    } else {
++        e->value.keycode = code;
++    }
++    q_count++;
++}
++
++static void q_key(int code)
++{
++    q_push(NSFB_EVENT_KEY_DOWN, code, 0, 0);
++    q_push(NSFB_EVENT_KEY_UP, code, 0, 0);
++}
++
++/* tecla com modificador: aperta, digita, solta */
++static void q_mod_key(int mod, int code)
++{
++    q_push(NSFB_EVENT_KEY_DOWN, mod, 0, 0);
++    q_key(code);
++    q_push(NSFB_EVENT_KEY_UP, mod, 0, 0);
++}
++
++/* simbolos com Shift no teclado US (o keymap do frontend do NetSurf) */
++static int unshift(int c)
++{
++    static const char sh[] = "!@#$%^&*()_+{}|:\"<>?~";
++    static const char un[] = "1234567890-=[]\\;',./`";
++    int i;
++    if (c >= 'A' && c <= 'Z')
++        return c - 'A' + 'a';
++    for (i = 0; sh[i]; i++)
++        if (sh[i] == c)
++            return un[i];
++    return 0;
++}
++
++static void push_key(int k)
++{
++    int base;
++    switch (k) {
++    case SODOS_KEY_UP: q_key(NSFB_KEY_UP); return;
++    case SODOS_KEY_DOWN: q_key(NSFB_KEY_DOWN); return;
++    case SODOS_KEY_LEFT: q_key(NSFB_KEY_LEFT); return;
++    case SODOS_KEY_RIGHT: q_key(NSFB_KEY_RIGHT); return;
++    case SODOS_KEY_PGUP: q_key(NSFB_KEY_PAGEUP); return;
++    case SODOS_KEY_PGDN: q_key(NSFB_KEY_PAGEDOWN); return;
++    case SODOS_KEY_HOME: q_key(NSFB_KEY_HOME); return;
++    case SODOS_KEY_END: q_key(NSFB_KEY_END); return;
++    case SODOS_KEY_DEL: q_key(NSFB_KEY_DELETE); return;
++    case 8: q_key(NSFB_KEY_BACKSPACE); return;
++    case 9: q_key(NSFB_KEY_TAB); return;
++    case 10:
++    case 13: q_key(NSFB_KEY_RETURN); return;
++    case 27: q_key(NSFB_KEY_ESCAPE); return;
++    default: break;
++    }
++    if (k >= 1 && k <= 26) {
++        /* Ctrl+letra */
++        q_mod_key(NSFB_KEY_LCTRL, 'a' + k - 1);
++        return;
++    }
++    if (k < 32 || k > 126)
++        return;
++    base = unshift(k);
++    if (base)
++        q_mod_key(NSFB_KEY_LSHIFT, base);
++    else
++        q_key(k);
++}
++
++static void present(void)
++{
++    if (dirty) {
++        k_gui_present();
++        dirty = 0;
++    }
++}
++
++/* Aberto pela area de trabalho, o programa e uma tarefa cooperativa e
++ * k_gui_event com timeout > 0 dorme ate o proximo evento. Os agendamentos
++ * do NetSurf precisam do timeout: espera em passos de timeout 0 (que cede
++ * a CPU as outras tarefas) ate o prazo. */
++static int wait_event(int *raw, int timeout)
++{
++    unsigned t0;
++    int t;
++
++    if (timeout <= 0)
++        return k_gui_event(raw, timeout);
++    t0 = k_ms();
++    for (;;) {
++        t = k_gui_event(raw, 0);
++        if (t != SODOS_EV_NONE || raw[0] != SODOS_EV_NONE)
++            return t;
++        if ((int)(k_ms() - t0) >= timeout)
++            return SODOS_EV_NONE;
++    }
++}
++
++static int sodos_defaults(nsfb_t *nsfb)
++{
++    int w = 0, h = 0;
++    if (!win_open) {
++        if (k_gui_open("NetSurf") != 0)
++            return -1;
++        win_open = 1;
++    }
++    k_gui_size(&w, &h);
++    nsfb->width = w;
++    nsfb->height = h;
++    nsfb->format = NSFB_FMT_ABGR8888;
++    select_plotters(nsfb);
++    return 0;
++}
++
++static int sodos_initialise(nsfb_t *nsfb)
++{
++    size_t size;
++    uint8_t *fbptr;
++
++    size = (size_t)nsfb->width * nsfb->height * 4;
++    fbptr = realloc(nsfb->ptr, size);
++    if (fbptr == NULL)
++        return -1;
++    nsfb->ptr = fbptr;
++    nsfb->linelen = nsfb->width * 4;
++    return 0;
++}
++
++/* a janela do WIN tem tamanho fixo: so o formato pode mudar */
++static int
++sodos_set_geometry(nsfb_t *nsfb, int width, int height, enum nsfb_format_e format)
++{
++    (void)width;
++    (void)height;
++    (void)format;
++    nsfb->format = NSFB_FMT_ABGR8888;
++    select_plotters(nsfb);
++    nsfb->linelen = nsfb->width * 4;
++    return 0;
++}
++
++static int sodos_finalise(nsfb_t *nsfb)
++{
++    free(nsfb->ptr);
++    nsfb->ptr = NULL;
++    if (win_open) {
++        k_gui_close();
++        win_open = 0;
++    }
++    return 0;
++}
++
++static bool sodos_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
++{
++    int raw[4];
++    int t;
++
++    (void)nsfb;
++    if (q_count == 0) {
++        /* gui_present redesenha a tela toda: com eventos na fila (digitacao
++         * rapida), trata todos antes de apresentar, senao o controlador
++         * PS/2 enche enquanto o kernel desenha e teclas se perdem */
++        t = k_gui_event(raw, 0);
++        if (t == SODOS_EV_NONE && raw[0] == SODOS_EV_NONE) {
++            present();
++            t = wait_event(raw, timeout);
++        }
++        if (t < 0 || raw[0] == SODOS_EV_CLOSE) {
++            q_push(NSFB_EVENT_CONTROL, NSFB_CONTROL_QUIT, 0, 0);
++        } else {
++            switch (raw[0]) {
++            case SODOS_EV_DOWN:
++                q_push(NSFB_EVENT_MOVE_ABSOLUTE, 0, raw[1], raw[2]);
++                button_down = raw[3] == 2 ? NSFB_KEY_MOUSE_3 : NSFB_KEY_MOUSE_1;
++                q_push(NSFB_EVENT_KEY_DOWN, button_down, 0, 0);
++                break;
++            case SODOS_EV_UP:
++                q_push(NSFB_EVENT_MOVE_ABSOLUTE, 0, raw[1], raw[2]);
++                q_push(NSFB_EVENT_KEY_UP, button_down ? button_down : NSFB_KEY_MOUSE_1, 0, 0);
++                button_down = 0;
++                break;
++            case SODOS_EV_DRAG:
++                q_push(NSFB_EVENT_MOVE_ABSOLUTE, 0, raw[1], raw[2]);
++                break;
++            case SODOS_EV_WHEEL: {
++                int n = raw[3] < 0 ? -raw[3] : raw[3];
++                int code = raw[3] < 0 ? NSFB_KEY_MOUSE_4 : NSFB_KEY_MOUSE_5;
++                q_push(NSFB_EVENT_MOVE_ABSOLUTE, 0, raw[1], raw[2]);
++                if (n > 4)
++                    n = 4;
++                while (n-- > 0)
++                    q_key(code);
++                break;
++            }
++            case SODOS_EV_KEY:
++                push_key(raw[3]);
++                break;
++            default:
++                break;
++            }
++        }
++        if (q_count == 0) {
++            if (timeout < 0)
++                return false;
++            event->type = NSFB_EVENT_CONTROL;
++            event->value.controlcode = NSFB_CONTROL_TIMEOUT;
++            return true;
++        }
++    }
++    *event = queue[q_head];
++    q_head = (q_head + 1) % QMAX;
++    q_count--;
++    return true;
++}
++
++static int sodos_update(nsfb_t *nsfb, nsfb_bbox_t *box)
++{
++    int x0 = box->x0, y0 = box->y0, x1 = box->x1, y1 = box->y1;
++    int x, y;
++
++    if (x0 < 0) x0 = 0;
++    if (y0 < 0) y0 = 0;
++    if (x1 > nsfb->width) x1 = nsfb->width;
++    if (y1 > nsfb->height) y1 = nsfb->height;
++    if (x0 >= x1 || y0 >= y1)
++        return 0;
++    /* a janela ignora pixels com alfa < 128: a tela e sempre opaca */
++    for (y = y0; y < y1; y++) {
++        uint8_t *p = nsfb->ptr + (size_t)y * nsfb->linelen + (size_t)x0 * 4 + 3;
++        for (x = x0; x < x1; x++, p += 4)
++            *p = 0xFF;
++    }
++    k_gui_pixels(x0, y0, x1 - x0, y1 - y0,
++                 nsfb->ptr + (size_t)y0 * nsfb->linelen + (size_t)x0 * 4, nsfb->linelen);
++    dirty = 1;
++    return 0;
++}
++
++/* o kernel desenha a seta do mouse: nada a plotar aqui */
++static int sodos_cursor(nsfb_t *nsfb, struct nsfb_cursor_s *cursor)
++{
++    (void)nsfb;
++    (void)cursor;
++    return true;
++}
++
++const nsfb_surface_rtns_t sodos_rtns = {
++    .defaults = sodos_defaults,
++    .initialise = sodos_initialise,
++    .finalise = sodos_finalise,
++    .input = sodos_input,
++    .update = sodos_update,
++    .cursor = sodos_cursor,
++    .geometry = sodos_set_geometry,
++};
++
++/* o linker do SODOS nao roda .init_array: registra a mao (nsfb_sodos_register) */
++extern const nsfb_surface_rtns_t ram_rtns;
++
++void nsfb_sodos_register(void)
++{
++    _nsfb_register_surface(NSFB_SURFACE_RAM, &ram_rtns, "ram");
++    _nsfb_register_surface(NSFB_SURFACE_SODOS, &sodos_rtns, "sodos");
++}
+--- a/netsurf/Makefile.config
++++ b/netsurf/Makefile.config
+@@ -0,0 +1,14 @@
++# Configuracao do port SODOS: sem curl/openssl/jpeg/png/svg/JS (fase 1)
++override NETSURF_USE_CURL := NO
++override NETSURF_USE_OPENSSL := NO
++override NETSURF_USE_JPEG := NO
++override NETSURF_USE_JPEGXL := NO
++override NETSURF_USE_PNG := NO
++override NETSURF_USE_WEBP := NO
++override NETSURF_USE_NSSVG := NO
++override NETSURF_USE_ROSPRITE := NO
++override NETSURF_USE_DUKTAPE := NO
++override NETSURF_USE_LIBICONV_PLUG := YES
++# iconv proprio (sodos/shim), sem -liconv
++override NETSURF_FB_FRONTEND := ram
++override NETSURF_FB_FONTLIB := internal
+--- a/netsurf/content/fetch.c
++++ b/netsurf/content/fetch.c
+@@ -54,7 +54,9 @@
+ #include "content/fetchers.h"
+ #include "content/fetchers/resource.h"
+ #include "content/fetchers/about/about.h"
++#ifdef WITH_CURL
+ #include "content/fetchers/curl.h"
++#endif
+ #include "content/fetchers/data.h"
+ #include "content/fetchers/file/file.h"
+ #include "javascript/fetcher.h"
+--- a/netsurf/utils/file.c
++++ b/netsurf/utils/file.c
+@@ -152,6 +152,13 @@
+ 		return res;
+ 	}
+ 
++#ifdef __SODOS__
++	/* file:///D:/X.HTM -> D:/X.HTM (unidade do SODOS) */
++	if (path[0] == '/' && path[1] != 0 && path[2] == ':') {
++		memmove(path, path + 1, strlen(path));
++	}
++#endif
++
+ 	*path_out = path;
+ 
+ 	return NSERROR_OK;
+@@ -180,8 +187,24 @@
+ 		return NSERROR_BAD_PARAMETER;
+ 	}
+ 
++#ifdef __SODOS__
++	/* D:\X\Y.HTM -> D:/X/Y.HTM, com ':' sem escape */
++	char *sodos_path = strdup(path);
++	char *sp;
++	if (sodos_path == NULL) {
++		return NSERROR_NOMEM;
++	}
++	for (sp = sodos_path; *sp; sp++) {
++		if (*sp == '\\') {
++			*sp = '/';
++		}
++	}
++	ret = url_escape(sodos_path, false, "/:", &escpath);
++	free(sodos_path);
++#else
+ 	/* escape the path so it can be placed in a url */
+ 	ret = url_escape(path, false, "/", &escpath);
++#endif
+ 	if (ret != NSERROR_OK) {
+ 		return ret;
+ 	}
+--- a/netsurf/frontends/framebuffer/gui.c
++++ b/netsurf/frontends/framebuffer/gui.c
+@@ -485,6 +485,9 @@
+ 	NSLOG(netsurf, INFO, "argc %d, argv %p", argc, argv);
+ 
+ 	nsfb_enumerate_surface_types(framebuffer_pick_default_fename, NULL);
++#ifdef __SODOS__
++	fename = "sodos";
++#endif
+ 
+ 	febpp = 32;
+ 
+@@ -557,8 +560,14 @@
+ static nserror set_defaults(struct nsoption_s *defaults)
+ {
+ 	/* Set defaults for absent option strings */
++#ifdef __SODOS__
++	/* FAT 8.3 e sem HOME: arquivo na pasta corrente */
++	nsoption_setnull_charp(cookie_file, strdup("NSCOOKIE.TXT"));
++	nsoption_setnull_charp(cookie_jar, strdup("NSCOOKIE.TXT"));
++#else
+ 	nsoption_setnull_charp(cookie_file, strdup("~/.netsurf/Cookies"));
+ 	nsoption_setnull_charp(cookie_jar, strdup("~/.netsurf/Cookies"));
++#endif
+ 
+ 	if (nsoption_charp(cookie_file) == NULL ||
+ 	    nsoption_charp(cookie_jar) == NULL) {
+@@ -2195,6 +2204,9 @@
+ 		.layout = framebuffer_layout_table,
+ 	};
+ 
++#ifdef __SODOS__
++	nsfb_sodos_register();
++#endif
+         ret = netsurf_register(&framebuffer_table);
+         if (ret != NSERROR_OK) {
+ 		die("NetSurf operation table failed registration");
+@@ -2218,9 +2230,20 @@
+ 	nsoption_commandline(&argc, argv, nsoptions);
+ 
+ 	/* message init */
++#ifdef __SODOS__
++	{
++		const uint8_t *mdata;
++		size_t mlen;
++		int sodos_resource(const char *name, const uint8_t **data, size_t *len);
++		ret = NSERROR_NOT_FOUND;
++		if (sodos_resource("Messages", &mdata, &mlen) == 0)
++			ret = messages_add_from_inline(mdata, mlen);
++	}
++#else
+ 	messages = filepath_find(respaths, "Messages");
+         ret = messages_add_from_file(messages);
+ 	free(messages);
++#endif
+ 	if (ret != NSERROR_OK) {
+ 		fprintf(stderr, "Message translations failed to load\n");
+ 	}
+--- a/netsurf/frontends/framebuffer/fetch.c
++++ b/netsurf/frontends/framebuffer/fetch.c
+@@ -90,9 +90,29 @@
+ 	return "text/html";
+ }
+ 
++#ifdef __SODOS__
++/* recursos embutidos no exe (sodos/genres.py): o FAT do SODOS e 8.3 */
++int sodos_resource(const char *name, const uint8_t **data, size_t *len);
++
++static nserror get_resource_data(const char *path, const uint8_t **data, size_t *data_len)
++{
++	return sodos_resource(path, data, data_len) == 0 ? NSERROR_OK : NSERROR_NOT_FOUND;
++}
++
++static nserror release_resource_data(const uint8_t *data)
++{
++	(void)data;
++	return NSERROR_OK;
++}
++#endif
++
+ /* table for fetch operations */
+ static struct gui_fetch_table fetch_table = {
+ 	.filetype = fetch_filetype,
++#ifdef __SODOS__
++	.get_resource_data = get_resource_data,
++	.release_resource_data = release_resource_data,
++#endif
+ 
+ 	.get_resource_url = get_resource_url,
+ };
