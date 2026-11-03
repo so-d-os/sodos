@@ -140,7 +140,12 @@ O patch:
 
 - Paginas com muitos recursos demoram: um fetch por vez e uma conexao nova
   por recurso (o site do NetSurf leva ~17 s no QEMU). Keep-alive e o proximo
-  passo. TLS 1.3 e 1.2 (este so com ECDHE e AES-128-GCM: servidor que so tem
+  passo. A velocidade de cada download vem do TCP do kernel (`net/net.c`):
+  ate 2026-11-03 a janela era de 16 KB e o notebook parava em ~90 KB/s
+  (16 KB / ~180 ms de ida e volta); agora o anel e de 256 KB com window
+  scale, SACK e segmentos fora de ordem guardados (precisa do kernel novo,
+  `make grub`). O slirp do QEMU nao aceita window scale: la a janela fica
+  em 64 KB. TLS 1.3 e 1.2 (este so com ECDHE e AES-128-GCM: servidor que so tem
   CBC ou AES-256 recusa com alerta 40), sem gzip e sem envio de arquivo
   (multipart).
 - JavaScript: o NetSurf so desenha o que o JS muda enquanto a pagina carrega;

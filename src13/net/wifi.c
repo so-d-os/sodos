@@ -8,7 +8,9 @@
 #include "drives.h"
 #include "mm.h"
 
-static struct wifi_cfg cfg;
+static struct wifi_cfg cfg;                /* a rede escolhida */
+static struct wifi_cfg nets[WIFI_CFG_MAX];  /* todas as redes do WIFI.CFG */
+static int nets_n;
 static struct rtw_info chip;
 static uint8_t pmk[32];
 static int stage;  /* ultima etapa que deu certo */
@@ -16,9 +18,9 @@ static uint8_t* fw_buf;
 static uint32_t fw_len;
 
 static const char* stage_name[] = {
-  "parado", "configuracao lida", "chaves WPA2 e firmware prontos", "placa encontrada",
+  "parado", "configuracao lida", "autoteste WPA2 e firmware prontos", "placa encontrada",
   "firmware escolhido", "placa ligada (versao e efuse lidos)", "firmware rodando na placa",
-  "MAC pronta (firmware responde)", "radio ligado no canal", "rede encontrada (beacons)",
+  "MAC pronta (firmware responde)", "radio ligado no canal", "rede encontrada (beacons) e PMK",
   "autenticado no AP", "associado", "WPA2 pronto", "conectado"
 };
 
@@ -110,29 +112,66 @@ static void copy_str(char* d, const char* s, int max) {
   d[i] = 0;
 }
 
-int wifi_cfg_load(const char* path, struct wifi_cfg* c) {
-  static char text[2048];
-  int n = file_load(path, text, (int)sizeof(text));
-  int i = 0;
-  if (n < 0) return -1;
-  {
-    uint8_t* z = (uint8_t*)c;
-    int k;
-    for (k = 0; k < (int)sizeof(*c); k++) z[k] = 0;
-  }
+static void cfg_clear(struct wifi_cfg* c) {
+  uint8_t* z = (uint8_t*)c;
+  int k;
+  for (k = 0; k < (int)sizeof(*c); k++) z[k] = 0;
   c->dhcp = 1;
-  while (i < n) {
+}
+
+static int cfg_valid(const struct wifi_cfg* c) {
+  int pl = 0;
+  while (c->psk[pl]) pl++;
+  return c->ssid_len && pl >= 8 && pl <= 63;
+}
+
+int wifi_cfg_load(const char* path, struct wifi_cfg* list, int max) {
+  static char text[4096];
+  int n = file_load(path, text, (int)sizeof(text));
+  int i = 0, count = 0;
+  struct wifi_cfg* c = list;
+  if (n < 0) return -1;
+  if (max <= 0) return -2;
+  cfg_clear(c);
+  for (;;) {
     char* line = text + i;
     char* key;
     char* val;
     char* e;
-    int len = 0;
-    while (i + len < n && text[i + len] != '\n') len++;
-    i += len + 1;
-    line[len] = 0;
-    if (len && line[len - 1] == '\r') line[--len] = 0;
-    while (*line == ' ' || *line == '\t') line++;
-    if (*line == '#' || *line == ';' || !*line) continue;
+    int len = 0, next = 0;
+    if (i >= n) {
+      next = 1;  /* fim do arquivo fecha a ultima rede */
+      line = 0;
+    } else {
+      while (i + len < n && text[i + len] != '\n') len++;
+      i += len + 1;
+      line[len] = 0;
+      if (len && line[len - 1] == '\r') line[--len] = 0;
+      while (*line == ' ' || *line == '\t') line++;
+      if (*line == '#' || *line == ';' || !*line) continue;
+      /* [nome] ou um segundo ssid= comecam outra rede */
+      if (*line == '[') next = 1;
+      else if (c->ssid_len) {
+        key = line;
+        while (*key && *key != '=' && *key != ' ' && *key != '\t') key++;
+        {
+          char sv = *key;
+          *key = 0;
+          next = key_is(line, "ssid");
+          *key = sv;
+        }
+      }
+    }
+    if (next && (c->ssid_len || !line)) {
+      if (cfg_valid(c)) {
+        count++;
+        if (count == max) break;
+        c = list + count;
+      }
+      cfg_clear(c);
+    }
+    if (!line) break;
+    if (*line == '[') continue;
     key = line;
     val = line;
     while (*val && *val != '=') val++;
@@ -161,13 +200,7 @@ int wifi_cfg_load(const char* path, struct wifi_cfg* c) {
       parse_ipv4(val, &c->dns);
     }
   }
-  if (!c->ssid_len) return -2;
-  {
-    int pl = 0;
-    while (c->psk[pl]) pl++;
-    if (pl < 8 || pl > 63) return -2;
-  }
-  return 0;
+  return count ? count : -2;
 }
 
 /* ---------- escuta ---------- */
@@ -199,12 +232,23 @@ static int mac_same(const uint8_t* a, const uint8_t* b) {
   return 1;
 }
 
-/* Escuta 'ms' e lista os beacons. Devolve 1 se a rede do WIFI.CFG apareceu,
- * 0 se nao, -1 se nada chegou. */
-static int listen_beacons(uint32_t ms) {
+/* A rede do WIFI.CFG que o beacon anuncia (pelo BSSID ou pelo SSID), ou -1. */
+static int net_match(const uint8_t* bssid, const char* ssid, int ch) {
+  int j;
+  for (j = 0; j < nets_n; j++) {
+    const struct wifi_cfg* c = &nets[j];
+    if ((c->channel ? c->channel : WIFI_DEF_CHANNEL) != ch) continue;
+    if ((c->has_bssid && mac_same(bssid, c->bssid)) || name_eq(ssid, c->ssid)) return j;
+  }
+  return -1;
+}
+
+/* Escuta 'ms' no canal ch e lista os beacons. Devolve o indice (em nets) da
+ * primeira rede do WIFI.CFG que apareceu, -1 se nenhuma, -2 se nada chegou. */
+static int listen_beacons(uint32_t ms, int ch) {
   static struct seen list[16];
   struct rtw_rx rx;
-  int n = 0, i, found = 0;
+  int n = 0, i, found = -1;
   uint32_t frames = 0, ppdu = 0, other = 0;
   uint32_t t0 = net_ms(), spins = 0;
   puts_k("  escutando beacons...\n");
@@ -242,13 +286,14 @@ static int listen_beacons(uint32_t ms) {
   rtw_log_hex(other);
   rtw_log("\n");
   for (i = 0; i < n; i++) {
-    int match = (cfg.has_bssid && mac_same(list[i].bssid, cfg.bssid)) ||
-                (cfg.ssid_len && name_eq(list[i].ssid, cfg.ssid));
-    if (match && !found) {
+    int j = net_match(list[i].bssid, list[i].ssid, ch);
+    int match = j >= 0;
+    /* vale a ordem do arquivo: a primeira rede listada que esta no ar */
+    if (match && (found < 0 || j < found)) {
       int k;
+      found = j;
       for (k = 0; k < 6; k++) ap_bssid[k] = list[i].bssid[k];
     }
-    if (match) found = 1;
     puts_k(match ? "  * " : "    ");
     put_mac(list[i].bssid);
     puts_k("  \"");
@@ -266,9 +311,9 @@ static int listen_beacons(uint32_t ms) {
   }
   if (!frames) {
     puts_k("  nenhum quadro recebido do ar\n");
-    return -1;
+    return -2;
   }
-  puts_k(found ? "  a rede do WIFI.CFG apareceu\n" : "  a rede do WIFI.CFG nao apareceu\n");
+  if (found < 0) puts_k("  nenhuma rede do WIFI.CFG neste canal\n");
   return found;
 }
 
@@ -633,7 +678,7 @@ static int start_steps(const char* path) {
   puts_k("WiFi: lendo ");
   puts_k(path);
   puts_k("\n");
-  rc = wifi_cfg_load(path, &cfg);
+  rc = wifi_cfg_load(path, nets, WIFI_CFG_MAX);
   if (rc == -1) {
     say("Nao consegui ler o arquivo de configuracao.\n");
     return -1;
@@ -642,18 +687,25 @@ static int start_steps(const char* path) {
     say("WIFI.CFG precisa de ssid= e psk= (8 a 63 caracteres).\n");
     return -1;
   }
-  puts_k("  rede \"");
-  puts_k(cfg.ssid);
-  puts_k("\"");
-  if (cfg.has_bssid) {
-    puts_k(" bssid ");
-    put_mac(cfg.bssid);
+  nets_n = rc;
+  for (rc = 0; rc < nets_n; rc++) {
+    const struct wifi_cfg* c = &nets[rc];
+    puts_k("  rede ");
+    put_u((uint32_t)rc + 1u);
+    puts_k(": \"");
+    puts_k(c->ssid);
+    puts_k("\"");
+    if (c->has_bssid) {
+      puts_k(" bssid ");
+      put_mac(c->bssid);
+    }
+    if (c->channel) {
+      puts_k(" canal ");
+      put_u((uint32_t)c->channel);
+    }
+    puts_k(c->dhcp ? " ip dhcp\n" : " ip fixo\n");
   }
-  if (cfg.channel) {
-    puts_k(" canal ");
-    put_u((uint32_t)cfg.channel);
-  }
-  puts_k(cfg.dhcp ? " ip dhcp\n" : " ip fixo\n");
+  cfg = nets[0];
   stage = 1;
 
   rc = wpa_selftest();
@@ -663,8 +715,6 @@ static int start_steps(const char* path) {
     puts_k("\n");
     return -1;
   }
-  wpa_pmk(cfg.psk, (const uint8_t*)cfg.ssid, cfg.ssid_len, pmk);
-  puts_k("  chave WPA2 (PMK) calculada\n");
   stage = 2;
 
   if (load_firmware() != 0) return -1;
@@ -746,25 +796,45 @@ static int start_steps(const char* path) {
   puts_k("  MAC pronta, firmware respondeu pelo RX\n");
   stage = 7;
 
+  /* escuta cada canal das redes do WIFI.CFG, na ordem do arquivo */
   {
-    int ch = cfg.channel ? cfg.channel : 56;
-    puts_k("  ligando o radio no canal ");
-    put_u((uint32_t)ch);
-    puts_k("...\n");
-    if (rtw_radio_init(ch) != 0) {
-      puts_k("  ligar o radio falhou: ");
-      puts_k(rtw_error());
-      puts_k("\n");
+    int j, sel = -1, heard = 0;
+    for (j = 0; j < nets_n && sel < 0; j++) {
+      int ch = nets[j].channel ? nets[j].channel : WIFI_DEF_CHANNEL;
+      int k;
+      for (k = 0; k < j; k++)
+        if ((nets[k].channel ? nets[k].channel : WIFI_DEF_CHANNEL) == ch) break;
+      if (k < j) continue;  /* canal ja escutado */
+      puts_k("  ligando o radio no canal ");
+      put_u((uint32_t)ch);
+      puts_k("...\n");
+      if (rtw_radio_init(ch) != 0) {
+        puts_k("  ligar o radio falhou: ");
+        puts_k(rtw_error());
+        puts_k("\n");
+        rtw_power_off();
+        return -1;
+      }
+      stage = 8;
+      rc = listen_beacons(3000, ch);
+      if (rc != -2) heard = 1;
+      if (rc >= 0) sel = rc;
+    }
+    if (sel < 0) {
+      puts_k(heard ? "  nenhuma rede do WIFI.CFG apareceu\n" : "");
       rtw_power_off();
       return -1;
     }
+    cfg = nets[sel];
+    puts_k("  usando a rede \"");
+    puts_k(cfg.ssid);
+    puts_k("\" (a senha dela no WIFI.CFG)\n");
+    rtw_log("[wifi] rede escolhida: \"");
+    rtw_log(cfg.ssid);
+    rtw_log("\"\n");
   }
-  stage = 8;
-  rc = listen_beacons(3000);
-  if (rc <= 0) {
-    rtw_power_off();
-    return -1;
-  }
+  wpa_pmk(cfg.psk, (const uint8_t*)cfg.ssid, cfg.ssid_len, pmk);
+  puts_k("  chave WPA2 (PMK) calculada\n");
   stage = 9;
   if (!cfg.has_bssid) {
     int k;
@@ -974,10 +1044,14 @@ void wifi_status(void) {
   puts_k("WiFi: ");
   puts_k(stage_name[stage]);
   puts_k("\n");
-  if (stage >= 1) {
+  if (stage >= 9) {
     puts_k("  rede \"");
     puts_k(cfg.ssid);
     puts_k("\"\n");
+  } else if (stage >= 1) {
+    puts_k("  ");
+    put_u((uint32_t)nets_n);
+    puts_k(" rede(s) no WIFI.CFG\n");
   }
   if (stage >= 5) {
     puts_k("  MAC ");

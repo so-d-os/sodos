@@ -219,11 +219,29 @@ static uint32_t tcp_dip;
 static uint32_t tcp_snd_una;
 static uint32_t tcp_snd_nxt;
 static uint32_t tcp_rcv_nxt;
-/* 4 KB no kernel; net_init troca por 32 KB do heap alto (registros TLS de 16 KB). */
+/* Anel de recepcao: 4 KB no kernel; net_init troca por 256 KB do heap alto.
+ * A janela anunciada e o espaco livre do anel, com window scale (RFC 7323):
+ * com 16 KB e ~180 ms de ida e volta o download parava em ~90 KB/s.
+ * tcp_rx_head e onde comecam os dados ainda nao lidos (tcp_rx_len bytes);
+ * o byte de sequencia tcp_rcv_nxt + k vai em head + len + k. Tamanhos sao
+ * potencia de 2. */
+#define TCP_RX_BIG (256 * 1024)
+#define TCP_WS 3              /* nossa escala: janela em unidades de 8 bytes */
 static uint8_t tcp_rx_low[4096];
 static uint8_t* tcp_rx = tcp_rx_low;
 static int tcp_rx_cap = (int)sizeof(tcp_rx_low);
+static int tcp_rx_head;
 static int tcp_rx_len;
+static int tcp_ws_ok;         /* o servidor respondeu window scale */
+static int tcp_sack_ok;       /* o servidor aceita SACK */
+/* Segmentos fora de ordem ja guardados no anel (sequencias [s, e)): uma
+ * perda no WiFi nao joga fora tudo o que veio depois dela. */
+#define TCP_OOO_MAX 8
+static uint32_t tcp_ooo_s[TCP_OOO_MAX];
+static uint32_t tcp_ooo_e[TCP_OOO_MAX];
+static int tcp_ooo_n;
+static int tcp_fin_pending;   /* FIN visto num segmento fora de ordem */
+static uint32_t tcp_fin_seq;
 static uint8_t tcp_last[1000];
 static int tcp_last_len;
 static uint8_t tcp_last_flags;
@@ -951,12 +969,100 @@ static int dns_resolve(const char* name, uint32_t* out) {
   return 0;
 }
 
-static int tcp_rx_append(const uint8_t* p, int n) {
+/* Grava n bytes 'off' bytes depois de tcp_rcv_nxt; quem chama ja cortou
+ * pela janela (tcp_rx_len + off + n <= tcp_rx_cap). */
+static void tcp_rx_put(int off, const uint8_t* p, int n) {
+  int mask = tcp_rx_cap - 1;
+  int at = (tcp_rx_head + tcp_rx_len + off) & mask;
   int i;
-  if (n < 0 || tcp_rx_len + n > tcp_rx_cap) return -1;
-  for (i = 0; i < n; i++) tcp_rx[tcp_rx_len + i] = p[i];
+  for (i = 0; i < n; i++) tcp_rx[(at + i) & mask] = p[i];
+}
+
+/* Guarda o trecho [s, e) fora de ordem, juntando com os vizinhos. */
+static void tcp_ooo_add(uint32_t s, uint32_t e) {
+  int i, j;
+  for (i = 0; i < tcp_ooo_n; i++) {
+    if ((int32_t)(s - tcp_ooo_e[i]) <= 0 && (int32_t)(tcp_ooo_s[i] - e) <= 0) {
+      if ((int32_t)(s - tcp_ooo_s[i]) < 0) tcp_ooo_s[i] = s;
+      if ((int32_t)(e - tcp_ooo_e[i]) > 0) tcp_ooo_e[i] = e;
+      /* o trecho cresceu: pode ter encostado em outro */
+      for (j = 0; j < tcp_ooo_n; j++) {
+        if (j == i) continue;
+        if ((int32_t)(tcp_ooo_s[j] - tcp_ooo_e[i]) <= 0 &&
+            (int32_t)(tcp_ooo_s[i] - tcp_ooo_e[j]) <= 0) {
+          if ((int32_t)(tcp_ooo_s[j] - tcp_ooo_s[i]) < 0) tcp_ooo_s[i] = tcp_ooo_s[j];
+          if ((int32_t)(tcp_ooo_e[j] - tcp_ooo_e[i]) > 0) tcp_ooo_e[i] = tcp_ooo_e[j];
+          tcp_ooo_s[j] = tcp_ooo_s[tcp_ooo_n - 1];
+          tcp_ooo_e[j] = tcp_ooo_e[tcp_ooo_n - 1];
+          tcp_ooo_n--;
+          if (i == tcp_ooo_n) i = j;
+          j = -1;
+        }
+      }
+      return;
+    }
+  }
+  if (tcp_ooo_n < TCP_OOO_MAX) {
+    tcp_ooo_s[tcp_ooo_n] = s;
+    tcp_ooo_e[tcp_ooo_n] = e;
+    tcp_ooo_n++;
+  }
+  /* cheio: o trecho fica no anel mas nao conta; o servidor manda de novo */
+}
+
+/* Dados novos em ordem: avanca e engole os trechos que agora encostam. */
+static void tcp_rx_advance(int n) {
+  int i, again = 1;
   tcp_rx_len += n;
-  return 0;
+  tcp_rcv_nxt += (uint32_t)n;
+  while (again) {
+    again = 0;
+    for (i = 0; i < tcp_ooo_n; i++) {
+      if ((int32_t)(tcp_ooo_s[i] - tcp_rcv_nxt) <= 0) {
+        int32_t more = (int32_t)(tcp_ooo_e[i] - tcp_rcv_nxt);
+        if (more > 0) {
+          tcp_rx_len += more;
+          tcp_rcv_nxt = tcp_ooo_e[i];
+        }
+        tcp_ooo_s[i] = tcp_ooo_s[tcp_ooo_n - 1];
+        tcp_ooo_e[i] = tcp_ooo_e[tcp_ooo_n - 1];
+        tcp_ooo_n--;
+        again = 1;
+        break;
+      }
+    }
+  }
+}
+
+/* Segmento com dados e/ou FIN, em ordem ou nao. */
+static void tcp_rx_segment(uint32_t seq, const uint8_t* data, int plen, int fin) {
+  int32_t off = (int32_t)(seq - tcp_rcv_nxt);
+  int room;
+  if (fin) {
+    tcp_fin_pending = 1;
+    tcp_fin_seq = seq + (uint32_t)plen;
+  }
+  if (off < 0) {               /* comeco repetido: corta o que ja temos */
+    if (-off >= plen) plen = 0;
+    else {
+      data += -off;
+      plen += off;
+      seq = tcp_rcv_nxt;
+    }
+    off = 0;
+  }
+  room = tcp_rx_cap - tcp_rx_len - off;
+  if (plen > room) plen = room > 0 ? room : 0;
+  if (plen > 0) {
+    tcp_rx_put(off, data, plen);
+    if (off == 0) tcp_rx_advance(plen);
+    else tcp_ooo_add(seq, seq + (uint32_t)plen);
+  }
+  if (tcp_fin_pending && tcp_fin_seq == tcp_rcv_nxt && !tcp_fin) {
+    tcp_rcv_nxt += 1;
+    tcp_fin = 1;
+    if (tcp_state == ST_EST) tcp_state = ST_CLOSEWAIT;
+  }
 }
 
 static int tcp_csum_ok(uint32_t src, uint32_t dst, const uint8_t* seg, int len) {
@@ -972,15 +1078,20 @@ static int tcp_csum_ok(uint32_t src, uint32_t dst, const uint8_t* seg, int len) 
 }
 
 static void tcp_raw(uint8_t flags, const uint8_t* data, int len, uint32_t seq, int advance) {
-  uint8_t seg[24 + 1000];
+  uint8_t seg[60 + 1000];
   uint32_t sum;
   uint16_t csum;
   int i;
   int win;
   int hdr = 20;
+  int nsack = 0;
   if (len < 0) len = 0;
   if (len > 1000) len = 1000;
-  if ((flags & 0x02) && len == 0) hdr = 24;
+  if ((flags & 0x02) && len == 0) hdr = tcp_rx_cap > 65535 ? 32 : 24;
+  else if ((flags & 0x10) && tcp_sack_ok && tcp_ooo_n > 0) {
+    nsack = tcp_ooo_n > 3 ? 3 : tcp_ooo_n;
+    hdr = 20 + 4 + 8 * nsack;
+  }
   mem_set(seg, 0, hdr);
   wr16(seg, tcp_sport);
   wr16(seg + 2, tcp_dport);
@@ -989,13 +1100,34 @@ static void tcp_raw(uint8_t flags, const uint8_t* data, int len, uint32_t seq, i
   seg[12] = (uint8_t)((hdr / 4) << 4);
   seg[13] = flags;
   win = tcp_rx_cap - tcp_rx_len;
-  if (win > 16384) win = 16384;
   if (win < 0) win = 0;
+  /* no SYN a janela nunca tem escala; depois, so se o servidor aceitou */
+  if (tcp_ws_ok && !(flags & 0x02)) win >>= TCP_WS;
+  if (win > 65535) win = 65535;
   wr16(seg + 14, (uint16_t)win);
-  if (hdr == 24) {
-    seg[20] = 2;
+  if (flags & 0x02) {
+    seg[20] = 2;                /* MSS 1460 */
     seg[21] = 4;
     wr16(seg + 22, 1460);
+    if (hdr == 32) {
+      seg[24] = 1;              /* NOP, window scale */
+      seg[25] = 3;
+      seg[26] = 3;
+      seg[27] = TCP_WS;
+      seg[28] = 1;              /* NOP, NOP, SACK permitido */
+      seg[29] = 1;
+      seg[30] = 4;
+      seg[31] = 2;
+    }
+  } else if (nsack > 0) {
+    seg[20] = 1;                /* NOP, NOP, SACK com os trechos guardados */
+    seg[21] = 1;
+    seg[22] = 5;
+    seg[23] = (uint8_t)(2 + 8 * nsack);
+    for (i = 0; i < nsack; i++) {
+      wr32(seg + 24 + 8 * i, tcp_ooo_s[i]);
+      wr32(seg + 28 + 8 * i, tcp_ooo_e[i]);
+    }
   }
   for (i = 0; i < len; i++) seg[hdr + i] = data[i];
   sum = 0;
@@ -1059,16 +1191,28 @@ static void tcp_input(uint32_t src, const uint8_t* seg, int len) {
   }
   if (tcp_state == ST_SYN_SENT) {
     if ((flags & 0x12) == 0x12 && ack == tcp_snd_nxt) {
+      int o = 20;
+      /* opcoes do SYN-ACK: window scale e SACK so valem se vierem aqui */
+      while (o < doff) {
+        int kind = seg[o];
+        int olen;
+        if (kind == 0) break;
+        if (kind == 1) {
+          o++;
+          continue;
+        }
+        if (o + 1 >= doff) break;
+        olen = seg[o + 1];
+        if (olen < 2 || o + olen > doff) break;
+        if (kind == 3 && olen == 3 && tcp_rx_cap > 65535) tcp_ws_ok = 1;
+        if (kind == 4 && olen == 2 && tcp_rx_cap > 65535) tcp_sack_ok = 1;
+        o += olen;
+      }
       tcp_snd_una = ack;
       tcp_rcv_nxt = seq + 1;
       tcp_state = ST_EST;
-      if (plen > 0 && tcp_rx_append(data, plen) == 0)
-        tcp_rcv_nxt += (uint32_t)plen;
-      if (flags & 0x01) {
-        tcp_rcv_nxt += 1;
-        tcp_fin = 1;
-        tcp_state = ST_CLOSEWAIT;
-      }
+      if (plen > 0 || (flags & 0x01))
+        tcp_rx_segment(seq + 1, data, plen, flags & 0x01);
       tcp_ack();
     }
     return;
@@ -1077,23 +1221,10 @@ static void tcp_input(uint32_t src, const uint8_t* seg, int len) {
     if ((int32_t)(ack - tcp_snd_una) >= 0 && (int32_t)(tcp_snd_nxt - ack) >= 0)
       tcp_snd_una = ack;
   }
-  if (plen > 0 && seq == tcp_rcv_nxt) {
-    if (tcp_rx_append(data, plen) == 0)
-      tcp_rcv_nxt += (uint32_t)plen;
-    else
-      plen = 0;
-    if ((flags & 0x01) && seq + (uint32_t)plen == tcp_rcv_nxt) {
-      tcp_rcv_nxt += 1;
-      tcp_fin = 1;
-      if (tcp_state == ST_EST) tcp_state = ST_CLOSEWAIT;
-    }
-    tcp_ack();
-  } else if (plen > 0) {
-    tcp_ack();
-  } else if ((flags & 0x01) && seq == tcp_rcv_nxt) {
-    tcp_rcv_nxt += 1;
-    tcp_fin = 1;
-    if (tcp_state == ST_EST) tcp_state = ST_CLOSEWAIT;
+  if (plen > 0 || (flags & 0x01)) {
+    /* em ordem ou nao, guarda; o ACK diz ate onde esta inteiro (e o SACK,
+     * o que ja veio depois do buraco) */
+    tcp_rx_segment(seq, data, plen, flags & 0x01);
     tcp_ack();
   }
 }
@@ -1480,9 +1611,11 @@ static void nic_poll(void) {
   polling = 1;
   if (nlink) {
     int len;
-    while (n++ < 8 && (len = nlink->rx(rxframe, (int)sizeof(rxframe))) > 0) eth_rx(rxframe, len);
+    /* 64 por volta: com a janela grande chegam rajadas e a fila da placa
+     * enchia entre uma leitura e outra */
+    while (n++ < 64 && (len = nlink->rx(rxframe, (int)sizeof(rxframe))) > 0) eth_rx(rxframe, len);
   } else {
-    while (n++ < 8 && ne_rx_one()) {}
+    while (n++ < 64 && ne_rx_one()) {}
   }
   polling = 0;
   srv_pump();
@@ -1635,6 +1768,11 @@ static int tcp_connect_ip(uint32_t ip, int port) {
     tcp_rst = 0;
     tcp_fin = 0;
     tcp_rx_len = 0;
+    tcp_rx_head = 0;
+    tcp_ooo_n = 0;
+    tcp_ws_ok = 0;
+    tcp_sack_ok = 0;
+    tcp_fin_pending = 0;
     tcp_dip = ip;
     tcp_dport = (uint16_t)port;
     tcp_sport = tcp_new_port();
@@ -1716,11 +1854,15 @@ static int api_recv(void* data, int cap) {
     n = tcp_rx_len;
     if (n > cap - 1) n = cap - 1;
     if (n > 0) {
-      for (i = 0; i < n; i++) dst[i] = tcp_rx[i];
+      int mask = tcp_rx_cap - 1;
+      int was_small = tcp_rx_cap - tcp_rx_len < 2 * 1460;
+      for (i = 0; i < n; i++) dst[i] = tcp_rx[(tcp_rx_head + i) & mask];
       dst[n] = 0;
-      for (i = 0; i < tcp_rx_len - n; i++) tcp_rx[i] = tcp_rx[n + i];
+      tcp_rx_head = (tcp_rx_head + n) & mask;
       tcp_rx_len -= n;
-      tcp_ack();
+      /* janela grande: so avisa quando ela estava quase fechada (os ACKs
+       * dos segmentos ja levam a janela atualizada) */
+      if (was_small || tcp_rx_cap <= 65535) tcp_ack();
       return n;
     }
     if (tcp_fin || tcp_state == ST_CLOSED || tcp_state == ST_CLOSEWAIT) return 0;
@@ -1738,6 +1880,8 @@ static void api_close(void) {
   }
   tcp_state = ST_CLOSED;
   tcp_rx_len = 0;
+  tcp_rx_head = 0;
+  tcp_ooo_n = 0;
 }
 
 void net_init(void) {
@@ -1746,10 +1890,10 @@ void net_init(void) {
   int i;
   time_init();
   {
-    uint8_t* big = (uint8_t*)umalloc_owned(32768u, 0);
+    uint8_t* big = (uint8_t*)umalloc_owned(TCP_RX_BIG, 0);
     if (big) {
       tcp_rx = big;
-      tcp_rx_cap = 32768;
+      tcp_rx_cap = TCP_RX_BIG;
     }
   }
   nic_ok = 0;
