@@ -15,7 +15,11 @@ usa a `LIBCX.DLL` e a `POSIXX.DLL` e desenha numa janela do WIN.
 - teclado, clique, arrastar, roda do mouse, barra de enderecos, formularios
 - imagens: PNG (com transparencia) e JPEG (inclusive progressivo) pelo `img.c`
   da IMG.DLL ligado no exe; GIF, BMP e ICO pelas libs do NetSurf
-- fonte bitmap interna; sem JavaScript
+- JavaScript pelo Duktape (ES5) que vem com o NetSurf, ligado por padrao:
+  `document.write`, DOM (`getElementById`, `innerHTML`, `createElement`...),
+  JSON, `Date`, `Math`, `setTimeout`, eventos. Erros de JS vao para o log
+  (`[WARN jserrors] Uncaught error in JS: ...` com a linha)
+- fonte bitmap interna
 
 ## Como compilar
 
@@ -40,7 +44,14 @@ D:\NETSURF.EXE file:///D:/T.HTM
 D:\NETSURF.EXE https://www.netsurf-browser.org/
 ```
 
-Sem argumento abre a pagina de boas-vindas embutida.
+Sem argumento abre a pagina inicial do SODOS (`sodos/welcome.html`, embutida
+no exe): busca no DuckDuckGo e atalhos para criativa.app, c8x.app, Google,
+Wikipedia e o site do NetSurf. Na barra de enderecos, `site.com` vira
+`https://site.com` e texto com espaco (ou sem ponto) vira busca no
+DuckDuckGo lite (a versao `html.duckduckgo.com` pede captcha ao NetSurf).
+
+Enquanto carrega, a barra de enderecos enche de azul conforme os arquivos da
+pagina chegam, e o status mostra `[arquivo N de M, x de y KB]`.
 
 No Linux, pelo `soxrun` (a janela vira um `.ppm` a cada quadro):
 
@@ -73,11 +84,12 @@ log para o console em vez do arquivo.
 |---|---|
 | `netsurf-3.11-sodos.patch` | mudancas na arvore oficial (abaixo) |
 | `sodos-cc` | gcc `-mx32 -msse2 -nostdinc` com os headers do SODOS |
-| `include/` | headers POSIX que faltam no SODOS (iconv, regex, zlib, getopt...) |
+| `include/` | headers POSIX que faltam no SODOS (iconv, regex, zlib, getopt, stdint least/fast...) |
 | `shim/iconv.c` | iconv: UTF-8, ASCII, Latin-1/9, Windows-1252, UTF-16, UCS-4 |
-| `shim/posix_extra.c` | scandir, mmap (copia), fstatat, getopt_long, inet_pton, stubs |
+| `shim/posix_extra.c` | scandir, mmap (copia), fstatat, getopt_long, inet_pton, difftime, strptime, stubs |
 | `run/qmp.py` | controla o QEMU (teclas, mouse, screenshot) nos testes |
 | `genres.py` | embute `default.css`, `Messages` etc. no exe (FAT 8.3) |
+| `welcome.html` | pagina inicial do SODOS (o `genres.py` a poe no lugar da do NetSurf) |
 
 O `link.sh` tambem compila `lib/math.c`, `lib/fpconv.c` e `lib/printf.c` do
 `c_compiler` com SSE2 e liga junto: a LIBCX e `-mno-sse` e nao tem `double`.
@@ -96,7 +108,13 @@ O patch:
   `k_gui_event` ignora o timeout.
 - `content/fetchers/sodos.c`: fetcher de `http` e `https`. O kernel tem uma
   conexao TCP por vez, entao os fetches entram numa fila e rodam um por vez,
-  com `Connection: close`. Cada poll le por ate ~60 ms; quando ha tecla ou
+  com `Connection: close`. Paginas, CSS e scripts passam na frente das
+  imagens (o `hlcache.c` marca o pedido que so aceita imagem, e a extensao
+  tambem conta): o NetSurf pede as imagens assim que o `<img>` entra no DOM,
+  e no criativa.app o `script.js` sincrono ficava atras de seis PNG de 2 MB,
+  com a pagina em branco por minutos no notebook. Para isso o `gui.c` sobe
+  `max_fetchers`/`max_fetchers_per_host` (o `fetch.c` segurava os pedidos
+  alem de 5 por host em ordem de chegada). Cada poll le por ate ~60 ms; quando ha tecla ou
   clique o `k_tcp_*` devolve -3 e a interface responde antes de continuar.
   Conexao, handshake ou envio interrompidos sao refeitos depois de 100 ms
   (no notebook o laco sem espera chegou a abrir 825 conexoes em 1,4 s), e a
@@ -110,15 +128,25 @@ O patch:
 - sem SDL/X/VNC/Wayland, sem a ligacao expat da libdom e sem libsvgtiny.
 - `utils/file.c`: `file:///D:/X` vira `D:/X` e vice-versa.
 - `frontends/framebuffer`: recursos e `Messages` vem do exe, superficie `sodos`
-  por padrao, cookies em `NSCOOKIE.TXT`.
+  por padrao, cookies em `NSCOOKIE.TXT`, barra de progresso no widget de
+  texto do fbtk (`fbtk_set_progress`) e busca pela barra de enderecos.
 
 ## Pendencias conhecidas
+
+- Google: a pagina inicial abre, mas a busca do Google hoje exige
+  JavaScript moderno e volta em branco; use o DuckDuckGo.
+- Imagem grande que ja comecou a baixar nao e interrompida por um script
+  pedido depois (espera ela acabar).
 
 - Paginas com muitos recursos demoram: um fetch por vez e uma conexao nova
   por recurso (o site do NetSurf leva ~17 s no QEMU). Keep-alive e o proximo
   passo. TLS 1.3 e 1.2 (este so com ECDHE e AES-128-GCM: servidor que so tem
   CBC ou AES-256 recusa com alerta 40), sem gzip e sem envio de arquivo
   (multipart).
+- JavaScript: o NetSurf so desenha o que o JS muda enquanto a pagina carrega;
+  depois de pronta, mudancas no DOM (clique, timer tardio) rodam mas nao
+  redesenham. O Duktape e ES5: scripts modernos (ES2015+, como YouTube,
+  Instagram) dao `SyntaxError` e faltam APIs como `Image()` e `<canvas>`.
 - Sem WebP, SVG e PNG entrelacado (Adam7). O GIF fica alinhado pelo topo
   da linha em vez da base.
 - Aberto pela area de trabalho, cliques muito curtos (~50 ms, so em teste

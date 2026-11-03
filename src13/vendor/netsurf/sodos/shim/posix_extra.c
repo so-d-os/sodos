@@ -16,6 +16,7 @@
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
+#include <time.h>
 #include <unistd.h>
 #include <zlib.h>
 
@@ -378,4 +379,64 @@ int getopt_long(int argc, char* const argv[], const char* opts, const struct opt
   }
   optind++;
   return '?';
+}
+
+/* --- tempo ----------------------------------------------------------------- */
+
+/* a LIBCX e -mno-sse e nao tem funcoes com double: esta vem compilada com SSE */
+double difftime(time_t a, time_t b) { return (double)a - (double)b; }
+
+/* strptime com o basico (%Y %m %d %H %M %S %y %b %e %j literais e espacos).
+ * O Duktape so a usa para Date.parse fora do formato ISO; o que nao reconhece
+ * devolve NULL e o Date fica NaN, como em libc sem suporte. */
+static int sp_num(const char** s, int digits, int* out) {
+  int v = 0, n = 0;
+  while (**s == ' ') (*s)++;
+  while (n < digits && **s >= '0' && **s <= '9') {
+    v = v * 10 + (*(*s)++ - '0');
+    n++;
+  }
+  if (!n) return 0;
+  *out = v;
+  return 1;
+}
+
+char* strptime(const char* s, const char* fmt, struct tm* tm) {
+  static const char* mon[12] = { "jan", "feb", "mar", "apr", "may", "jun",
+                                 "jul", "aug", "sep", "oct", "nov", "dec" };
+  int v, i;
+  for (; *fmt; fmt++) {
+    if (*fmt == ' ') {
+      while (*s == ' ') s++;
+      continue;
+    }
+    if (*fmt != '%') {
+      if (*s++ != *fmt) return NULL;
+      continue;
+    }
+    switch (*++fmt) {
+    case 'Y': if (!sp_num(&s, 4, &v)) return NULL; tm->tm_year = v - 1900; break;
+    case 'y': if (!sp_num(&s, 2, &v)) return NULL; tm->tm_year = v < 69 ? v + 100 : v; break;
+    case 'm': if (!sp_num(&s, 2, &v)) return NULL; tm->tm_mon = v - 1; break;
+    case 'd':
+    case 'e': if (!sp_num(&s, 2, &v)) return NULL; tm->tm_mday = v; break;
+    case 'H': if (!sp_num(&s, 2, &v)) return NULL; tm->tm_hour = v; break;
+    case 'M': if (!sp_num(&s, 2, &v)) return NULL; tm->tm_min = v; break;
+    case 'S': if (!sp_num(&s, 2, &v)) return NULL; tm->tm_sec = v; break;
+    case 'j': if (!sp_num(&s, 3, &v)) return NULL; tm->tm_yday = v - 1; break;
+    case 'b':
+    case 'h':
+      while (*s == ' ') s++;
+      for (i = 0; i < 12; i++)
+        if (strncasecmp(s, mon[i], 3) == 0) break;
+      if (i == 12) return NULL;
+      tm->tm_mon = i;
+      s += 3;
+      while ((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z')) s++;
+      break;
+    case '%': if (*s++ != '%') return NULL; break;
+    default: return NULL; /* %c, %x e outros dependem de locale */
+    }
+  }
+  return (char*)s;
 }

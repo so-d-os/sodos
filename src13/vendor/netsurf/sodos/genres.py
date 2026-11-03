@@ -10,7 +10,9 @@ with open(out, "w") as f:
     f.write("/* gerado por sodos/genres.py - nao editar */\n")
     f.write("#include <stddef.h>\n#include <stdint.h>\n#include <string.h>\n\n")
     for i, n in enumerate(names):
-        data = open(os.path.join(res, n), "rb").read()
+        # a pagina inicial do SODOS (sodos/welcome.html) substitui a do NetSurf
+        mine = os.path.join(os.path.dirname(os.path.abspath(__file__)), n)
+        data = open(mine if n == "welcome.html" else os.path.join(res, n), "rb").read()
         if data[:2] == b"\x1f\x8b":
             data = gzip.decompress(data)
         f.write("static const uint8_t r%d[%d] = {\n" % (i, len(data) + 1))

@@ -422,7 +422,7 @@
 --- a/netsurf/Makefile.config
 +++ b/netsurf/Makefile.config
 @@ -0,0 +1,16 @@
-+# Configuracao do port SODOS: sem curl/openssl/jpeg/png/svg/JS (rede pelo fetcher sodos)
++# Configuracao do port SODOS: sem curl/openssl/libpng/libjpeg/svg (rede, PNG e JPEG sao do SODOS); JS pelo Duktape
 +override NETSURF_USE_CURL := NO
 +override NETSURF_USE_OPENSSL := NO
 +override NETSURF_USE_JPEG := NO
@@ -431,7 +431,7 @@
 +override NETSURF_USE_WEBP := NO
 +override NETSURF_USE_NSSVG := NO
 +override NETSURF_USE_ROSPRITE := NO
-+override NETSURF_USE_DUKTAPE := NO
++override NETSURF_USE_DUKTAPE := YES
 +override NETSURF_USE_LIBICONV_PLUG := YES
 +# iconv proprio (sodos/shim), sem -liconv
 +override NETSURF_FB_FRONTEND := ram
@@ -478,13 +478,16 @@
  
 --- a/netsurf/content/fetchers/sodos.c
 +++ b/netsurf/content/fetchers/sodos.c
-@@ -0,0 +1,697 @@
+@@ -0,0 +1,776 @@
 +/*
 + * Fetcher http: e https: do SODOS, sobre k_tcp_* e o cliente TLS 1.3 do
 + * c_compiler/tls (ligado no exe).
 + *
 + * O kernel tem uma conexao TCP por vez: os fetches entram numa fila e
-+ * rodam um de cada vez, com "Connection: close". Cada poll le o que der
++ * rodam um de cada vez, com "Connection: close". Paginas, CSS e scripts
++ * passam na frente das imagens: o NetSurf pede as imagens assim que o <img>
++ * entra no DOM, e um script sincrono no fim da pagina ficava atras de
++ * todas elas (com a pagina em branco). Cada poll le o que der
 + * em ate ~60 ms; k_tcp_recv devolve -3 quando ha tecla ou clique e o poll
 + * volta para a interface tratar (a leitura continua no proximo poll).
 + *
@@ -530,6 +533,7 @@
 +	bool aborted;
 +	bool locked;
 +	bool https;
++	bool image;		/* so imagem (hlcache) ou extensao: vai depois */
 +	char *post;		/* corpo urlencoded ou NULL */
 +	char **headers;		/* cabecalhos do NetSurf (copia) */
 +	enum sf_state state;
@@ -553,6 +557,11 @@
 +static struct sfetch *queue;	/* todos os fetches, em ordem */
 +static struct sfetch *active;	/* o que tem a conexao */
 +static unsigned char rbuf[16384];
++
++/* progresso da leva atual (zera quando a fila esvazia) */
++static int prog_total, prog_done;
++
++bool fetch_sodos_low_priority;
 +
 +/* --- conexao ------------------------------------------------------------- */
 +
@@ -619,6 +628,8 @@
 +		conn_close(f);
 +		active = NULL;
 +	}
++	if (f->started)
++		prog_done++;
 +	fetch_remove_from_queues(f->parent);
 +	fetch_free(f->parent);
 +}
@@ -719,6 +730,23 @@
 +	return 1;
 +}
 +
++/* k_tcp_connect nao diz se faltou o nome ou a conexao: pergunta ao DNS
++ * de novo para a mensagem separar os dois casos */
++static void sf_connect_error(struct sfetch *f, const char *host, int port)
++{
++	unsigned ip;
++
++	if (k_dns(host, &ip) != 0)
++		snprintf((char *)rbuf, sizeof rbuf,
++			 "Nome %s nao encontrado no DNS", host);
++	else
++		snprintf((char *)rbuf, sizeof rbuf,
++			 "%s (%u.%u.%u.%u) nao aceitou conexao na porta %d",
++			 host, ip >> 24, (ip >> 16) & 255, (ip >> 8) & 255,
++			 ip & 255, port);
++	sf_error(f, (char *)rbuf);
++}
++
 +/* conecta e manda o pedido: 0 ok, 1 tentar de novo (interrompido), -1 erro */
 +static int sf_connect(struct sfetch *f)
 +{
@@ -755,6 +783,10 @@
 +			const char *e = tls_error();
 +			if (e != NULL && strcmp(e, "interrompido") == 0)
 +				return sf_interrupted(f, host, "TLS");
++			if (e != NULL && strcmp(e, "nao conectou (DNS/TCP)") == 0) {
++				sf_connect_error(f, host, port);
++				return -1;
++			}
 +			snprintf((char *)rbuf, sizeof rbuf, "HTTPS %s: %s", host,
 +				 e ? e : "erro");
 +			sf_error(f, (char *)rbuf);
@@ -767,9 +799,7 @@
 +			return sf_interrupted(f, host, "TCP");
 +		}
 +		if (rc != 0) {
-+			snprintf((char *)rbuf, sizeof rbuf,
-+				 "Nao conectou em %s:%d (DNS/TCP)", host, port);
-+			sf_error(f, (char *)rbuf);
++			sf_connect_error(f, host, port);
 +			return -1;
 +		}
 +	}
@@ -1050,6 +1080,26 @@
 +	return true;
 +}
 +
++/* imagem pela extensao do caminho (sem a query) */
++static bool sf_is_image(nsurl *url)
++{
++	static const char *const ext[] = { ".png", ".jpg", ".jpeg", ".gif",
++		".webp", ".svg", ".ico", ".bmp", ".avif", NULL };
++	lwc_string *path = nsurl_get_component(url, NSURL_PATH);
++	bool img = false;
++	if (path != NULL) {
++		const char *p = lwc_string_data(path);
++		size_t n = lwc_string_length(path);
++		int i;
++		for (i = 0; ext[i] != NULL && !img; i++) {
++			size_t k = strlen(ext[i]);
++			img = n >= k && strncasecmp(p + n - k, ext[i], k) == 0;
++		}
++		lwc_string_unref(path);
++	}
++	return img;
++}
++
 +static void *sf_setup(struct fetch *parent, nsurl *url, bool only_2xx,
 +		      bool downgrade_tls, const char *post_urlenc,
 +		      const struct fetch_multipart_data *post_multipart,
@@ -1078,6 +1128,7 @@
 +		lwc_string_unref(scheme);
 +	}
 +	f->https = match;
++	f->image = fetch_sodos_low_priority || sf_is_image(url);
 +	if (post_urlenc != NULL)
 +		f->post = strdup(post_urlenc);
 +	for (n = 0; headers != NULL && headers[n] != NULL; n++)
@@ -1094,7 +1145,28 @@
 +static bool sf_start(void *ctx)
 +{
 +	((struct sfetch *)ctx)->started = true;
++	prog_total++;
 +	return true;
++}
++
++/* exportada em sodos.h */
++void fetch_sodos_progress_reset(void)
++{
++	struct sfetch *f;
++	prog_done = prog_total = 0;
++	for (f = queue; f != NULL; f = f->next)
++		if (f->started && !f->aborted)
++			prog_total++;
++}
++
++/* exportada em sodos.h */
++bool fetch_sodos_progress(int *done, int *total, long *got, long *len)
++{
++	*done = prog_done;
++	*total = prog_total;
++	*got = active != NULL && active->state == SF_BODY ? active->got : 0;
++	*len = active != NULL && active->state == SF_BODY ? active->clen : -1;
++	return queue != NULL && prog_total > 0;
 +}
 +
 +/* o poll faz a limpeza: o fetch pode estar no meio de um callback */
@@ -1136,11 +1208,18 @@
 +
 +	if (active == NULL) {
 +		unsigned now = k_ms();
++		struct sfetch *img = NULL;
 +		for (f = queue; f != NULL; f = f->next) {
 +			if (f->started && !f->aborted && !f->locked &&
-+			    (f->interrupted == 0 || (int)(now - f->next_try) >= 0))
-+				break;
++			    (f->interrupted == 0 || (int)(now - f->next_try) >= 0)) {
++				if (!f->image)
++					break;
++				if (img == NULL)
++					img = f;
++			}
 +		}
++		if (f == NULL)
++			f = img;
 +		if (f != NULL) {
 +			int rc = sf_connect(f);
 +			if (rc == 0)
@@ -1178,7 +1257,7 @@
 +#endif /* __SODOS__ */
 --- a/netsurf/content/fetchers/sodos.h
 +++ b/netsurf/content/fetchers/sodos.h
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,29 @@
 +/*
 + * Fetcher http: e https: do SODOS (content/fetchers/sodos.c).
 + *
@@ -1189,8 +1268,23 @@
 +#ifndef NETSURF_CONTENT_FETCHERS_FETCH_SODOS_H
 +#define NETSURF_CONTENT_FETCHERS_FETCH_SODOS_H
 +
++#include <stdbool.h>
++
 +/** Registra o fetcher para http e https. */
 +nserror fetch_sodos_register(void);
++
++/**
++ * Progresso dos fetches http/https em andamento: quantos acabaram de quantos
++ * pedidos desde o ultimo fetch_sodos_progress_reset, e bytes do que esta baixando agora
++ * (len -1 = tamanho desconhecido). Devolve false se nao ha nada na fila.
++ */
++/** true enquanto o hlcache pede algo que so pode ser imagem */
++extern bool fetch_sodos_low_priority;
++
++bool fetch_sodos_progress(int *done, int *total, long *got, long *len);
++
++/** Comeca a contar de novo (pagina nova): o que ja esta na fila conta. */
++void fetch_sodos_progress_reset(void);
 +
 +#endif
 --- a/netsurf/content/handlers/image/Makefile
@@ -1574,7 +1668,18 @@
  #define NETSURF_LOG_LEVEL INFO
 --- a/netsurf/frontends/framebuffer/gui.c
 +++ b/netsurf/frontends/framebuffer/gui.c
-@@ -485,6 +485,9 @@
+@@ -43,6 +43,10 @@
+ #include "netsurf/netsurf.h"
+ #include "netsurf/cookie_db.h"
+ #include "content/fetch.h"
++#ifdef __SODOS__
++#include "content/fetchers/sodos.h"
++static void sodos_show_progress(struct gui_window *g);
++#endif
+ 
+ #include "framebuffer/gui.h"
+ #include "framebuffer/fbtk.h"
+@@ -485,6 +489,9 @@
  	NSLOG(netsurf, INFO, "argc %d, argv %p", argc, argv);
  
  	nsfb_enumerate_surface_types(framebuffer_pick_default_fename, NULL);
@@ -1584,7 +1689,7 @@
  
  	febpp = 32;
  
-@@ -557,8 +560,14 @@
+@@ -557,8 +564,14 @@
  static nserror set_defaults(struct nsoption_s *defaults)
  {
  	/* Set defaults for absent option strings */
@@ -1599,7 +1704,7 @@
  
  	if (nsoption_charp(cookie_file) == NULL ||
  	    nsoption_charp(cookie_jar) == NULL) {
-@@ -611,6 +620,67 @@
+@@ -611,6 +624,67 @@
  	return true;
  }
  
@@ -1667,7 +1772,7 @@
  static void framebuffer_run(void)
  {
  	nsfb_event_t event;
-@@ -635,6 +705,9 @@
+@@ -635,6 +709,9 @@
  		}
  
  		fbtk_redraw(fbtk);
@@ -1677,7 +1782,176 @@
  	}
  }
  
-@@ -2195,6 +2268,9 @@
+@@ -1160,6 +1237,57 @@
+ 	return 0;
+ }
+ 
++#ifdef __SODOS__
++/* barra de enderecos: "site.com" vira https://site.com/; texto com espaco
++ * ou sem ponto vira pesquisa no DuckDuckGo lite (sem JavaScript; a versao html
++ * pede captcha a navegadores desconhecidos) */
++static nserror sodos_url_from_bar(const char *text, nsurl **url)
++{
++	static const char hex[] = "0123456789ABCDEF";
++	const char *p;
++	char *buf, *o;
++	size_t n;
++	nserror err;
++
++	while (*text == ' ')
++		text++;
++	n = strlen(text);
++	while (n > 0 && text[n - 1] == ' ')
++		n--;
++	if (strstr(text, "://") != NULL || strncmp(text, "about:", 6) == 0 ||
++	    strncmp(text, "file:", 5) == 0 || strncmp(text, "data:", 5) == 0 ||
++	    strncmp(text, "resource:", 9) == 0 || strncmp(text, "javascript:", 11) == 0)
++		return nsurl_create(text, url);
++
++	buf = malloc(n * 3 + 64);
++	if (buf == NULL)
++		return NSERROR_NOMEM;
++	if (memchr(text, ' ', n) == NULL && (memchr(text, '.', n) != NULL ||
++	    strncmp(text, "localhost", 9) == 0)) {
++		snprintf(buf, n * 3 + 64, "https://%.*s", (int)n, text);
++	} else {
++		o = buf + sprintf(buf, "https://lite.duckduckgo.com/lite/?q=");
++		for (p = text; p < text + n; p++) {
++			unsigned char c = (unsigned char)*p;
++			if (c == ' ') {
++				*o++ = '+';
++			} else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
++				   (c >= '0' && c <= '9') || strchr("-_.~", c)) {
++				*o++ = (char)c;
++			} else {
++				*o++ = '%';
++				*o++ = hex[c >> 4];
++				*o++ = hex[c & 15];
++			}
++		}
++		*o = 0;
++	}
++	err = nsurl_create(buf, url);
++	free(buf);
++	return err;
++}
++#endif
++
+ static int
+ fb_url_enter(void *pw, char *text)
+ {
+@@ -1167,7 +1295,11 @@
+ 	nsurl *url;
+ 	nserror error;
+ 
++#ifdef __SODOS__
++	error = sodos_url_from_bar(text, &url);
++#else
+ 	error = nsurl_create(text, &url);
++#endif
+ 	if (error != NSERROR_OK) {
+ 		fb_warn_user("Errorcode:", messages_get_errorcode(error));
+ 	} else {
+@@ -1830,6 +1962,7 @@
+ 
+ 	if (gw == NULL)
+ 		return NULL;
++	gw->throbber_index = -1;
+ 
+ 	/* associate the gui window with the underlying browser window
+ 	 */
+@@ -1954,6 +2087,13 @@
+ static void
+ gui_window_set_status(struct gui_window *g, const char *text)
+ {
++#ifdef __SODOS__
++	snprintf(g->status_text, sizeof g->status_text, "%s", text);
++	if (g->throbber_index >= 0) {
++		sodos_show_progress(g);
++		return;
++	}
++#endif
+ 	fbtk_set_text(g->status, text);
+ }
+ 
+@@ -1994,6 +2134,44 @@
+ 	return NSERROR_OK;
+ }
+ 
++#ifdef __SODOS__
++/* barra de enderecos enche conforme os fetches da pagina acabam, e o
++ * status ganha "arquivo N de M, x de y KB" do que esta baixando */
++static void sodos_show_progress(struct gui_window *g)
++{
++	int done, total, p;
++	long got, len;
++	char buf[320];
++
++	if (!fetch_sodos_progress(&done, &total, &got, &len)) {
++		fbtk_set_text(g->status, g->status_text);
++		return;
++	}
++	p = total > 0 ? (int)(1000L * done / total) : 0;
++	if (len > 0 && total > 0)
++		p += (int)(1000L * (got > len ? len : got) / len / total);
++	if (p < 30)
++		p = 30;		/* a barra aparece logo no inicio */
++	if (p > 1000)
++		p = 1000;
++	/* pode voltar um pouco quando a pagina pede mais arquivos */
++	fbtk_set_progress(g->url, p);
++
++	if (len > 0)
++		snprintf(buf, sizeof buf, "%s  [%d de %d, %ld de %ld KB]",
++			 g->status_text, done + 1 > total ? total : done + 1,
++			 total, got / 1024, len / 1024);
++	else if (got > 0)
++		snprintf(buf, sizeof buf, "%s  [%d de %d, %ld KB]",
++			 g->status_text, done + 1 > total ? total : done + 1,
++			 total, got / 1024);
++	else
++		snprintf(buf, sizeof buf, "%s  [%d de %d]", g->status_text,
++			 done + 1 > total ? total : done + 1, total);
++	fbtk_set_text(g->status, buf);
++}
++#endif
++
+ static void
+ throbber_advance(void *pw)
+ {
+@@ -2047,6 +2225,9 @@
+ 
+ 	if (g->throbber_index >= 0) {
+ 		fbtk_set_bitmap(g->throbber, image);
++#ifdef __SODOS__
++		sodos_show_progress(g);
++#endif
+ 		framebuffer_schedule(100, throbber_advance, g);
+ 	}
+ }
+@@ -2055,6 +2236,10 @@
+ gui_window_start_throbber(struct gui_window *g)
+ {
+ 	g->throbber_index = 0;
++#ifdef __SODOS__
++	fetch_sodos_progress_reset();
++	sodos_show_progress(g);
++#endif
+ 	framebuffer_schedule(100, throbber_advance, g);
+ }
+ 
+@@ -2063,6 +2248,10 @@
+ {
+ 	gw->throbber_index = -1;
+ 	fbtk_set_bitmap(gw->throbber, &throbber0);
++#ifdef __SODOS__
++	fbtk_set_progress(gw->url, 0);
++	fbtk_set_text(gw->status, gw->status_text);
++#endif
+ 
+ 	fb_update_back_forward(gw);
+ 
+@@ -2195,6 +2384,9 @@
  		.layout = framebuffer_layout_table,
  	};
  
@@ -1687,7 +1961,7 @@
          ret = netsurf_register(&framebuffer_table);
          if (ret != NSERROR_OK) {
  		die("NetSurf operation table failed registration");
-@@ -2202,10 +2278,16 @@
+@@ -2202,10 +2394,16 @@
  
  	respaths = fb_init_resource_path(NETSURF_FB_RESPATH":"NETSURF_FB_FONTPATH);
  
@@ -1704,7 +1978,7 @@
  
  	/* user options setup */
  	ret = nsoption_init(set_defaults, &nsoptions, &nsoptions_default);
-@@ -2218,9 +2300,20 @@
+@@ -2218,9 +2416,20 @@
  	nsoption_commandline(&argc, argv, nsoptions);
  
  	/* message init */
@@ -1725,6 +1999,22 @@
  	if (ret != NSERROR_OK) {
  		fprintf(stderr, "Message translations failed to load\n");
  	}
+@@ -2233,6 +2442,15 @@
+ 
+ 	/* Override, since we have no support for non-core SELECT menu */
+ 	nsoption_set_bool(core_select_menu, true);
++#ifdef __SODOS__
++	/* o NetSurf vem com JS desligado; no SODOS o Duktape esta ligado */
++	nsoption_set_bool(enable_javascript, true);
++	/* o fetcher do SODOS baixa um por vez e escolhe a ordem (paginas, CSS e
++	 * scripts antes das imagens): o fetch.c tem de lhe entregar todos, senao
++	 * segura os pedidos alem de 5 por host na ordem em que vieram */
++	nsoption_set_int(max_fetchers, 200);
++	nsoption_set_int(max_fetchers_per_host, 200);
++#endif
+ 
+ 	if (process_cmdline(argc,argv) != true)
+ 		die("unable to process command line.\n");
 --- a/netsurf/frontends/framebuffer/fetch.c
 +++ b/netsurf/frontends/framebuffer/fetch.c
 @@ -90,9 +90,29 @@
@@ -1757,3 +2047,113 @@
  
  	.get_resource_url = get_resource_url,
  };
+--- a/netsurf/content/hlcache.c
++++ b/netsurf/content/hlcache.c
+@@ -36,6 +36,9 @@
+ #include "desktop/gui_internal.h"
+ 
+ #include "content/mimesniff.h"
++#ifdef __SODOS__
++#include "content/fetchers/sodos.h"
++#endif
+ #include "content/hlcache.h"
+ // Note, this is *ONLY* so that we can abort cleanly during shutdown of the cache
+ #include "content/content_protected.h"
+@@ -719,9 +722,16 @@
+ 	ctx->handle->cb = cb;
+ 	ctx->handle->pw = pw;
+ 
++#ifdef __SODOS__
++	/* o fetcher do SODOS baixa um por vez: so imagem vai depois do resto */
++	fetch_sodos_low_priority = (accepted_types & ~CONTENT_IMAGE) == 0;
++#endif
+ 	error = llcache_handle_retrieve(url, flags, referer, post,
+ 			hlcache_llcache_callback, ctx,
+ 			&ctx->llcache);
++#ifdef __SODOS__
++	fetch_sodos_low_priority = false;
++#endif
+ 	if (error != NSERROR_OK) {
+ 		/* error retrieving handle so free context and return error */
+ 		free((char *) ctx->child.charset);
+--- a/netsurf/frontends/framebuffer/gui.h
++++ b/netsurf/frontends/framebuffer/gui.h
+@@ -47,6 +47,9 @@
+ 	struct fbtk_widget_s *bottom_right;
+ 
+ 	int throbber_index;
++#ifdef __SODOS__
++	char status_text[200];	/* status do NetSurf, sem o progresso */
++#endif
+ 
+ 	struct gui_window *next;
+ 	struct gui_window *prev;
+--- a/netsurf/frontends/framebuffer/fbtk.h
++++ b/netsurf/frontends/framebuffer/fbtk.h
+@@ -587,6 +587,14 @@
+  */
+ void fbtk_set_text(fbtk_widget_t *widget, const char *text);
+ 
++/**
++ * Barra de progresso atras do texto de um widget de texto.
++ *
++ * @param widget Text widget.
++ * @param permille 1..1000 mostra a barra, 0 esconde.
++ */
++void fbtk_set_progress(fbtk_widget_t *widget, int permille);
++
+ 
+ /**
+  * Give widget input focus.
+--- a/netsurf/frontends/framebuffer/fbtk/text.c
++++ b/netsurf/frontends/framebuffer/fbtk/text.c
+@@ -124,6 +124,16 @@
+ 		nsfb_plot_rectangle_fill(root->u.root.fb, &bbox, widget->bg);
+ 	}
+ 
++	/* progresso do carregamento atras do texto (barra de enderecos) */
++	if (widget->u.text.progress > 0) {
++		nsfb_bbox_t bar = bbox;
++		bar.x1 = bbox.x0 + (int)((long)(bbox.x1 - bbox.x0) *
++					 widget->u.text.progress / 1000);
++		nsfb_plot_rectangle_fill(root->u.root.fb, &bar, 0x00FFE8CC);
++		bar.y0 = bar.y1 - 3;
++		nsfb_plot_rectangle_fill(root->u.root.fb, &bar, 0x00E0A040);
++	}
++
+ 	/* widget can have a single pixel outline border */
+ 	if (widget->u.text.outline) {
+ 		rect.x1--;
+@@ -538,6 +548,22 @@
+ }
+ 
+ /* exported function documented in fbtk.h */
++void
++fbtk_set_progress(fbtk_widget_t *widget, int permille)
++{
++	if ((widget == NULL) || (widget->type != FB_WIDGET_TYPE_TEXT))
++		return;
++	if (permille > 1000)
++		permille = 1000;
++	if (permille < 0)
++		permille = 0;
++	if (widget->u.text.progress == permille)
++		return;
++	widget->u.text.progress = permille;
++	fbtk_request_redraw(widget);
++}
++
++/* exported function documented in fbtk.h */
+ void
+ fbtk_set_text(fbtk_widget_t *widget, const char *text)
+ {
+--- a/netsurf/frontends/framebuffer/fbtk/widget.h
++++ b/netsurf/frontends/framebuffer/fbtk/widget.h
+@@ -187,6 +187,7 @@
+ 			int len; /* text length */
+ 			int width; /* text width in px */
+ 			int idx_offset; /* caret pos in pixels */
++			int progress; /* barra atras do texto: 0 nao, 1..1000 */
+ 		} text;
+ 
+ 		/* application driven widget */

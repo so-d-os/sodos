@@ -1,0 +1,26 @@
+<html><head><title>JS no SODOS</title>
+<style>body{font-family:sans-serif;background:#eef} .ok{color:#060;font-weight:bold} .box{background:#fc6;padding:6px;margin:6px 0}</style>
+</head><body>
+<h2>JavaScript no NetSurf/SODOS</h2>
+<p>document.write: <script>document.write('<span class="ok">funcionou (' + (2+3) + ')</span>');</script></p>
+<p id="dom">DOM: ainda nao</p>
+<p id="json">JSON: ?</p>
+<p id="data">Date: ?</p>
+<p id="timer">setTimeout: esperando...</p>
+<div id="lista" class="box"></div>
+<button id="botao" onclick="clicou()">Clique aqui</button> <span id="cliques">0 cliques</span>
+<script>
+document.getElementById('dom').innerHTML = 'DOM: <span class="ok">texto trocado por JS</span>';
+var o = JSON.parse('{"nome":"SODOS","n":[1,2,3]}');
+document.getElementById('json').textContent = 'JSON: ' + o.nome + ' soma=' + o.n.reduce(function(a,b){return a+b;},0);
+document.getElementById('data').textContent = 'Date: ' + new Date(2026, 10, 3).getFullYear() + ', Math.sqrt(2)=' + Math.sqrt(2).toFixed(4);
+var ul = document.createElement('ul');
+for (var i = 1; i <= 3; i++) { var li = document.createElement('li'); li.appendChild(document.createTextNode('item criado ' + i)); ul.appendChild(li); }
+document.getElementById('lista').appendChild(ul);
+setTimeout(function(){ document.getElementById('timer').innerHTML = 'setTimeout: <span class="ok">disparou</span>'; }, 500);
+var n = 0;
+function clicou(){ n++; document.getElementById('cliques').textContent = n + ' clique(s)'; }
+console.log('log do console funcionando');
+naoExiste();
+</script>
+</body></html>
