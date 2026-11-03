@@ -4,14 +4,17 @@ Port do navegador [NetSurf](https://www.netsurf-browser.org/) 3.11 (frontend
 framebuffer) para o SODOS. Gera um `NETSURF.EXE` (SOX, gcc `-mx32 -msse2`) que
 usa a `LIBCX.DLL` e a `POSIXX.DLL` e desenha numa janela do WIN.
 
-## Fase 1 (estado atual)
+## Estado atual
 
 - HTML + CSS (libcss, libdom, hubbub), layout completo do NetSurf
+- `http:` e `https:` (fase 2): fetcher proprio sobre `k_tcp_*` e o cliente
+  TLS 1.3/1.2 do `c_compiler/tls`, com redirecionamento, cookies, `chunked`,
+  `Content-Length` e POST de formulario (urlencoded)
 - URLs `file:` com unidade: `file:///D:/PAGINA.HTM`
 - `about:`, `data:` e `resource:` (paginas internas embutidas no exe)
 - teclado, clique, arrastar, roda do mouse, barra de enderecos, formularios
 - fonte bitmap interna; decodificadores GIF e BMP ligados (ainda nao testados)
-- sem rede (http/https e a fase 2), sem PNG/JPEG, sem JavaScript
+- sem PNG/JPEG e sem JavaScript (fase 3)
 
 ## Como compilar
 
@@ -33,6 +36,7 @@ unidade (os DLLs sao procurados na raiz) e abra pelo WIN, ou pelo Command:
 
 ```
 D:\NETSURF.EXE file:///D:/T.HTM
+D:\NETSURF.EXE https://www.netsurf-browser.org/
 ```
 
 Sem argumento abre a pagina de boas-vindas embutida.
@@ -49,6 +53,19 @@ python3 topng.py quadro.ppm quadro.png
 `SOX_GUI_EVENTS` aceita `wait:ms`, `click:x:y`, `drag:x:y`, `up`, `key:c`,
 `key:ENTER` (e `TAB`, `BS`, `ESC`, setas...), `wheel:n[:x:y]` e `close`.
 
+## Log
+
+O NetSurf grava `X:\LOG\NETSURF.LOG`, onde X e a unidade do exe (no pendrive,
+`U:\LOG\NETSURF.LOG`), e cria a pasta se faltar. Cada execucao comeca com uma
+linha `=== NetSurf iniciado ... ===`; depois vem cada pedido (`GET`, `HTTP 200
+... (ms)`, `ok ...: bytes, ms`) e os erros (`ERRO url: motivo`, com o alerta
+TLS ou a falha de DNS/TCP). O filtro e avisos de tudo mais o categoria `fetch`
+em INFO. Acima de 256 KB o arquivo vira `NETSURF.OLD` e comeca outro.
+
+Na LIBCX o `fflush` regrava o arquivo inteiro, entao avisos e erros vao para o
+disco na hora e o resto a cada ~2 s e ao fechar. `NETSURF.EXE -v url` manda o
+log para o console em vez do arquivo.
+
 ## Arquivos
 
 | Arquivo | O que e |
@@ -58,10 +75,13 @@ python3 topng.py quadro.ppm quadro.png
 | `include/` | headers POSIX que faltam no SODOS (iconv, regex, zlib, getopt...) |
 | `shim/iconv.c` | iconv: UTF-8, ASCII, Latin-1/9, Windows-1252, UTF-16, UCS-4 |
 | `shim/posix_extra.c` | scandir, mmap (copia), fstatat, getopt_long, inet_pton, stubs |
+| `run/qmp.py` | controla o QEMU (teclas, mouse, screenshot) nos testes |
 | `genres.py` | embute `default.css`, `Messages` etc. no exe (FAT 8.3) |
 
 O `link.sh` tambem compila `lib/math.c`, `lib/fpconv.c` e `lib/printf.c` do
 `c_compiler` com SSE2 e liga junto: a LIBCX e `-mno-sse` e nao tem `double`.
+O cliente TLS (`c_compiler/tls/*.c`) entra no exe do mesmo jeito: o
+`TLS.DLL` e do `cc`, e assim nao ha mistura de ABI.
 
 O patch:
 
@@ -71,6 +91,10 @@ O patch:
   teclas se perdiam. Ela tambem espera com timeout 0 + `k_ms`, porque aberto
   pela area de trabalho o programa e uma tarefa cooperativa e la o
   `k_gui_event` ignora o timeout.
+- `content/fetchers/sodos.c`: fetcher de `http` e `https`. O kernel tem uma
+  conexao TCP por vez, entao os fetches entram numa fila e rodam um por vez,
+  com `Connection: close`. Cada poll le por ate ~60 ms; quando ha tecla ou
+  clique o `k_tcp_recv` devolve -3 e a interface responde antes de continuar.
 - registro manual das superficies (`nsfb_sodos_register`): o linker do SODOS
   nao roda `.init_array`.
 - sem SDL/X/VNC/Wayland, sem a ligacao expat da libdom e sem libsvgtiny.
@@ -79,6 +103,14 @@ O patch:
   por padrao, cookies em `NSCOOKIE.TXT`.
 
 ## Pendencias conhecidas
+
+- Paginas com muitos recursos demoram: um fetch por vez e uma conexao nova
+  por recurso (o site do NetSurf leva ~17 s no QEMU). Keep-alive e o proximo
+  passo. TLS 1.3 e 1.2 (este so com ECDHE e AES-128-GCM: servidor que so tem
+  CBC ou AES-256 recusa com alerta 40), sem gzip e sem envio de arquivo
+  (multipart).
+- Aberto pela area de trabalho, cliques muito curtos (~50 ms, so em teste
+  automatico) perdem o soltar e o link nao abre; clique normal funciona.
 
 - Aberto pela area de trabalho, digitacao muito rapida (rajadas < ~100 ms por
   tecla) perde teclas: o kernel redesenha a tela inteira a cada quadro da

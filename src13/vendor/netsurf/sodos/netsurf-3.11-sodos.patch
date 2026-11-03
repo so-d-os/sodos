@@ -406,8 +406,8 @@
 +}
 --- a/netsurf/Makefile.config
 +++ b/netsurf/Makefile.config
-@@ -0,0 +1,14 @@
-+# Configuracao do port SODOS: sem curl/openssl/jpeg/png/svg/JS (fase 1)
+@@ -0,0 +1,16 @@
++# Configuracao do port SODOS: sem curl/openssl/jpeg/png/svg/JS (rede pelo fetcher sodos)
 +override NETSURF_USE_CURL := NO
 +override NETSURF_USE_OPENSSL := NO
 +override NETSURF_USE_JPEG := NO
@@ -421,18 +421,745 @@
 +# iconv proprio (sodos/shim), sem -liconv
 +override NETSURF_FB_FRONTEND := ram
 +override NETSURF_FB_FONTLIB := internal
++# Log do SODOS (X:\LOG\NETSURF.LOG): avisos/erros de tudo e o detalhe dos fetches
++override NETSURF_BUILTIN_VERBOSE_FILTER := "(level:WARNING || (cat:fetch && level:INFO))"
 --- a/netsurf/content/fetch.c
 +++ b/netsurf/content/fetch.c
-@@ -54,7 +54,9 @@
+@@ -54,7 +54,12 @@
  #include "content/fetchers.h"
  #include "content/fetchers/resource.h"
  #include "content/fetchers/about/about.h"
 +#ifdef WITH_CURL
  #include "content/fetchers/curl.h"
 +#endif
++#ifdef __SODOS__
++#include "content/fetchers/sodos.h"
++#endif
  #include "content/fetchers/data.h"
  #include "content/fetchers/file/file.h"
  #include "javascript/fetcher.h"
+@@ -291,6 +296,12 @@
+ 	if (ret != NSERROR_OK) {
+ 		return ret;
+ 	}
++#endif
++#ifdef __SODOS__
++	ret = fetch_sodos_register();
++	if (ret != NSERROR_OK) {
++		return ret;
++	}
+ #endif
+ 
+ 	ret = fetch_data_register();
+--- a/netsurf/content/fetchers/Makefile
++++ b/netsurf/content/fetchers/Makefile
+@@ -1,6 +1,6 @@
+ # Content fetchers sources
+ 
+-S_FETCHERS_YES := data.c resource.c
++S_FETCHERS_YES := data.c resource.c sodos.c
+ S_FETCHERS_NO :=
+ S_FETCHERS_$(NETSURF_USE_CURL) += curl.c
+ 
+--- a/netsurf/content/fetchers/sodos.c
++++ b/netsurf/content/fetchers/sodos.c
+@@ -0,0 +1,679 @@
++/*
++ * Fetcher http: e https: do SODOS, sobre k_tcp_* e o cliente TLS 1.3 do
++ * c_compiler/tls (ligado no exe).
++ *
++ * O kernel tem uma conexao TCP por vez: os fetches entram numa fila e
++ * rodam um de cada vez, com "Connection: close". Cada poll le o que der
++ * em ate ~60 ms; k_tcp_recv devolve -3 quando ha tecla ou clique e o poll
++ * volta para a interface tratar (a leitura continua no proximo poll).
++ *
++ * This file is part of NetSurf, http://www.netsurf-browser.org/
++ * Licensed under the GNU General Public License, version 2.
++ */
++
++#ifdef __SODOS__
++
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <strings.h>
++
++#include <so.h>
++#include <tls.h>
++
++#include "utils/corestrings.h"
++#include "utils/log.h"
++#include "utils/messages.h"
++#include "utils/nsoption.h"
++#include "utils/nsurl.h"
++#include "utils/useragent.h"
++#include "content/fetch.h"
++#include "content/fetchers.h"
++#include "content/urldb.h"
++
++#include "content/fetchers/sodos.h"
++
++enum sf_state {
++	SF_QUEUED,	/* esperando a vez */
++	SF_HEAD,	/* lendo a linha de status e os cabecalhos */
++	SF_BODY		/* lendo o corpo */
++};
++
++struct sfetch {
++	struct sfetch *next;
++	struct fetch *parent;
++	nsurl *url;
++	bool only_2xx;
++	bool started;
++	bool aborted;
++	bool locked;
++	bool https;
++	char *post;		/* corpo urlencoded ou NULL */
++	char **headers;		/* cabecalhos do NetSurf (copia) */
++	enum sf_state state;
++
++	char *hbuf;		/* cabecalhos ainda sem \r\n\r\n */
++	size_t hlen, hcap;
++	long code;
++	char *location;
++	long clen;		/* Content-Length, -1 = ate fechar */
++	long got;
++	unsigned t_start;	/* k_ms do inicio, para o log */
++	bool chunked;
++	long chunk_left;	/* bytes restantes do pedaco atual */
++	int chunk_state;	/* 0 tamanho, 1 dados, 2 \r\n depois, 3 fim */
++	char cline[32];		/* linha do tamanho do pedaco */
++	int clinelen;
++};
++
++static struct sfetch *queue;	/* todos os fetches, em ordem */
++static struct sfetch *active;	/* o que tem a conexao */
++static unsigned char rbuf[16384];
++
++/* --- conexao ------------------------------------------------------------- */
++
++static int conn_send(struct sfetch *f, const char *p, int n)
++{
++	return f->https ? tls_send(p, n) : k_tcp_send(p, n);
++}
++
++static int conn_recv(struct sfetch *f, void *p, int cap)
++{
++	return f->https ? tls_recv(p, cap) : k_tcp_recv(p, cap);
++}
++
++static void conn_close(struct sfetch *f)
++{
++	if (f->https)
++		tls_close();
++	else
++		k_tcp_close();
++}
++
++/* --- mensagens ----------------------------------------------------------- */
++
++static void sf_send(struct sfetch *f, fetch_msg *msg)
++{
++	f->locked = true;
++	fetch_send_callback(msg, f->parent);
++	f->locked = false;
++}
++
++static void sf_error(struct sfetch *f, const char *text)
++{
++	fetch_msg msg;
++	NSLOG(fetch, WARNING, "ERRO %s: %s (HTTP %ld, %ld bytes, %u ms)",
++	      nsurl_access(f->url), text, f->code, f->got,
++	      f->t_start ? k_ms() - f->t_start : 0);
++	msg.type = FETCH_ERROR;
++	msg.data.error = text;
++	sf_send(f, &msg);
++}
++
++static void sf_data(struct sfetch *f, const unsigned char *p, size_t n)
++{
++	fetch_msg msg;
++	if (n == 0 || f->aborted)
++		return;
++	msg.type = FETCH_DATA;
++	msg.data.header_or_data.buf = p;
++	msg.data.header_or_data.len = n;
++	sf_send(f, &msg);
++}
++
++/* tira da fila, avisa o NetSurf e libera (fetch_free chama sf_free) */
++static void sf_done(struct sfetch *f)
++{
++	struct sfetch **pp;
++	for (pp = &queue; *pp != NULL; pp = &(*pp)->next) {
++		if (*pp == f) {
++			*pp = f->next;
++			break;
++		}
++	}
++	if (active == f) {
++		conn_close(f);
++		active = NULL;
++	}
++	fetch_remove_from_queues(f->parent);
++	fetch_free(f->parent);
++}
++
++/* --- pedido -------------------------------------------------------------- */
++
++static char *str_append(char *s, size_t *len, size_t *cap, const char *add)
++{
++	size_t n = strlen(add);
++	if (*len + n + 1 > *cap) {
++		size_t nc = (*cap ? *cap * 2 : 1024) + n;
++		char *ns = realloc(s, nc);
++		if (ns == NULL) {
++			free(s);
++			return NULL;
++		}
++		s = ns;
++		*cap = nc;
++	}
++	memcpy(s + *len, add, n + 1);
++	*len += n;
++	return s;
++}
++
++static bool has_header(struct sfetch *f, const char *name)
++{
++	size_t n = strlen(name);
++	int i;
++	for (i = 0; f->headers != NULL && f->headers[i] != NULL; i++)
++		if (strncasecmp(f->headers[i], name, n) == 0)
++			return true;
++	return false;
++}
++
++static char *build_request(struct sfetch *f, const char *host, int port)
++{
++	char *req = NULL, *path = NULL, *cookie;
++	size_t len = 0, cap = 0, plen;
++	char line[512];
++	int i;
++
++	if (nsurl_get(f->url, NSURL_PATH | NSURL_QUERY, &path, &plen) != NSERROR_OK)
++		return NULL;
++	snprintf(line, sizeof line, "%s ", f->post ? "POST" : "GET");
++	req = str_append(req, &len, &cap, line);
++	if (req) req = str_append(req, &len, &cap, path[0] ? path : "/");
++	free(path);
++	if (req) req = str_append(req, &len, &cap, " HTTP/1.1\r\nHost: ");
++	if (req) req = str_append(req, &len, &cap, host);
++	if (req && port != (f->https ? 443 : 80)) {
++		snprintf(line, sizeof line, ":%d", port);
++		req = str_append(req, &len, &cap, line);
++	}
++	if (req) req = str_append(req, &len, &cap, "\r\nUser-Agent: ");
++	if (req) req = str_append(req, &len, &cap, user_agent_string());
++	if (req) req = str_append(req, &len, &cap,
++			"\r\nAccept-Encoding: identity\r\nConnection: close\r\n");
++	if (req && !has_header(f, "Accept:"))
++		req = str_append(req, &len, &cap, "Accept: */*\r\n");
++	if (req && nsoption_charp(accept_language) != NULL &&
++	    nsoption_charp(accept_language)[0] != '\0') {
++		snprintf(line, sizeof line, "Accept-Language: %s, *;q=0.1\r\n",
++			 nsoption_charp(accept_language));
++		req = str_append(req, &len, &cap, line);
++	}
++	for (i = 0; req && f->headers != NULL && f->headers[i] != NULL; i++) {
++		req = str_append(req, &len, &cap, f->headers[i]);
++		if (req) req = str_append(req, &len, &cap, "\r\n");
++	}
++	cookie = urldb_get_cookie(f->url, true);
++	if (req && cookie != NULL) {
++		req = str_append(req, &len, &cap, "Cookie: ");
++		if (req) req = str_append(req, &len, &cap, cookie);
++		if (req) req = str_append(req, &len, &cap, "\r\n");
++	}
++	free(cookie);
++	if (req && f->post != NULL) {
++		snprintf(line, sizeof line,
++			 "Content-Type: application/x-www-form-urlencoded\r\n"
++			 "Content-Length: %u\r\n", (unsigned)strlen(f->post));
++		req = str_append(req, &len, &cap, line);
++	}
++	if (req) req = str_append(req, &len, &cap, "\r\n");
++	if (req && f->post != NULL)
++		req = str_append(req, &len, &cap, f->post);
++	return req;
++}
++
++/* conecta e manda o pedido: 0 ok, 1 tentar de novo (interrompido), -1 erro */
++static int sf_connect(struct sfetch *f)
++{
++	lwc_string *lhost, *lport;
++	char host[256];
++	int port, rc;
++	char *req;
++
++	lhost = nsurl_get_component(f->url, NSURL_HOST);
++	if (lhost == NULL) {
++		sf_error(f, "URL sem host");
++		return -1;
++	}
++	snprintf(host, sizeof host, "%s", lwc_string_data(lhost));
++	lwc_string_unref(lhost);
++	port = f->https ? 443 : 80;
++	lport = nsurl_get_component(f->url, NSURL_PORT);
++	if (lport != NULL) {
++		port = atoi(lwc_string_data(lport));
++		lwc_string_unref(lport);
++	}
++
++	if (!k_net_ready()) {
++		sf_error(f, "Sem rede (k_net_ready)");
++		return -1;
++	}
++	f->t_start = k_ms();
++	NSLOG(fetch, INFO, "%s %s", f->post ? "POST" : "GET", nsurl_access(f->url));
++	if (f->https) {
++		rc = tls_connect(host, port);
++		if (rc != 0) {
++			const char *e = tls_error();
++			if (e != NULL && strcmp(e, "interrompido") == 0) {
++				NSLOG(fetch, INFO, "TLS com %s interrompido por tecla/clique, de novo",
++				      host);
++				return 1;
++			}
++			snprintf((char *)rbuf, sizeof rbuf, "HTTPS %s: %s", host,
++				 e ? e : "erro");
++			sf_error(f, (char *)rbuf);
++			return -1;
++		}
++	} else {
++		rc = k_tcp_connect(host, port);
++		if (rc == -3) {
++			k_tcp_close();
++			return 1;
++		}
++		if (rc != 0) {
++			snprintf((char *)rbuf, sizeof rbuf,
++				 "Nao conectou em %s:%d (DNS/TCP)", host, port);
++			sf_error(f, (char *)rbuf);
++			return -1;
++		}
++	}
++
++	req = build_request(f, host, port);
++	if (req == NULL) {
++		conn_close(f);
++		sf_error(f, "Sem memoria");
++		return -1;
++	}
++	rc = conn_send(f, req, (int)strlen(req));
++	free(req);
++	if (rc < 0) {
++		conn_close(f);
++		sf_error(f, "Falha ao enviar o pedido");
++		return -1;
++	}
++	f->state = SF_HEAD;
++	return 0;
++}
++
++/* --- resposta ------------------------------------------------------------ */
++
++/* trata uma linha de cabecalho (sem \r\n) */
++static void sf_header_line(struct sfetch *f, char *line, size_t n)
++{
++	fetch_msg msg;
++	char *v;
++
++	msg.type = FETCH_HEADER;
++	msg.data.header_or_data.buf = (const uint8_t *)line;
++	msg.data.header_or_data.len = n;
++	sf_send(f, &msg);
++	if (f->aborted)
++		return;
++
++	v = strchr(line, ':');
++	if (v == NULL)
++		return;
++	v++;
++	while (*v == ' ' || *v == '\t')
++		v++;
++	if (strncasecmp(line, "Location:", 9) == 0) {
++		free(f->location);
++		f->location = strdup(v);
++	} else if (strncasecmp(line, "Content-Length:", 15) == 0) {
++		f->clen = atol(v);
++	} else if (strncasecmp(line, "Transfer-Encoding:", 18) == 0) {
++		if (strstr(v, "chunked") || strstr(v, "Chunked"))
++			f->chunked = true;
++	} else if (strncasecmp(line, "Set-Cookie:", 11) == 0) {
++		fetch_set_cookie(f->parent, v);
++	}
++}
++
++/* cabecalhos completos: status, redirecionamento, erro. true = acabou */
++static bool sf_headers_done(struct sfetch *f)
++{
++	fetch_msg msg;
++
++	fetch_set_http_code(f->parent, f->code);
++	NSLOG(fetch, INFO, "HTTP %ld %s%s%s (%u ms)", f->code, nsurl_access(f->url),
++	      f->location ? " -> " : "", f->location ? f->location : "",
++	      k_ms() - f->t_start);
++	if (f->code == 304 && f->post == NULL) {
++		msg.type = FETCH_NOTMODIFIED;
++		sf_send(f, &msg);
++		return true;
++	}
++	if (f->code >= 300 && f->code < 400 && f->location != NULL) {
++		msg.type = FETCH_REDIRECT;
++		msg.data.redirect = f->location;
++		sf_send(f, &msg);
++		return true;
++	}
++	if (f->only_2xx && (f->code < 200 || f->code > 299)) {
++		sf_error(f, messages_get("Not2xx"));
++		return true;
++	}
++	return f->aborted;
++}
++
++/* consome bytes da fase de cabecalhos; devolve quantos usou ou -1 se acabou */
++static long sf_feed_head(struct sfetch *f, const unsigned char *p, size_t n)
++{
++	size_t start = f->hlen, i, line0;
++	char *end;
++
++	if (f->hlen + n + 1 > f->hcap) {
++		size_t nc = f->hlen + n + 1024;
++		char *nb = realloc(f->hbuf, nc);
++		if (nb == NULL) {
++			sf_error(f, "Sem memoria");
++			return -1;
++		}
++		f->hbuf = nb;
++		f->hcap = nc;
++	}
++	memcpy(f->hbuf + f->hlen, p, n);
++	f->hlen += n;
++	f->hbuf[f->hlen] = 0;
++	end = strstr(f->hbuf, "\r\n\r\n");
++	if (end == NULL) {
++		if (f->hlen > 65536) {
++			sf_error(f, "Cabecalhos grandes demais");
++			return -1;
++		}
++		return (long)n;
++	}
++
++	/* linha de status: HTTP/1.x NNN texto */
++	if (strncmp(f->hbuf, "HTTP/", 5) != 0) {
++		sf_error(f, "Resposta nao e HTTP");
++		return -1;
++	}
++	{
++		char *sp = strchr(f->hbuf, ' ');
++		f->code = sp ? atol(sp + 1) : 0;
++	}
++	/* 100 Continue: descarta; o que vier depois e outra resposta */
++	if (f->code == 100) {
++		long used = (long)((size_t)(end + 4 - f->hbuf) - start);
++		f->hlen = 0;
++		return used;
++	}
++
++	line0 = 0;
++	for (i = 0; f->hbuf + i < end + 2; i++) {
++		if (f->hbuf[i] == '\r' && f->hbuf[i + 1] == '\n') {
++			f->hbuf[i] = 0;
++			sf_header_line(f, f->hbuf + line0, i - line0);
++			if (f->aborted)
++				return -1;
++			line0 = i + 2;
++			i++;
++		}
++	}
++	if (sf_headers_done(f))
++		return -1;
++	f->state = SF_BODY;
++	/* bytes deste bloco que ja sao corpo */
++	return (long)((size_t)(end + 4 - f->hbuf) - start);
++}
++
++/* corpo; devolve true quando terminou */
++static bool sf_feed_body(struct sfetch *f, const unsigned char *p, size_t n)
++{
++	if (!f->chunked) {
++		if (f->clen >= 0 && f->got + (long)n > f->clen)
++			n = (size_t)(f->clen - f->got);
++		f->got += (long)n;
++		sf_data(f, p, n);
++		return f->clen >= 0 && f->got >= f->clen;
++	}
++	while (n > 0 && !f->aborted) {
++		if (f->chunk_state == 0 || f->chunk_state == 2 || f->chunk_state == 3) {
++			/* linha: tamanho do pedaco, \r\n depois dos dados ou trailer */
++			char c = (char)*p++;
++			n--;
++			if (c == '\n') {
++				f->cline[f->clinelen] = 0;
++				if (f->chunk_state == 0) {
++					f->chunk_left = strtol(f->cline, NULL, 16);
++					f->chunk_state = f->chunk_left > 0 ? 1 : 3;
++				} else if (f->chunk_state == 2) {
++					f->chunk_state = 0;
++				} else if (f->clinelen == 0) {
++					return true;	/* linha vazia depois do 0 */
++				}
++				f->clinelen = 0;
++			} else if (c != '\r' && f->clinelen < (int)sizeof(f->cline) - 1) {
++				f->cline[f->clinelen++] = c;
++			}
++		} else {
++			size_t k = n < (size_t)f->chunk_left ? n : (size_t)f->chunk_left;
++			sf_data(f, p, k);
++			f->got += (long)k;
++			p += k;
++			n -= k;
++			f->chunk_left -= (long)k;
++			if (f->chunk_left == 0)
++				f->chunk_state = 2;
++		}
++	}
++	return false;
++}
++
++static void sf_finished(struct sfetch *f)
++{
++	fetch_msg msg;
++	NSLOG(fetch, INFO, "ok %s: HTTP %ld, %ld bytes, %u ms%s", nsurl_access(f->url),
++	      f->code, f->got, k_ms() - f->t_start,
++	      f->https && !tls_cert_ok() ? ", certificado NAO verificado" : "");
++	msg.type = FETCH_FINISHED;
++	sf_send(f, &msg);
++}
++
++/* le o que der; devolve true se o fetch acabou (e ja foi liberado) */
++static bool sf_read(struct sfetch *f)
++{
++	unsigned t0 = k_ms();
++
++	for (;;) {
++		int r = conn_recv(f, rbuf, (int)sizeof rbuf);
++		if (r == -3)
++			return false;	/* tecla/clique: a interface primeiro */
++		if (r < 0) {
++			if (f->state == SF_BODY && !f->chunked && f->clen < 0)
++				sf_finished(f);
++			else
++				sf_error(f, f->https && tls_error() ? tls_error() :
++					 "Tempo esgotado ou conexao perdida");
++			sf_done(f);
++			return true;
++		}
++		if (r == 0) {
++			if (f->state == SF_HEAD)
++				sf_error(f, "O servidor fechou sem responder");
++			else if (f->chunked && f->chunk_state != 3)
++				sf_error(f, "Resposta cortada");
++			else if (f->clen >= 0 && f->got < f->clen)
++				sf_error(f, "Resposta cortada");
++			else
++				sf_finished(f);
++			sf_done(f);
++			return true;
++		}
++		{
++			const unsigned char *p = rbuf;
++			size_t n = (size_t)r;
++			/* um bloco pode ter fim de cabecalho (ou um 100 inteiro) e corpo */
++			while (f->state == SF_HEAD && n > 0) {
++				long used = sf_feed_head(f, p, n);
++				if (used < 0 || f->aborted) {
++					sf_done(f);
++					return true;
++				}
++				p += used;
++				n -= (size_t)used;
++			}
++			if (f->state == SF_HEAD) {
++				/* cabecalho ainda incompleto */
++			} else if (n == 0 && f->clen == 0 && !f->chunked) {
++				sf_finished(f);
++				sf_done(f);
++				return true;
++			} else if (sf_feed_body(f, p, n) || f->aborted) {
++				if (!f->aborted)
++					sf_finished(f);
++				sf_done(f);
++				return true;
++			}
++		}
++		if ((int)(k_ms() - t0) > 60)
++			return false;
++	}
++}
++
++/* --- tabela de operacoes ------------------------------------------------- */
++
++static bool sf_initialise(lwc_string *scheme)
++{
++	(void)scheme;
++	return true;
++}
++
++static void sf_finalise(lwc_string *scheme)
++{
++	(void)scheme;
++}
++
++static bool sf_acceptable(const nsurl *url)
++{
++	(void)url;
++	return true;
++}
++
++static void *sf_setup(struct fetch *parent, nsurl *url, bool only_2xx,
++		      bool downgrade_tls, const char *post_urlenc,
++		      const struct fetch_multipart_data *post_multipart,
++		      const char **headers)
++{
++	struct sfetch *f, **pp;
++	lwc_string *scheme;
++	bool match = false;
++	int n, i;
++
++	(void)downgrade_tls;
++	if (post_multipart != NULL) {
++		/* envio de arquivo ainda nao: so formularios urlencoded */
++		return NULL;
++	}
++	f = calloc(1, sizeof(*f));
++	if (f == NULL)
++		return NULL;
++	f->parent = parent;
++	f->url = nsurl_ref(url);
++	f->only_2xx = only_2xx;
++	f->clen = -1;
++	scheme = nsurl_get_component(url, NSURL_SCHEME);
++	if (scheme != NULL) {
++		lwc_string_caseless_isequal(scheme, corestring_lwc_https, &match);
++		lwc_string_unref(scheme);
++	}
++	f->https = match;
++	if (post_urlenc != NULL)
++		f->post = strdup(post_urlenc);
++	for (n = 0; headers != NULL && headers[n] != NULL; n++)
++		;
++	f->headers = calloc((size_t)n + 1, sizeof(char *));
++	for (i = 0; f->headers != NULL && i < n; i++)
++		f->headers[i] = strdup(headers[i]);
++	for (pp = &queue; *pp != NULL; pp = &(*pp)->next)
++		;
++	*pp = f;
++	return f;
++}
++
++static bool sf_start(void *ctx)
++{
++	((struct sfetch *)ctx)->started = true;
++	return true;
++}
++
++/* o poll faz a limpeza: o fetch pode estar no meio de um callback */
++static void sf_abort(void *ctx)
++{
++	((struct sfetch *)ctx)->aborted = true;
++}
++
++static void sf_free(void *ctx)
++{
++	struct sfetch *f = ctx;
++	int i;
++	nsurl_unref(f->url);
++	free(f->post);
++	for (i = 0; f->headers != NULL && f->headers[i] != NULL; i++)
++		free(f->headers[i]);
++	free(f->headers);
++	free(f->hbuf);
++	free(f->location);
++	free(f);
++}
++
++static void sf_poll(lwc_string *scheme)
++{
++	struct sfetch *f, *next;
++	static bool in_poll;
++
++	(void)scheme;
++	if (in_poll)
++		return;
++	in_poll = true;
++
++	/* cancelados (fora do callback) saem da fila */
++	for (f = queue; f != NULL; f = next) {
++		next = f->next;
++		if (f->aborted && !f->locked)
++			sf_done(f);
++	}
++
++	if (active == NULL) {
++		for (f = queue; f != NULL; f = f->next) {
++			if (f->started && !f->aborted && !f->locked)
++				break;
++		}
++		if (f != NULL) {
++			int rc = sf_connect(f);
++			if (rc == 0)
++				active = f;
++			else if (rc < 0)
++				sf_done(f);
++			/* rc 1: interrompido, tenta no proximo poll */
++		}
++	} else if (!active->locked) {
++		sf_read(active);
++	}
++	in_poll = false;
++}
++
++nserror fetch_sodos_register(void)
++{
++	const struct fetcher_operation_table ops = {
++		.initialise = sf_initialise,
++		.acceptable = sf_acceptable,
++		.setup = sf_setup,
++		.start = sf_start,
++		.abort = sf_abort,
++		.free = sf_free,
++		.poll = sf_poll,
++		.finalise = sf_finalise
++	};
++	nserror ret;
++
++	ret = fetcher_add(lwc_string_ref(corestring_lwc_http), &ops);
++	if (ret != NSERROR_OK)
++		return ret;
++	return fetcher_add(lwc_string_ref(corestring_lwc_https), &ops);
++}
++
++#endif /* __SODOS__ */
+--- a/netsurf/content/fetchers/sodos.h
++++ b/netsurf/content/fetchers/sodos.h
+@@ -0,0 +1,14 @@
++/*
++ * Fetcher http: e https: do SODOS (content/fetchers/sodos.c).
++ *
++ * This file is part of NetSurf, http://www.netsurf-browser.org/
++ * Licensed under the GNU General Public License, version 2.
++ */
++
++#ifndef NETSURF_CONTENT_FETCHERS_FETCH_SODOS_H
++#define NETSURF_CONTENT_FETCHERS_FETCH_SODOS_H
++
++/** Registra o fetcher para http e https. */
++nserror fetch_sodos_register(void);
++
++#endif
 --- a/netsurf/utils/file.c
 +++ b/netsurf/utils/file.c
 @@ -152,6 +152,13 @@
@@ -474,6 +1201,81 @@
  	if (ret != NSERROR_OK) {
  		return ret;
  	}
+--- a/netsurf/utils/log.c
++++ b/netsurf/utils/log.c
+@@ -103,6 +103,10 @@
+ NSLOG_DEFINE_CATEGORY(dukky, "Duktape JavaScript Binding");
+ NSLOG_DEFINE_CATEGORY(jserrors, "JavaScript error messages");
+ 
++#ifdef __SODOS__
++static bool sodos_log_dirty;
++#endif
++
+ static void
+ netsurf_render_log(void *_ctx,
+ 		   nslog_entry_context_t *ctx,
+@@ -125,7 +129,43 @@
+ 
+ 	/* Log entries aren't newline terminated add one for clarity */
+ 	fputc('\n', logfile);
++
++#ifdef __SODOS__
++	/* no SODOS o fflush regrava o arquivo inteiro: erro vai na hora,
++	 * o resto espera nslog_sodos_flush */
++	if (logfile != stderr) {
++		if (ctx->level >= NSLOG_LEVEL_WARNING)
++			nslog_sodos_flush(true);
++		else
++			sodos_log_dirty = true;
++	}
++#endif
++}
++
++#ifdef __SODOS__
++/* exported interface documented in utils/log.h */
++void nslog_sodos_flush(bool force)
++{
++	static struct timeval last;
++	struct timeval now;
++
++	if (logfile == stderr || logfile == NULL)
++		return;
++	gettimeofday(&now, NULL);
++	if (!force) {
++		long ms;
++		if (!sodos_log_dirty)
++			return;
++		ms = (long)(now.tv_sec - last.tv_sec) * 1000 +
++			(long)(now.tv_usec - last.tv_usec) / 1000;
++		if (ms >= 0 && ms < 2000)
++			return;
++	}
++	fflush(logfile);
++	sodos_log_dirty = false;
++	last = now;
+ }
++#endif
+ 
+ /* exported interface documented in utils/log.h */
+ nserror
+--- a/netsurf/utils/log.h
++++ b/netsurf/utils/log.h
+@@ -64,6 +64,15 @@
+  */
+ extern nserror nslog_set_filter_by_options(void);
+ 
++#ifdef __SODOS__
++/**
++ * Grava o log no disco (SODOS: o fflush regrava o arquivo inteiro).
++ *
++ * \param force grava agora; sem force, so se mudou e passaram 2 s.
++ */
++void nslog_sodos_flush(bool force);
++#endif
++
+ /* ensure a logging level is defined */
+ #ifndef NETSURF_LOG_LEVEL
+ #define NETSURF_LOG_LEVEL INFO
 --- a/netsurf/frontends/framebuffer/gui.c
 +++ b/netsurf/frontends/framebuffer/gui.c
 @@ -485,6 +485,9 @@
@@ -501,7 +1303,85 @@
  
  	if (nsoption_charp(cookie_file) == NULL ||
  	    nsoption_charp(cookie_jar) == NULL) {
-@@ -2195,6 +2204,9 @@
+@@ -611,6 +620,67 @@
+ 	return true;
+ }
+ 
++#ifdef __SODOS__
++#include <sys/stat.h>
++#include <time.h>
++
++/* log em X:\LOG\NETSURF.LOG, X = unidade do exe (o pendrive e U:) */
++#define SODOS_LOG_MAX (256 * 1024)
++static char sodos_log_path[64];
++
++/* poe "-V caminho" no argv para o nslog_init gravar no arquivo */
++static char **sodos_log_args(int *pargc, char **argv)
++{
++	char dir[32], old[64], cwd[64];
++	char drive = 0;
++	struct stat st;
++	char **nv;
++	int i;
++
++	if (*pargc > 1 && argv[1][0] == '-' && (argv[1][1] == 'v' || argv[1][1] == 'V') &&
++	    argv[1][2] == 0)
++		return argv;	/* quem chamou escolheu */
++	if (argv[0] != NULL && argv[0][0] != 0 && argv[0][1] == ':')
++		drive = argv[0][0];
++	else if (getcwd(cwd, sizeof cwd) != NULL && cwd[1] == ':')
++		drive = cwd[0];
++	if (drive == 0)
++		drive = 'U';
++	snprintf(dir, sizeof dir, "%c:\\LOG", drive);
++	snprintf(sodos_log_path, sizeof sodos_log_path, "%s\\NETSURF.LOG", dir);
++	if (stat(dir, &st) != 0)
++		mkdir(dir, 0755);
++	/* grande demais: vira NETSURF.OLD e comeca outro */
++	if (stat(sodos_log_path, &st) == 0 && st.st_size > SODOS_LOG_MAX) {
++		snprintf(old, sizeof old, "%s\\NETSURF.OLD", dir);
++		remove(old);
++		rename(sodos_log_path, old);
++	}
++	nv = calloc((size_t)*pargc + 3, sizeof(char *));
++	if (nv == NULL)
++		return argv;
++	nv[0] = argv[0];
++	nv[1] = "-V";
++	nv[2] = sodos_log_path;
++	for (i = 1; i < *pargc; i++)
++		nv[i + 2] = argv[i];
++	*pargc += 2;
++	return nv;
++}
++
++static void sodos_log_banner(int argc, char **argv)
++{
++	char when[32] = "?";
++	time_t t = time(NULL);
++	struct tm *tm = localtime(&t);
++	if (tm != NULL)
++		strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", tm);
++	NSLOG(netsurf, WARNING, "=== NetSurf iniciado %s, log %s, url %s ===",
++	      when, sodos_log_path[0] ? sodos_log_path : "(stderr)",
++	      argc > 1 ? argv[argc - 1] : "(pagina inicial)");
++}
++#endif
++
+ static void framebuffer_run(void)
+ {
+ 	nsfb_event_t event;
+@@ -635,6 +705,9 @@
+ 		}
+ 
+ 		fbtk_redraw(fbtk);
++#ifdef __SODOS__
++		nslog_sodos_flush(false);
++#endif
+ 	}
+ }
+ 
+@@ -2195,6 +2268,9 @@
  		.layout = framebuffer_layout_table,
  	};
  
@@ -511,7 +1391,24 @@
          ret = netsurf_register(&framebuffer_table);
          if (ret != NSERROR_OK) {
  		die("NetSurf operation table failed registration");
-@@ -2218,9 +2230,20 @@
+@@ -2202,10 +2278,16 @@
+ 
+ 	respaths = fb_init_resource_path(NETSURF_FB_RESPATH":"NETSURF_FB_FONTPATH);
+ 
++#ifdef __SODOS__
++	argv = sodos_log_args(&argc, argv);
++#endif
+ 	/* initialise logging. Not fatal if it fails but not much we
+ 	 * can do about it either.
+ 	 */
+ 	nslog_init(nslog_stream_configure, &argc, argv);
++#ifdef __SODOS__
++	sodos_log_banner(argc, argv);
++#endif
+ 
+ 	/* user options setup */
+ 	ret = nsoption_init(set_defaults, &nsoptions, &nsoptions_default);
+@@ -2218,9 +2300,20 @@
  	nsoption_commandline(&argc, argv, nsoptions);
  
  	/* message init */

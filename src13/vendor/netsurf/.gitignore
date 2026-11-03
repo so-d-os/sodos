@@ -10,3 +10,5 @@ sodos/run/*.ppm
 sodos/run/*.png
 sodos/run/*.log
 sodos/run/*.TXT
+sodos/run/LOG/
+sodos/run/*.out
