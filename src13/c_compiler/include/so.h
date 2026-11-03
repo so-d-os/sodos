@@ -9,6 +9,8 @@ void k_putc(int c);
 void k_write(const char* s, int n);
 void k_puts(const char* s);
 int k_getc(void);
+/* Nao espera: -1 se nao ha tecla. Para jogos e lacos com k_ms(). */
+int k_trygetc(void);
 int k_readline(char* buf, int max);
 void k_clear(void);
 

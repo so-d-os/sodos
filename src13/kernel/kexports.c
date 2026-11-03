@@ -54,6 +54,14 @@ static int k_getc(void) {
   return c;
 }
 
+/* Como k_getc, mas nao espera: -1 se nao ha tecla (ou fim do pipe). */
+static int k_trygetc(void) {
+  int c;
+  if (shell_pipe_active()) return shell_pipe_getc();
+  c = shell_try_char();
+  return c ? c : -1;
+}
+
 static int k_readline(char* buf, int max) {
   int n = 0;
   if (!buf || max < 2) return -1;
@@ -376,6 +384,7 @@ static const struct kexp table[] = {
   EXP(k_write),
   EXP(k_puts),
   EXP(k_getc),
+  EXP(k_trygetc),
   EXP(k_readline),
   EXP(k_clear),
   EXP(k_fsize),

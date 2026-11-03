@@ -473,7 +473,8 @@ static int kb_read(unsigned char* sc) {
   return 1;
 }
 
-static int get_char(void) {
+/* wait = 0: nao espera; devolve 0 se nao ha tecla pronta. */
+static int get_key(int wait) {
   unsigned char sc;
 
   /* Tecla que sobrou de acento sem combinacao (~ e x -> ~ depois x). */
@@ -486,11 +487,15 @@ static int get_char(void) {
    * caia no handler de #DF e o iret executava lixo em 0x9FC00 (#UD). */
   for (;;) {
     net_poll();
-    if (!kb_read(&sc))
+    if (!kb_read(&sc)) {
+      if (!wait) return 0;
       continue;
+    }
     break_fire();
-    if (sc == 0xFA || sc == 0xFE)
+    if (sc == 0xFA || sc == 0xFE) {
+      if (!wait) return 0;
       continue;
+    }
     break;
   }
 
@@ -525,8 +530,16 @@ static int get_char(void) {
   return keymap_char(sc);
 }
 
+static int get_char(void) {
+  return get_key(1);
+}
+
 int shell_get_char(void) {
   return get_char();
+}
+
+int shell_try_char(void) {
+  return get_key(0);
 }
 
 void pause(void) {

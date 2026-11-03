@@ -13,6 +13,7 @@
 #include <setjmp.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/select.h>
 #include <dirent.h>
 #include <malloc.h>
 #include <netdb.h>
@@ -172,6 +173,26 @@ static int k_getc(void) {
   }
   c = getchar();
   return c == EOF ? 26 : c;
+}
+
+static unsigned k_ms(void);
+
+/* Nao espera. Com SOX_KEYS entrega uma tecla a cada 200 ms (o resto e -1),
+ * para um laco de jogo andar entre as telas gravadas; sem ele, olha o stdin. */
+static int k_trygetc(void) {
+  static unsigned next;
+  struct timeval tv = {0, 0};
+  fd_set fds;
+  if (getenv("SOX_KEYS")) {
+    unsigned now = k_ms();
+    if (next && (int)(now - next) < 0) return -1;
+    next = now + 200;
+    return k_getc();
+  }
+  FD_ZERO(&fds);
+  FD_SET(0, &fds);
+  if (select(1, &fds, 0, 0, &tv) <= 0) return -1;
+  return k_getc();
 }
 
 static int k_vput(int row, int col, const unsigned short* cells, int n) {
@@ -748,7 +769,7 @@ static const struct {
   const char* name;
   void* fn;
 } ktab[] = {
-  E(k_putc), E(k_write), E(k_puts), E(k_getc), E(k_readline), E(k_clear),
+  E(k_putc), E(k_write), E(k_puts), E(k_getc), E(k_trygetc), E(k_readline), E(k_clear),
   E(k_fsize), E(k_fload), E(k_fread), E(k_fsave), E(k_flist), E(k_dirlist), E(k_pwd), E(k_chdir),
   E(k_drive), E(k_set_drive), E(k_dir), E(k_fdelete), E(k_mkdir), E(k_rmdir), E(k_dfree),
   E(k_vput), E(k_cursor),
