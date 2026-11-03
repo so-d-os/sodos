@@ -1,4 +1,4 @@
-/* https.c - GET por TLS 1.3: cc https.c tls.dll
+/* https.c - GET por TLS (1.3 ou 1.2): cc https.c tls.dll
  * Uso: https example.com [/caminho]   (mostra a resposta inteira) */
 #include <stdio.h>
 #include <string.h>
@@ -17,7 +17,7 @@ int main(int argc, char** argv) {
     printf("TLS falhou: %s\n", tls_error());
     return 1;
   }
-  printf("TLS 1.3 ok em %u ms (certificado NAO verificado)\n", k_ms() - t0);
+  printf("TLS ok em %u ms (%s)\n", k_ms() - t0, tls_security());
   snprintf(req, sizeof(req),
            "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: SO-https/1.0\r\nConnection: close\r\n\r\n",
            path, host);

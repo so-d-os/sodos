@@ -1,7 +1,7 @@
-/* x509.c - le o certificado do handshake TLS 1.3 e confere tres coisas:
- * o nome do site, a assinatura do servidor (CertificateVerify) e a cadeia
- * ate uma raiz conhecida. RSA com SHA-256/384 (PKCS#1 no certificado, PSS
- * SHA-256 no TLS) e ECDSA P-256/P-384. A data vem de k_date (AAAA MM DD);
+/* x509.c - le o certificado do handshake TLS (1.3 ou 1.2) e confere tres
+ * coisas: o nome do site, a assinatura do servidor (CertificateVerify no 1.3,
+ * ServerKeyExchange no 1.2) e a cadeia ate uma raiz conhecida. RSA com
+ * SHA-256/384 (PKCS#1; PSS SHA-256 no TLS) e ECDSA P-256/P-384. A data vem de k_date (AAAA MM DD);
  * sem relogio, a validade nao e barrada. */
 #include "x509.h"
 #include "p256-m.h"
@@ -597,25 +597,41 @@ static int sig_ok(const certinfo* child, const pubkey* issuer) {
   return 0;
 }
 
-static int cv_ok(const pubkey* key, int scheme, const u8* sig, int sig_len, const u8 th[32]) {
-  /* 64 vezes 0x20, o texto de 33 bytes, um 0x00 e o hash do transcript. */
-  u8 msg[64 + 33 + 1 + 32];
-  u8 hash[32];
-  memset(msg, 0x20, 64);
-  memcpy(msg + 64, "TLS 1.3, server CertificateVerify", 33);
-  msg[97] = 0;
-  memcpy(msg + 98, th, 32);
-  sha256(msg, 130, hash);
-  if (scheme == 0x0403 && key->kind == 2) {
+/* assinatura do servidor sobre data (o conteudo inteiro, o hash e feito aqui).
+ * ECDSA chega em DER (SEQUENCE de r e s); aceita tambem os bytes crus. */
+static int tls_sig_ok(const pubkey* key, int scheme, const u8* sig, int sig_len, const u8* data,
+                      int dlen) {
+  u8 hash[48];
+  int hash_alg = scheme >> 8;
+  int sig_alg = scheme & 255;
+  if (scheme == 0x0804) {
+    if (key->kind != 1) return 0;
+    sha256(data, dlen, hash);
+    return rsa_pss_sha256(key, hash, sig, sig_len);
+  }
+  if (hash_alg == 4) sha256(data, dlen, hash);
+  else if (hash_alg == 5) sha384(data, dlen, hash);
+  else return 0;
+  if (sig_alg == 1) {
+    if (hash_alg == 4) return rsa_pkcs1_sha256(key, hash, sig, sig_len);
+    return rsa_pkcs1(key, hash, 48, SHA384_INFO, (int)sizeof SHA384_INFO, sig, sig_len);
+  }
+  if (sig_alg == 3 && key->kind == 2) {
     u8 raw[64];
-    /* TLS 1.3 manda o ECDSA em DER (SEQUENCE de r e s), nao os 64 bytes crus. */
     if (ecdsa_der_to_raw(sig, sig_len, raw, 32) < 0) {
       if (sig_len != 64) return 0;
       memcpy(raw, sig, 64);
     }
-    return p256_ecdsa_verify(raw, key->xy, hash, 32) == 0;
+    return p256_ecdsa_verify(raw, key->xy, hash, (size_t)(hash_alg == 4 ? 32 : 48)) == 0;
   }
-  if (scheme == 0x0804 && key->kind == 1) return rsa_pss_sha256(key, hash, sig, sig_len);
+  if (sig_alg == 3 && key->kind == 3) {
+    u8 raw[96];
+    if (ecdsa_der_to_raw(sig, sig_len, raw, 48) < 0) {
+      if (sig_len != 96) return 0;
+      memcpy(raw, sig, 96);
+    }
+    return p384_ecdsa_verify(raw, key->xy, hash, (size_t)(hash_alg == 4 ? 32 : 48)) == 0;
+  }
   return 0;
 }
 
@@ -667,16 +683,18 @@ static int root_ok(const certinfo* top) {
 
 static int read_u24(const u8* p) { return (p[0] << 16) | (p[1] << 8) | p[2]; }
 
-int x509_tls_check(const char* host, const u8* msg, int msg_len, int scheme, const u8* sig,
-                   int sig_len, const u8 th[32], char* why, int why_max) {
+/* tls12: Certificate do TLS 1.2 (sem contexto nem extensoes por certificado) */
+static int chain_check(const char* host, const u8* msg, int msg_len, int tls12, int scheme,
+                       const u8* sig, int sig_len, const u8* data, int dlen, char* why,
+                       int why_max) {
   certinfo chain[6];
   int nc = 0, p, i, ctx, list, end;
   if (!msg || msg_len < 4 || !sig || sig_len < 1) {
     why_set(why, why_max, "sem certificado");
     return -1;
   }
-  ctx = msg[0];
-  p = 1 + ctx;
+  ctx = tls12 ? 0 : msg[0];
+  p = tls12 ? 0 : 1 + ctx;
   if (p + 3 > msg_len) {
     why_set(why, why_max, "certificado ilegivel");
     return -1;
@@ -692,7 +710,7 @@ int x509_tls_check(const char* host, const u8* msg, int msg_len, int scheme, con
     int clen = read_u24(msg + p);
     int ext;
     p += 3;
-    if (clen < 1 || p + clen + 2 > end) {
+    if (clen < 1 || p + clen + (tls12 ? 0 : 2) > end) {
       why_set(why, why_max, "certificado ilegivel");
       return -1;
     }
@@ -702,8 +720,10 @@ int x509_tls_check(const char* host, const u8* msg, int msg_len, int scheme, con
     }
     nc++;
     p += clen;
-    ext = (msg[p] << 8) | msg[p + 1];
-    p += 2 + ext;
+    if (!tls12) {
+      ext = (msg[p] << 8) | msg[p + 1];
+      p += 2 + ext;
+    }
   }
   if (nc < 1) {
     why_set(why, why_max, "sem certificado");
@@ -719,11 +739,12 @@ int x509_tls_check(const char* host, const u8* msg, int msg_len, int scheme, con
       return -1;
     }
   }
-  if (scheme != 0x0403 && scheme != 0x0804) {
+  if (scheme != 0x0403 && scheme != 0x0503 && scheme != 0x0804 &&
+      (!tls12 || (scheme != 0x0401 && scheme != 0x0501))) {
     why_set(why, why_max, "assinatura TLS nao suportada");
     return -1;
   }
-  if (!cv_ok(&chain[0].key, scheme, sig, sig_len, th)) {
+  if (!tls_sig_ok(&chain[0].key, scheme, sig, sig_len, data, dlen)) {
     why_set(why, why_max, "assinatura do servidor invalida");
     return -1;
   }
@@ -739,4 +760,22 @@ int x509_tls_check(const char* host, const u8* msg, int msg_len, int scheme, con
   }
   why_set(why, why_max, "");
   return 0;
+}
+
+int x509_tls_check(const char* host, const u8* msg, int msg_len, int scheme, const u8* sig,
+                   int sig_len, const u8 th[32], char* why, int why_max) {
+  /* CertificateVerify: 64 vezes 0x20, o texto de 33 bytes, um 0x00 e o hash */
+  u8 content[64 + 33 + 1 + 32];
+  memset(content, 0x20, 64);
+  memcpy(content + 64, "TLS 1.3, server CertificateVerify", 33);
+  content[97] = 0;
+  memcpy(content + 98, th, 32);
+  return chain_check(host, msg, msg_len, 0, scheme, sig, sig_len, content, (int)sizeof content,
+                     why, why_max);
+}
+
+int x509_tls12_check(const char* host, const u8* msg, int msg_len, int scheme, const u8* sig,
+                     int sig_len, const u8* signed_data, int signed_len, char* why, int why_max) {
+  return chain_check(host, msg, msg_len, 1, scheme, sig, sig_len, signed_data, signed_len, why,
+                     why_max);
 }

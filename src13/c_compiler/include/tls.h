@@ -1,5 +1,6 @@
-/* tls.h - cliente TLS 1.3 (TLS.DLL). Uma conexao por vez, sobre k_tcp_*.
- * Cifra: TLS_AES_128_GCM_SHA256, grupos x25519 e secp256r1.
+/* tls.h - cliente TLS 1.3 e 1.2 (TLS.DLL). Uma conexao por vez, sobre k_tcp_*.
+ * 1.3: TLS_AES_128_GCM_SHA256. 1.2 (servidor sem 1.3): ECDHE-ECDSA/RSA-
+ * AES128-GCM-SHA256. Grupos x25519 e secp256r1.
  * O certificado e conferido (nome, cadeia, assinatura). tls_cert_ok diz
  * se conferiu; tls_security e o texto curto para a barra de status. */
 #ifndef _TLS_H
