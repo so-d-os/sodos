@@ -1,14 +1,27 @@
 /* img.c - ICO, GIF, PNG e JPEG (baseline e progressivo).
- * A saida cabe em 800 pixels de lado; a origem pode ter ate 2048. */
+ * A saida cabe em IMG_MAXS pixels de lado (800 na IMG.DLL); a origem pode
+ * ter ate IMG_MAX_IN. */
 #include <img.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define MAXS 800
-#define MAX_IN 3840
+/* Quem liga o img.c direto (o NetSurf) pode mudar os limites na compilacao. */
+#ifndef IMG_MAXS
+#define IMG_MAXS 800
+#endif
+#ifndef IMG_MAX_IN
+#define IMG_MAX_IN 3840
+#endif
+#define MAXS IMG_MAXS
+#define MAX_IN IMG_MAX_IN
+
+/* tamanho da origem da ultima imagem (antes da reducao); fora da API da DLL */
+int img_src_w, img_src_h;
 
 static int sample_step(int w, int h) {
   int s = 1;
+  img_src_w = w;
+  img_src_h = h;
   if (w < 1 || h < 1 || w > MAX_IN || h > MAX_IN) return -1;
   while ((w + s - 1) / s > MAXS || (h + s - 1) / s > MAXS) s++;
   return s;

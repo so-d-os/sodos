@@ -79,7 +79,7 @@
  SURFACE_HANDLER_$(NSFB_SDL_AVAILABLE) += sdl.c
 --- a/libnsfb/src/surface/sodos.c
 +++ b/libnsfb/src/surface/sodos.c
-@@ -0,0 +1,324 @@
+@@ -0,0 +1,339 @@
 +/*
 + * sodos.c - superficie da libnsfb para a janela do WIN no SODOS.
 + *
@@ -292,55 +292,70 @@
 +    return 0;
 +}
 +
++/* um evento do kernel vira um ou mais eventos do nsfb na fila */
++static void translate_event(const int *raw)
++{
++    switch (raw[0]) {
++    case SODOS_EV_CLOSE:
++        q_push(NSFB_EVENT_CONTROL, NSFB_CONTROL_QUIT, 0, 0);
++        break;
++    case SODOS_EV_DOWN:
++        q_push(NSFB_EVENT_MOVE_ABSOLUTE, 0, raw[1], raw[2]);
++        button_down = raw[3] == 2 ? NSFB_KEY_MOUSE_3 : NSFB_KEY_MOUSE_1;
++        q_push(NSFB_EVENT_KEY_DOWN, button_down, 0, 0);
++        break;
++    case SODOS_EV_UP:
++        q_push(NSFB_EVENT_MOVE_ABSOLUTE, 0, raw[1], raw[2]);
++        q_push(NSFB_EVENT_KEY_UP, button_down ? button_down : NSFB_KEY_MOUSE_1, 0, 0);
++        button_down = 0;
++        break;
++    case SODOS_EV_DRAG:
++        q_push(NSFB_EVENT_MOVE_ABSOLUTE, 0, raw[1], raw[2]);
++        break;
++    case SODOS_EV_WHEEL: {
++        int n = raw[3] < 0 ? -raw[3] : raw[3];
++        int code = raw[3] < 0 ? NSFB_KEY_MOUSE_4 : NSFB_KEY_MOUSE_5;
++        q_push(NSFB_EVENT_MOVE_ABSOLUTE, 0, raw[1], raw[2]);
++        if (n > 4)
++            n = 4;
++        while (n-- > 0)
++            q_key(code);
++        break;
++    }
++    case SODOS_EV_KEY:
++        push_key(raw[3]);
++        break;
++    default:
++        break;
++    }
++}
++
 +static bool sodos_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
 +{
 +    int raw[4];
 +    int t;
 +
 +    (void)nsfb;
-+    if (q_count == 0) {
-+        /* gui_present redesenha a tela toda: com eventos na fila (digitacao
-+         * rapida), trata todos antes de apresentar, senao o controlador
-+         * PS/2 enche enquanto o kernel desenha e teclas se perdem */
++    /* Esvazia a fila do kernel. Com evento pendente la, k_tcp_* devolve -3
++     * e o fetch em andamento (TLS) e interrompido; e gui_present redesenha a
++     * tela toda, entao digitacao rapida e tratada antes de apresentar. */
++    while (q_count < QMAX - 8) {
 +        t = k_gui_event(raw, 0);
-+        if (t == SODOS_EV_NONE && raw[0] == SODOS_EV_NONE) {
-+            present();
-+            t = wait_event(raw, timeout);
-+        }
-+        if (t < 0 || raw[0] == SODOS_EV_CLOSE) {
++        if (t < 0) {
 +            q_push(NSFB_EVENT_CONTROL, NSFB_CONTROL_QUIT, 0, 0);
-+        } else {
-+            switch (raw[0]) {
-+            case SODOS_EV_DOWN:
-+                q_push(NSFB_EVENT_MOVE_ABSOLUTE, 0, raw[1], raw[2]);
-+                button_down = raw[3] == 2 ? NSFB_KEY_MOUSE_3 : NSFB_KEY_MOUSE_1;
-+                q_push(NSFB_EVENT_KEY_DOWN, button_down, 0, 0);
-+                break;
-+            case SODOS_EV_UP:
-+                q_push(NSFB_EVENT_MOVE_ABSOLUTE, 0, raw[1], raw[2]);
-+                q_push(NSFB_EVENT_KEY_UP, button_down ? button_down : NSFB_KEY_MOUSE_1, 0, 0);
-+                button_down = 0;
-+                break;
-+            case SODOS_EV_DRAG:
-+                q_push(NSFB_EVENT_MOVE_ABSOLUTE, 0, raw[1], raw[2]);
-+                break;
-+            case SODOS_EV_WHEEL: {
-+                int n = raw[3] < 0 ? -raw[3] : raw[3];
-+                int code = raw[3] < 0 ? NSFB_KEY_MOUSE_4 : NSFB_KEY_MOUSE_5;
-+                q_push(NSFB_EVENT_MOVE_ABSOLUTE, 0, raw[1], raw[2]);
-+                if (n > 4)
-+                    n = 4;
-+                while (n-- > 0)
-+                    q_key(code);
-+                break;
-+            }
-+            case SODOS_EV_KEY:
-+                push_key(raw[3]);
-+                break;
-+            default:
-+                break;
-+            }
++            break;
 +        }
++        if (raw[0] == SODOS_EV_NONE)
++            break;
++        translate_event(raw);
++    }
++    if (q_count == 0) {
++        present();
++        t = wait_event(raw, timeout);
++        if (t < 0)
++            q_push(NSFB_EVENT_CONTROL, NSFB_CONTROL_QUIT, 0, 0);
++        else
++            translate_event(raw);
 +        if (q_count == 0) {
 +            if (timeout < 0)
 +                return false;
@@ -463,7 +478,7 @@
  
 --- a/netsurf/content/fetchers/sodos.c
 +++ b/netsurf/content/fetchers/sodos.c
-@@ -0,0 +1,679 @@
+@@ -0,0 +1,697 @@
 +/*
 + * Fetcher http: e https: do SODOS, sobre k_tcp_* e o cliente TLS 1.3 do
 + * c_compiler/tls (ligado no exe).
@@ -526,6 +541,8 @@
 +	long clen;		/* Content-Length, -1 = ate fechar */
 +	long got;
 +	unsigned t_start;	/* k_ms do inicio, para o log */
++	unsigned next_try;	/* k_ms da proxima tentativa depois de interrupcao */
++	int interrupted;	/* conexoes interrompidas por tecla/clique */
 +	bool chunked;
 +	long chunk_left;	/* bytes restantes do pedaco atual */
 +	int chunk_state;	/* 0 tamanho, 1 dados, 2 \r\n depois, 3 fim */
@@ -690,6 +707,18 @@
 +	return req;
 +}
 +
++/* tecla ou clique pendente interrompe connect/handshake/envio (k_tcp_* -3):
++ * tenta de novo em 100 ms, sem martelar o servidor com conexoes */
++static int sf_interrupted(struct sfetch *f, const char *host, const char *where)
++{
++	f->interrupted++;
++	f->next_try = k_ms() + 100;
++	if (f->interrupted == 1 || f->interrupted % 20 == 0)
++		NSLOG(fetch, INFO, "%s com %s interrompido por tecla/clique (%d), de novo",
++		      where, host, f->interrupted);
++	return 1;
++}
++
 +/* conecta e manda o pedido: 0 ok, 1 tentar de novo (interrompido), -1 erro */
 +static int sf_connect(struct sfetch *f)
 +{
@@ -716,17 +745,16 @@
 +		sf_error(f, "Sem rede (k_net_ready)");
 +		return -1;
 +	}
-+	f->t_start = k_ms();
-+	NSLOG(fetch, INFO, "%s %s", f->post ? "POST" : "GET", nsurl_access(f->url));
++	if (f->interrupted == 0) {
++		f->t_start = k_ms();
++		NSLOG(fetch, INFO, "%s %s", f->post ? "POST" : "GET", nsurl_access(f->url));
++	}
 +	if (f->https) {
 +		rc = tls_connect(host, port);
 +		if (rc != 0) {
 +			const char *e = tls_error();
-+			if (e != NULL && strcmp(e, "interrompido") == 0) {
-+				NSLOG(fetch, INFO, "TLS com %s interrompido por tecla/clique, de novo",
-+				      host);
-+				return 1;
-+			}
++			if (e != NULL && strcmp(e, "interrompido") == 0)
++				return sf_interrupted(f, host, "TLS");
 +			snprintf((char *)rbuf, sizeof rbuf, "HTTPS %s: %s", host,
 +				 e ? e : "erro");
 +			sf_error(f, (char *)rbuf);
@@ -736,7 +764,7 @@
 +		rc = k_tcp_connect(host, port);
 +		if (rc == -3) {
 +			k_tcp_close();
-+			return 1;
++			return sf_interrupted(f, host, "TCP");
 +		}
 +		if (rc != 0) {
 +			snprintf((char *)rbuf, sizeof rbuf,
@@ -755,7 +783,10 @@
 +	rc = conn_send(f, req, (int)strlen(req));
 +	free(req);
 +	if (rc < 0) {
++		const char *e = f->https ? tls_error() : NULL;
 +		conn_close(f);
++		if (rc == -3 || (e != NULL && strcmp(e, "interrompido") == 0))
++			return sf_interrupted(f, host, "envio");
 +		sf_error(f, "Falha ao enviar o pedido");
 +		return -1;
 +	}
@@ -1104,8 +1135,10 @@
 +	}
 +
 +	if (active == NULL) {
++		unsigned now = k_ms();
 +		for (f = queue; f != NULL; f = f->next) {
-+			if (f->started && !f->aborted && !f->locked)
++			if (f->started && !f->aborted && !f->locked &&
++			    (f->interrupted == 0 || (int)(now - f->next_try) >= 0))
 +				break;
 +		}
 +		if (f != NULL) {
@@ -1158,6 +1191,269 @@
 +
 +/** Registra o fetcher para http e https. */
 +nserror fetch_sodos_register(void);
++
++#endif
+--- a/netsurf/content/handlers/image/Makefile
++++ b/netsurf/content/handlers/image/Makefile
+@@ -1,7 +1,7 @@
+ # Image content handlers sources
+ 
+ # S_IMAGE are sources related to image management
+-S_IMAGE_YES := image.c image_cache.c
++S_IMAGE_YES := image.c image_cache.c sodos_img.c
+ S_IMAGE_NO :=
+ S_IMAGE_$(NETSURF_USE_BMP) += bmp.c
+ S_IMAGE_$(NETSURF_USE_GIF) += gif.c
+--- a/netsurf/content/handlers/image/image.c
++++ b/netsurf/content/handlers/image/image.c
+@@ -38,6 +38,7 @@
+ #include "image/rsvg.h"
+ #include "image/svg.h"
+ #include "image/webp.h"
++#include "image/sodos_img.h"
+ #include "image/image.h"
+ 
+ /**
+@@ -78,6 +79,12 @@
+ 	if (error != NSERROR_OK)
+ 		return error;
+ #endif
++
++#ifdef __SODOS__
++	error = sodos_img_init();
++	if (error != NSERROR_OK)
++		return error;
++#endif
+ 
+ #ifdef WITH_PNG
+ 	error = nspng_init();
+--- a/netsurf/content/handlers/image/sodos_img.c
++++ b/netsurf/content/handlers/image/sodos_img.c
+@@ -0,0 +1,210 @@
++/*
++ * Imagens PNG e JPEG no SODOS: decodifica com o img.c da IMG.DLL do SODOS
++ * (ligado no exe), que ja traz inflate, PNG e JPEG baseline/progressivo.
++ *
++ * O primeiro decode acontece quando os dados chegam (data_complete) e o
++ * bitmap vai para o image_cache; se o cache o descartar, sodos_img_convert
++ * decodifica de novo. Imagens com mais de IMG_MAXS pixels de lado chegam
++ * reduzidas, mas o tamanho da pagina usa o tamanho original.
++ *
++ * This file is part of NetSurf, http://www.netsurf-browser.org/
++ * Licensed under the GNU General Public License, version 2.
++ */
++
++#ifdef __SODOS__
++
++#include <stdbool.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <img.h>
++
++#include "utils/utils.h"
++#include "utils/log.h"
++#include "utils/messages.h"
++#include "netsurf/bitmap.h"
++#include "content/llcache.h"
++#include "content/content.h"
++#include "content/content_protected.h"
++#include "content/content_factory.h"
++#include "desktop/gui_internal.h"
++#include "desktop/bitmap.h"
++
++#include "image/image_cache.h"
++#include "image/sodos_img.h"
++
++/* tamanho original da ultima imagem (img.c) */
++extern int img_src_w, img_src_h;
++
++static nserror sodos_img_create(const content_handler *handler,
++		lwc_string *imime_type, const struct http_parameter *params,
++		llcache_handle *llcache, const char *fallback_charset,
++		bool quirks, struct content **c)
++{
++	struct content *img;
++	nserror error;
++
++	img = calloc(1, sizeof(struct content));
++	if (img == NULL)
++		return NSERROR_NOMEM;
++
++	error = content__init(img, handler, imime_type, params,
++			      llcache, fallback_charset, quirks);
++	if (error != NSERROR_OK) {
++		free(img);
++		return error;
++	}
++	*c = img;
++	return NSERROR_OK;
++}
++
++/* RGBA decodificado -> bitmap do frontend */
++static struct bitmap *sodos_img_to_bitmap(const img_t *im)
++{
++	struct bitmap *bitmap;
++	uint8_t *pixels;
++	size_t rowstride;
++	bool opaque = true;
++	int y;
++	size_t i, n = (size_t)im->w * im->h;
++
++	for (i = 0; i < n; i++) {
++		if (im->rgba[i * 4 + 3] != 0xff) {
++			opaque = false;
++			break;
++		}
++	}
++	bitmap = guit->bitmap->create(im->w, im->h,
++				      opaque ? BITMAP_OPAQUE : BITMAP_NONE);
++	if (bitmap == NULL)
++		return NULL;
++	pixels = guit->bitmap->get_buffer(bitmap);
++	if (pixels == NULL) {
++		guit->bitmap->destroy(bitmap);
++		return NULL;
++	}
++	rowstride = guit->bitmap->get_rowstride(bitmap);
++	for (y = 0; y < im->h; y++)
++		memcpy(pixels + (size_t)y * rowstride,
++		       im->rgba + (size_t)y * im->w * 4, (size_t)im->w * 4);
++	/* img.c entrega R,G,B,A sem alfa pre-multiplicado */
++	bitmap_format_to_client(bitmap, &(bitmap_fmt_t) {
++		.layout = BITMAP_LAYOUT_R8G8B8A8,
++		.pma = false,
++	});
++	guit->bitmap->set_opaque(bitmap, opaque);
++	guit->bitmap->modified(bitmap);
++	return bitmap;
++}
++
++static struct bitmap *sodos_img_convert(struct content *c)
++{
++	const uint8_t *data;
++	size_t size;
++	img_t im;
++	struct bitmap *bitmap;
++
++	data = content__get_source_data(c, &size);
++	if (data == NULL || size == 0 || size > 0x7fffffff)
++		return NULL;
++	if (img_decode(data, (int)size, &im) != 0)
++		return NULL;
++	bitmap = sodos_img_to_bitmap(&im);
++	img_free(&im);
++	return bitmap;
++}
++
++static bool sodos_img_data_complete(struct content *c)
++{
++	union content_msg_data msg_data;
++	const uint8_t *data;
++	size_t size;
++	img_t im;
++	struct bitmap *bitmap;
++	char *title;
++
++	data = content__get_source_data(c, &size);
++	if (data == NULL || size == 0 || size > 0x7fffffff ||
++	    img_decode(data, (int)size, &im) != 0) {
++		NSLOG(netsurf, WARNING, "imagem nao decodificada (%s, %u bytes): %s",
++		      lwc_string_data(c->mime_type), (unsigned)size,
++		      nsurl_access(llcache_handle_get_url(c->llcache)));
++		msg_data.errordata.errorcode = NSERROR_UNKNOWN;
++		msg_data.errordata.errormsg = "Imagem nao suportada";
++		content_broadcast(c, CONTENT_MSG_ERROR, &msg_data);
++		return false;
++	}
++	/* o tamanho na pagina e o da origem, mesmo se o decode reduziu */
++	c->width = img_src_w > 0 ? img_src_w : im.w;
++	c->height = img_src_h > 0 ? img_src_h : im.h;
++	c->size = (size_t)im.w * im.h * 4;
++	bitmap = sodos_img_to_bitmap(&im);
++	img_free(&im);
++	if (bitmap == NULL) {
++		msg_data.errordata.errorcode = NSERROR_NOMEM;
++		msg_data.errordata.errormsg = messages_get("NoMemory");
++		content_broadcast(c, CONTENT_MSG_ERROR, &msg_data);
++		return false;
++	}
++	image_cache_add(c, bitmap, sodos_img_convert);
++
++	title = messages_get_buff("PNGTitle",
++			nsurl_access_leaf(llcache_handle_get_url(c->llcache)),
++			c->width, c->height);
++	if (title != NULL) {
++		content__set_title(c, title);
++		free(title);
++	}
++	content_set_ready(c);
++	content_set_done(c);
++	content_set_status(c, "");
++	return true;
++}
++
++static nserror sodos_img_clone(const struct content *old, struct content **newc)
++{
++	struct content *img;
++	nserror error;
++
++	img = calloc(1, sizeof(struct content));
++	if (img == NULL)
++		return NSERROR_NOMEM;
++	error = content__clone(old, img);
++	if (error != NSERROR_OK) {
++		content_destroy(img);
++		return error;
++	}
++	if ((old->status == CONTENT_STATUS_READY) ||
++	    (old->status == CONTENT_STATUS_DONE)) {
++		if (sodos_img_data_complete(img) == false) {
++			content_destroy(img);
++			return NSERROR_CLONE_FAILED;
++		}
++	}
++	*newc = img;
++	return NSERROR_OK;
++}
++
++static const content_handler sodos_img_content_handler = {
++	.create = sodos_img_create,
++	.data_complete = sodos_img_data_complete,
++	.destroy = image_cache_destroy,
++	.redraw = image_cache_redraw,
++	.clone = sodos_img_clone,
++	.get_internal = image_cache_get_internal,
++	.type = image_cache_content_type,
++	.is_opaque = image_cache_is_opaque,
++	.no_share = false,
++};
++
++static const char *sodos_img_types[] = {
++	"image/png",
++	"image/x-png",
++	"image/jpeg",
++	"image/jpg",
++	"image/pjpeg"
++};
++
++CONTENT_FACTORY_REGISTER_TYPES(sodos_img, sodos_img_types, sodos_img_content_handler);
++
++#endif /* __SODOS__ */
+--- a/netsurf/content/handlers/image/sodos_img.h
++++ b/netsurf/content/handlers/image/sodos_img.h
+@@ -0,0 +1,13 @@
++/*
++ * Imagens PNG e JPEG do SODOS (content/handlers/image/sodos_img.c).
++ *
++ * This file is part of NetSurf, http://www.netsurf-browser.org/
++ * Licensed under the GNU General Public License, version 2.
++ */
++
++#ifndef NETSURF_IMAGE_SODOS_IMG_H_
++#define NETSURF_IMAGE_SODOS_IMG_H_
++
++nserror sodos_img_init(void);
 +
 +#endif
 --- a/netsurf/utils/file.c

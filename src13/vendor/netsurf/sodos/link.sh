@@ -22,10 +22,12 @@ python3 "$S/genres.py" "$N/tree/netsurf/frontends/framebuffer/res" "$O/sodos_res
 for t in tls x509 crypto p256-m p384 roots; do
   "$S/sodos-cc" -O2 -D__export= -c "$C/tls/$t.c" -o "$O/tls_$t.o"
 done
+# PNG/JPEG: img.c da IMG.DLL ligado no exe, sem o limite de 800 px da DLL
+"$S/sodos-cc" -O2 -D__export= -DIMG_MAXS=2048 -DIMG_MAX_IN=8192 -c "$C/img/img.c" -o "$O/imgx.o"
 # printf com %f (a LIBCX e -mno-sse): as definicoes locais vencem os imports
 "$S/sodos-cc" -O2 -fno-builtin -c "$C/lib/printf.c" -o "$O/printfx.o"
 "$C/build/link" /out:"$O/NETSURF.EXE" "$C/build/x_crt0.o" \
   "$N"/tree/netsurf/build/Linux-framebuffer/*.o \
-  "$O/sodos_res.o" "$O/iconv.o" "$O/posix_extra.o" "$O/mathx.o" "$O/fpconvx.o" "$O/printfx.o" "$O"/tls_*.o \
+  "$O/sodos_res.o" "$O/iconv.o" "$O/posix_extra.o" "$O/mathx.o" "$O/fpconvx.o" "$O/printfx.o" "$O"/tls_*.o "$O/imgx.o" \
   "$O"/*.lib "$C/out/POSIXX.DLL" "$C/out/LIBCX.DLL" "$C/out/KERNEL.IMP"
 ls -la "$O/NETSURF.EXE"

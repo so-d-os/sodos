@@ -13,8 +13,9 @@ usa a `LIBCX.DLL` e a `POSIXX.DLL` e desenha numa janela do WIN.
 - URLs `file:` com unidade: `file:///D:/PAGINA.HTM`
 - `about:`, `data:` e `resource:` (paginas internas embutidas no exe)
 - teclado, clique, arrastar, roda do mouse, barra de enderecos, formularios
-- fonte bitmap interna; decodificadores GIF e BMP ligados (ainda nao testados)
-- sem PNG/JPEG e sem JavaScript (fase 3)
+- imagens: PNG (com transparencia) e JPEG (inclusive progressivo) pelo `img.c`
+  da IMG.DLL ligado no exe; GIF, BMP e ICO pelas libs do NetSurf
+- fonte bitmap interna; sem JavaScript
 
 ## Como compilar
 
@@ -80,6 +81,8 @@ log para o console em vez do arquivo.
 
 O `link.sh` tambem compila `lib/math.c`, `lib/fpconv.c` e `lib/printf.c` do
 `c_compiler` com SSE2 e liga junto: a LIBCX e `-mno-sse` e nao tem `double`.
+O `img.c` (`c_compiler/img`) entra com `-DIMG_MAXS=2048 -DIMG_MAX_IN=8192`:
+imagens de ate 8192 px, reduzidas a 2048 px de lado (a DLL reduz a 800).
 O cliente TLS (`c_compiler/tls/*.c`) entra no exe do mesmo jeito: o
 `TLS.DLL` e do `cc`, e assim nao ha mistura de ABI.
 
@@ -94,7 +97,14 @@ O patch:
 - `content/fetchers/sodos.c`: fetcher de `http` e `https`. O kernel tem uma
   conexao TCP por vez, entao os fetches entram numa fila e rodam um por vez,
   com `Connection: close`. Cada poll le por ate ~60 ms; quando ha tecla ou
-  clique o `k_tcp_recv` devolve -3 e a interface responde antes de continuar.
+  clique o `k_tcp_*` devolve -3 e a interface responde antes de continuar.
+  Conexao, handshake ou envio interrompidos sao refeitos depois de 100 ms
+  (no notebook o laco sem espera chegou a abrir 825 conexoes em 1,4 s), e a
+  superficie esvazia a fila de eventos do kernel a cada leitura para que o
+  fetch nao seja interrompido a toa.
+- `content/handlers/image/sodos_img.c`: handler de `image/png` e `image/jpeg`.
+  Decodifica quando o download termina e entrega o bitmap ao `image_cache`; o
+  tamanho na pagina e o da imagem original mesmo quando ela chega reduzida.
 - registro manual das superficies (`nsfb_sodos_register`): o linker do SODOS
   nao roda `.init_array`.
 - sem SDL/X/VNC/Wayland, sem a ligacao expat da libdom e sem libsvgtiny.
@@ -109,6 +119,8 @@ O patch:
   passo. TLS 1.3 e 1.2 (este so com ECDHE e AES-128-GCM: servidor que so tem
   CBC ou AES-256 recusa com alerta 40), sem gzip e sem envio de arquivo
   (multipart).
+- Sem WebP, SVG e PNG entrelacado (Adam7). O GIF fica alinhado pelo topo
+  da linha em vez da base.
 - Aberto pela area de trabalho, cliques muito curtos (~50 ms, so em teste
   automatico) perdem o soltar e o link nao abre; clique normal funciona.
 
