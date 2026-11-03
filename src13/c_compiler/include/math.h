@@ -1,6 +1,10 @@
 #ifndef _MATH_H
 #define _MATH_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* libm do SO (lib/math.c, dentro do LIBC.DLL). long double = double. */
 
 #ifdef __GNUC__
@@ -99,6 +103,18 @@ double tanh(double x);
 double asinh(double x);
 double acosh(double x);
 double atanh(double x);
+double erf(double x);
+double erfc(double x);
+double lgamma(double x);
+double tgamma(double x);
+double nextafter(double x, double y);
+double nexttoward(double x, long double y);
+double remquo(double x, double y, int* q);
+double scalbln(double x, long n);
+
+typedef float float_t;
+typedef double double_t;
+#define islessgreater(a, b) (((a) < (b)) || ((a) > (b)))
 
 float fabsf(float x);
 float sqrtf(float x);
@@ -131,6 +147,32 @@ float atan2f(float y, float x);
 float sinhf(float x);
 float coshf(float x);
 float tanhf(float x);
+float asinhf(float x);
+float acoshf(float x);
+float atanhf(float x);
+float erff(float x);
+float erfcf(float x);
+float exp2f(float x);
+float expm1f(float x);
+float fdimf(float a, float b);
+float fmaf(float a, float b, float c);
+int ilogbf(float x);
+float lgammaf(float x);
+long long llrintf(float x);
+long long llroundf(float x);
+long lrintf(float x);
+long lroundf(float x);
+float log1pf(float x);
+float logbf(float x);
+float nanf(const char* tag);
+float nearbyintf(float x);
+float nextafterf(float x, float y);
+float nexttowardf(float x, long double y);
+float remainderf(float x, float y);
+float remquof(float x, float y, int* q);
+float scalblnf(float x, long n);
+float scalbnf(float x, int n);
+float tgammaf(float x);
 
 /* long double = double */
 #define fabsl fabs
@@ -149,6 +191,50 @@ float tanhf(float x);
 #define atan2l atan2
 #define frexpl frexp
 #define ldexpl ldexp
-#define modfl(x, p) modf((x), (double*)(p))
+long double modfl(long double x, long double* p);
+#define acosl acos
+#define asinl asin
+#define coshl cosh
+#define sinhl sinh
+#define tanhl tanh
+#define acoshl acosh
+#define asinhl asinh
+#define atanhl atanh
+#define cbrtl cbrt
+#define copysignl copysign
+#define erfl erf
+#define erfcl erfc
+#define exp2l exp2
+#define expm1l expm1
+#define fdiml fdim
+#define fmal fma
+#define fmaxl fmax
+#define fminl fmin
+#define hypotl hypot
+#define ilogbl ilogb
+#define lgammal lgamma
+#define llrintl llrint
+#define llroundl llround
+#define log1pl log1p
+#define log2l log2
+#define logbl logb
+#define lrintl lrint
+#define lroundl lround
+#define nanl nan
+#define nearbyintl nearbyint
+#define nextafterl nextafter
+#define nexttowardl nexttoward
+#define remainderl remainder
+#define remquol remquo
+#define rintl rint
+#define roundl round
+#define scalblnl scalbln
+#define scalbnl scalbn
+#define tgammal tgamma
+#define truncl trunc
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif

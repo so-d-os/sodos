@@ -35,6 +35,9 @@ void mod_list(void);
 
 /* Programa em execucao (0 = nenhum). */
 uint32_t mod_current_pid(void);
+/* Unidade de onde o .EXE atual foi carregado ('C', 'D', ...; 0 = nenhuma).
+ * Programas usam para achar arquivos/log ao lado do proprio exe. */
+char mod_exe_drive(void);
 
 /* Estado do carregador trocado quando o desktop alterna entre programas.
  * depth e o aninhamento deste programa, nao a soma das janelas paradas. */

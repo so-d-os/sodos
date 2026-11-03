@@ -7,12 +7,17 @@
 /* console */
 void k_putc(int c);
 void k_write(const char* s, int n);
+/* Depuracao: escreve direto na serial (sem console/VGA). */
+void k_dbg(const char* s, int n);
 void k_puts(const char* s);
 int k_getc(void);
 /* Nao espera: -1 se nao ha tecla. Para jogos e lacos com k_ms(). */
 int k_trygetc(void);
 int k_readline(char* buf, int max);
 void k_clear(void);
+/* Cede o turno as outras tarefas do SO (WIN, HTTPD). Ponto de cooperacao
+ * para threads de usuario e lacos de espera. */
+void k_yield(void);
 
 /* arquivos: "D:NOME.EXT", "NOME.EXT" ou pasta "D:\\temp\\net\\NOME.EXT" */
 int k_fsize(const char* path);
@@ -27,6 +32,8 @@ void k_pwd(char* out, int max);
 int k_chdir(const char* path);
 int k_drive(void);
 int k_set_drive(int letter);
+/* Unidade de onde o .EXE atual foi carregado ('C', 'D', ...; 0 = nenhuma). */
+int k_exe_drive(void);
 
 /* Uma entrada de pasta. date/time no formato FAT (0 = sem data):
  * dia = date & 31, mes = (date >> 5) & 15, ano = 1980 + (date >> 9);
@@ -92,6 +99,8 @@ int k_dns(const char* host, unsigned* ip);
 int k_tcp_connect(const char* host, int port);
 int k_tcp_send(const void* data, int len);
 int k_tcp_recv(void* data, int cap);
+/* Bytes no buffer de recepcao, -1 se nao ha conexao (ou o par fechou). */
+int k_net_pending(void);
 void k_tcp_close(void);
 
 /* janela canvas: so funciona num .EXE aberto pelo WIN. Cores 0xRRGGBB.

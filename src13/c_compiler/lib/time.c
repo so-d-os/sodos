@@ -283,6 +283,13 @@ int gettimeofday(struct timeval* tv, void* tz) {
   return 0;
 }
 
+/* C11. O SODOS so tem o relogio de parede (UTC). */
+int timespec_get(struct timespec* ts, int base) {
+  if (!ts || base != TIME_UTC) return 0;
+  clock_gettime(CLOCK_REALTIME, ts);
+  return base;
+}
+
 int nanosleep(const struct timespec* req, struct timespec* rem) {
   unsigned start = k_ms();
   unsigned want = (unsigned)req->tv_sec * 1000u + (unsigned)(req->tv_nsec / 1000000L);

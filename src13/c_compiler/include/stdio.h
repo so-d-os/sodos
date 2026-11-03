@@ -1,12 +1,17 @@
 #ifndef _STDIO_H
 #define _STDIO_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stddef.h>
 #include <stdarg.h>
 
 /* O sistema de arquivos le e grava arquivos inteiros: fopen("r") carrega
  * tudo na memoria e fclose de um arquivo "w"/"a" grava tudo de uma vez. */
 typedef struct __so_file FILE;
+typedef long fpos_t;
 
 #define EOF (-1)
 #define SEEK_SET 0
@@ -44,6 +49,12 @@ int feof(FILE* f);
 int ferror(FILE* f);
 void clearerr(FILE* f);
 int fflush(FILE* f);
+/* Usadas pela libc++ (M2b); no SODOS sao simples ou no-op. */
+int setvbuf(FILE* f, char* buf, int mode, size_t size);
+void setbuf(FILE* f, char* buf);
+FILE* freopen(const char* path, const char* mode, FILE* f);
+int fgetpos(FILE* f, fpos_t* pos);
+int fsetpos(FILE* f, const fpos_t* pos);
 #define L_tmpnam 20
 #define TMP_MAX 100000
 #define FOPEN_MAX 32
@@ -70,4 +81,8 @@ int vscanf(const char* fmt, va_list ap);
 int vfscanf(FILE* f, const char* fmt, va_list ap);
 int vsscanf(const char* s, const char* fmt, va_list ap);
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif

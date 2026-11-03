@@ -1,6 +1,10 @@
 #ifndef _STDLIB_H
 #define _STDLIB_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stddef.h>
 
 #define EXIT_SUCCESS 0
@@ -10,11 +14,16 @@
 void* malloc(size_t n);
 void* calloc(size_t n, size_t sz);
 void* realloc(void* p, size_t n);
+void* aligned_alloc(size_t align, size_t n);
 void free(void* p);
 
 void exit(int code);
+void _Exit(int code);
 void abort(void);
 int atexit(void (*fn)(void));
+void quick_exit(int code);
+int at_quick_exit(void (*fn)(void));
+int mblen(const char* s, size_t n);
 int system(const char* cmd);
 char* getenv(const char* name);
 
@@ -52,4 +61,8 @@ void qsort(void* base, size_t n, size_t sz, int (*cmp)(const void*, const void*)
 void* bsearch(const void* key, const void* base, size_t n, size_t sz,
               int (*cmp)(const void*, const void*));
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif

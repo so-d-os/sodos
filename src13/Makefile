@@ -647,6 +647,59 @@ grub: kernel_multiboot.elf
 	  sudo sh tools/grub-entry.sh install; \
 	fi
 
+# Firefox (firefox/): camada de plataforma e NSPR do port (SODOS.DLL,
+# FBOOT.EXE e PRTEST.EXE). Precisa de gcc com -mx32 e do c_compiler.
+# Nao entra no "all".
+.PHONY: firefox firefox-test firefox-nspr firefox-nspr-test firefox-cxx firefox-cxx-test firefox-libcxx firefox-libcxx-test firefox-toolchain firefox-disk
+firefox:
+	$(MAKE) -C firefox all
+
+firefox-test:
+	$(MAKE) -C firefox test
+
+firefox-nspr:
+	$(MAKE) -C firefox nspr
+
+firefox-nspr-test:
+	$(MAKE) -C firefox nspr-test
+
+firefox-cxx:
+	$(MAKE) -C firefox cxx
+
+firefox-cxx-test:
+	$(MAKE) -C firefox cxx-test
+
+firefox-libcxx:
+	$(MAKE) -C firefox libcxx
+
+firefox-libcxx-test:
+	$(MAKE) -C firefox libcxx-test
+
+firefox-toolchain:
+	$(MAKE) -C firefox toolchain
+
+# Copia o port para o D: do disk.img (fecha o QEMU antes: o SO regrava a FAT).
+firefox-disk: firefox
+	@if pgrep -f "[q]emu-system.*file=$(DISK)" >/dev/null; then \
+	  echo "Feche o QEMU antes: o SO regrava a FAT e apaga o que o mcopy gravou."; exit 1; fi
+	mcopy -o -i $(DISK)@@512 firefox/build/out/SODOS.DLL ::/SODOS.DLL
+	mcopy -o -i $(DISK)@@512 firefox/build/out/FBOOT.EXE ::/FBOOT.EXE
+	mcopy -o -i $(DISK)@@512 c_compiler/out/POSIXX.DLL ::/POSIXX.DLL
+	mcopy -o -i $(DISK)@@512 c_compiler/out/LIBCX.DLL ::/LIBCX.DLL
+	@if [ -f firefox/build/nspr/PRTEST.EXE ]; then \
+	  mcopy -o -i $(DISK)@@512 firefox/build/nspr/PRTEST.EXE ::/PRTEST.EXE; \
+	fi
+	@if [ -f firefox/build/cxx/CXXTEST.EXE ]; then \
+	  mcopy -o -i $(DISK)@@512 firefox/build/cxx/CXXTEST.EXE ::/CXXTEST.EXE; \
+	fi
+	@if [ -f firefox/build/libcxx/STLTEST.EXE ]; then \
+	  mcopy -o -i $(DISK)@@512 firefox/build/libcxx/STLTEST.EXE ::/STLTEST.EXE; \
+	fi
+	@if [ -f firefox/build/libcxx/THRTEST.EXE ]; then \
+	  mcopy -o -i $(DISK)@@512 firefox/build/libcxx/THRTEST.EXE ::/THRTEST.EXE; \
+	fi
+	@echo "pronto: no SODOS rode D:\\FBOOT.EXE, D:\\PRTEST.EXE, D:\\CXXTEST.EXE, D:\\STLTEST.EXE ou D:\\THRTEST.EXE"
+
 clean:
 	rm -f *.o *.elf *.bin os.img executables.c
 	rm -f shell/*.o disks/*.o kernel/*.o fs/*.o net/*.o video/*.o

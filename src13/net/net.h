@@ -23,6 +23,8 @@ void net_delay(uint32_t ms);
 int net_tcp_connect(const char* host, int port);
 int net_tcp_send(const void* data, int len);
 int net_tcp_recv(void* data, int cap);
+/* Bytes ja recebidos e nao lidos; -1 sem conexao ou fluxo encerrado. */
+int net_tcp_pending(void);
 void net_tcp_close(void);
 
 /* Drena a placa. O servidor HTTP anda junto. */

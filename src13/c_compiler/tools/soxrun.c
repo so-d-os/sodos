@@ -13,7 +13,9 @@
 #include <setjmp.h>
 #include <time.h>
 #include <unistd.h>
+#include <errno.h>
 #include <sys/select.h>
+#include <sys/ioctl.h>
 #include <dirent.h>
 #include <malloc.h>
 #include <netdb.h>
@@ -427,6 +429,7 @@ static int k_dfree(int letter, unsigned* total_kb, unsigned* free_kb) {
 }
 static int k_drive(void) { return 'D'; }
 static int k_set_drive(int letter) { return letter == 'D' || letter == 'd' ? 0 : -1; }
+static int k_exe_drive(void) { return 'D'; }
 
 static void* low_alloc(size_t n);
 static void low_free(void* p);
@@ -692,6 +695,20 @@ static void k_tcp_close(void) {
   if (sock >= 0) close(sock);
   sock = -1;
 }
+/* libsodos: ceder o turno e consultar o buffer de recepcao sem bloquear. */
+static void k_yield(void) {}
+static int k_net_pending(void) {
+  int avail = 0;
+  char c;
+  ssize_t r;
+  if (sock < 0) return -1;
+  if (ioctl(sock, FIONREAD, &avail) != 0) return -1;
+  if (avail > 0) return avail;
+  r = recv(sock, &c, 1, MSG_PEEK | MSG_DONTWAIT);
+  if (r == 0) return -1;                       /* o par fechou */
+  if (r > 0) return 1;
+  return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
+}
 
 /* No SO isto e o prompt. Aqui: echo imprime, o resto vira k_exec. */
 static int k_ci_start(const char* s, const char* p) {
@@ -905,14 +922,14 @@ static const struct {
   const char* name;
   void* fn;
 } ktab[] = {
-  E(k_putc), E(k_write), E(k_puts), E(k_getc), E(k_trygetc), E(k_readline), E(k_clear),
+  E(k_putc), E(k_write), E(k_puts), E(k_getc), E(k_trygetc), E(k_readline), E(k_clear), E(k_yield),
   E(k_fsize), E(k_fload), E(k_fread), E(k_fsave), E(k_flist), E(k_dirlist), E(k_pwd), E(k_chdir),
-  E(k_drive), E(k_set_drive), E(k_dir), E(k_fdelete), E(k_mkdir), E(k_rmdir), E(k_dfree),
+  E(k_drive), E(k_set_drive), E(k_exe_drive), E(k_dir), E(k_fdelete), E(k_mkdir), E(k_rmdir), E(k_dfree),
   E(k_vput), E(k_cursor),
   E(k_malloc), E(k_free), E(k_realloc), E(k_msize), E(k_meminfo),
   E(k_exit), E(k_exec), E(k_shell), E(k_shell_capture), E(k_last_error), E(k_dll_load), E(k_dll_sym), E(k_dll_free),
   E(k_rdtsc), E(k_ms), E(k_date), E(k_time), E(k_random),
-  E(k_net_ready), E(k_dns), E(k_tcp_connect), E(k_tcp_send), E(k_tcp_recv), E(k_tcp_close),
+  E(k_net_ready), E(k_dns), E(k_tcp_connect), E(k_tcp_send), E(k_tcp_recv), E(k_net_pending), E(k_tcp_close),
   E(k_gui_open), E(k_gui_size), E(k_gui_font), E(k_gui_event),
   E(k_gui_close), { "k_gui_title", (void*)k_gui_nop },
   E(k_gui_fill), { "k_gui_text", (void*)k_gui_nop },

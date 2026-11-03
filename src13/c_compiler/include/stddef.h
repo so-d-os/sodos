@@ -1,10 +1,26 @@
 #ifndef _STDDEF_H
 #define _STDDEF_H
 
+/* x32: size_t/ptrtoint de 4 bytes; LP64 (gcc -m64): 8 bytes. O cc do SO
+ * nao define __SIZEOF_POINTER__, entao o padrao continua 32 bits. */
+#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+typedef unsigned long size_t;
+typedef long ptrdiff_t;
+typedef long ssize_t;
+#else
 typedef unsigned int size_t;
 typedef int ptrdiff_t;
 typedef int ssize_t;
+#endif
+#ifndef __cplusplus
 typedef unsigned short wchar_t;
+#endif
+
+/* C11: tipo com o maior alinhamento exigido por qualquer objeto. */
+typedef struct {
+  long long __ll;
+  long double __ld;
+} max_align_t;
 
 #ifndef NULL
 #define NULL ((void*)0)

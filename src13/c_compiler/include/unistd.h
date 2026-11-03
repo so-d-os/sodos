@@ -1,6 +1,10 @@
 #ifndef _UNISTD_H
 #define _UNISTD_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <sys/types.h>
 
 #define SEEK_SET 0
@@ -29,6 +33,13 @@ gid_t getegid(void);
 unsigned sleep(unsigned s);
 int usleep(unsigned us);
 long sysconf(int name);
+int fork(void);
+int pipe(int fds[2]);
+int dup2(int oldfd, int newfd);
+pid_t wait(int* status);
+void _exit(int code);
+int execv(const char* path, char* const argv[]);
+int execve(const char* path, char* const argv[], char* const envp[]);
 
 #define F_OK 0
 #define X_OK 1
@@ -41,5 +52,12 @@ long sysconf(int name);
 #define _SC_PAGE_SIZE _SC_PAGESIZE
 #define _SC_CLK_TCK 2
 #define _SC_OPEN_MAX 4
+#define _SC_NPROCESSORS_CONF 83
+#define _SC_NPROCESSORS_ONLN 84
+#define _SC_PHYS_PAGES 85
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif

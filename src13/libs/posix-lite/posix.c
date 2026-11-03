@@ -533,6 +533,8 @@ __export int fstat(int fd, struct stat* st) {
   st->st_mode = S_IFREG | S_IRUSR | S_IWUSR;
   st->st_size = e->size;
   st->st_mtime = file_mtime(e->path);
+  st->st_atime = st->st_mtime;
+  st->st_ctime = st->st_mtime;
   return 0;
 }
 
@@ -558,6 +560,8 @@ __export int stat(const char* path, struct stat* st) {
   st->st_mode = S_IFREG | S_IRUSR | S_IWUSR;
   st->st_size = sz;
   st->st_mtime = file_mtime(full);
+  st->st_atime = st->st_mtime;
+  st->st_ctime = st->st_mtime;
   return 0;
 }
 

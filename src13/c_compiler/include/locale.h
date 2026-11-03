@@ -1,6 +1,10 @@
 #ifndef _LOCALE_H
 #define _LOCALE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* So existe o locale "C" (ponto decimal '.'). */
 #define LC_CTYPE 0
 #define LC_NUMERIC 1
@@ -34,4 +38,8 @@ struct lconv {
 char* setlocale(int category, const char* locale);
 struct lconv* localeconv(void);
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif

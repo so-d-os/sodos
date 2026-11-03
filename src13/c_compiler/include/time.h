@@ -1,6 +1,10 @@
 #ifndef _TIME_H
 #define _TIME_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Hora do RTC (k_date/k_time). Sem fuso: localtime == gmtime. */
 #include <stddef.h>
 #include <sys/types.h>
@@ -43,9 +47,14 @@ char* asctime_r(const struct tm* tm, char* buf);
 char* ctime_r(const time_t* t, char* buf);
 size_t strftime(char* s, size_t max, const char* fmt, const struct tm* tm);
 int clock_gettime(clockid_t id, struct timespec* ts);
+int timespec_get(struct timespec* ts, int base);
 int nanosleep(const struct timespec* req, struct timespec* rem);
 void tzset(void);
 extern int daylight;
 extern long timezone;
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif

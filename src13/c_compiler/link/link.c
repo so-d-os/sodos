@@ -17,6 +17,7 @@
 #define K_TEXT 1
 #define K_DATA 2
 #define K_BSS  3
+#define K_INIT 4
 
 #define SYM_UNDEF  (-1)
 #define SYM_ABS    (-2)
@@ -335,6 +336,7 @@ static int load_cobj(const char* name, const unsigned char* b, unsigned size) {
 #define SHT_RELA     4
 #define SHT_NOBITS   8
 #define SHT_REL      9
+#define SHT_INIT_ARRAY 14
 #define SHF_WRITE    1
 #define SHF_ALLOC    2
 #define SHF_EXEC     4
@@ -405,11 +407,13 @@ static int load_elf(const char* name, const unsigned char* b, unsigned size) {
     map[i] = -1;
     if (type == SHT_SYMTAB) symtab = (int)i;
     if (!(flags & SHF_ALLOC)) continue;
-    if (type != SHT_PROGBITS && type != SHT_NOBITS) continue;
+    if (type != SHT_PROGBITS && type != SHT_NOBITS && type != SHT_INIT_ARRAY) continue;
     if (strncmp(sname, ".eh_frame", 9) == 0) continue;
     if (strncmp(sname, ".note", 5) == 0) continue;
     if (type == SHT_NOBITS) kind = K_BSS;
     else if (flags & SHF_EXEC) kind = K_TEXT;
+    else if (strncmp(sname, ".init_array", 11) == 0 ||
+             strncmp(sname, ".ctors", 6) == 0) kind = K_INIT;
     else kind = K_DATA;
     if (kind != K_BSS && soff + ssize > size) continue;
     map[i] = add_sect(o, kind, b + soff, ssize, align);
@@ -626,13 +630,16 @@ static void reference_undefs(int o) {
 }
 
 static int defines_needed(int o) {
-  int i;
+  int i, g;
   for (i = objs[o].sym0; i < objs[o].sym0 + objs[o].nsym; i++) {
     struct lsym* s = &syms[i];
-    int g;
     if (!s->global || s->sect == SYM_UNDEF) continue;
-    g = gfind(s->name, 0);
-    if (g >= 0 && gs[g].referenced && gs[g].sym < 0) return 1;
+    /* Os membros de .LIB ainda nao passaram por define_globals; comparar
+     * direto com os nomes pendentes e o que faz a extracao funcionar. */
+    for (g = 0; g < ngs; g++) {
+      if (gs[g].referenced && gs[g].sym < 0 && strcmp(gs[g].name, s->name) == 0)
+        return 1;
+    }
   }
   return 0;
 }
@@ -645,7 +652,7 @@ static int find_provider(const char* name) {
 }
 
 /* Endereco (offset na imagem) de um simbolo local resolvido. */
-static unsigned seg_base[4];
+static unsigned seg_base[5];
 
 static int sym_target(int si, unsigned* addr, int* absolute) {
   struct lsym* s = &syms[si];
@@ -767,6 +774,45 @@ static int do_link(const char* out) {
     gs[i].import = nimps++;
   }
 
+  /* layout: text | thunks | data | init_array | iat | bss */
+  {
+    unsigned pos[5];
+    int s_init;
+    unsigned init_base;
+    pos[K_TEXT] = pos[K_DATA] = pos[K_BSS] = pos[K_INIT] = 0;
+    for (i = 0; i < nsects; i++) {
+      struct sect* s = &sects[i];
+      if (!objs[s->obj].active) continue;
+      pos[s->kind] = align_up(pos[s->kind], s->align);
+      s->off = pos[s->kind];
+      pos[s->kind] += s->size;
+    }
+    text_end = pos[K_TEXT];
+    thunk_base = align_up(text_end, 8);
+    data_base = align_up(thunk_base + (unsigned)nimps * 8u, 16);
+    init_base = align_up(data_base + pos[K_DATA], 4);
+    iat_base = align_up(init_base + pos[K_INIT], 8);
+    image_size = iat_base + (unsigned)nimps * 8u;
+    bss_base = align_up(image_size, 16);
+    bss_size = (bss_base - image_size) + pos[K_BSS];
+    seg_base[K_TEXT] = 0;
+    seg_base[K_DATA] = data_base;
+    seg_base[K_INIT] = init_base;
+    seg_base[K_BSS] = bss_base;
+
+    /* Tabela contigua de construtores: o crt0/runtime C++ percorre de
+     * __init_array_start a __init_array_end. Sao simbolos de secao (nao
+     * absolutos) para o loader somar a base ao carregar a imagem. */
+    s_init = add_sect(0, K_INIT, 0, 0, 4);
+    sects[s_init].off = 0;
+    {
+      int a = add_sym(0, "__init_array_start", s_init, 0, 1, 0, 0);
+      int z = add_sym(0, "__init_array_end", s_init, pos[K_INIT], 1, 0, 0);
+      gs[gfind("__init_array_start", 1)].sym = a;
+      gs[gfind("__init_array_end", 1)].sym = z;
+    }
+  }
+
   for (i = 0; i < nobjs; i++) {
     int k;
     if (!objs[i].active) continue;
@@ -782,28 +828,6 @@ static int do_link(const char* out) {
   }
   if (errors) return -1;
 
-  /* layout: text | thunks | data | iat | bss */
-  {
-    unsigned pos[4];
-    pos[K_TEXT] = pos[K_DATA] = pos[K_BSS] = 0;
-    for (i = 0; i < nsects; i++) {
-      struct sect* s = &sects[i];
-      if (!objs[s->obj].active) continue;
-      pos[s->kind] = align_up(pos[s->kind], s->align);
-      s->off = pos[s->kind];
-      pos[s->kind] += s->size;
-    }
-    text_end = pos[K_TEXT];
-    thunk_base = align_up(text_end, 8);
-    data_base = align_up(thunk_base + (unsigned)nimps * 8u, 16);
-    iat_base = align_up(data_base + pos[K_DATA], 8);
-    image_size = iat_base + (unsigned)nimps * 8u;
-    bss_base = align_up(image_size, 16);
-    bss_size = (bss_base - image_size) + pos[K_BSS];
-    seg_base[K_TEXT] = 0;
-    seg_base[K_DATA] = data_base;
-    seg_base[K_BSS] = bss_base;
-  }
   image = (unsigned char*)xrealloc(0, image_size + 1);
   memset(image, 0, image_size + 1);
   for (i = 0; i < nsects; i++) {

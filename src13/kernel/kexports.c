@@ -10,6 +10,8 @@
 #include "kexports.h"
 #include "visual.h"
 #include "fbcon.h"
+#include "sched.h"
+#include "serial.h"
 
 void mod_exit(int code);
 void shell_read_line(char* buf, int max);
@@ -35,6 +37,14 @@ static void k_write(const char* s, int n) {
   con_break_poll();
   if (!s) return;
   for (i = 0; i < n; i++) con_out(s[i]);
+}
+
+/* Depuracao de programas: vai direto para a serial (COM1), sem passar pelo
+ * console/VGA. Util para portar bibliotecas antes de existir stdout. */
+static void k_dbg(const char* s, int n) {
+  int i;
+  if (!s) return;
+  for (i = 0; i < n; i++) serial_putc(s[i]);
 }
 
 static void k_puts(const char* s) {
@@ -88,6 +98,8 @@ static int k_fread(const char* path, uint32_t offset, char* buf, int len) {
 static int k_fsave(const char* path, const char* data, int size) { return file_save(path, data, size); }
 static int k_drive(void) { return drives_current(); }
 static int k_set_drive(int letter) { return drives_set_current((char)letter); }
+/* Unidade do .EXE em execucao (para achar D:\LOG, D:\omni.ja, ...). */
+static int k_exe_drive(void) { return mod_exe_drive(); }
 
 /* Nomes da unidade separados por '\n'. Devolve quantos. */
 static int k_flist(int letter, char* out, int max) {
@@ -354,6 +366,10 @@ static void k_random(uint8_t* out, int n) {
   }
 }
 
+/* ---------- escalonamento cooperativo ---------- */
+/* Programas e DLLs (libsodos) usam para ceder o turno sem esperar tecla. */
+static void k_yield(void) { sched_yield(); }
+
 /* ---------- rede ---------- */
 static int k_net_ready(void) { return net_ready(); }
 static int k_dns(const char* host, uint32_t* ip) { return net_resolve(host, ip); }
@@ -369,6 +385,7 @@ static int k_tcp_recv(void* d, int cap) {
   con_break_poll();
   return net_tcp_recv(d, cap);
 }
+static int k_net_pending(void) { return net_tcp_pending(); }
 static void k_tcp_close(void) {
   net_tcp_close();
   tcp_pid = 0;
@@ -406,11 +423,13 @@ struct kexp {
 static const struct kexp table[] = {
   EXP(k_putc),
   EXP(k_write),
+  EXP(k_dbg),
   EXP(k_puts),
   EXP(k_getc),
   EXP(k_trygetc),
   EXP(k_readline),
   EXP(k_clear),
+  EXP(k_yield),
   EXP(k_fsize),
   EXP(k_fload),
   EXP(k_fread),
@@ -428,6 +447,7 @@ static const struct kexp table[] = {
   EXP(k_cursor),
   EXP(k_drive),
   EXP(k_set_drive),
+  EXP(k_exe_drive),
   EXP(k_malloc),
   EXP(k_free),
   EXP(k_realloc),
@@ -451,6 +471,7 @@ static const struct kexp table[] = {
   EXP(k_tcp_connect),
   EXP(k_tcp_send),
   EXP(k_tcp_recv),
+  EXP(k_net_pending),
   EXP(k_tcp_close),
   EXP(k_gui_open),
   EXP(k_gui_close),

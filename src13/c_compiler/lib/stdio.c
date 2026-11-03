@@ -460,3 +460,34 @@ void perror(const char* s) {
   if (s && *s) fprintf(stderr, "%s: %s\n", s, strerror(errno));
   else fprintf(stderr, "%s\n", strerror(errno));
 }
+
+/* ---------- funcoes que a libc++ espera do <cstdio> ---------- */
+
+int setvbuf(FILE* f, char* buf, int mode, size_t size) {
+  (void)f;
+  (void)buf;
+  (void)mode;
+  (void)size;
+  return 0; /* o SODOS nao tem buffer de stdio configuravel */
+}
+
+void setbuf(FILE* f, char* buf) { (void)f; (void)buf; }
+
+FILE* freopen(const char* path, const char* mode, FILE* f) {
+  if (f) fclose(f);
+  return fopen(path, mode);
+}
+
+int fgetpos(FILE* f, fpos_t* pos) {
+  long p;
+  if (!pos) return -1;
+  p = ftell(f);
+  if (p < 0) return -1;
+  *pos = (fpos_t)p;
+  return 0;
+}
+
+int fsetpos(FILE* f, const fpos_t* pos) {
+  if (!pos) return -1;
+  return fseek(f, (long)*pos, SEEK_SET);
+}

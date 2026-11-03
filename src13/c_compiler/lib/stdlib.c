@@ -89,6 +89,28 @@ void* malloc(size_t n) {
   }
 }
 
+/* C11 aligned_alloc: o malloc do SODOS ja devolve 16-alinhado. Para
+ * alinhamentos maiores nao ha garantia; a libc++ usa em tipos over-aligned. */
+void* aligned_alloc(size_t align, size_t n) {
+  (void)align;
+  return malloc(n);
+}
+
+void _Exit(int code) {
+  k_exit(code);
+  for (;;) {}
+}
+
+void quick_exit(int code) { _Exit(code); }
+
+int at_quick_exit(void (*fn)(void)) { return atexit(fn); }
+
+/* Sem locale multibyte: cada byte e um caractere. */
+int mblen(const char* s, size_t n) {
+  if (!s) return 0;
+  return (n && *s) ? 1 : 0;
+}
+
 void free(void* p) {
   struct hdr* h;
   if (!p) return;

@@ -8,6 +8,12 @@
 #include <errno.h>
 #include <so.h>
 
+/* ---------- runtime C++ ----------
+ * Versao vazia para .EXE so em C. O runtime C++ (sodos/cxx) define uma
+ * versao forte no proprio .EXE, que vence este import da LIBCX. */
+void __sodos_ctors(void) {}
+void __sodos_dtors(void) {}
+
 /* ---------- ambiente: tabela "NOME=valor" so deste processo ---------- */
 #define ENV_MAX 64
 static char* env_tab[ENV_MAX];

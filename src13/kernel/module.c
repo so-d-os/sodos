@@ -26,6 +26,7 @@ struct module {
   int used;
   int refs;
   int is_dll;
+  int is64;
   uint32_t pid;
   char name[32];
   uint8_t* base;
@@ -56,6 +57,7 @@ static void set_err(const char* a, const char* b) {
 
 const char* mod_last_error(void) { return last_err; }
 uint32_t mod_current_pid(void) { return cur_pid; }
+char mod_exe_drive(void) { return exe_drive; }
 
 void mod_cpu_save(struct mod_cpu* s) {
   s->ctx = cur_ctx;
@@ -233,14 +235,15 @@ static int load(const char* req, int want_dll);
 static void dyn_release_pid(uint32_t pid);
 
 static int resolve_imports(int id, const struct sox_import* imp, uint32_t n, const char* st,
-                           uint32_t st_size) {
+                           uint32_t st_size, int is64) {
   struct module* m = &mods[id];
   uint32_t i;
   for (i = 0; i < n; i++) {
     const char* lib;
     const char* fn;
     void* addr = 0;
-    if (imp[i].lib >= st_size || imp[i].name >= st_size || imp[i].slot + 4u > m->size) {
+    uint32_t need = is64 ? 8u : 4u;
+    if (imp[i].lib >= st_size || imp[i].name >= st_size || imp[i].slot + need > m->size) {
       set_err("import invalido em ", m->name);
       return -1;
     }
@@ -275,7 +278,8 @@ static int resolve_imports(int id, const struct sox_import* imp, uint32_t n, con
       serial_puts("\n");
       return -1;
     }
-    *(uint32_t*)(m->base + imp[i].slot) = (uint32_t)addr;
+    if (is64) *(uint64_t*)(m->base + imp[i].slot) = (uint64_t)(uintptr_t)addr;
+    else *(uint32_t*)(m->base + imp[i].slot) = (uint32_t)(uintptr_t)addr;
   }
   return 0;
 }
@@ -288,6 +292,7 @@ static int load(const char* req, int want_dll) {
   struct sox_hdr* h;
   struct module* m;
   int id;
+  int is64;
   uint32_t i;
   uint32_t total;
   if (want_dll) {
@@ -323,7 +328,8 @@ static int load(const char* req, int want_dll) {
     return -1;
   }
   h = (struct sox_hdr*)file;
-  if (h->magic != SOX_MAGIC ||
+  is64 = (h->magic == SOX_MAGIC2) || ((h->flags & SOX_FLAG_64) != 0);
+  if ((h->magic != SOX_MAGIC && h->magic != SOX_MAGIC2) ||
       h->off_image + h->image_size > (uint32_t)fsz ||
       h->off_relocs + h->nrelocs * 4u > (uint32_t)fsz ||
       h->off_imports + h->nimports * sizeof(struct sox_import) > (uint32_t)fsz ||
@@ -357,6 +363,7 @@ static int load(const char* req, int want_dll) {
   m->used = 1;
   m->refs = 1;
   m->is_dll = want_dll;
+  m->is64 = is64;
   m->pid = cur_pid;
   for (i = 0; i < sizeof(m->name) - 1 && bname[i]; i++) m->name[i] = bname[i];
   m->name[i] = '\0';
@@ -380,7 +387,8 @@ static int load(const char* req, int want_dll) {
   {
     const uint32_t* rel = (const uint32_t*)(file + h->off_relocs);
     for (i = 0; i < h->nrelocs; i++) {
-      if (rel[i] + 4u > h->image_size) {
+      uint32_t width = is64 ? 8u : 4u;
+      if (rel[i] + width > h->image_size) {
         set_err("relocacao invalida em ", bname);
         m->ndeps = 0;
         m->entry = SOX_NO_ENTRY;
@@ -388,12 +396,13 @@ static int load(const char* req, int want_dll) {
         ufree(file);
         return -1;
       }
-      *(uint32_t*)(m->base + rel[i]) += (uint32_t)m->base;
+      if (is64) *(uint64_t*)(m->base + rel[i]) += (uint64_t)(uintptr_t)m->base;
+      else *(uint32_t*)(m->base + rel[i]) += (uint32_t)(uintptr_t)m->base;
     }
   }
   load_nest++;
   if (resolve_imports(id, (const struct sox_import*)(file + h->off_imports), h->nimports,
-                      (const char*)(file + h->off_strtab), h->strtab_size) != 0) {
+                      (const char*)(file + h->off_strtab), h->strtab_size, is64) != 0) {
     load_nest--;
     m->entry = SOX_NO_ENTRY;
     unload(id);
@@ -426,18 +435,19 @@ static uint32_t arg_len(const char* s) {
   return n;
 }
 
-/* O cc usa ponteiros de 32 bits. Copia o argv para o topo da pilha do programa
- * e devolve esse endereco, que tambem e o topo util da pilha. */
-static void* pack_user_argv(int* argc_io, char** argv, uint8_t* stack, uint32_t ssz) {
+/* Copia o argv para o topo da pilha do programa. SOX1 usa vetor de u32;
+ * SOX2 (LP64) usa u64. Devolve o endereco do vetor, que tambem e o topo util
+ * da pilha. */
+static void* pack_user_argv(int* argc_io, char** argv, uint8_t* stack, uint32_t ssz, int is64) {
+  uint32_t ptrsz = is64 ? 8u : 4u;
   uint32_t bytes;
   uint32_t i;
   uint8_t* base;
-  uint32_t* vec;
   char* dst;
   int n = argc_io ? *argc_io : 0;
   if (n < 0) n = 0;
   if (n > 31) n = 31;
-  bytes = (uint32_t)(n + 1) * 4u;
+  bytes = (uint32_t)(n + 1) * ptrsz;
   for (i = 0; i < (uint32_t)n; i++) {
     const char* s = (argv && argv[i]) ? argv[i] : "";
     bytes += arg_len(s) + 1u;
@@ -445,12 +455,12 @@ static void* pack_user_argv(int* argc_io, char** argv, uint8_t* stack, uint32_t 
   bytes = (bytes + 15u) & ~15u;
   if (bytes + 256u > ssz) return 0;
   base = stack + ssz - bytes;
-  vec = (uint32_t*)base;
-  dst = (char*)(vec + (n + 1));
+  dst = (char*)base + (uint32_t)(n + 1) * ptrsz;
   for (i = 0; i < (uint32_t)n; i++) {
     const char* s = (argv && argv[i]) ? argv[i] : "";
     uint32_t k = 0;
-    vec[i] = (uint32_t)(uintptr_t)dst;
+    if (is64) ((uint64_t*)base)[i] = (uint64_t)(uintptr_t)dst;
+    else ((uint32_t*)base)[i] = (uint32_t)(uintptr_t)dst;
     while (s[k]) {
       dst[k] = s[k];
       k++;
@@ -458,7 +468,8 @@ static void* pack_user_argv(int* argc_io, char** argv, uint8_t* stack, uint32_t 
     dst[k] = 0;
     dst += k + 1;
   }
-  vec[n] = 0;
+  if (is64) ((uint64_t*)base)[n] = 0;
+  else ((uint32_t*)base)[n] = 0;
   if (argc_io) *argc_io = n;
   return base;
 }
@@ -515,7 +526,7 @@ int mod_exec(const char* path, int argc, char** argv) {
   }
   {
     int nargc = argc;
-    void* av = pack_user_argv(&nargc, argv, stack, ssz);
+    void* av = pack_user_argv(&nargc, argv, stack, ssz, mods[id].is64);
     if (!av) {
       set_err("argumentos nao cabem na pilha", 0);
       unload(id);

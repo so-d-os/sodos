@@ -1,6 +1,10 @@
 #ifndef _SYS_STAT_H
 #define _SYS_STAT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <sys/types.h>
 
 #define S_IFMT  0170000
@@ -20,6 +24,10 @@ struct stat {
   time_t st_mtime;
   dev_t st_dev;
   ino_t st_ino;
+  /* Campos extras usados pelo NSPR (port do Firefox). Ficam no fim para
+   * nao mudar o layout que o resto do SO ja usa. */
+  time_t st_atime;
+  time_t st_ctime;
 };
 
 int stat(const char* path, struct stat* st);
@@ -39,4 +47,8 @@ int mkdir(const char* path, mode_t mode);
 #define S_ISCHR(m) 0
 #define S_ISFIFO(m) 0
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif

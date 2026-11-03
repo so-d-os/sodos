@@ -1884,6 +1884,18 @@ static void api_close(void) {
   tcp_ooo_n = 0;
 }
 
+/* Para poll()/select do espaco de usuario: ha quanto ler agora? -1 quando
+ * nao ha conexao ou o fluxo acabou (o dono deve entao ler o resto com
+ * net_tcp_recv, que devolve 0 no fim). */
+int net_tcp_pending(void) {
+  if (tcp_state == ST_EST || tcp_state == ST_CLOSEWAIT) {
+    if (tcp_rx_len > 0) return tcp_rx_len;
+    if (tcp_fin || tcp_state == ST_CLOSEWAIT) return -1;
+    return 0;
+  }
+  return -1;
+}
+
 void net_init(void) {
   uint16_t io = 0;
   volatile uint32_t* g = (volatile uint32_t*)GATE;

@@ -60,6 +60,7 @@ The shell commands below assume the repository root; when they need the code, th
 - **`win` desktop**: movable and resizable windows, taskbar, Start menu, icons, thumbnails, Notepad, Manager, Explorer in assembly and Command.
 - **C/C++ compiler** (`cc` + `link`) that runs on Linux and inside the OS (`CC.EXE`, `LINK.EXE`), with its own libc, DLLs, relocation and verified *self-hosting*.
 - **Browser** with HTTP/1.1, HTML, a subset of CSS and JavaScript, images, on-disk cache, search (DuckDuckGo/Google/Bing/Images) and TLS 1.3 with certificate verification.
+- **Firefox port (early)**: `src13/firefox/` — platform layer (`SODOS.DLL`) with cooperative pthreads, anonymous `mmap`, `poll` and TCP sockets, an **NSPR 4.35** port (threads, locks, condition variables, time and files), a minimal **C++ runtime** (global constructors/`.init_array`, `new/delete`, virtual dispatch) and a **libc++ core** (containers, `string`, algorithms, `chrono`, `std::thread`/`mutex`); 18 platform, 16 NSPR, 7 C++ and 27 libc++ tests pass inside QEMU. Firefox itself does not build yet (see `src13/firefox/docs/`).
 - **Network**: NE2000 in polling mode, ARP, IPv4, ICMP, UDP (DNS) and TCP; fixed IP `10.0.2.15` on QEMU's SLIRP.
 - **HTTP server on port 8797** with routes to run commands, list/close windows, move the mouse and take a BMP *printscreen* — the interface that lets an AI command the OS.
 - **Media**: `IMG.DLL` (PNG, JPEG, GIF, ICO), `IMAGEVW.EXE`, `VIDPLAY.EXE` (MJPEG/RGB in AVI/MOV/MP4) and `FONTADV.EXE` with a TTF rasterizer.

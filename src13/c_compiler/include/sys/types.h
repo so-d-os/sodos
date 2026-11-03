@@ -1,6 +1,10 @@
 #ifndef _SYS_TYPES_H
 #define _SYS_TYPES_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stddef.h>
 /* ssize_t e size_t ja vem de stddef.h */
 
@@ -20,4 +24,8 @@ typedef long suseconds_t;
 typedef int key_t;
 typedef long long off64_t;
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif

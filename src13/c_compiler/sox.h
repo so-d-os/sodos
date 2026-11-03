@@ -7,9 +7,15 @@
  * Arquivo: sox_hdr | imagem (text+data) | relocs | imports | exports | strtab
  * A imagem e montada no endereco 0. O loader soma a base a cada u32 listado
  * em relocs e grava em cada 'slot' de import o endereco da funcao.
- * Chamadas a imports passam por um thunk 'jmp [slot]' gerado pelo link. */
-#define SOX_MAGIC 0x31584F53u /* "SOX1" */
+ * Chamadas a imports passam por um thunk 'jmp [slot]' gerado pelo link.
+ *
+ * SOX2 (magic "SOX2"/SOX_FLAG_64) usa a ABI LP64: cada reloc da lista aponta
+ * para um campo de 8 bytes (base + addend) e cada slot de import tem 8 bytes.
+ * Offsets, tamanhos e a entrada continuam u32 (imagem < 4 GB). */
+#define SOX_MAGIC 0x31584F53u /* "SOX1" (ABI x32) */
+#define SOX_MAGIC2 0x32584F53u /* "SOX2" (ABI LP64) */
 #define SOX_FLAG_DLL 1u
+#define SOX_FLAG_64 2u
 #define SOX_NO_ENTRY 0xFFFFFFFFu
 
 struct sox_hdr {

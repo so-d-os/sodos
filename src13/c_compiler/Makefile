@@ -194,6 +194,46 @@ $(B) $(O):
 $(LINK): link/link.c sox.h | $(B)
 	$(HOSTCC) $(HCFLAGS) -o $@ link/link.c
 
+# ---- SOX2 / ABI LP64 (primeiro marco) ----
+LINK64 = $(B)/link64
+CRT64 = $(B)/x_crt0_64.o
+
+$(LINK64): link/link64.c sox.h | $(B)
+	$(HOSTCC) $(HCFLAGS) -o $@ link/link64.c
+
+$(CRT64): lib/crt0_64.S | $(B)
+	gcc -m64 -c $< -o $@
+
+$(B)/hello64.o: lib/hello64.c | $(B)
+	gcc -m64 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -mno-red-zone \
+	  -mcmodel=large -nostdinc -isystem include -c $< -o $@
+
+$(O)/HELLO64.EXE: $(CRT64) $(B)/hello64.o $(LINK64) $(O)/KERNEL.IMP
+	$(LINK64) /out:$@ $(CRT64) $(B)/hello64.o $(O)/KERNEL.IMP
+
+hello64: $(O)/HELLO64.EXE
+
+# LIBCX64 estatica: mesma libc, compilada -m64, ligada no HELLO64C.
+LIBC64_SRC = string ctype stdlib stdio printf fpconv math time misc
+LIBC64_OBJ = $(patsubst %,$(B)/x64_%.o,$(LIBC64_SRC))
+
+$(B)/x64_%.o: lib/%.c | $(B)
+	gcc -m64 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -mno-red-zone \
+	  -mcmodel=large -fno-asynchronous-unwind-tables -nostdinc -isystem include -c $< -o $@
+
+$(B)/x_crt0_64libc.o: lib/crt0.c | $(B)
+	gcc -m64 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -mno-red-zone \
+	  -mcmodel=large -fno-asynchronous-unwind-tables -nostdinc -isystem include -c $< -o $@
+
+$(B)/hello64c.o: lib/hello64c.c | $(B)
+	gcc -m64 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -mno-red-zone \
+	  -mcmodel=large -fno-asynchronous-unwind-tables -nostdinc -isystem include -c $< -o $@
+
+$(O)/HELLO64C.EXE: $(B)/x_crt0_64libc.o $(B)/hello64c.o $(LIBC64_OBJ) $(LINK64) $(O)/KERNEL.IMP
+	$(LINK64) /out:$@ $(B)/x_crt0_64libc.o $(B)/hello64c.o $(LIBC64_OBJ) $(O)/KERNEL.IMP
+
+hello64c: $(O)/HELLO64C.EXE
+
 $(SOXRUN): tools/soxrun.c sox.h | $(B)
 	$(HOSTCC) -no-pie -fno-pie -mstackrealign -D_FILE_OFFSET_BITS=64 $(HCFLAGS) -o $@ tools/soxrun.c
 

@@ -222,3 +222,27 @@ char* strerror(int e) {
   }
   return "Erro desconhecido";
 }
+
+/* Sem locale: colacao e ordenacao byte a byte. */
+int strcoll(const char* a, const char* b) { return strcmp(a, b); }
+
+size_t strxfrm(char* d, const char* s, size_t n) {
+  size_t l = strlen(s);
+  if (d && n) {
+    size_t c = l < n - 1 ? l : n - 1;
+    memcpy(d, s, c);
+    d[c] = 0;
+  }
+  return l;
+}
+
+int strerror_r(int e, char* buf, size_t n) {
+  const char* s = strerror(e);
+  size_t l;
+  if (!buf || !n) return -1;
+  l = strlen(s);
+  if (l >= n) l = n - 1;
+  memcpy(buf, s, l);
+  buf[l] = 0;
+  return 0;
+}
