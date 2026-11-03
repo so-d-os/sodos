@@ -307,6 +307,30 @@ static int k_date(void) {
   return (century * 100 + year) * 10000 + month * 100 + day;
 }
 
+/* HHMMSS do relogio (UTC, como o k_date); -1 se o RTC der lixo. */
+static int k_time(void) {
+  int h, m, s, binary, h24, pm, guard = 0;
+  while ((cmos_in(0x0A) & 0x80) && guard++ < 1000) {}
+  binary = cmos_in(0x0B) & 0x04;
+  h24 = cmos_in(0x0B) & 0x02;
+  s = cmos_in(0x00);
+  m = cmos_in(0x02);
+  h = cmos_in(0x04);
+  pm = h & 0x80;
+  h &= 0x7F;
+  if (!binary) {
+    s = bcd_byte(s);
+    m = bcd_byte(m);
+    h = bcd_byte(h);
+  }
+  if (!h24) {
+    if (h == 12) h = 0;
+    if (pm) h += 12;
+  }
+  if (h > 23 || m > 59 || s > 59) return -1;
+  return h * 10000 + m * 100 + s;
+}
+
 /* Junta o TSC com a fase do PIT; o tempo entre teclas e pacotes varia de verdade. */
 static uint32_t mix_state = 0x9E3779B9u;
 static void k_random(uint8_t* out, int n) {
@@ -420,6 +444,7 @@ static const struct kexp table[] = {
   EXP(k_rdtsc),
   EXP(k_ms),
   EXP(k_date),
+  EXP(k_time),
   EXP(k_random),
   EXP(k_net_ready),
   EXP(k_dns),

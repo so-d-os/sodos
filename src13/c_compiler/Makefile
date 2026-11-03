@@ -22,7 +22,8 @@ XGFLAGS = -mx32 -march=x86-64 -mno-sse -mno-mmx -mno-red-zone -O2 -ffreestanding
 	-fno-builtin -fno-jump-tables -nostdinc -Iinclude -Wall
 
 LINK = $(B)/link
-LIBC_SRC = lib/string.c lib/ctype.c lib/stdlib.c lib/stdio.c lib/printf.c lib/divdi.c
+LIBC_SRC = lib/string.c lib/ctype.c lib/stdlib.c lib/stdio.c lib/printf.c lib/divdi.c \
+	lib/fpconv.c lib/math.c lib/scanf.c lib/time.c lib/setjmp.c lib/misc.c
 ifeq ($(LIBC_WITH),gcc)
 LIBC_OBJ = $(patsubst lib/%.c,$(B)/g_%.o,$(LIBC_SRC))
 CRT0_SRC_OBJ = $(B)/g_crt0.o

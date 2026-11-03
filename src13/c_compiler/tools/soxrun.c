@@ -625,6 +625,12 @@ static int k_date(void) {
   if (!gmtime_r(&t, &tm)) return 0;
   return (tm.tm_year + 1900) * 10000 + (tm.tm_mon + 1) * 100 + tm.tm_mday;
 }
+static int k_time(void) {
+  time_t t = time(0);
+  struct tm tm;
+  if (!gmtime_r(&t, &tm)) return -1;
+  return tm.tm_hour * 10000 + tm.tm_min * 100 + tm.tm_sec;
+}
 static void k_random(unsigned char* out, int n) {
   FILE* f = fopen("/dev/urandom", "rb");
   if (f) {
@@ -775,7 +781,7 @@ static const struct {
   E(k_vput), E(k_cursor),
   E(k_malloc), E(k_free), E(k_realloc), E(k_msize), E(k_meminfo),
   E(k_exit), E(k_exec), E(k_shell), E(k_shell_capture), E(k_last_error), E(k_dll_load), E(k_dll_sym), E(k_dll_free),
-  E(k_rdtsc), E(k_ms), E(k_date), E(k_random),
+  E(k_rdtsc), E(k_ms), E(k_date), E(k_time), E(k_random),
   E(k_net_ready), E(k_dns), E(k_tcp_connect), E(k_tcp_send), E(k_tcp_recv), E(k_tcp_close),
   E(k_gui_open), E(k_gui_size), E(k_gui_font), E(k_gui_event),
   { "k_gui_close", (void*)k_gui_nop }, { "k_gui_title", (void*)k_gui_nop },

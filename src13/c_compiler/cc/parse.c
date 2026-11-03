@@ -369,6 +369,7 @@ static Type* type_name(Token** rest, Token* tok);
 static int is_typename(Token* t);
 static long long eval(Node* n);
 static long long eval2(Node* n, Obj** label);
+static double eval_double(Node* n);
 static void initializer2(Token** rest, Token* tok, Initializer* init);
 
 static Token* skip_attribute(Token* tok) {
@@ -402,7 +403,8 @@ static int is_typename(Token* t) {
 
 enum {
   S_VOID = 1 << 0, S_BOOL = 1 << 2, S_CHAR = 1 << 4, S_SHORT = 1 << 6, S_INT = 1 << 8,
-  S_LONG = 1 << 10, S_OTHER = 1 << 12, S_SIGNED = 1 << 13, S_UNSIGNED = 1 << 14
+  S_LONG = 1 << 10, S_OTHER = 1 << 12, S_SIGNED = 1 << 13, S_UNSIGNED = 1 << 14,
+  S_FLOAT = 1 << 16, S_DOUBLE = 1 << 18
 };
 
 static Type* declspec(Token** rest, Token* tok, VarAttr* attr) {
@@ -430,7 +432,6 @@ static Type* declspec(Token** rest, Token* tok, VarAttr* attr) {
       tok = skip_attribute(tok);
       continue;
     }
-    if (n == k_float || n == k_double) error_tok(tok, "ponto flutuante nao e suportado");
     td = find_typedef(tok);
     if (n == k_struct || n == k_union || n == k_enum || n == k_class || td || n == k_builtin_va) {
       if (counter) break;
@@ -454,6 +455,8 @@ static Type* declspec(Token** rest, Token* tok, VarAttr* attr) {
     else if (n == k_short) counter += S_SHORT;
     else if (n == k_int) counter += S_INT;
     else if (n == k_long) counter += S_LONG;
+    else if (n == k_float) counter += S_FLOAT;
+    else if (n == k_double) counter += S_DOUBLE;
     else if (n == k_signed) counter |= S_SIGNED;
     else if (n == k_unsigned) counter |= S_UNSIGNED;
     switch (counter) {
@@ -473,6 +476,8 @@ static Type* declspec(Token** rest, Token* tok, VarAttr* attr) {
       case S_SIGNED + S_LONG + S_LONG + S_INT: ty = ty_llong; break;
       case S_UNSIGNED + S_LONG + S_LONG: case S_UNSIGNED + S_LONG + S_LONG + S_INT:
         ty = ty_ullong; break;
+      case S_FLOAT: ty = ty_float; break;
+      case S_DOUBLE: case S_LONG + S_DOUBLE: ty = ty_double; break;
       default: error_tok(tok, "tipo invalido");
     }
     tok = tok->next;
@@ -1462,6 +1467,16 @@ static Reloc* write_gvar_data(Reloc* cur, Initializer* init, Type* ty, char* buf
     return cur;
   }
   if (!init->expr) return cur;
+  if (is_flonum(ty)) {
+    double d = eval_double(init->expr);
+    if (ty->kind == TY_FLOAT) {
+      float f = (float)d;
+      memcpy(buf + offset, &f, 4);
+    } else {
+      memcpy(buf + offset, &d, 8);
+    }
+    return cur;
+  }
   {
     Obj* label = NULL;
     long long v = eval2(init->expr, &label);
@@ -1504,8 +1519,53 @@ static long long trunc_to(long long v, Type* ty) {
   return v;
 }
 
+/* Constante de ponto flutuante (inicializador global, conta entre literais). */
+static double eval_double(Node* n) {
+  add_type(n);
+  if (is_integer(n->ty)) {
+    long long v = eval(n);
+    if (n->ty->is_unsigned && n->ty->size == 8) return (double)(unsigned long long)v;
+    return (double)v;
+  }
+  switch (n->kind) {
+    case ND_ADD: return eval_double(n->lhs) + eval_double(n->rhs);
+    case ND_SUB: return eval_double(n->lhs) - eval_double(n->rhs);
+    case ND_MUL: return eval_double(n->lhs) * eval_double(n->rhs);
+    case ND_DIV: return eval_double(n->lhs) / eval_double(n->rhs);
+    case ND_NEG: return -eval_double(n->lhs);
+    case ND_COND: return eval(n->cond) ? eval_double(n->then) : eval_double(n->els);
+    case ND_COMMA: return eval_double(n->rhs);
+    case ND_CAST: {
+      double d = eval_double(n->lhs);
+      if (n->ty->kind == TY_FLOAT) d = (float)d;
+      return d;
+    }
+    case ND_NUM:
+      if (is_flonum(n->ty)) return n->fval;
+      return (double)n->val;
+  }
+  error_tok(n->tok, "nao e uma constante");
+  return 0;
+}
+
+/* comparacao entre constantes; algum lado e flonum */
+static long long eval_fcmp(Node* n) {
+  double a = eval_double(n->lhs);
+  double b = eval_double(n->rhs);
+  switch (n->kind) {
+    case ND_EQ: return a == b;
+    case ND_NE: return a != b;
+    case ND_LT: return a < b;
+  }
+  return a <= b;
+}
+
 static long long eval2(Node* n, Obj** label) {
   add_type(n);
+  if (is_flonum(n->ty)) error_tok(n->tok, "esperava constante inteira");
+  if ((n->kind == ND_EQ || n->kind == ND_NE || n->kind == ND_LT || n->kind == ND_LE) &&
+      is_flonum(n->lhs->ty))
+    return eval_fcmp(n);
   switch (n->kind) {
     case ND_ADD: return eval2(n->lhs, label) + eval(n->rhs);
     case ND_SUB: return eval2(n->lhs, label) - eval(n->rhs);
@@ -1549,7 +1609,14 @@ static long long eval2(Node* n, Obj** label) {
     case ND_LOGAND: return eval(n->lhs) && eval(n->rhs);
     case ND_LOGOR: return eval(n->lhs) || eval(n->rhs);
     case ND_CAST: {
-      long long v = eval2(n->lhs, label);
+      long long v;
+      if (is_flonum(n->lhs->ty)) {
+        double d = eval_double(n->lhs);
+        if (n->ty->kind == TY_BOOL) return d != 0;
+        if (n->ty->is_unsigned && n->ty->size == 8) return (long long)(unsigned long long)d;
+        return trunc_to((long long)d, n->ty);
+      }
+      v = eval2(n->lhs, label);
       if (is_integer(n->ty) && !(label && *label)) return trunc_to(v, n->ty);
       return v;
     }
@@ -2098,7 +2165,7 @@ static Node* to_assign(Node* binary) {
 static Node* new_add(Node* l, Node* r, Token* tok) {
   add_type(l);
   add_type(r);
-  if (is_integer(l->ty) && is_integer(r->ty)) return new_binary(ND_ADD, l, r, tok);
+  if (is_numeric(l->ty) && is_numeric(r->ty)) return new_binary(ND_ADD, l, r, tok);
   if (l->ty->base && r->ty->base) error_tok(tok, "soma de dois ponteiros");
   if (!l->ty->base && r->ty->base) {
     Node* t = l;
@@ -2115,7 +2182,7 @@ static Node* new_add(Node* l, Node* r, Token* tok) {
 static Node* new_sub(Node* l, Node* r, Token* tok) {
   add_type(l);
   add_type(r);
-  if (is_integer(l->ty) && is_integer(r->ty)) return new_binary(ND_SUB, l, r, tok);
+  if (is_numeric(l->ty) && is_numeric(r->ty)) return new_binary(ND_SUB, l, r, tok);
   if (l->ty->base && is_integer(r->ty)) {
     if (is_64(r->ty)) r = new_cast(r, ty_int);
     r = new_binary(ND_MUL, r, new_typed_num(l->ty->base->size, ty_int, tok), tok);
@@ -2438,6 +2505,7 @@ static Node* funcall(Token** rest, Token* tok, Node* fn, Node* first) {
       if (!fty->is_variadic && !fty->no_proto) error_tok(arg->tok, "argumentos demais");
       if (arg->ty->kind == TY_BOOL || arg->ty->kind == TY_CHAR || arg->ty->kind == TY_SHORT)
         arg = new_cast(arg, ty_int);
+      else if (arg->ty->kind == TY_FLOAT) arg = new_cast(arg, ty_double);
       else if (arg->ty->kind == TY_ARRAY) arg = new_cast(arg, pointer_to(arg->ty->base));
       else if (arg->ty->kind == TY_FUNC) arg = new_cast(arg, pointer_to(arg->ty));
     }
@@ -2516,6 +2584,7 @@ static Node* primary(Token** rest, Token* tok) {
     Node* n;
     if (!tok->ty) convert_number(tok);
     n = new_typed_num(tok->ival, tok->ty, tok);
+    n->fval = tok->fval;
     *rest = tok->next;
     return n;
   }

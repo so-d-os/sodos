@@ -25,6 +25,21 @@ long strtol(const char* s, char** end, int base);
 unsigned long strtoul(const char* s, char** end, int base);
 long long strtoll(const char* s, char** end, int base);
 unsigned long long strtoull(const char* s, char** end, int base);
+double atof(const char* s);
+double strtod(const char* s, char** end);
+float strtof(const char* s, char** end);
+long double strtold(const char* s, char** end);
+
+typedef struct { int quot, rem; } div_t;
+typedef struct { long quot, rem; } ldiv_t;
+typedef struct { long long quot, rem; } lldiv_t;
+div_t div(int a, int b);
+ldiv_t ldiv(long a, long b);
+lldiv_t lldiv(long long a, long long b);
+int setenv(const char* name, const char* value, int overwrite);
+int unsetenv(const char* name);
+int putenv(char* s);
+char* realpath(const char* path, char* out);
 
 int abs(int v);
 long labs(long v);

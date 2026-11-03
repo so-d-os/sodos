@@ -156,11 +156,6 @@ void __so_assert(const char* expr, const char* file, int line) {
   abort();
 }
 
-char* getenv(const char* name) {
-  (void)name;
-  return NULL;
-}
-
 /* Roda outro programa: "NOME arg1 arg2" (aspas agrupam). Devolve o exit code
  * ou -1 se nao conseguiu carregar. */
 int system(const char* cmd) {

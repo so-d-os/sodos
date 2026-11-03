@@ -457,6 +457,7 @@ static long long pp_primary(Token** rest, Token* tok) {
   }
   if (tok->kind == TK_NUM) {
     convert_number(tok);
+    if (is_flonum(tok->ty)) error_tok(tok, "ponto flutuante em #if");
     *rest = tok->next;
     return tok->ival;
   }

@@ -82,6 +82,8 @@ unsigned k_rdtsc(unsigned* hi);
 unsigned k_ms(void);
 /* data UTC AAAAMMDD, ou 0 se o relogio nao for confiavel */
 int k_date(void);
+/* hora UTC HHMMSS, ou -1 */
+int k_time(void);
 void k_random(unsigned char* out, int n);
 
 /* rede: uma conexao TCP por vez */

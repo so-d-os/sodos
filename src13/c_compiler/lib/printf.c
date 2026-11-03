@@ -1,6 +1,12 @@
-/* printf.c - familia printf (sem ponto flutuante: %f/%e/%g imprimem '?'). */
+/* printf.c - familia printf. %f/%e/%g/%a arredondam os digitos exatos do
+ * double (fpconv.c) meio para o par, como o glibc. */
 #include <stdio.h>
 #include <string.h>
+
+/* gcc -mx32 -mno-sse (LIBCX): sem double; o argumento nem vem na pilha. */
+#if defined(__GNUC__) && defined(__x86_64__) && !defined(__SSE2__)
+#define NO_FLOAT 1
+#endif
 
 struct sink {
   FILE* f;      /* destino arquivo, ou */
@@ -18,6 +24,211 @@ static void emit(struct sink* s, char c) {
 static void emit_n(struct sink* s, char c, int n) {
   while (n-- > 0) emit(s, c);
 }
+
+#ifndef NO_FLOAT
+int __fp_digits(double v, char* out, int* nd);
+
+#define FP_DIG 800
+#define FP_OUT 1200
+
+/* Arredonda d[0..nd) para keep digitos (meio para o par). Devolve o novo exp. */
+static int fp_round(char* d, int* nd, int exp, int keep) {
+  int i, up;
+  if (keep >= *nd) return exp;
+  if (keep < 0) {
+    *nd = 0;
+    return exp;
+  }
+  if (d[keep] > '5') up = 1;
+  else if (d[keep] < '5') up = 0;
+  else {
+    up = 0;
+    for (i = keep + 1; i < *nd; i++)
+      if (d[i] != '0') up = 1;
+    if (!up) up = keep > 0 && ((d[keep - 1] - '0') & 1);
+  }
+  *nd = keep;
+  if (up) {
+    for (i = keep - 1; i >= 0; i--) {
+      if (d[i] < '9') {
+        d[i]++;
+        break;
+      }
+      d[i] = '0';
+    }
+    if (i < 0) {
+      d[0] = '1';
+      *nd = 1;
+      exp++;
+    }
+  }
+  while (*nd > 0 && d[*nd - 1] == '0') (*nd)--;
+  return exp;
+}
+
+static char fp_dig(const char* d, int nd, int i) { return i >= 0 && i < nd ? d[i] : '0'; }
+
+/* corpo sem sinal nem padding; devolve o tamanho */
+static int fp_fixed(char* o, const char* d, int nd, int exp, int prec, int alt) {
+  int n = 0, i;
+  if (exp <= 0) o[n++] = '0';
+  else
+    for (i = 0; i < exp; i++) o[n++] = fp_dig(d, nd, i);
+  if (prec > 0 || alt) o[n++] = '.';
+  for (i = 0; i < prec; i++) o[n++] = fp_dig(d, nd, exp + i);
+  return n;
+}
+
+static int fp_expo(char* o, const char* d, int nd, int exp, int prec, int alt, int upper) {
+  int n = 0, i, x = nd ? exp - 1 : 0;
+  char t[8];
+  int k = 0;
+  o[n++] = fp_dig(d, nd, 0);
+  if (prec > 0 || alt) o[n++] = '.';
+  for (i = 1; i <= prec; i++) o[n++] = fp_dig(d, nd, i);
+  o[n++] = upper ? 'E' : 'e';
+  o[n++] = x < 0 ? '-' : '+';
+  if (x < 0) x = -x;
+  do {
+    t[k++] = (char)('0' + x % 10);
+    x /= 10;
+  } while (x);
+  if (k < 2) t[k++] = '0';
+  while (k) o[n++] = t[--k];
+  return n;
+}
+
+/* %g sem '#': tira zeros da fracao e o ponto que sobrar */
+static int fp_strip(char* o, int n) {
+  int dot = -1, e = n, i;
+  for (i = 0; i < n; i++) {
+    if (o[i] == '.') dot = i;
+    if (o[i] == 'e' || o[i] == 'E') {
+      e = i;
+      break;
+    }
+  }
+  if (dot < 0) return n;
+  i = e;
+  while (i > dot + 1 && o[i - 1] == '0') i--;
+  if (i == dot + 1) i = dot;
+  memmove(o + i, o + e, (size_t)(n - e));
+  return i + (n - e);
+}
+
+static int fp_hex(char* o, double v, int prec, int upper) {
+  unsigned long long bits, m;
+  int e, n = 0, i, nd;
+  const char* hx = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+  char t[8];
+  int k = 0;
+  memcpy(&bits, &v, 8);
+  e = (int)((bits >> 52) & 0x7FF);
+  m = bits & 0xFFFFFFFFFFFFFULL;
+  o[n++] = '0';
+  o[n++] = upper ? 'X' : 'x';
+  if (e == 0 && m == 0) {
+    o[n++] = '0';
+    e = 0;
+  } else {
+    int lead = 1;
+    if (e == 0) {
+      /* subnormal: 0x0.xxxp-1022, como o glibc */
+      e = -1022;
+      lead = 0;
+    } else {
+      e -= 1023;
+    }
+    if (prec >= 0 && prec < 13) {
+      int drop = (13 - prec) * 4;
+      unsigned long long half = 1ULL << (drop - 1);
+      unsigned long long rest = m & ((half << 1) - 1);
+      unsigned long long full = (m | ((unsigned long long)lead << 52)) >> drop;
+      if (rest > half || (rest == half && (full & 1))) full++;
+      o[n++] = (char)('0' + (int)(full >> (52 - drop)));
+      m = (full << drop) & 0xFFFFFFFFFFFFFULL;
+    } else {
+      o[n++] = (char)('0' + lead);
+    }
+    nd = 13;
+    if (prec < 0)
+      while (nd > 0 && !((m >> ((13 - nd) * 4)) & 15)) nd--;
+    else
+      nd = prec;
+    if (nd > 0) o[n++] = '.';
+    for (i = 0; i < nd; i++) o[n++] = i < 13 ? hx[(m >> ((12 - i) * 4)) & 15] : '0';
+  }
+  o[n++] = upper ? 'P' : 'p';
+  o[n++] = e < 0 ? '-' : '+';
+  if (e < 0) e = -e;
+  do {
+    t[k++] = (char)('0' + e % 10);
+    e /= 10;
+  } while (e);
+  while (k) o[n++] = t[--k];
+  return n;
+}
+
+static void fmt_float(struct sink* s, int c, double v, int width, int prec, int left, int zero,
+                      int plus, int space, int alt) {
+  static char d[FP_DIG];
+  static char o[FP_OUT];
+  unsigned long long bits;
+  int neg, nd = 0, exp = 1, n, upper = c == 'F' || c == 'E' || c == 'G' || c == 'A';
+  int lc = upper ? c + 32 : c;
+  char sign = 0;
+  int pad, i;
+  memcpy(&bits, &v, 8);
+  neg = (int)(bits >> 63);
+  if (neg) sign = '-';
+  else if (plus) sign = '+';
+  else if (space) sign = ' ';
+  if (((bits >> 52) & 0x7FF) == 0x7FF) {
+    const char* w = (bits & 0xFFFFFFFFFFFFFULL) ? (upper ? "NAN" : "nan") : (upper ? "INF" : "inf");
+    memcpy(o, w, 3);
+    n = 3;
+    zero = 0;
+  } else if (lc == 'a') {
+    n = fp_hex(o, v, prec, upper);
+  } else {
+    if (prec < 0) prec = 6;
+    if (prec > 700) prec = 700;
+    if (bits << 1) exp = __fp_digits(neg ? -v : v, d, &nd);
+    if (lc == 'f') {
+      exp = fp_round(d, &nd, exp, exp + prec);
+      n = fp_fixed(o, d, nd, exp, prec, alt);
+    } else if (lc == 'e') {
+      exp = fp_round(d, &nd, exp, prec + 1);
+      if (!nd) exp = 1;
+      n = fp_expo(o, d, nd, exp, prec, alt, upper);
+    } else {
+      int p = prec ? prec : 1, x;
+      exp = fp_round(d, &nd, exp, p);
+      x = nd ? exp - 1 : 0;
+      if (p > x && x >= -4) n = fp_fixed(o, d, nd, exp, p - 1 - x, alt);
+      else n = fp_expo(o, d, nd, nd ? exp : 1, p - 1, alt, upper);
+      if (!alt) n = fp_strip(o, n);
+    }
+  }
+  pad = width - n - (sign ? 1 : 0);
+  if (!left && !zero) emit_n(s, ' ', pad);
+  if (sign) emit(s, sign);
+  if (!left && zero) {
+    /* 0x de %a vem antes dos zeros */
+    i = 0;
+    if (lc == 'a' && n >= 2) {
+      emit(s, o[0]);
+      emit(s, o[1]);
+      i = 2;
+    }
+    emit_n(s, '0', pad);
+    for (; i < n; i++) emit(s, o[i]);
+  } else {
+    for (i = 0; i < n; i++) emit(s, o[i]);
+  }
+  if (left) emit_n(s, ' ', pad);
+}
+#endif
 
 static int format(struct sink* s, const char* fmt, va_list ap) {
   char tmp[72];
@@ -64,6 +275,7 @@ static int format(struct sink* s, const char* fmt, va_list ap) {
     }
     for (;; fmt++) {
       if (*fmt == 'l') lng++;
+      else if (*fmt == 'L' || *fmt == 'q') lng = 2;
       else if (*fmt == 'h' || *fmt == 'z' || *fmt == 't' || *fmt == 'j') {
         if (*fmt == 'j') lng = 2;
       } else break;
@@ -94,9 +306,12 @@ static int format(struct sink* s, const char* fmt, va_list ap) {
       case 'n':
         *va_arg(ap, int*) = (int)s->len;
         continue;
-      case 'f': case 'e': case 'g': case 'F': case 'E': case 'G':
-        (void)va_arg(ap, long long);
+      case 'f': case 'e': case 'g': case 'a': case 'F': case 'E': case 'G': case 'A':
+#ifdef NO_FLOAT
         emit(s, '?');
+#else
+        fmt_float(s, c, va_arg(ap, double), width, prec, left, zero, plus, space, alt);
+#endif
         continue;
       case 'p':
         v = (unsigned)va_arg(ap, void*);

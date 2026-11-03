@@ -44,7 +44,14 @@ int feof(FILE* f);
 int ferror(FILE* f);
 void clearerr(FILE* f);
 int fflush(FILE* f);
+#define L_tmpnam 20
+#define TMP_MAX 100000
+#define FOPEN_MAX 32
+
 int remove(const char* path);
+int rename(const char* from, const char* to);
+char* tmpnam(char* s);
+FILE* tmpfile(void);
 void perror(const char* s);
 
 int printf(const char* fmt, ...);
@@ -55,5 +62,12 @@ int vprintf(const char* fmt, va_list ap);
 int vfprintf(FILE* f, const char* fmt, va_list ap);
 int vsprintf(char* buf, const char* fmt, va_list ap);
 int vsnprintf(char* buf, size_t n, const char* fmt, va_list ap);
+
+int scanf(const char* fmt, ...);
+int fscanf(FILE* f, const char* fmt, ...);
+int sscanf(const char* s, const char* fmt, ...);
+int vscanf(const char* fmt, va_list ap);
+int vfscanf(FILE* f, const char* fmt, va_list ap);
+int vsscanf(const char* s, const char* fmt, va_list ap);
 
 #endif

@@ -70,6 +70,7 @@ struct Token {
   Token* origin; /* token da macro que gerou este (para mensagens) */
   /* literais */
   long long ival;
+  double fval; /* numero float/double */
   Type* ty;    /* tipo do numero/char/string */
   char* str;   /* string decodificada (com NUL) */
   int slen;    /* bytes incluindo o NUL */
@@ -96,7 +97,7 @@ extern char* pp_main_file;
 /* ---------- type.c ---------- */
 enum {
   TY_VOID, TY_BOOL, TY_CHAR, TY_SHORT, TY_INT, TY_LONG, TY_LLONG, TY_ENUM,
-  TY_PTR, TY_ARRAY, TY_FUNC, TY_STRUCT, TY_UNION
+  TY_PTR, TY_ARRAY, TY_FUNC, TY_STRUCT, TY_UNION, TY_FLOAT, TY_DOUBLE
 };
 
 struct Type {
@@ -147,11 +148,15 @@ extern Type* ty_long;
 extern Type* ty_ulong;
 extern Type* ty_llong;
 extern Type* ty_ullong;
+extern Type* ty_float;
+extern Type* ty_double;
 
 int is_integer(Type* t);
 int is_ptr_like(Type* t);   /* ponteiro ou array */
 int is_scalar(Type* t);
 int is_64(Type* t);
+int is_flonum(Type* t);     /* float ou double */
+int is_numeric(Type* t);    /* inteiro ou flonum */
 int is_struct(Type* t);
 Type* copy_type(Type* t);
 Type* pointer_to(Type* base);
@@ -190,6 +195,7 @@ struct Node {
   Obj* ret_buf;   /* struct devolvida por valor */
   Obj* var;
   long long val;
+  double fval;    /* ND_NUM de tipo float/double */
   /* rotulos */
   int brk;
   int cont;

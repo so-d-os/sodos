@@ -14,6 +14,7 @@ int* __so_errno(void);
 #define EISDIR 21
 #define EINVAL 22
 #define ENOSYS 38
+#define EDOM 33
 #define ERANGE 34
 
 #endif

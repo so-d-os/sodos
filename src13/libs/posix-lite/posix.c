@@ -1,20 +1,24 @@
 /* posix-lite - subset POSIX sobre k_* (Fase 1 do port MC).
- * Compila como POSIX.DLL pelo cc do SODOS. */
+ * Compila como POSIX.DLL pelo cc do SODOS. Arquivos abertos com open()
+ * ficam inteiros na memoria e sao gravados no close/fsync. */
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include <so.h>
 
-#define FD_MAX 16
-#define DIR_MAX 4
-#define PATH_MAX 96
-#define LIST_MAX 4096
-#define FILE_CAP (256 * 1024)
+#define FD_MAX 64
+#define DIR_MAX 8
+#undef PATH_MAX
+#define PATH_MAX 260
+#define LIST_MAX 16384
+#define FILE_CAP (64 * 1024 * 1024)
 
 struct fd_ent {
   int used;
@@ -46,7 +50,7 @@ static void norm_sep(char* s) {
 }
 
 static void join_cwd(const char* path, char* out, int max) {
-  char cwd[64];
+  char cwd[PATH_MAX];
   int i = 0, j = 0;
   if (!path) path = "";
   if (is_abs_dos(path) || path[0] == '\\' || path[0] == '/') {
@@ -109,23 +113,129 @@ __export int isatty(int fd) {
   return fd == 0 || fd == 1 || fd == 2;
 }
 
+static int err_from_k(int r) {
+  if (r == -1) return ENOENT;
+  if (r == -2) return EINVAL;
+  if (r == -3) return EISDIR;
+  return EACCES;
+}
+
 __export int unlink(const char* path) {
-  (void)path;
-  errno = ENOSYS;
-  return -1;
+  char full[PATH_MAX];
+  int r;
+  if (!path) {
+    errno = EINVAL;
+    return -1;
+  }
+  join_cwd(path, full, PATH_MAX);
+  r = k_fdelete(full);
+  if (r < 0) {
+    errno = err_from_k(r);
+    return -1;
+  }
+  return 0;
 }
 
 __export int rmdir(const char* path) {
-  (void)path;
-  errno = ENOSYS;
-  return -1;
+  char full[PATH_MAX];
+  int r;
+  if (!path) {
+    errno = EINVAL;
+    return -1;
+  }
+  join_cwd(path, full, PATH_MAX);
+  r = k_rmdir(full);
+  if (r == -2) errno = EEXIST; /* ENOTEMPTY */
+  else if (r == -3) errno = ENOTDIR;
+  else if (r < 0) errno = ENOENT;
+  return r < 0 ? -1 : 0;
 }
 
 __export int mkdir(const char* path, mode_t mode) {
-  (void)path;
+  char full[PATH_MAX];
+  int r;
   (void)mode;
-  errno = ENOSYS;
+  if (!path) {
+    errno = EINVAL;
+    return -1;
+  }
+  join_cwd(path, full, PATH_MAX);
+  r = k_mkdir(full);
+  if (r == 1) {
+    errno = EEXIST;
+    return -1;
+  }
+  if (r < 0) {
+    errno = EACCES;
+    return -1;
+  }
+  return 0;
+}
+
+__export int access(const char* path, int mode) {
+  struct stat st;
+  (void)mode;
+  return stat(path, &st);
+}
+
+__export pid_t getpid(void) { return 1; }
+__export pid_t getppid(void) { return 0; }
+__export uid_t getuid(void) { return 0; }
+__export uid_t geteuid(void) { return 0; }
+__export gid_t getgid(void) { return 0; }
+__export gid_t getegid(void) { return 0; }
+
+__export int usleep(unsigned us) {
+  unsigned start = k_ms(), ms = us / 1000;
+  while (k_ms() - start < ms) {}
+  return 0;
+}
+
+__export unsigned sleep(unsigned s) {
+  usleep(s * 1000000u);
+  return 0;
+}
+
+__export long sysconf(int name) {
+  if (name == _SC_PAGESIZE) return 4096;
+  if (name == _SC_CLK_TCK) return 1000;
+  if (name == _SC_OPEN_MAX) return FD_MAX;
+  errno = EINVAL;
   return -1;
+}
+
+/* data/hora FAT da entrada -> time_t (0 se nao tiver) */
+static time_t file_mtime(const char* full) {
+  static struct k_dirent ents[256];
+  char dir[PATH_MAX];
+  const char* name;
+  int n, i, k;
+  strncpy(dir, full, PATH_MAX - 1);
+  dir[PATH_MAX - 1] = 0;
+  k = (int)strlen(dir);
+  while (k > 0 && dir[k - 1] == '\\') dir[--k] = 0;
+  while (k > 0 && dir[k - 1] != '\\' && dir[k - 1] != ':') k--;
+  name = full + k;
+  if (!*name) return 0;
+  dir[k] = 0;
+  if (k == 0) k_pwd(dir, PATH_MAX);
+  n = k_dir(dir, ents, 256);
+  for (i = 0; i < n; i++) {
+    if (strcasecmp(ents[i].name, name) == 0) {
+      struct tm tm;
+      unsigned d = ents[i].date, t = ents[i].time;
+      if (!d) return 0;
+      memset(&tm, 0, sizeof(tm));
+      tm.tm_mday = (int)(d & 31);
+      tm.tm_mon = (int)((d >> 5) & 15) - 1;
+      tm.tm_year = (int)(d >> 9) + 80;
+      tm.tm_hour = (int)(t >> 11);
+      tm.tm_min = (int)((t >> 5) & 63);
+      tm.tm_sec = (int)(t & 31) * 2;
+      return mktime(&tm);
+    }
+  }
+  return 0;
 }
 
 static int fd_alloc(void) {
@@ -156,6 +266,10 @@ __export int open(const char* path, int flags, ...) {
     return -1;
   }
   sz = k_fsize(full);
+  if (sz >= 0 && (flags & O_CREAT) && (flags & O_EXCL)) {
+    errno = EEXIST;
+    return -1;
+  }
   if (sz < 0) {
     if (!(flags & O_CREAT)) {
       errno = ENOENT;
@@ -246,8 +360,15 @@ __export ssize_t read(int fd, void* buf, size_t n) {
   struct fd_ent* e;
   size_t left;
   if (fd == 0) {
-    errno = ENOSYS;
-    return -1;
+    /* stdin da libc: linha a linha */
+    size_t got = 0;
+    while (got < n) {
+      int c = fgetc(stdin);
+      if (c == EOF) break;
+      ((char*)buf)[got++] = (char)c;
+      if (c == '\n') break;
+    }
+    return (ssize_t)got;
   }
   if (fd < 3 || fd >= FD_MAX || !fds[fd].used) {
     errno = EBADF;
@@ -323,6 +444,80 @@ __export off_t lseek(int fd, off_t off, int whence) {
   return e->pos;
 }
 
+/* grava o que mudou sem fechar */
+__export int fsync(int fd) {
+  struct fd_ent* e;
+  if (fd < 3 || fd >= FD_MAX || !fds[fd].used) {
+    errno = EBADF;
+    return fd >= 0 && fd < 3 ? 0 : -1;
+  }
+  e = &fds[fd];
+  if (e->dirty && (e->flags & (O_WRONLY | O_RDWR))) {
+    if (k_fsave(e->path, e->data ? e->data : "", e->size) < 0) {
+      errno = EIO;
+      return -1;
+    }
+    e->dirty = 0;
+  }
+  return 0;
+}
+
+__export int ftruncate(int fd, off_t len) {
+  struct fd_ent* e;
+  char* nb;
+  if (fd < 3 || fd >= FD_MAX || !fds[fd].used || len < 0) {
+    errno = EBADF;
+    return -1;
+  }
+  e = &fds[fd];
+  if (!(e->flags & (O_WRONLY | O_RDWR))) {
+    errno = EACCES;
+    return -1;
+  }
+  if (len > e->size) {
+    if (len > FILE_CAP) {
+      errno = EIO;
+      return -1;
+    }
+    nb = (char*)realloc(e->data, (size_t)len + 1);
+    if (!nb) {
+      errno = ENOMEM;
+      return -1;
+    }
+    memset(nb + e->size, 0, (size_t)(len - e->size));
+    e->data = nb;
+  }
+  e->size = len;
+  e->data[len] = 0;
+  e->dirty = 1;
+  return 0;
+}
+
+__export int dup(int fd) {
+  int nfd;
+  struct fd_ent* e;
+  if (fd < 3 || fd >= FD_MAX || !fds[fd].used) {
+    errno = EBADF;
+    return -1;
+  }
+  /* copia independente (sem posicao compartilhada) */
+  nfd = fd_alloc();
+  if (nfd < 0) {
+    errno = ENOMEM;
+    return -1;
+  }
+  e = &fds[nfd];
+  *e = fds[fd];
+  e->data = (char*)malloc((size_t)e->size + 1);
+  if (!e->data) {
+    e->used = 0;
+    errno = ENOMEM;
+    return -1;
+  }
+  memcpy(e->data, fds[fd].data, (size_t)e->size + 1);
+  return nfd;
+}
+
 __export int fstat(int fd, struct stat* st) {
   struct fd_ent* e;
   if (!st) {
@@ -337,6 +532,7 @@ __export int fstat(int fd, struct stat* st) {
   memset(st, 0, sizeof(*st));
   st->st_mode = S_IFREG | S_IRUSR | S_IWUSR;
   st->st_size = e->size;
+  st->st_mtime = file_mtime(e->path);
   return 0;
 }
 
@@ -361,6 +557,7 @@ __export int stat(const char* path, struct stat* st) {
   }
   st->st_mode = S_IFREG | S_IRUSR | S_IWUSR;
   st->st_size = sz;
+  st->st_mtime = file_mtime(full);
   return 0;
 }
 

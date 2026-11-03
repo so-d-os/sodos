@@ -16,5 +16,30 @@ int rmdir(const char* path);
 int chdir(const char* path);
 char* getcwd(char* buf, size_t size);
 int isatty(int fd);
+int access(const char* path, int mode);
+int fsync(int fd);
+int ftruncate(int fd, off_t len);
+int dup(int fd);
+pid_t getpid(void);
+pid_t getppid(void);
+uid_t getuid(void);
+uid_t geteuid(void);
+gid_t getgid(void);
+gid_t getegid(void);
+unsigned sleep(unsigned s);
+int usleep(unsigned us);
+long sysconf(int name);
+
+#define F_OK 0
+#define X_OK 1
+#define W_OK 2
+#define R_OK 4
+#define STDIN_FILENO 0
+#define STDOUT_FILENO 1
+#define STDERR_FILENO 2
+#define _SC_PAGESIZE 30
+#define _SC_PAGE_SIZE _SC_PAGESIZE
+#define _SC_CLK_TCK 2
+#define _SC_OPEN_MAX 4
 
 #endif

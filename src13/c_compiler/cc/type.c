@@ -1,4 +1,5 @@
-/* type.c - Tipos do C (alvo i386: int/long/ponteiro = 4 bytes, long long = 8). */
+/* type.c - Tipos do C (alvo i386: int/long/ponteiro = 4 bytes, long long = 8).
+ * float = 4 e double = long double = 8; no gerador ficam em eax / edx:eax. */
 #include "cc.h"
 
 static Type* new_type(int kind, int size, int align, int is_unsigned) {
@@ -22,6 +23,8 @@ static Type t_long = { TY_LONG, 4, 4, 0 };
 static Type t_ulong = { TY_LONG, 4, 4, 1 };
 static Type t_llong = { TY_LLONG, 8, 4, 0 };
 static Type t_ullong = { TY_LLONG, 8, 4, 1 };
+static Type t_float = { TY_FLOAT, 4, 4, 0 };
+static Type t_double = { TY_DOUBLE, 8, 4, 0 };
 
 Type* ty_void = &t_void;
 Type* ty_bool = &t_bool;
@@ -35,6 +38,8 @@ Type* ty_long = &t_long;
 Type* ty_ulong = &t_ulong;
 Type* ty_llong = &t_llong;
 Type* ty_ullong = &t_ullong;
+Type* ty_float = &t_float;
+Type* ty_double = &t_double;
 
 int is_integer(Type* t) {
   int k = t->kind;
@@ -43,7 +48,9 @@ int is_integer(Type* t) {
 }
 
 int is_ptr_like(Type* t) { return t->kind == TY_PTR || t->kind == TY_ARRAY; }
-int is_scalar(Type* t) { return is_integer(t) || t->kind == TY_PTR; }
+int is_flonum(Type* t) { return t->kind == TY_FLOAT || t->kind == TY_DOUBLE; }
+int is_numeric(Type* t) { return is_integer(t) || is_flonum(t); }
+int is_scalar(Type* t) { return is_numeric(t) || t->kind == TY_PTR; }
 int is_64(Type* t) { return t->kind == TY_LLONG; }
 int is_struct(Type* t) { return t->kind == TY_STRUCT || t->kind == TY_UNION; }
 
@@ -98,7 +105,7 @@ int type_compatible(Type* a, Type* b) {
     case TY_FUNC:
       return type_compatible(a->base, b->base);
   }
-  return a->kind == TY_VOID || a->kind == TY_BOOL;
+  return a->kind == TY_VOID || a->kind == TY_BOOL || is_flonum(a);
 }
 
 static Node* cast_node(Node* n, Type* ty) {
@@ -112,6 +119,7 @@ static Node* cast_node(Node* n, Type* ty) {
 }
 
 static Type* promote(Type* t) {
+  if (is_flonum(t)) return t;
   if (t->kind == TY_LLONG) return t->is_unsigned ? ty_ullong : ty_llong;
   if (t->kind == TY_INT || t->kind == TY_LONG) return t->is_unsigned ? ty_uint : ty_int;
   return ty_int; /* bool, char, short, enum */
@@ -121,6 +129,8 @@ static Type* common_type(Type* a, Type* b) {
   if (a->base && (a->kind == TY_PTR || a->kind == TY_ARRAY)) return pointer_to(a->base);
   if (a->kind == TY_FUNC) return pointer_to(a);
   if (b->kind == TY_FUNC) return pointer_to(b);
+  if (a->kind == TY_DOUBLE || b->kind == TY_DOUBLE) return ty_double;
+  if (a->kind == TY_FLOAT || b->kind == TY_FLOAT) return ty_float;
   a = promote(a);
   b = promote(b);
   if (a->kind == TY_LLONG || b->kind == TY_LLONG) {
@@ -130,6 +140,11 @@ static Type* common_type(Type* a, Type* b) {
   }
   if (a->is_unsigned || b->is_unsigned) return ty_uint;
   return ty_int;
+}
+
+static void int_only(Node* n) {
+  if (is_flonum(n->lhs->ty) || (n->rhs && is_flonum(n->rhs->ty)))
+    error_tok(n->tok, "operacao invalida com ponto flutuante");
 }
 
 static void usual_conv(Node* n) {
@@ -155,8 +170,12 @@ void add_type(Node* n) {
     case ND_NUM:
       n->ty = ty_int;
       return;
-    case ND_ADD: case ND_SUB: case ND_MUL: case ND_DIV: case ND_MOD:
-    case ND_BAND: case ND_BOR: case ND_BXOR:
+    case ND_MOD: case ND_BAND: case ND_BOR: case ND_BXOR:
+      int_only(n);
+      usual_conv(n);
+      n->ty = n->lhs->ty;
+      return;
+    case ND_ADD: case ND_SUB: case ND_MUL: case ND_DIV:
       usual_conv(n);
       n->ty = n->lhs->ty;
       return;
@@ -182,7 +201,9 @@ void add_type(Node* n) {
       n->ty = ty_int;
       return;
     case ND_BNOT: case ND_SHL: case ND_SHR: {
-      Type* t = promote(n->lhs->ty);
+      Type* t;
+      int_only(n);
+      t = promote(n->lhs->ty);
       n->lhs = cast_node(n->lhs, t);
       if (n->rhs) n->rhs = cast_node(n->rhs, ty_int);
       n->ty = t;
@@ -194,7 +215,7 @@ void add_type(Node* n) {
     case ND_COND:
       if (n->then->ty->kind == TY_VOID || n->els->ty->kind == TY_VOID) {
         n->ty = ty_void;
-      } else if (is_integer(n->then->ty) && is_integer(n->els->ty)) {
+      } else if (is_numeric(n->then->ty) && is_numeric(n->els->ty)) {
         Type* t = common_type(n->then->ty, n->els->ty);
         n->then = cast_node(n->then, t);
         n->els = cast_node(n->els, t);

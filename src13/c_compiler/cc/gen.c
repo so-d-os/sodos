@@ -8,7 +8,10 @@
  * Funcoes k_* do kernel recebem os 6 primeiros em edi, esi, edx, ecx, r8d, r9d.
  * _start e DllMain sao chamados pelo kernel em registradores e copiam
  * os argumentos para a area local. Struct de retorno: ponteiro em [ebp+16],
- * "ret 4" (o ret de 64 bits ja remove os 8 bytes do endereco de volta). */
+ * "ret 4" (o ret de 64 bits ja remove os 8 bytes do endereco de volta).
+ * Ponto flutuante: float em eax, double em edx:eax (os bits, como um long
+ * long); as contas passam por xmm0/xmm1 (SSE2), que nao guardam nada entre
+ * uma expressao e outra. Double ocupa 8 bytes na pilha e volta em edx:eax. */
 #include "cc.h"
 #include "sox.h"
 
@@ -268,8 +271,21 @@ static void copy_eax_to_ecx(int size) {
   e1(0x5E);             /* pop esi */
 }
 
-/* flags = (valor != 0) */
+/* 8 bytes em edx:eax: long long e double */
+static int is_wide(Type* ty) { return ty->kind == TY_LLONG || ty->kind == TY_DOUBLE; }
+
+/* flags = (valor != 0). Flonum: -0.0 tambem e zero; destroi o valor. */
 static void cmp_zero(Type* ty) {
+  if (ty->kind == TY_FLOAT) {
+    e1(0xA9);                    /* test eax, 0x7FFFFFFF */
+    e4(0x7FFFFFFF);
+    return;
+  }
+  if (ty->kind == TY_DOUBLE) {
+    e2(0x01, 0xD2);              /* add edx, edx (tira o sinal) */
+    e2(0x09, 0xD0);              /* or eax, edx */
+    return;
+  }
   if (is_64(ty)) e2(0x09, 0xD0); /* or eax, edx */
   else e2(0x85, 0xC0);           /* test eax, eax */
 }
@@ -314,6 +330,154 @@ static void store(Type* ty) {
   } else e2(0x89, 0x01);
 }
 
+/* ---------- ponto flutuante ---------- */
+/* edx:eax -> rax */
+static void join_rax(void) {
+  e4(0x20E2C148);               /* shl rdx, 32 */
+  e2(0x89, 0xC0);               /* mov eax, eax */
+  e3(0x48, 0x09, 0xD0);         /* or rax, rdx */
+}
+
+/* rax -> edx:eax */
+static void split_rax(void) {
+  e3(0x48, 0x89, 0xC2);         /* mov rdx, rax */
+  e4(0x20EAC148);               /* shr rdx, 32 */
+  e2(0x89, 0xC0);               /* mov eax, eax */
+}
+
+/* valor (eax / edx:eax) -> xmm0 */
+static void to_xmm0(Type* ty) {
+  if (ty->kind == TY_FLOAT) {
+    e4(0xC06E0F66);             /* movd xmm0, eax */
+    return;
+  }
+  join_rax();
+  e1(0x66); e4(0xC06E0F48);     /* movq xmm0, rax */
+}
+
+/* xmm0 -> eax / edx:eax */
+static void from_xmm0(Type* ty) {
+  if (ty->kind == TY_FLOAT) {
+    e4(0xC07E0F66);             /* movd eax, xmm0 */
+    return;
+  }
+  e1(0x66); e4(0xC07E0F48);     /* movq rax, xmm0 */
+  split_rax();
+}
+
+/* 0xF2 = double (sd), 0xF3 = float (ss) */
+static int sse_pfx(Type* ty) { return ty->kind == TY_FLOAT ? 0xF3 : 0xF2; }
+
+/* inteiro em eax / edx:eax -> double em xmm0 */
+static void int_to_xmm0(Type* from) {
+  if (from->kind == TY_LLONG) {
+    join_rax();
+    if (from->is_unsigned) {
+      /* acima de 2^63: metade (guardando o bit de baixo), converte, dobra */
+      e3(0x48, 0x85, 0xC0);              /* test rax, rax */
+      e2(0x78, 0x07);                    /* js big */
+      e1(0xF2); e4(0xC02A0F48);          /* cvtsi2sd xmm0, rax */
+      e2(0xEB, 0x15);                    /* jmp done */
+      e3(0x48, 0x89, 0xC1);              /* big: mov rcx, rax */
+      e3(0x48, 0xD1, 0xE9);              /* shr rcx, 1 */
+      e3(0x83, 0xE0, 0x01);              /* and eax, 1 */
+      e3(0x48, 0x09, 0xC1);              /* or rcx, rax */
+      e1(0xF2); e4(0xC12A0F48);          /* cvtsi2sd xmm0, rcx */
+      e4(0xC0580FF2);                    /* addsd xmm0, xmm0 */
+      return;                            /* done: */
+    }
+    e1(0xF2); e4(0xC02A0F48);            /* cvtsi2sd xmm0, rax */
+    return;
+  }
+  if (from->is_unsigned || from->kind == TY_PTR || from->kind == TY_BOOL) {
+    e2(0x89, 0xC0);                      /* mov eax, eax */
+    e1(0xF2); e4(0xC02A0F48);            /* cvtsi2sd xmm0, rax */
+    return;
+  }
+  e4(0xC02A0FF2);                        /* cvtsi2sd xmm0, eax */
+}
+
+/* double em xmm0 -> inteiro em eax / edx:eax (truncando) */
+static void xmm0_to_int(Type* to) {
+  if (to->kind == TY_LLONG && to->is_unsigned) {
+    /* a partir de 2^63: subtrai 2^63, converte e liga o bit 63 */
+    e2(0x48, 0xB8); e4(0); e4(0x43E00000); /* mov rax, 2^63 (double) */
+    e1(0x66); e4(0xC86E0F48);            /* movq xmm1, rax */
+    e4(0xC12E0F66);                      /* ucomisd xmm0, xmm1 */
+    e2(0x73, 0x07);                      /* jae big */
+    e1(0xF2); e4(0xC02C0F48);            /* cvttsd2si rax, xmm0 */
+    e2(0xEB, 0x0E);                      /* jmp done */
+    e4(0xC15C0FF2);                      /* big: subsd xmm0, xmm1 */
+    e1(0xF2); e4(0xC02C0F48);            /* cvttsd2si rax, xmm0 */
+    e4(0xF8BA0F48); e1(0x3F);            /* btc rax, 63 */
+    split_rax();                         /* done: */
+    return;
+  }
+  if (to->kind == TY_LLONG || (to->size == 4 && to->is_unsigned) || to->kind == TY_PTR) {
+    e1(0xF2); e4(0xC02C0F48);            /* cvttsd2si rax, xmm0 */
+    if (to->kind == TY_LLONG) split_rax();
+    else e2(0x89, 0xC0);                 /* mov eax, eax */
+    return;
+  }
+  e4(0xC02C0FF2);                        /* cvttsd2si eax, xmm0 */
+}
+
+static void cast(Type* from, Type* to);
+
+static void cast_flonum(Type* from, Type* to) {
+  if (is_flonum(from) && is_flonum(to)) {
+    if (from->kind == to->kind) return;
+    to_xmm0(from);
+    if (to->kind == TY_FLOAT) e4(0xC05A0FF2); /* cvtsd2ss xmm0, xmm0 */
+    else e4(0xC05A0FF3);                      /* cvtss2sd xmm0, xmm0 */
+    from_xmm0(to);
+    return;
+  }
+  if (is_flonum(to)) {
+    int_to_xmm0(from);
+    if (to->kind == TY_FLOAT) e4(0xC05A0FF2); /* cvtsd2ss xmm0, xmm0 */
+    from_xmm0(to);
+    return;
+  }
+  /* flonum -> inteiro */
+  to_xmm0(from);
+  if (from->kind == TY_FLOAT) e4(0xC05A0FF3); /* cvtss2sd xmm0, xmm0 */
+  xmm0_to_int(to);
+  if (to->size < 4) cast(ty_int, to);
+}
+
+/* lhs em eax / edx:eax, rhs no topo da pilha; ambos do tipo ty */
+static void gen_binary_flonum(Node* n, Type* ty) {
+  int p = sse_pfx(ty);
+  to_xmm0(ty);
+  e1(p); e4(0x240C100F);                 /* movs? xmm1, [rsp] */
+  add_esp(ty->size);
+  switch (n->kind) {
+    case ND_ADD: e1(p); e3(0x0F, 0x58, 0xC1); from_xmm0(ty); return;
+    case ND_SUB: e1(p); e3(0x0F, 0x5C, 0xC1); from_xmm0(ty); return;
+    case ND_MUL: e1(p); e3(0x0F, 0x59, 0xC1); from_xmm0(ty); return;
+    case ND_DIV: e1(p); e3(0x0F, 0x5E, 0xC1); from_xmm0(ty); return;
+  }
+  /* comparacao: NaN da falso em tudo, menos em != */
+  if (ty->kind == TY_DOUBLE) e1(0x66);
+  if (n->kind == ND_EQ || n->kind == ND_NE) {
+    e3(0x0F, 0x2E, 0xC1);                /* ucomis? xmm0, xmm1 */
+    if (n->kind == ND_EQ) {
+      e3(0x0F, 0x94, 0xC0);              /* sete al */
+      e3(0x0F, 0x9B, 0xC1);              /* setnp cl */
+      e2(0x20, 0xC8);                    /* and al, cl */
+    } else {
+      e3(0x0F, 0x95, 0xC0);              /* setne al */
+      e3(0x0F, 0x9A, 0xC1);              /* setp cl */
+      e2(0x08, 0xC8);                    /* or al, cl */
+    }
+  } else {
+    e3(0x0F, 0x2E, 0xC8);                /* ucomis? xmm1, xmm0 (b ? a) */
+    e3(0x0F, n->kind == ND_LT ? 0x97 : 0x93, 0xC0); /* seta / setae al */
+  }
+  e3(0x0F, 0xB6, 0xC0);                  /* movzx eax, al */
+}
+
 /* ---------- conversoes ---------- */
 static void cast(Type* from, Type* to) {
   if (to->kind == TY_VOID) return;
@@ -323,6 +487,10 @@ static void cast(Type* from, Type* to) {
     return;
   }
   if (!is_scalar(from) || !is_scalar(to)) return; /* array/funcao/struct: endereco */
+  if (is_flonum(from) || is_flonum(to)) {
+    cast_flonum(from, to);
+    return;
+  }
   if (is_64(to)) {
     if (is_64(from)) return;
     if (from->is_unsigned || from->kind == TY_PTR || from->kind == TY_BOOL) mov_edx_imm(0);
@@ -501,13 +669,13 @@ static void push_arg(Node* arg) {
     pop_esi32();
     return;
   }
-  if (is_64(ty)) push_edx();
+  if (is_wide(ty)) push_edx();
   push_eax();
 }
 
 static int arg_size(Type* ty) {
   if (is_struct(ty)) return align_to(ty->size, 4);
-  return is_64(ty) ? 8 : 4;
+  return is_wide(ty) ? 8 : 4;
 }
 
 /* which: 0 edi, 1 esi, 2 edx, 3 ecx, 4 r8, 5 r9. Le [rsp+off]. */
@@ -566,7 +734,7 @@ static void spill_entry(Obj* fn) {
   int i = 0;
   if (!is_entry_name(fn)) return;
   for (v = fn->params; v && i < 6; v = v->next, i++)
-    store_entry_arg(i, v->offset, is_64(v->ty));
+    store_entry_arg(i, v->offset, is_wide(v->ty));
 }
 
 /* Tira os 6 primeiros argumentos da pilha e poe nos registradores do kernel.
@@ -595,6 +763,64 @@ static int sysv_lift(Node* n, Node** args, int nargs, int total) {
   return stacked - taken;
 }
 
+/* ---------- setjmp/longjmp (inline; nao ha asm no cc) ----------
+ * jmp_buf: [0] ebp, [4] esp, [8] endereco de volta (8 bytes). As variaveis
+ * locais moram na memoria, entao nada mais precisa ser guardado. */
+static int builtin_kind(Node* fn) {
+  const char* s;
+  if (fn->kind != ND_VAR || !fn->var || !fn->var->name) return 0;
+  s = fn->var->name;
+  if (!strcmp(s, "setjmp") || !strcmp(s, "_setjmp") || !strcmp(s, "sigsetjmp") ||
+      !strcmp(s, "__builtin_setjmp"))
+    return 1;
+  if (!strcmp(s, "longjmp") || !strcmp(s, "_longjmp") || !strcmp(s, "siglongjmp") ||
+      !strcmp(s, "__builtin_longjmp"))
+    return 2;
+  return 0;
+}
+
+/* A expressao chama setjmp? Ai nada pode estar empilhado quando ele roda:
+ * o longjmp volta com o esp de la, mas os slots acima ja foram reusados. */
+static int has_setjmp(Node* n) {
+  Node* a;
+  if (!n) return 0;
+  if (n->kind == ND_FUNCALL && builtin_kind(n->lhs) == 1) return 1;
+  if (n->kind == ND_FUNCALL)
+    for (a = n->args; a; a = a->next)
+      if (has_setjmp(a)) return 1;
+  return has_setjmp(n->lhs) || has_setjmp(n->rhs) || has_setjmp(n->cond) ||
+         has_setjmp(n->then) || has_setjmp(n->els);
+}
+
+static void gen_setjmp(Node* n) {
+  int l = new_label();
+  if (!n->args) error_tok(n->tok, "setjmp sem argumento");
+  gen_expr(n->args);
+  e2(0x89, 0x28);               /* mov [eax], ebp */
+  e3(0x89, 0x60, 0x04);         /* mov [eax+4], esp */
+  e3(0x48, 0x8D, 0x0D);         /* lea rcx, [rip+volta] */
+  add_fix(l);
+  e4(0x08488948);               /* mov [rax+8], rcx */
+  e2(0x31, 0xC0);               /* xor eax, eax */
+  place(l);                     /* volta: eax = valor do longjmp */
+}
+
+static void gen_longjmp(Node* n) {
+  if (!n->args || !n->args->next) error_tok(n->tok, "longjmp precisa de 2 argumentos");
+  gen_expr(n->args->next);
+  push_eax();
+  gen_expr(n->args);
+  pop_ecx();
+  e2(0x85, 0xC9);               /* test ecx, ecx */
+  e2(0x75, 0x05);               /* jnz +5 */
+  e1(0xB9); e4(1);              /* mov ecx, 1 */
+  e2(0x8B, 0x28);               /* mov ebp, [eax] */
+  e3(0x8B, 0x60, 0x04);         /* mov esp, [eax+4] */
+  e4(0x08508B48);               /* mov rdx, [rax+8] */
+  e2(0x89, 0xC8);               /* mov eax, ecx */
+  e2(0xFF, 0xE2);               /* jmp rdx */
+}
+
 static void gen_funcall(Node* n) {
   Node* args[256];
   int nargs = 0;
@@ -605,6 +831,10 @@ static void gen_funcall(Node* n) {
   Node* a;
   Node* fn = n->lhs;
   Type* rt = n->func_ty->base;
+  switch (builtin_kind(fn)) {
+    case 1: gen_setjmp(n); return;
+    case 2: gen_longjmp(n); return;
+  }
   for (a = n->args; a; a = a->next) {
     if (nargs >= 256) error_tok(n->tok, "argumentos demais");
     args[nargs++] = a;
@@ -639,12 +869,30 @@ static void gen_expr(Node* n) {
     case ND_NULL_EXPR:
       return;
     case ND_NUM:
+      if (n->ty->kind == TY_FLOAT) {
+        float f = (float)n->fval;
+        unsigned u;
+        memcpy(&u, &f, 4);
+        mov_eax_imm(u);
+        return;
+      }
+      if (n->ty->kind == TY_DOUBLE) {
+        unsigned u[2];
+        memcpy(u, &n->fval, 8);
+        mov_eax_imm(u[0]);
+        mov_edx_imm(u[1]);
+        return;
+      }
       mov_eax_imm((unsigned)n->val);
       if (is_64(n->ty)) mov_edx_imm((unsigned)(n->val >> 32));
       return;
     case ND_NEG:
       gen_expr(n->lhs);
-      if (is_64(n->ty)) {
+      if (n->ty->kind == TY_FLOAT) {
+        e1(0x35); e4(0x80000000);        /* xor eax, 0x80000000 */
+      } else if (n->ty->kind == TY_DOUBLE) {
+        e2(0x81, 0xF2); e4(0x80000000);  /* xor edx, 0x80000000 */
+      } else if (is_64(n->ty)) {
         e2(0xF7, 0xD8);       /* neg eax */
         e3(0x83, 0xD2, 0x00); /* adc edx, 0 */
         e2(0xF7, 0xDA);       /* neg edx */
@@ -665,6 +913,17 @@ static void gen_expr(Node* n) {
       gen_addr(n->lhs);
       return;
     case ND_ASSIGN:
+      if (!is_struct(n->ty) && !is_wide(n->ty) && has_setjmp(n->rhs)) {
+        /* valor antes do endereco: o setjmp roda sem nada empilhado */
+        gen_expr(n->rhs);
+        push_eax();
+        gen_addr(n->lhs);
+        e2(0x89, 0xC1);           /* mov ecx, eax */
+        e3(0x8B, 0x04, 0x24);     /* mov eax, [esp] */
+        e3(0x89, 0x0C, 0x24);     /* mov [esp], ecx */
+        store(n->ty);
+        return;
+      }
       gen_addr(n->lhs);
       push_eax();
       gen_expr(n->rhs);
@@ -763,6 +1022,15 @@ static void gen_expr(Node* n) {
     return;
   }
 
+  if (is_flonum(n->lhs->ty)) {
+    gen_expr(n->rhs);
+    if (is_wide(n->rhs->ty)) push_edx();
+    push_eax();
+    gen_expr(n->lhs);
+    gen_binary_flonum(n, n->lhs->ty);
+    return;
+  }
+
   if (is_64(n->lhs->ty)) {
     gen_expr(n->rhs);
     push_edx();
@@ -772,10 +1040,20 @@ static void gen_expr(Node* n) {
     return;
   }
 
-  gen_expr(n->rhs);
-  push_eax();
-  gen_expr(n->lhs);
-  pop_ecx();
+  if (has_setjmp(n->lhs)) {
+    /* ordem de avaliacao livre no C: lhs (setjmp) primeiro */
+    gen_expr(n->lhs);
+    push_eax();
+    gen_expr(n->rhs);
+    e2(0x89, 0xC1);             /* mov ecx, eax */
+    e3(0x8B, 0x04, 0x24);       /* mov eax, [esp] */
+    add_esp(4);
+  } else {
+    gen_expr(n->rhs);
+    push_eax();
+    gen_expr(n->lhs);
+    pop_ecx();
+  }
   switch (n->kind) {
     case ND_ADD: e2(0x01, 0xC8); return;
     case ND_SUB: e2(0x29, 0xC8); return;

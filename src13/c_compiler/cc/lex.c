@@ -293,12 +293,45 @@ Token* tokenize_string(char* text, SrcFile* f, int line) {
 }
 
 /* pp-number -> valor e tipo */
+/* 1.5, .5, 1e3, 1.5f, 0x1p4: texto do token copiado e lido com strtod */
+static int convert_float(Token* t) {
+  char* p = t->loc;
+  char* end = t->loc + t->len;
+  char tmp[128];
+  char* q;
+  int hex = p[0] == '0' && (p[1] == 'x' || p[1] == 'X');
+  int is_f = 0;
+  for (q = p; q < end; q++) {
+    if (*q == '.' || (!hex && (*q == 'e' || *q == 'E')) || (hex && (*q == 'p' || *q == 'P'))) {
+      is_f = 1;
+      break;
+    }
+  }
+  if (!is_f) return 0;
+  if (t->len >= (int)sizeof(tmp)) error_tok(t, "numero longo demais");
+  memcpy(tmp, p, (size_t)t->len);
+  tmp[t->len] = 0;
+  t->fval = strtod(tmp, &q);
+  t->ty = ty_double;
+  if (*q == 'f' || *q == 'F') {
+    t->ty = ty_float;
+    q++;
+  } else if (*q == 'l' || *q == 'L') {
+    q++;
+  }
+  if (*q) error_tok(t, "sufixo invalido no numero");
+  t->kind = TK_NUM;
+  t->ival = 0;
+  return 1;
+}
+
 void convert_number(Token* t) {
   char* p = t->loc;
   char* end = t->loc + t->len;
   unsigned long long v = 0;
   int base = 10;
   int u = 0, l = 0;
+  if (convert_float(t)) return;
   if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X') && end - p > 2) {
     p += 2;
     base = 16;
@@ -319,8 +352,6 @@ void convert_number(Token* t) {
   for (; p < end; p++) {
     if (*p == 'u' || *p == 'U') u = 1;
     else if (*p == 'l' || *p == 'L') l++;
-    else if (*p == '.' || *p == 'e' || *p == 'E' || *p == 'f' || *p == 'F')
-      error_tok(t, "ponto flutuante nao e suportado");
     else error_tok(t, "sufixo invalido no numero");
   }
   t->kind = TK_NUM;

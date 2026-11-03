@@ -395,9 +395,65 @@ void clearerr(FILE* f) {
 }
 
 int remove(const char* path) {
-  (void)path;
-  errno = EACCES;
-  return -1;
+  int r;
+  if (!path) {
+    errno = EINVAL;
+    return -1;
+  }
+  r = k_fdelete(path);
+  if (r == -3) r = k_rmdir(path);
+  if (r < 0) {
+    errno = r == -1 ? ENOENT : r == -2 ? EINVAL : EACCES;
+    return -1;
+  }
+  return 0;
+}
+
+/* Sem rename no kernel: copia o arquivo inteiro e apaga o antigo. */
+int rename(const char* from, const char* to) {
+  int sz;
+  char* buf;
+  if (!from || !to) {
+    errno = EINVAL;
+    return -1;
+  }
+  sz = k_fsize(from);
+  if (sz < 0) {
+    errno = ENOENT;
+    return -1;
+  }
+  buf = (char*)malloc((size_t)sz + 1);
+  if (!buf) {
+    errno = ENOMEM;
+    return -1;
+  }
+  if (k_fload(from, buf, sz + 1) != sz || k_fsave(to, buf, sz) < 0) {
+    free(buf);
+    errno = EIO;
+    return -1;
+  }
+  free(buf);
+  if (k_fdelete(from) < 0) {
+    errno = EACCES;
+    return -1;
+  }
+  return 0;
+}
+
+char* tmpnam(char* s) {
+  static char name[L_tmpnam];
+  static unsigned seq;
+  char* out = s ? s : name;
+  do {
+    seq++;
+    sprintf(out, "TMP%05u.TMP", (k_ms() + seq * 7919u) % 100000u);
+  } while (k_fsize(out) >= 0);
+  return out;
+}
+
+FILE* tmpfile(void) {
+  char name[L_tmpnam];
+  return fopen(tmpnam(name), "w+");
 }
 
 void perror(const char* s) {

@@ -1,15 +1,23 @@
 posix-lite — subset POSIX para o port MC (e outros apps)
 
 Fonte: posix.c
-Saida:  c_compiler/out/POSIX.DLL  (make -C c_compiler out/POSIX.DLL)
+Saida:  c_compiler/out/POSIX.DLL  (cc)  e  out/POSIXX.DLL (gcc -mx32)
 
 Headers no cc:
   include/unistd.h, dirent.h, fcntl.h, sys/types.h, sys/stat.h
 
-Kernel: k_pwd, k_chdir, k_dirlist
+O que tem:
+  open/close/read/write/lseek/creat (arquivo inteiro na memoria, ate 64 MB;
+  grava no close ou no fsync), O_CREAT/O_TRUNC/O_APPEND/O_EXCL, ftruncate,
+  dup, fstat/stat (com st_mtime da entrada FAT), access, unlink, mkdir,
+  rmdir, chdir, getcwd, isatty, opendir/readdir/closedir, getpid & cia,
+  sleep/usleep (espera ocupada no k_ms), sysconf. read(0) le do stdin.
+
+Na libc (LIBC.DLL), nao aqui: time.h, sys/time.h, setjmp.h, signal.h,
+  locale.h, math.h, float.h, inttypes.h, scanf, rename/remove/tmpnam,
+  getenv/setenv (ambiente so do processo), realpath.
+
+Kernel: k_pwd, k_chdir, k_dirlist, k_dir, k_fdelete, k_mkdir, k_rmdir
 
 Uso (cc):
   CC APP.C POSIX.DLL
-
-Apps gcc -mx32: recompilar posix.c com XGFLAGS e linkar com LIBCX.DLL
-(ainda nao ha POSIXX.DLL separado; proximo passo se o MC precisar).
