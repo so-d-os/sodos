@@ -1,8 +1,11 @@
 # Artefatos de build do compilador/port (nao versionar)
-src13/c_compiler/build/
+src13/c_compiler/build/*
 src13/c_compiler/out/
 src13/fonts/FontesAvancadas/bin/
 src13/fonts/FontesAvancadas/obj/
+
+# mkvid.py e' fonte e vive em build/ (mantem versionado)
+!src13/c_compiler/build/mkvid.py
 
 # Scripts e saidas temporarias de depuracao
 .tmp_*
