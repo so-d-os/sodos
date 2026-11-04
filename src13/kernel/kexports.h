@@ -9,5 +9,5 @@ void* kexport_find(const char* name);
 void kexp_set_console_hook(void (*hook)(char c));
 
 /* Chamado por mod_exec quando o programa pid termina (inclusive por Ctrl+C):
- * fecha a conexao TCP que ele deixou aberta. */
+ * fecha a conexao TCP que ele deixou aberta e volta a fonte e o piscar que ele mudou. */
 void kexp_release_pid(uint32_t pid);

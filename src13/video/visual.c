@@ -975,6 +975,63 @@ int win_screen_size(int* w, int* h) {
   return 1;
 }
 
+/* vga_bios_font e a fonte em uso: a saida do modo grafico e o fbcon leem dela. */
+const uint8_t* vga_font_glyph(int ch) {
+  return vga_bios_font_ok ? &vga_bios_font[ch * 32] : font8x16_cp850[ch];
+}
+
+/* A saida da plane 2 sublinha o cursor: k_cursor pode te-lo escondido. */
+static void vga_font_load(int ch) {
+  volatile uint8_t* vga = (volatile uint8_t*)0xA0000;
+  uint8_t start;
+  int i;
+  if (!vga_legacy() || gfx_live) return;
+  outb(0x3D4, 0x0A);
+  start = inb(0x3D5);
+  if (ch < 0) {
+    vga_restore_bios_font();
+  } else {
+    vga_font_plane_enter();
+    for (i = 0; i < 16; i++) vga[ch * 32 + i] = vga_bios_font[ch * 32 + i];
+    vga_font_plane_leave();
+  }
+  outb(0x3D4, 0x0A);
+  outb(0x3D5, start);
+}
+
+/* Modo do controlador de atributos, como em vga_mode_text. O fbcon sempre usa
+ * o fundo claro: nada a fazer no UEFI. */
+void vga_text_blink(int on) {
+  if (!vga_legacy() || gfx_live) return;
+  (void)inb(0x3DA);
+  outb(0x3C0, 0x30);
+  outb(0x3C0, on ? 0x0C : 0x04);
+}
+
+int vga_font_get(int ch, uint8_t* glyph) {
+  const uint8_t* g;
+  int i;
+  if (ch < 0 || ch > 255 || !glyph) return -1;
+  g = vga_font_glyph(ch);
+  for (i = 0; i < 16; i++) glyph[i] = g[i];
+  return 0;
+}
+
+int vga_font_set(int ch, const uint8_t* glyph) {
+  int i;
+  if (ch < 0 || ch > 255 || !glyph || gfx_live || !vga_bios_font_ok) return -1;
+  for (i = 0; i < 16; i++) vga_bios_font[ch * 32 + i] = glyph[i];
+  vga_font_load(ch);
+  fbcon_font_changed(ch);
+  return 0;
+}
+
+void vga_font_reset(void) {
+  font_load_builtin();
+  vga_font_load(-1);
+  fbcon_font_changed(-1);
+}
+
 /* Uma linha BGR (BMP), y a partir do topo. max e em pixels. */
 int win_screen_bgr(int y, uint8_t* dst, int max) {
   int x, n;

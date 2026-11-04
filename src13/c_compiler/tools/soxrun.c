@@ -207,6 +207,19 @@ static int k_vput(int row, int col, const unsigned short* cells, int n) {
   return 0;
 }
 static void k_cursor(int row, int col) { (void)row; (void)col; }
+static unsigned char vfont[256][16];
+static int k_font_get(int ch, unsigned char* glyph) {
+  if (ch < 0 || ch > 255 || !glyph) return -1;
+  memcpy(glyph, vfont[ch], 16);
+  return 0;
+}
+static int k_font_set(int ch, const unsigned char* glyph) {
+  if (ch < 0 || ch > 255 || !glyph) return -1;
+  memcpy(vfont[ch], glyph, 16);
+  return 0;
+}
+static void k_font_reset(void) { memset(vfont, 0, sizeof vfont); }
+static int k_blink(int on) { (void)on; return 0; }
 static int k_readline(char* buf, int max) {
   int n;
   fflush(stdout);
@@ -925,7 +938,7 @@ static const struct {
   E(k_putc), E(k_write), E(k_puts), E(k_getc), E(k_trygetc), E(k_readline), E(k_clear), E(k_yield),
   E(k_fsize), E(k_fload), E(k_fread), E(k_fsave), E(k_flist), E(k_dirlist), E(k_pwd), E(k_chdir),
   E(k_drive), E(k_set_drive), E(k_exe_drive), E(k_dir), E(k_fdelete), E(k_mkdir), E(k_rmdir), E(k_dfree),
-  E(k_vput), E(k_cursor),
+  E(k_vput), E(k_cursor), E(k_font_get), E(k_font_set), E(k_font_reset), E(k_blink),
   E(k_malloc), E(k_free), E(k_realloc), E(k_msize), E(k_meminfo),
   E(k_exit), E(k_exec), E(k_shell), E(k_shell_capture), E(k_last_error), E(k_dll_load), E(k_dll_sym), E(k_dll_free),
   E(k_rdtsc), E(k_ms), E(k_date), E(k_time), E(k_random),
