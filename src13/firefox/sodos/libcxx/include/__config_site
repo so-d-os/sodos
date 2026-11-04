@@ -1,0 +1,16 @@
+/* __config_site - configuracao da libc++ para o SODOS (gerada aqui, nao
+ * pelo CMake). Primeiro alvo: sem threads, sem locale, sem wchar.
+ */
+#ifndef _LIBCPP_CONFIG_SITE
+#define _LIBCPP_CONFIG_SITE
+
+#define _LIBCPP_ABI_VERSION 1
+#define _LIBCPP_ABI_NAMESPACE __1
+#define _LIBCPP_HARDENING_MODE _LIBCPP_HARDENING_MODE_NONE
+
+#define _LIBCPP_HAS_NO_LOCALIZATION
+#define _LIBCPP_HAS_NO_WIDE_CHARACTERS
+#define _LIBCPP_HAS_NO_VENDOR_AVAILABILITY_ANNOTATIONS
+#define _LIBCPP_HAS_CLOCK_GETTIME
+
+#endif

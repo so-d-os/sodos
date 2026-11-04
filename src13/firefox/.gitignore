@@ -1,0 +1,8 @@
+# build/  - objetos e saidas do port (fora do git)
+# vendor/ - arvores upstream baixadas por setup.sh (fora do git)
+build/
+vendor/*
+!vendor/.gitkeep
+*.log
+sodos/rust/*/target/
+sodos/rust/*/build/

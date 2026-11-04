@@ -1,0 +1,10 @@
+# Artefatos de build do compilador/port (nao versionar)
+src13/c_compiler/build/
+src13/c_compiler/out/
+src13/fonts/FontesAvancadas/bin/
+src13/fonts/FontesAvancadas/obj/
+
+# Scripts e saidas temporarias de depuracao
+.tmp_*
+src13/.tmp_*
+src13/*/.tmp_*

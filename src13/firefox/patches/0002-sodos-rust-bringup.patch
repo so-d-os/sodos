@@ -1,0 +1,25 @@
+--- a/build/moz.configure/rust.configure
++++ b/build/moz.configure/rust.configure
+@@ -288,6 +288,11 @@
+     # triple and relies on the user to ensure that everything is
+     # compiled for the appropriate ABI.  We need to perform appropriate
+     # munging to get the correct option to rustc.
++
++    # SODOS: alvo Rust customizado (sodos/rust/custom).
++    if host_or_target.os == "SODOS":
++        return "x86_64-sodos"
++
+     # We correlate the autoconf-derived targets with the list of targets
+     # rustc gives us with --print target-list.
+     candidates = rust_supported_targets.get(
+@@ -451,6 +456,10 @@
+ @imports(_from="mozbuild.configure.util", _import="LineIO")
+ @imports(_from="__builtin__", _import="open")
+ def assert_rust_compile(host_or_target, rustc_target, rustc):
++    # SODOS: std ainda nao existe; build Rust fica para depois.
++    if host_or_target.os == "SODOS":
++        return
++
+     # Check to see whether our rustc has a reasonably functional stdlib
+     # for our chosen target.
+     target_arg = "--target=" + rustc_target

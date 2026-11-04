@@ -1,0 +1,4 @@
+#!/bin/sh
+# x86_64-sodos-gcc64 - driver C LP64 (SOX2). Sem C++64/LIBCX64 ainda.
+D=$(cd "$(dirname "$0")" && pwd)
+SODOS_CC_64=1 exec python3 "$D/../sodos-gcc.py" "$@"

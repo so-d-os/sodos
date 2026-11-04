@@ -7,6 +7,7 @@ extern "C" {
 
 #include <stddef.h>
 #include <stdarg.h>
+#include <sys/types.h>
 
 /* O sistema de arquivos le e grava arquivos inteiros: fopen("r") carrega
  * tudo na memoria e fclose de um arquivo "w"/"a" grava tudo de uma vez. */
@@ -18,6 +19,9 @@ typedef long fpos_t;
 #define SEEK_CUR 1
 #define SEEK_END 2
 #define BUFSIZ 1024
+#define _IOFBF 0
+#define _IOLBF 1
+#define _IONBF 2
 #define FILENAME_MAX 64
 
 /* Sem import de dados entre DLLs: stdin/stdout/stderr vem de uma funcao. */
@@ -27,6 +31,7 @@ FILE* __so_stdio(int which);
 #define stderr (__so_stdio(2))
 
 FILE* fopen(const char* path, const char* mode);
+int vasprintf(char** out, const char* fmt, va_list ap);
 /* data foi obtido com malloc. fclose libera. */
 FILE* fopen_mem(char* data, int size);
 int fclose(FILE* f);
@@ -43,6 +48,10 @@ int puts(const char* s);
 int putchar(int c);
 int getchar(void);
 int fseek(FILE* f, long off, int whence);
+int fileno(FILE* f);
+FILE* fdopen(int fd, const char* mode);
+int fseeko(FILE* f, off_t off, int whence);
+off_t ftello(FILE* f);
 long ftell(FILE* f);
 void rewind(FILE* f);
 int feof(FILE* f);

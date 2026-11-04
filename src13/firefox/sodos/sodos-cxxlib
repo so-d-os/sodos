@@ -1,0 +1,27 @@
+#!/bin/sh
+# sodos-cxxlib - g++ -mx32 com os headers da libc++ (vendor/libcxx).
+# A ordem importa: a libc++ tem wrappers <string.h>, <stdlib.h>... que fazem
+# include_next para os headers C do SODOS.
+D=$(cd "$(dirname "$0")" && pwd)
+C=$D/../../c_compiler
+L=$D/../vendor/libcxx-18.1.8/include
+N=$D/../vendor/gxx
+
+if command -v g++ >/dev/null 2>&1; then
+  GXX=g++
+  B=
+else
+  GXX=$N/usr/bin/x86_64-linux-gnu-g++-13
+  B=-B$N/usr/libexec/gcc/x86_64-linux-gnu/13/
+  if [ ! -x "$GXX" ]; then
+    echo "sodos-cxxlib: g++ nao encontrado; rode sodos/scripts/fetch-gxx.sh" >&2
+    exit 1
+  fi
+fi
+
+exec "$GXX" $B -mx32 -march=x86-64 -msse2 -mno-red-zone -ffreestanding -fno-pic -fno-pie \
+  -fno-stack-protector -fno-asynchronous-unwind-tables -fno-jump-tables \
+  -fno-tree-loop-distribute-patterns -nostdinc -nostdinc++ -fno-exceptions -fno-rtti \
+  -isystem "$D/libcxx/include" -isystem "$L" \
+  -isystem "$D/include" -isystem "$C/include" -D__SODOS__ \
+  -D_LIBCPP_PSTL_CPU_BACKEND_SERIAL "$@"

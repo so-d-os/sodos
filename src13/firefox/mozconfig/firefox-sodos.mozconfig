@@ -1,0 +1,54 @@
+# mozconfig/firefox-sodos.mozconfig
+#
+# Flags PREVISTAS para o configure do Gecko no SODOS. NAO USE AINDA: o alvo
+# x86_64-sodos, o toolkit cairo-sodos e o runtime C++ ainda nao existem
+# (docs/03-fases.md, M2/M5). Este arquivo existe para fixar a intencao e
+# evitar que cada tentativa comece de uma lista diferente.
+#
+# Uso futuro (M2+), dentro de vendor/firefox:
+#   MOZCONFIG=../../mozconfig/firefox-sodos.mozconfig ./mach build
+
+ac_add_options --target=x86_64-sodos
+ac_add_options --host=x86_64-pc-linux-gnu
+ac_add_options --enable-application=browser
+
+# Runtime e alocador: o SODOS nao tem jemalloc/mmap de arquivo.
+ac_add_options --disable-jemalloc
+ac_add_options --disable-crashreporter
+ac_add_options --disable-updater
+ac_add_options --disable-tests
+ac_add_options --disable-profiling
+
+# Sem sandbox, sem multiprocesso no primeiro build.
+ac_add_options --disable-sandbox
+ac_add_options --disable-accessibility
+ac_add_options --disable-parental-controls
+ac_add_options --disable-geolocation
+ac_add_options --disable-webrtc
+ac_add_options --disable-necko-wifi
+ac_add_options --disable-dbus
+ac_add_options --disable-glib
+ac_add_options --disable-pulseaudio
+ac_add_options --disable-alsa
+
+# Bibliotecas do sistema: o SODOS nao tem pacotes; tudo vem do vendor/.
+ac_add_options --without-system-nspr
+ac_add_options --without-system-nss
+ac_add_options --without-system-icu
+ac_add_options --without-system-libvpx
+ac_add_options --without-system-png
+ac_add_options --without-system-jpeg
+ac_add_options --without-system-zlib
+ac_add_options --without-system-sqlite
+ac_add_options --without-system-harfbuzz
+ac_add_options --without-system-freetype2
+ac_add_options --without-system-pixman
+ac_add_options --without-system-cairo
+
+# Sem X11/GTK/Wayland: o backend e o k_gui_* (widget/sodos, M5).
+ac_add_options --without-x
+ac_add_options --disable-gtk
+ac_add_options --enable-default-toolkit=cairo-sodos
+
+ac_add_options --enable-optimize
+ac_add_options --disable-debug

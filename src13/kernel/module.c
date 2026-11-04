@@ -474,6 +474,16 @@ static void* pack_user_argv(int* argc_io, char** argv, uint8_t* stack, uint32_t 
   return base;
 }
 
+static uint8_t mod_tls_block[4096] __attribute__((aligned(16)));
+static uint64_t mod_fs_read(void) {
+  uint32_t lo, hi;
+  __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000100));
+  return ((uint64_t)hi << 32) | lo;
+}
+static void mod_fs_write(uint64_t v) {
+  __asm__ volatile("wrmsr" :: "c"(0xC0000100), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
+}
+
 int mod_exec(const char* path, int argc, char** argv) {
   int id;
   int rc;
@@ -537,7 +547,31 @@ int mod_exec(const char* path, int argc, char** argv) {
       return MOD_ERR_MEMORY;
     }
     kbd_break_take();   /* Ctrl+C antigo (do prompt) nao mata o novo */
-    rc = mod_call_entry(mods[id].base + mods[id].entry, nargc, av, av);
+    {
+      uint64_t prev_fs = mod_fs_read();
+      uint64_t canary = 0x9e3779b97f4a7c15ull;
+      int ti;
+      for (ti = 0; ti < (int)sizeof(mod_tls_block); ti++) mod_tls_block[ti] = 0;
+      for (ti = 0; ti < 8; ti++) mod_tls_block[0x28 + ti] = (uint8_t)(canary >> (ti * 8));
+      mod_fs_write((uint64_t)(uintptr_t)mod_tls_block);
+      serial_puts("[mod] exec ");
+    serial_puts(mods[id].name);
+    serial_puts(" base=");
+    serial_hex32((uint32_t)(uintptr_t)mods[id].base);
+    serial_puts(" entry=");
+    serial_hex32((uint32_t)mods[id].entry);
+    serial_puts(" size=");
+    serial_hex32((uint32_t)mods[id].size);
+    serial_puts(" stack=");
+    serial_hex32((uint32_t)(uintptr_t)stack);
+    serial_puts(" ssz=");
+    serial_hex32(ssz);
+    serial_puts(" av=");
+    serial_hex32((uint32_t)(uintptr_t)av);
+    serial_puts("\n");
+      rc = mod_call_entry(mods[id].base + mods[id].entry, nargc, av, av);
+      mod_fs_write(prev_fs);
+    }
   }
   dyn_release_pid(pid);
   kexp_release_pid(pid);

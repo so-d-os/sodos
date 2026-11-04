@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""rustc wrapper: mapeia x86_64-sodos para o target JSON no nightly."""
+import os
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+JSON = os.path.normpath(os.path.join(HERE, "..", "custom", "x86_64-sodos.json"))
+
+args = sys.argv[1:]
+out = []
+custom = False
+i = 0
+while i < len(args):
+    a = args[i]
+    if a == "--target" and i + 1 < len(args) and args[i + 1] == "x86_64-sodos":
+        out += ["--target", JSON]
+        custom = True
+        i += 2
+        continue
+    if a == "--target=x86_64-sodos":
+        out.append("--target=" + JSON)
+        custom = True
+        i += 1
+        continue
+    if a.endswith("x86_64-sodos.json"):
+        custom = True
+    out.append(a)
+    i += 1
+if custom and not any(a.startswith("-Zunstable-options") for a in out):
+    out.insert(0, "-Zunstable-options")
+crate = None
+for idx, a in enumerate(out):
+    if a == "--crate-name" and idx + 1 < len(out):
+        crate = out[idx + 1]
+        break
+no_std_crates = {"core", "alloc", "compiler_builtins", "panic_abort",
+                 "panic_unwind", "std_detect", "proc_macro", "unwind",
+                 "std", "rustc_std_workspace_core", "rustc_std_workspace_alloc",
+                 "cfg_if", "cfg-if"}
+if custom:
+    out += ["--cfg", 'getrandom_backend="custom"']
+sys.exit(subprocess.call([os.path.expanduser("~/.cargo/bin/rustup"), "run", "nightly", "rustc"] + out))

@@ -1,0 +1,11 @@
+#!/bin/sh
+# sodos-cc64 - gcc -m64 (SOX2/LP64) com os headers do SODOS.
+D=$(cd "$(dirname "$0")" && pwd)
+C=$D/../../c_compiler
+exec gcc -m64 -march=x86-64 -msse2 -mno-red-zone -mcmodel=large -mstackrealign \
+  -ffreestanding -fno-pic -fno-pie -fno-stack-protector \
+  -fno-asynchronous-unwind-tables -fno-jump-tables \
+  -fno-tree-loop-distribute-patterns -nostdinc \
+  -isystem "$D/include" -isystem "$C/include" \
+  -isystem /usr/lib/gcc/x86_64-linux-gnu/13/include \
+  -D__SODOS__ "$@"

@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""cargo wrapper: mapeia --target x86_64-sodos para o JSON e build-std."""
+import os
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+JSON = os.path.normpath(os.path.join(HERE, "..", "custom", "x86_64-sodos.json"))
+RUSTC = os.path.join(HERE, "rustc")
+
+args = sys.argv[1:]
+out = []
+i = 0
+while i < len(args):
+    a = args[i]
+    if a == "--target" and i + 1 < len(args) and args[i + 1] == "x86_64-sodos":
+        out += ["--target", JSON]
+        i += 2
+        continue
+    if a == "--target=x86_64-sodos":
+        out.append("--target=" + JSON)
+        i += 1
+        continue
+    out.append(a)
+    i += 1
+
+env = dict(os.environ)
+env["RUSTC"] = RUSTC
+# -Z globais precisam vir antes do subcomando (build/check/...).
+cmd = [os.path.expanduser("~/.cargo/bin/rustup"), "run", "nightly", "cargo",
+       "-Zjson-target-spec", "-Zbuild-std=std,panic_abort"] + out
+sys.exit(subprocess.call(cmd, env=env))

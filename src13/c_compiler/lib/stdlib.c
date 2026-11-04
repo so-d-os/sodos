@@ -8,6 +8,30 @@
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
+#include <stdint.h>
+
+#ifdef __x86_64__
+static inline void dbg_mark(unsigned char c) {
+  __asm__ volatile("outb %0, %1" :: "a"(c), "d"((unsigned short)0x3F8));
+}
+static void dbg_txt(const char* s) {
+  while (*s) dbg_mark((unsigned char)*s++);
+}
+static void dbg_u32(unsigned v) {
+  char b[9];
+  int i;
+  for (i = 0; i < 8; i++) {
+    int d = (int)((v >> (28 - 4 * i)) & 0xFu);
+    b[i] = (char)(d < 10 ? '0' + d : 'a' + d - 10);
+  }
+  b[8] = 0;
+  dbg_txt(b);
+}
+#else
+#define dbg_mark(c) ((void)0)
+#define dbg_txt(s) ((void)0)
+#define dbg_u32(v) ((void)0)
+#endif
 #include <stdio.h>
 #include <so.h>
 
@@ -27,6 +51,8 @@ struct hdr {
   unsigned short cls;
   unsigned short magic;
   unsigned size; /* bytes uteis */
+  unsigned pad;  /* deslocamento ate o bloco original do k_malloc */
+  unsigned pad2; /* fecha o cabecalho em 16 bytes (alinhamento do ponteiro) */
 };
 
 struct heap_state {
@@ -40,10 +66,11 @@ struct heap_state {
 
 static struct heap_state hs;
 static int err_value;
+static unsigned nchunks = 1; /* 1 = primeira alocacao ainda nao feita */
 
 int* __so_errno(void) { return &err_value; }
 
-static unsigned class_size(int c) { return 16u << c; }
+#define class_size(c) (16u << (c))
 
 void* malloc(size_t n) {
   struct hdr* h;
@@ -51,14 +78,31 @@ void* malloc(size_t n) {
   if (n == 0) n = 1;
   while (c < NCLASS && class_size(c) < n) c++;
   if (c == NCLASS) {
-    h = (struct hdr*)k_malloc(n + sizeof(struct hdr));
-    if (!h) {
+    char* raw = (char*)k_malloc(n + 2 * sizeof(struct hdr) + 16u);
+    if (!raw) {
+      dbg_txt("!MBIG n=");
+      dbg_u32((unsigned)n);
+      dbg_txt(" ch=");
+      dbg_u32(nchunks);
+      dbg_txt("\n");
       err_value = ENOMEM;
       return NULL;
+    }
+    /* k_malloc devolve 4-alinhado: alinhamos o bloco a 16 e guardamos o
+     * deslocamento para o free achar o bloco original. */
+    h = (struct hdr*)(((uintptr_t)raw + sizeof(struct hdr) + 15u) &
+                      ~(uintptr_t)15u);
+    if (n >= 0x2000u) {
+      dbg_txt("!AB n=");
+      dbg_u32((unsigned)n);
+      dbg_txt(" p=");
+      dbg_u32((unsigned)(uintptr_t)(h + 1));
+      dbg_txt("\n");
     }
     h->cls = BIG_CLASS;
     h->magic = HDR_MAGIC;
     h->size = n;
+    h->pad = (unsigned)((char*)h - raw);
     return h + 1;
   }
   if (hs.free_list[c]) {
@@ -71,12 +115,17 @@ void* malloc(size_t n) {
   {
     unsigned need = class_size(c) + sizeof(struct hdr);
     if (hs.left < need) {
-      hs.cur = (char*)k_malloc(CHUNK);
-      if (!hs.cur) {
+      char* p = (char*)k_malloc(CHUNK + 16u);
+      if (!p) {
+        dbg_txt("!MCHK ch=");
+        dbg_u32(nchunks);
+        dbg_txt("\n");
         hs.left = 0;
         err_value = ENOMEM;
         return NULL;
       }
+      nchunks++;
+      hs.cur = (char*)(((uintptr_t)p + 15u) & ~(uintptr_t)15u);
       hs.left = CHUNK;
     }
     h = (struct hdr*)hs.cur;
@@ -118,7 +167,14 @@ void free(void* p) {
   if (h->magic != HDR_MAGIC) return; /* ponteiro invalido ou free duplo */
   h->magic = 0;
   if (h->cls == BIG_CLASS) {
-    k_free(h);
+    if (h->size >= 0x2000u) {
+      dbg_txt("!FB p=");
+      dbg_u32((unsigned)(uintptr_t)p);
+      dbg_txt(" n=");
+      dbg_u32(h->size);
+      dbg_txt("\n");
+    }
+    k_free((char*)h - h->pad);
     return;
   }
   *(void**)p = hs.free_list[h->cls];
@@ -334,3 +390,7 @@ void* bsearch(const void* key, const void* b, size_t n, size_t sz,
   }
   return NULL;
 }
+
+void* memalign(size_t align, size_t n) { return aligned_alloc(align, n); }
+
+int posix_memalign(void** out, size_t align, size_t n) { void* p = aligned_alloc(align, n); if (!p) return 12; *out = p; return 0; }

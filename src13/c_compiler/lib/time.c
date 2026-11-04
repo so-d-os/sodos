@@ -1,6 +1,7 @@
 /* time.c - time.h sobre o RTC (k_date + k_time, UTC) e o k_ms.
  * Sem tabela de fusos: localtime e igual a gmtime. */
 #include <time.h>
+#include <locale.h>
 #include <sys/time.h>
 #include <string.h>
 #include <stdio.h>
@@ -8,6 +9,7 @@
 
 int daylight = 0;
 long timezone = 0;
+char* tzname[2] = {(char*)"UTC", (char*)"UTC"};
 
 void tzset(void) {}
 
@@ -300,3 +302,7 @@ int nanosleep(const struct timespec* req, struct timespec* rem) {
   }
   return 0;
 }
+
+size_t strftime_l(char* s, size_t max, const char* fmt, const struct tm* tm, locale_t loc) { (void)loc; return strftime(s, max, fmt, tm); }
+int strcoll_l(const char* a, const char* b, locale_t loc) { (void)loc; return strcmp(a,b); }
+size_t strxfrm_l(char* d, const char* s, size_t n, locale_t loc) { (void)loc; size_t l = strlen(s); if (n) { size_t c = l < n-1 ? l : n-1; memcpy(d,s,c); d[c]=0; } return l; }

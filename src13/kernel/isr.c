@@ -120,6 +120,16 @@ void isr_dispatch(isr_frame_t* f) {
     serial_puts(" cr2=0x");
     serial_hex32((uint32_t)(cr2 >> 32));
     serial_hex32((uint32_t)cr2);
+    serial_puts("\n[exc] stack:");
+    {
+      uint64_t* sp = (uint64_t*)(uintptr_t)f->esp_dummy;
+      int si;
+      for (si = 0; si < 12; si++) {
+        serial_puts(" ");
+        serial_hex32((uint32_t)(sp[si] >> 32));
+        serial_hex32((uint32_t)sp[si]);
+      }
+    }
     serial_puts("\n");
   }
   /* Se estiver em modo grafico, volta a modo texto para panic ser visivel */

@@ -7,8 +7,13 @@ typedef short int16_t;
 typedef unsigned short uint16_t;
 typedef int int32_t;
 typedef unsigned int uint32_t;
+#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+typedef long int64_t;
+typedef unsigned long uint64_t;
+#else
 typedef long long int64_t;
 typedef unsigned long long uint64_t;
+#endif
 #if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
 typedef long intptr_t;
 typedef unsigned long uintptr_t;
@@ -50,15 +55,15 @@ typedef uint64_t uint_fast64_t;
 #define INT32_MIN (-2147483647 - 1)
 #define INT32_MAX 2147483647
 #define UINT32_MAX 4294967295U
-#define INT64_MIN (-9223372036854775807LL - 1)
-#define INT64_MAX 9223372036854775807LL
-#define UINT64_MAX 18446744073709551615ULL
-#define SIZE_MAX 4294967295U
-#define PTRDIFF_MIN (-2147483647 - 1)
-#define PTRDIFF_MAX 2147483647
-#define INTPTR_MIN (-2147483647 - 1)
-#define INTPTR_MAX 2147483647
-#define UINTPTR_MAX 4294967295U
+#define INT64_MIN (-INT64_C(9223372036854775807) - 1)
+#define INT64_MAX INT64_C(9223372036854775807)
+#define UINT64_MAX UINT64_C(18446744073709551615)
+#define SIZE_MAX ((size_t)-1)
+#define PTRDIFF_MIN (-__PTRDIFF_MAX__ - 1)
+#define PTRDIFF_MAX __PTRDIFF_MAX__
+#define INTPTR_MIN (-__INTPTR_MAX__ - 1)
+#define INTPTR_MAX __INTPTR_MAX__
+#define UINTPTR_MAX __UINTPTR_MAX__
 #define INTMAX_MIN INT64_MIN
 #define INTMAX_MAX INT64_MAX
 #define UINTMAX_MAX UINT64_MAX
@@ -69,9 +74,43 @@ typedef uint64_t uint_fast64_t;
 #define UINT16_C(c) c
 #define INT32_C(c) c
 #define UINT32_C(c) c##U
+#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+#define INT64_C(c) c##L
+#define UINT64_C(c) c##UL
+#define INTMAX_C(c) c##L
+#define UINTMAX_C(c) c##UL
+#else
 #define INT64_C(c) c##LL
 #define UINT64_C(c) c##ULL
 #define INTMAX_C(c) c##LL
 #define UINTMAX_C(c) c##ULL
+#endif
 
+#endif
+
+#ifndef INT_FAST8_MIN
+#define INT_FAST8_MIN INT8_MIN
+#define INT_FAST8_MAX INT8_MAX
+#define UINT_FAST8_MAX UINT8_MAX
+#define INT_FAST16_MIN INT16_MIN
+#define INT_FAST16_MAX INT16_MAX
+#define UINT_FAST16_MAX UINT16_MAX
+#define INT_FAST32_MIN INT32_MIN
+#define INT_FAST32_MAX INT32_MAX
+#define UINT_FAST32_MAX UINT32_MAX
+#define INT_FAST64_MIN INT64_MIN
+#define INT_FAST64_MAX INT64_MAX
+#define UINT_FAST64_MAX UINT64_MAX
+#define INT_LEAST8_MIN INT8_MIN
+#define INT_LEAST8_MAX INT8_MAX
+#define UINT_LEAST8_MAX UINT8_MAX
+#define INT_LEAST16_MIN INT16_MIN
+#define INT_LEAST16_MAX INT16_MAX
+#define UINT_LEAST16_MAX UINT16_MAX
+#define INT_LEAST32_MIN INT32_MIN
+#define INT_LEAST32_MAX INT32_MAX
+#define UINT_LEAST32_MAX UINT32_MAX
+#define INT_LEAST64_MIN INT64_MIN
+#define INT_LEAST64_MAX INT64_MAX
+#define UINT_LEAST64_MAX UINT64_MAX
 #endif

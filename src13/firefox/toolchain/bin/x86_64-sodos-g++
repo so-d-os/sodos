@@ -1,0 +1,4 @@
+#!/bin/sh
+# x86_64-sodos-g++ - driver C++ do alvo SODOS (libc++ + link SOX).
+D=$(cd "$(dirname "$0")" && pwd)
+SODOS_CC_KIND=cxx exec python3 "$D/../sodos-gcc.py" "$@"

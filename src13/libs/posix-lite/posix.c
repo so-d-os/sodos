@@ -26,6 +26,7 @@ struct fd_ent {
   int pos;
   int size;
   int dirty;
+  int rnd; /* /dev/urandom: cada read devolve bytes pseudo-aleatorios */
   char path[PATH_MAX];
   char* data;
 };
@@ -66,6 +67,50 @@ static void join_cwd(const char* path, char* out, int max) {
   while (path[i] && j < max - 1) out[j++] = path[i++];
   out[j] = 0;
   norm_sep(out);
+}
+
+/* "/dev/urandom" e "/dev/random": nao existem no SODOS; criamos um fd
+ * sintetico que devolve bytes pseudo-aleatorios em cada read. */
+static int is_dev_random(const char* full) {
+  const char* p = full;
+  char low[PATH_MAX];
+  int i;
+  if (!p) return 0;
+  if (p[0] && p[1] == ':') p += 2;
+  while (*p == '\\' || *p == '/') p++;
+  for (i = 0; p[i] && i < PATH_MAX - 1; i++) {
+    char c = p[i];
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    if (c == '/') c = '\\';
+    low[i] = c;
+  }
+  low[i] = 0;
+  return strcmp(low, "dev\\urandom") == 0 || strcmp(low, "dev\\random") == 0;
+}
+
+static unsigned long long rng_state;
+
+static unsigned long long rng_next(void) {
+  if (!rng_state) {
+    rng_state = 0x9E3779B97F4A7C15ull ^ (unsigned long long)k_ms();
+    rng_state ^= (unsigned long long)(unsigned int)k_time() * 0x2545F4914F6CDD1Dull;
+    rng_state ^= (unsigned long long)(unsigned int)(size_t)&rng_state << 17;
+    if (!rng_state) rng_state = 0x123456789ABCDEFull;
+  }
+  rng_state ^= rng_state >> 12;
+  rng_state ^= rng_state << 25;
+  rng_state ^= rng_state >> 27;
+  return rng_state * 0x2545F4914F6CDD1Dull;
+}
+
+static void rng_fill(void* buf, size_t n) {
+  unsigned char* p = (unsigned char*)buf;
+  size_t i = 0;
+  while (i < n) {
+    unsigned long long v = rng_next();
+    int k;
+    for (k = 0; k < 8 && i < n; k++, i++) p[i] = (unsigned char)(v >> (8 * k));
+  }
 }
 
 static int path_is_dir(const char* path) {
@@ -261,6 +306,28 @@ __export int open(const char* path, int flags, ...) {
     (void)mode;
   }
   join_cwd(path, full, PATH_MAX);
+  if (is_dev_random(full)) {
+    fd = fd_alloc();
+    if (fd < 0) {
+      errno = ENOMEM;
+      return -1;
+    }
+    e = &fds[fd];
+    memset(e, 0, sizeof(*e));
+    e->used = 1;
+    e->flags = flags;
+    e->rnd = 1;
+    e->data = (char*)malloc(1);
+    if (!e->data) {
+      e->used = 0;
+      errno = ENOMEM;
+      return -1;
+    }
+    e->data[0] = 0;
+    strncpy(e->path, full, PATH_MAX - 1);
+    errno = 0;
+    return fd;
+  }
   if (path_is_dir(full)) {
     errno = EISDIR;
     return -1;
@@ -375,6 +442,11 @@ __export ssize_t read(int fd, void* buf, size_t n) {
     return -1;
   }
   e = &fds[fd];
+  if (e->rnd) {
+    rng_fill(buf, n);
+    e->pos += (int)n;
+    return (ssize_t)n;
+  }
   if (e->pos >= e->size) return 0;
   left = (size_t)(e->size - e->pos);
   if (n > left) n = left;
@@ -629,3 +701,18 @@ __export int closedir(DIR* dp) {
   d->used = 0;
   return 0;
 }
+
+/* getrandom(2): o SODOS nao tem entropia do kernel; usamos o PRNG do shim. */
+__export ssize_t getrandom(void* buf, size_t n, unsigned int flags) {
+  (void)flags;
+  if (!buf && n) {
+    errno = EINVAL;
+    return -1;
+  }
+  rng_fill(buf, n);
+  return (ssize_t)n;
+}
+
+__export void arc4random_buf(void* buf, size_t n) { rng_fill(buf, n); }
+
+__export unsigned int arc4random(void) { return (unsigned int)(rng_next() >> 16); }

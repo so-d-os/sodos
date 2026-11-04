@@ -54,6 +54,9 @@ int memcmp(const void* x, const void* y, size_t n) {
   return 0;
 }
 
+/* BSD; o core/compiler_builtins do Rust usa bcmp. */
+int bcmp(const void* a, const void* b, size_t n) { return memcmp(a, b, n); }
+
 void* memchr(const void* s, int c, size_t n) {
   const unsigned char* p = (const unsigned char*)s;
   size_t i;
@@ -245,4 +248,15 @@ int strerror_r(int e, char* buf, size_t n) {
   memcpy(buf, s, l);
   buf[l] = 0;
   return 0;
+}
+
+char* strtok_r(char* s, const char* delim, char** save) {
+  char* p = s ? s : *save;
+  if (!p) return NULL;
+  while (*p && strchr(delim, *p)) p++;
+  if (!*p) { *save = NULL; return NULL; }
+  char* start = p;
+  while (*p && !strchr(delim, *p)) p++;
+  if (*p) { *p = 0; *save = p + 1; } else *save = NULL;
+  return start;
 }

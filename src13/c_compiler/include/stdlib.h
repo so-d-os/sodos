@@ -15,6 +15,8 @@ void* malloc(size_t n);
 void* calloc(size_t n, size_t sz);
 void* realloc(void* p, size_t n);
 void* aligned_alloc(size_t align, size_t n);
+void* memalign(size_t align, size_t n);
+int posix_memalign(void** out, size_t align, size_t n);
 void free(void* p);
 
 void exit(int code);
@@ -24,6 +26,10 @@ int atexit(void (*fn)(void));
 void quick_exit(int code);
 int at_quick_exit(void (*fn)(void));
 int mblen(const char* s, size_t n);
+int mbtowc(wchar_t* pwc, const char* s, size_t n);
+int wctomb(char* s, wchar_t wc);
+size_t mbstowcs(wchar_t* dst, const char* src, size_t n);
+size_t wcstombs(char* dst, const wchar_t* src, size_t n);
 int system(const char* cmd);
 char* getenv(const char* name);
 

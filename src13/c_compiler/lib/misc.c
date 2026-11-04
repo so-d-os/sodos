@@ -6,6 +6,9 @@
 #include <signal.h>
 #include <inttypes.h>
 #include <errno.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <unistd.h>
 #include <so.h>
 
 /* ---------- runtime C++ ----------
@@ -240,3 +243,152 @@ char* realpath(const char* path, char* out) {
   if (out) strcpy(out, res);
   return out;
 }
+
+/* O SODOS ainda nao tem links simbolicos; a ICU so usa para o fuso. */
+ssize_t readlink(const char* path, char* buf, size_t n) {
+  (void)path;
+  (void)buf;
+  (void)n;
+  errno = ENOENT;
+  return -1;
+}
+
+/* ---------- locale "C" / extensoes POSIX usadas pela libc++ ---------- */
+locale_t newlocale(int mask, const char* locale, locale_t base) {
+  (void)mask; (void)locale; (void)base;
+  return (locale_t)1;
+}
+locale_t duplocale(locale_t loc) { return loc; }
+void freelocale(locale_t loc) { (void)loc; }
+locale_t uselocale(locale_t loc) { (void)loc; return (locale_t)1; }
+long long strtoll_l(const char* s, char** end, int base, locale_t loc) {
+  (void)loc; return strtoll(s, end, base);
+}
+unsigned long long strtoull_l(const char* s, char** end, int base, locale_t loc) {
+  (void)loc; return strtoull(s, end, base);
+}
+#if __SIZEOF_POINTER__ == 8
+double strtod_l(const char* s, char** end, locale_t loc) {
+  (void)loc; return strtod(s, end);
+}
+float strtof_l(const char* s, char** end, locale_t loc) {
+  (void)loc; return strtof(s, end);
+}
+long double strtold_l(const char* s, char** end, locale_t loc) {
+  (void)loc; return strtold(s, end);
+}
+#endif
+
+int vasprintf(char** out, const char* fmt, va_list ap) {
+  va_list cp;
+  int n;
+  char* p;
+  va_copy(cp, ap);
+  n = vsnprintf(NULL, 0, fmt, cp);
+  va_end(cp);
+  if (n < 0) return -1;
+  p = (char*)malloc((size_t)n + 1);
+  if (!p) return -1;
+  va_copy(cp, ap);
+  vsnprintf(p, (size_t)n + 1, fmt, cp);
+  va_end(cp);
+  *out = p;
+  return n;
+}
+
+int execvp(const char* file, char* const argv[]) { (void)file; (void)argv; errno = ENOENT; return -1; }
+int kill(int pid, int sig) { (void)pid; (void)sig; errno = EINVAL; return -1; }
+imaxdiv_t imaxdiv(intmax_t n, intmax_t d) { imaxdiv_t r; r.quot = n / d; r.rem = n % d; return r; }
+intmax_t wcstoimax(const wchar_t* s, wchar_t** e, int b) { (void)s; (void)e; (void)b; return 0; }
+uintmax_t wcstoumax(const wchar_t* s, wchar_t** e, int b) { (void)s; (void)e; (void)b; return 0; }
+
+unsigned long getauxval(unsigned long type) { (void)type; return 0; }
+
+int mbtowc(wchar_t* pwc, const char* s, size_t n) {
+  if (!s) return 0;
+  if (n == 0) return -1;
+  if (pwc) *pwc = (unsigned char)s[0];
+  return s[0] ? 1 : 0;
+}
+int wctomb(char* s, wchar_t wc) {
+  if (!s) return 0;
+  s[0] = (char)wc;
+  return 1;
+}
+size_t mbstowcs(wchar_t* dst, const char* src, size_t n) {
+  size_t i = 0;
+  while (i < n && src[i]) { if (dst) dst[i] = (unsigned char)src[i]; i++; }
+  if (i < n && dst) dst[i] = 0;
+  return i;
+}
+size_t wcstombs(char* dst, const wchar_t* src, size_t n) {
+  size_t i = 0;
+  while (i < n && src[i]) { if (dst) dst[i] = (char)src[i]; i++; }
+  if (i < n && dst) dst[i] = 0;
+  return i;
+}
+
+long syscall(long number, ...) { (void)number; errno = ENOSYS; return -1; }
+
+struct termios;
+int tcgetattr(int fd, struct termios* t) { (void)fd; (void)t; return -1; }
+int tcsetattr(int fd, int act, const struct termios* t) { (void)fd; (void)act; (void)t; return -1; }
+
+char* basename(char* path) {
+  char* p = path; char* r = path;
+  if (!path || !*path) return (char*)".";
+  for (p = path; *p; p++) if (*p == '/') r = p + 1;
+  return r;
+}
+char* dirname(char* path) {
+  static char dot[] = ".";
+  char* p;
+  if (!path || !*path) return dot;
+  p = path;
+  for (char* q = path; *q; q++) if (*q == '/') p = q;
+  if (p == path) return (char *)"/";
+  *p = 0;
+  return path;
+}
+
+unsigned long __stack_chk_guard = 0x00000aff;
+void __stack_chk_fail(void) { abort(); }
+
+int getpid(void) { return 1; }
+int getppid(void) { return 1; }
+int gettid(void) { return 1; }
+
+int fork(void) { errno = ENOSYS; return -1; }
+
+int wait(int* status) { (void)status; errno = ECHILD; return -1; }
+int waitpid(int pid, int* status, int options) { (void)pid; (void)status; (void)options; errno = ECHILD; return -1; }
+
+int pipe(int fds[2]) { (void)fds; errno = ENOSYS; return -1; }
+int dup(int fd) { (void)fd; errno = ENOSYS; return -1; }
+int dup2(int a, int b) { (void)a; (void)b; errno = ENOSYS; return -1; }
+int fcntl(int fd, int cmd, ...) { (void)fd; (void)cmd; errno = ENOSYS; return -1; }
+
+int execv(const char* f, char* const a[]) { (void)f; (void)a; errno = ENOENT; return -1; }
+int execve(const char* f, char* const a[], char* const e[]) { (void)f; (void)a; (void)e; errno = ENOENT; return -1; }
+
+char* nl_langinfo(int item) { (void)item; return (char*)""; }
+
+void* catopen(const char* n, int f) { (void)n; (void)f; return (void*)-1; }
+char* catgets(void* c, int s, int m, const char* d) { (void)c; (void)s; (void)m; return (char*)d; }
+int catclose(void* c) { (void)c; return 0; }
+
+int sigemptyset(sigset_t* set) { if (set) memset(set, 0, sizeof(*set)); return 0; }
+int sigfillset(sigset_t* set) { if (set) memset(set, 0xff, sizeof(*set)); return 0; }
+int sigaddset(sigset_t* set, int sig) { if (set && sig > 0 && sig < 32) set->val[sig/32] |= 1u << (sig%32); return 0; }
+int sigdelset(sigset_t* set, int sig) { if (set && sig > 0 && sig < 32) set->val[sig/32] &= ~(1u << (sig%32)); return 0; }
+int sigismember(const sigset_t* set, int sig) { return set && sig > 0 && sig < 32 && (set->val[sig/32] & (1u << (sig%32))); }
+int sigaction(int sig, const struct sigaction* act, struct sigaction* old) { (void)sig; (void)act; (void)old; return 0; }
+int sigprocmask(int how, const sigset_t* set, sigset_t* old) { (void)how; (void)set; (void)old; return 0; }
+int sigwait(const sigset_t* set, int* sig) { (void)set; if (sig) *sig = 0; return 0; }
+
+int madvise(void* a, size_t l, int adv) { (void)a; (void)l; (void)adv; return 0; }
+
+int __popcountdi2(unsigned long long x) { int n = 0; while (x) { n += (int)(x & 1); x >>= 1; } return n; }
+int __clzdi2(unsigned long long x) { int n = 64; while (x) { n--; x >>= 1; } return n; }
+int __ctzdi2(unsigned long long x) { int n = 0; if (!x) return 64; while (!(x & 1)) { n++; x >>= 1; } return n; }
+int __ffsdi2(unsigned long long x) { return x ? __ctzdi2(x) + 1 : 0; }

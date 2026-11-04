@@ -1,0 +1,26 @@
+#!/bin/sh
+# sodos-cxx - g++ -mx32 freestanding para o SODOS (M2a).
+#
+# Usa o g++ do PATH; se nao existir, o g++ local de vendor/gxx (baixado por
+# sodos/scripts/fetch-gxx.sh). Sem libstdc++: o teste usa apenas o runtime
+# minimo de sodos/cxx.
+D=$(cd "$(dirname "$0")" && pwd)
+C=$D/../../c_compiler
+N=$D/../vendor/gxx
+
+if command -v g++ >/dev/null 2>&1; then
+  GXX=g++
+  B=
+else
+  GXX=$N/usr/bin/x86_64-linux-gnu-g++-13
+  B=-B$N/usr/libexec/gcc/x86_64-linux-gnu/13/
+  if [ ! -x "$GXX" ]; then
+    echo "sodos-cxx: g++ nao encontrado; rode sodos/scripts/fetch-gxx.sh" >&2
+    exit 1
+  fi
+fi
+
+exec "$GXX" $B -mx32 -march=x86-64 -msse2 -mno-red-zone -ffreestanding -fno-pic -fno-pie \
+  -fno-stack-protector -fno-asynchronous-unwind-tables -fno-jump-tables \
+  -fno-tree-loop-distribute-patterns -nostdinc -fno-exceptions -fno-rtti \
+  -isystem "$D/include" -isystem "$C/include" -D__SODOS__ "$@"

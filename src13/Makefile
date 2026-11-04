@@ -650,7 +650,7 @@ grub: kernel_multiboot.elf
 # Firefox (firefox/): camada de plataforma e NSPR do port (SODOS.DLL,
 # FBOOT.EXE e PRTEST.EXE). Precisa de gcc com -mx32 e do c_compiler.
 # Nao entra no "all".
-.PHONY: firefox firefox-test firefox-nspr firefox-nspr-test firefox-cxx firefox-cxx-test firefox-libcxx firefox-libcxx-test firefox-toolchain firefox-disk
+.PHONY: firefox firefox-test firefox-nspr firefox-nspr-test firefox-nspr64 firefox-cxx firefox-cxx-test firefox-libcxx firefox-libcxx-test firefox-libcxx64 firefox-rust64 firefox-toolchain firefox-disk
 firefox:
 	$(MAKE) -C firefox all
 
@@ -662,6 +662,18 @@ firefox-nspr:
 
 firefox-nspr-test:
 	$(MAKE) -C firefox nspr-test
+
+firefox-nspr64:
+	$(MAKE) -C firefox nspr64
+
+firefox-libcxx64:
+	$(MAKE) -C firefox libcxx64
+
+firefox-rust64:
+	$(MAKE) -C firefox rust64
+
+firefox-rust64-custom:
+	$(MAKE) -C firefox rust64-custom
 
 firefox-cxx:
 	$(MAKE) -C firefox cxx

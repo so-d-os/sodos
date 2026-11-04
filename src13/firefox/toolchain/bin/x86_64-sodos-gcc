@@ -1,0 +1,4 @@
+#!/bin/sh
+# x86_64-sodos-gcc - driver C do alvo SODOS (compila x32, liga SOX).
+D=$(cd "$(dirname "$0")" && pwd)
+exec python3 "$D/../sodos-gcc.py" "$@"

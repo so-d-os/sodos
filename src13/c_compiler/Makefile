@@ -214,12 +214,12 @@ $(O)/HELLO64.EXE: $(CRT64) $(B)/hello64.o $(LINK64) $(O)/KERNEL.IMP
 hello64: $(O)/HELLO64.EXE
 
 # LIBCX64 estatica: mesma libc, compilada -m64, ligada no HELLO64C.
-LIBC64_SRC = string ctype stdlib stdio printf fpconv math time misc
+LIBC64_SRC = string ctype stdlib stdio printf scanf fpconv math time misc wchar setjmp64 ctors64
 LIBC64_OBJ = $(patsubst %,$(B)/x64_%.o,$(LIBC64_SRC))
 
 $(B)/x64_%.o: lib/%.c | $(B)
 	gcc -m64 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -mno-red-zone \
-	  -mcmodel=large -fno-asynchronous-unwind-tables -nostdinc -isystem include -c $< -o $@
+	  -mcmodel=large -mstackrealign -fno-asynchronous-unwind-tables -nostdinc -isystem include -c $< -o $@
 
 $(B)/x_crt0_64libc.o: lib/crt0.c | $(B)
 	gcc -m64 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -mno-red-zone \

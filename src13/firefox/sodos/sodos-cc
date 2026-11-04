@@ -1,0 +1,10 @@
+#!/bin/sh
+# sodos-cc - gcc -mx32 para a camada de plataforma do Firefox.
+# Mesma ABI do SODOS (ponteiros 32 bits, long mode) usada pelo NetSurf.
+D=$(cd "$(dirname "$0")" && pwd)
+C=$D/../../c_compiler
+exec gcc -mx32 -march=x86-64 -msse2 -mno-red-zone -ffreestanding -fno-pic -fno-pie \
+  -fno-stack-protector -fno-asynchronous-unwind-tables -fno-jump-tables \
+  -fno-tree-loop-distribute-patterns -nostdinc \
+  -isystem "$D/include" -isystem "$C/include" \
+  -D__SODOS__ "$@"

@@ -13,11 +13,14 @@ extern "C" {
 
 ssize_t read(int fd, void* buf, size_t n);
 ssize_t write(int fd, const void* buf, size_t n);
+ssize_t readlink(const char* path, char* buf, size_t n);
+long syscall(long number, ...);
 off_t lseek(int fd, off_t off, int whence);
 int close(int fd);
 int unlink(const char* path);
 int rmdir(const char* path);
 int chdir(const char* path);
+int execvp(const char* file, char* const argv[]);
 char* getcwd(char* buf, size_t size);
 int isatty(int fd);
 int access(const char* path, int mode);

@@ -54,8 +54,24 @@ FILE* __so_stdio(int which) {
   return &std_files[which];
 }
 
+/* Espelho na serial (COM1) da saida do programa: ajuda a depurar portes que
+ * ainda nao tem console proprio. */
+#ifdef __x86_64__
+static void ser_write(const char* s, int n) {
+  int i;
+  if (!s) return;
+  for (i = 0; i < n; i++)
+    __asm__ volatile("outb %0, %1" :: "a"((unsigned char)s[i]), "d"((unsigned short)0x3F8));
+}
+#else
+static void ser_write(const char* s, int n) { (void)s; (void)n; }
+#endif
+
 void __so_stdio_flush_out(void) {
-  if (olen > 0) k_write(obuf, olen);
+  if (olen > 0) {
+    ser_write(obuf, olen);
+    k_write(obuf, olen);
+  }
   olen = 0;
 }
 
@@ -321,6 +337,7 @@ size_t fwrite(const void* buf, size_t sz, size_t n, FILE* f) {
   }
   if (f->kind == K_STDERR) {
     __so_stdio_flush_out();
+    ser_write(s, (int)total);
     k_write(s, (int)total);
     return n;
   }
@@ -491,3 +508,9 @@ int fsetpos(FILE* f, const fpos_t* pos) {
   if (!pos) return -1;
   return fseek(f, (long)*pos, SEEK_SET);
 }
+
+FILE* fdopen(int fd, const char* mode) { (void)fd; (void)mode; errno = EINVAL; return NULL; }
+int fseeko(FILE* f, off_t off, int whence) { return fseek(f, (long)off, whence); }
+off_t ftello(FILE* f) { return (off_t)ftell(f); }
+
+int fileno(FILE* f) { (void)f; return -1; }

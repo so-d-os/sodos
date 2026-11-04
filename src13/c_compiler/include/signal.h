@@ -21,6 +21,7 @@ typedef void (*sighandler_t)(int);
 #define SIGILL 4
 #define SIGTRAP 5
 #define SIGABRT 6
+#define SIGBUS 7
 #define SIGFPE 8
 #define SIGKILL 9
 #define SIGUSR1 10
@@ -52,11 +53,21 @@ typedef struct {
   unsigned int val[32];
 } sigset_t;
 
+typedef struct {
+  int si_signo;
+  int si_errno;
+  int si_code;
+  int __pad0;
+  void* si_addr;
+  long __pad[14];
+} siginfo_t;
+
 struct sigaction {
   sighandler_t sa_handler;
   sigset_t sa_mask;
   int sa_flags;
   void (*sa_restorer)(void);
+  void (*sa_sigaction)(int, siginfo_t*, void*);
 };
 
 #define SA_RESTART 0x10000000
@@ -64,9 +75,12 @@ struct sigaction {
 #define SA_NOCLDSTOP 1
 #define SA_NOCLDWAIT 2
 #define SA_SIGINFO 4
+#define SA_ONSTACK 0x08000000
+#define SA_NODEFER 0x40000000
 
 sighandler_t signal(int sig, sighandler_t handler);
 int raise(int sig);
+int kill(int pid, int sig);
 
 int sigemptyset(sigset_t* set);
 int sigfillset(sigset_t* set);
@@ -81,4 +95,5 @@ int sigwait(const sigset_t* set, int* sig);
 #ifdef __cplusplus
 }
 #endif
+#include <ucontext.h>
 #endif

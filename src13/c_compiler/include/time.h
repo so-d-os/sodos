@@ -52,6 +52,7 @@ int nanosleep(const struct timespec* req, struct timespec* rem);
 void tzset(void);
 extern int daylight;
 extern long timezone;
+extern char* tzname[2];
 
 
 #ifdef __cplusplus

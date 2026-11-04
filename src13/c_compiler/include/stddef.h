@@ -13,7 +13,11 @@ typedef int ptrdiff_t;
 typedef int ssize_t;
 #endif
 #ifndef __cplusplus
+#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+typedef int wchar_t;
+#else
 typedef unsigned short wchar_t;
+#endif
 #endif
 
 /* C11: tipo com o maior alinhamento exigido por qualquer objeto. */
@@ -23,7 +27,11 @@ typedef struct {
 } max_align_t;
 
 #ifndef NULL
+#ifdef __cplusplus
+#define NULL 0
+#else
 #define NULL ((void*)0)
+#endif
 #endif
 
 #ifdef __GNUC__

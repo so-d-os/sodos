@@ -1,0 +1,47 @@
+--- a/build/autoconf/config.sub
++++ b/build/autoconf/config.sub
+@@ -2106,6 +2106,7 @@
+ 	| serenity* \
+ 	| sim* \
+ 	| skyos* \
++	| sodos* \
+ 	| solaris* \
+ 	| solidbsd* \
+ 	| sortix* \
+--- a/build/moz.configure/init.configure
++++ b/build/moz.configure/init.configure
+@@ -529,6 +529,8 @@
+         canonical_os = canonical_kernel = "SunOS"
+     elif os.startswith("wasi") and allow_wasi:
+         canonical_os = canonical_kernel = "WASI"
++    elif os.startswith("sodos"):
++        canonical_os = canonical_kernel = "SODOS"
+     else:
+         raise ValueError("Unknown OS: %s" % os)
+ 
+--- a/python/mozbuild/mozbuild/configure/constants.py
++++ b/python/mozbuild/mozbuild/configure/constants.py
+@@ -43,6 +43,7 @@
+         "SunOS",
+         "WINNT",
+         "WASI",
++        "SODOS",
+     )
+ 
+ 
+@@ -58,6 +59,7 @@
+         "SunOS",
+         "WINNT",
+         "WASI",
++        "SODOS",
+     )
+ 
+ 
+@@ -147,6 +149,7 @@
+     "SunOS": "__sun__",
+     "WINNT": "_WIN32 || __CYGWIN__",
+     "WASI": "__wasi__",
++    "SODOS": "__SODOS__",
+ }
+ 
+ assert sorted(kernel_preprocessor_checks.keys()) == sorted(Kernel.POSSIBLE_VALUES)

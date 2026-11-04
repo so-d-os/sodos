@@ -1,0 +1,26 @@
+#!/bin/sh
+# sodos-cxxlib64 - g++ -m64 com libc++ e headers C do SODOS (LP64).
+# Sem threads/exceções; RTTI habilitado para as vtables da libc++.
+D=$(cd "$(dirname "$0")" && pwd)
+C=$D/../../c_compiler
+L=$D/../vendor/libcxx-18.1.8/include
+N=$D/../vendor/gxx
+
+if command -v g++ >/dev/null 2>&1; then
+  GXX=g++
+  B=
+else
+  GXX=$N/usr/bin/x86_64-linux-gnu-g++-13
+  B=-B$N/usr/libexec/gcc/x86_64-linux-gnu/13/
+  if [ ! -x "$GXX" ]; then
+    echo "sodos-cxxlib64: g++ nao encontrado; rode sodos/scripts/fetch-gxx.sh" >&2
+    exit 1
+  fi
+fi
+
+exec "$GXX" $B -m64 -mcmodel=large -mno-red-zone -ffreestanding -fno-pic -fno-pie \
+  -fno-stack-protector -fno-asynchronous-unwind-tables -fno-jump-tables -fcf-protection=none \
+  -fno-tree-loop-distribute-patterns -nostdinc -nostdinc++ -fno-exceptions \
+  -isystem "$D/libcxx64/include" -isystem "$L" -isystem "$D/libcxx/include" \
+  -isystem "$D/include" -isystem "$C/include" -isystem /usr/lib/gcc/x86_64-linux-gnu/13/include -D__SODOS__ \
+  -D_LIBCPP_PSTL_CPU_BACKEND_SERIAL "$@"
