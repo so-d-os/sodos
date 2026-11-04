@@ -11,3 +11,9 @@ src13/fonts/FontesAvancadas/obj/
 .tmp_*
 src13/.tmp_*
 src13/*/.tmp_*
+
+# Midia grande (video de exemplo do player) - fora do git
+src13/content/*.mp4
+
+# Arquivo de lixo de uma sessao antiga (nome U+F03A, 815 bytes)
+
