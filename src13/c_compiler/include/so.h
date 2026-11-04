@@ -56,6 +56,8 @@ int k_mkdir(const char* path);
 int k_rmdir(const char* path);
 /* Espaco em KB de um disco FAT; -1 se nao for. */
 int k_dfree(int letter, unsigned* total_kb, unsigned* free_kb);
+/* Mascara das unidades montadas: bit 0 = A:, bit 1 = B:, ... */
+unsigned k_drive_mask(void);
 
 /* tela de texto 80x25: celulas caractere | cor << 8 (cor = fundo << 4 | frente).
  * -1 no WIN ou com a saida desviada: ai so ha k_putc. */

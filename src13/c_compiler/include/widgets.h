@@ -113,4 +113,8 @@ int wg_edit_box(const void* id, gui_edit_t* e, int x, int y, int w, int h);
 /* Enter/Espaco quando o botao/check tem foco: o app chama com a tecla. */
 int wg_key_is_activate(int key);
 
+/* Area clicavel generica com a mesma logica dos controles (aperta e
+ * solta dentro): util para linhas de lista, celulas, icones. */
+int wg_click_area(const void* id, int x, int y, int w, int h, int enabled);
+
 #endif /* _WIDGETS_H */

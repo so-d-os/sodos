@@ -142,6 +142,16 @@ static int k_dfree(int letter, uint32_t* total_kb, uint32_t* free_kb) {
   return drives_space((char)letter, total_kb, free_kb);
 }
 
+/* Mascara das unidades montadas: bit 0 = A:, bit 1 = B:, ... bit 25 = Z:.
+ * Usada pelo Explorer para listar as unidades sem chutar letras. */
+static uint32_t k_drive_mask(void) {
+  uint32_t mask = 0;
+  int i;
+  for (i = 0; i < 26; i++)
+    if (drives_is_mounted((char)('A' + i))) mask |= (uint32_t)1u << i;
+  return mask;
+}
+
 /* ---------- tela de texto 80x25 ---------- */
 /* Celulas caractere | cor << 8, como na VGA. No WIN, ou com a saida
  * desviada (pipe), nao ha tela de celulas: devolve -1. */
@@ -443,6 +453,7 @@ static const struct kexp table[] = {
   EXP(k_mkdir),
   EXP(k_rmdir),
   EXP(k_dfree),
+  EXP(k_drive_mask),
   EXP(k_vput),
   EXP(k_cursor),
   EXP(k_drive),

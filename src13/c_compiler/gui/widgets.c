@@ -473,6 +473,11 @@ __export int wg_edit_box(const void* id, gui_edit_t* e, int x, int y, int w, int
   return focused;
 }
 
+__export int wg_click_area(const void* id, int x, int y, int w, int h,
+                           int enabled) {
+  return click(id, x, y, w, h, enabled);
+}
+
 __export int wg_key_is_activate(int key) {
   return key == '\r' || key == '\n' || key == ' ';
 }

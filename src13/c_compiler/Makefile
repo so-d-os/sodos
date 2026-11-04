@@ -87,6 +87,10 @@ $(O)/FONTADV.EXE: ../fonts/fontadv.c ../fonts/ttfrast.c ../fonts/ttfrast.h $(O)/
 $(O)/WIDGETS.EXE: ../utils/widgets_demo.c $(O)/GUI.DLL include/widgets.h $(HCC) $(HEADERS)
 	$(HCC) -o $@ ../utils/widgets_demo.c $(O)/GUI.DLL
 
+# Gerenciador de arquivos do WIN (navegacao entre pastas e unidades).
+$(O)/EXPLORER.EXE: ../utils/explorer.c $(O)/GUI.DLL include/widgets.h $(HCC) $(HEADERS)
+	$(HCC) -o $@ ../utils/explorer.c $(O)/GUI.DLL
+
 # Prompt de comando. A janela preta e desenhada pelo WIN; o EXE abre outra copia.
 $(O)/COMMAND.EXE: examples/command.c $(HCC) $(HEADERS)
 	$(HCC) -o $@ examples/command.c

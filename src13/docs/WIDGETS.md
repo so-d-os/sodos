@@ -90,3 +90,37 @@ Shift+Tab andam no foco, Enter/Espaço acionam, setas navegam a lista, Esc sai.
 3. **Diálogos** (mensagem, confirmação, abrir/salvar) reaproveitando `wg_*`.
 4. **Scrollview**: área com conteúdo maior que a janela (lista + canvas).
 5. **Docking / múltiplas janelas** no WIN e foco entre janelas.
+
+## Explorer (gerenciador de arquivos)
+
+![Explorer](img/explorer.png)
+
+`utils/explorer.c` -> `EXPLORER.EXE`, o gerenciador de arquivos do WIN, feito
+com esta biblioteca.
+
+Navegacao:
+
+- barra com **Voltar** (historico), **Acima** (pasta pai), **Atualizar** e um
+  campo de caminho (digite e Enter/Ir);
+- coluna **Unidades** (usa o novo export `k_drive_mask`) e **Atalhos**
+  (`D:\`, `D:\SODOS`, `D:\USER`, `C:\`);
+- lista com colunas Nome / Tamanho / Data, icones de pasta/arquivo, ordenacao
+  por nome, tamanho ou data;
+- **segundo clique** no item ja selecionado (ou o botao **Abrir**, ou Enter)
+  entra na pasta, executa `.EXE`/`.BAT` ou mostra os dados do arquivo;
+- **Nova pasta**, **Excluir** (com confirmacao no segundo clique), roda do
+  rato e teclado (setas, PgUp/PgDn, Home/End, Backspace = subir, Esc = sair);
+- barra de status com o caminho, contagem de pastas/arquivos e tamanho total.
+
+Aceita um caminho inicial:
+
+```
+D:\EXPLORER.EXE D:\SODOS\FONTS
+```
+
+Detalhe de implementacao: as linhas da lista usam `wg_click_area()`, a mesma
+logica de "aperta e solta dentro" dos botoes (funciona melhor que tratar o
+evento de clique na mao, que pode chegar repetido).
+
+Para testar sem teclado/mouse fisico: suba o WIN, rode o app e clique por HTTP
+(ver `tools/winshot.py` e os endpoints `/win/execute` e `/win/mouse`).
