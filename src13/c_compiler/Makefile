@@ -40,6 +40,7 @@ CC_SRC = cc/main.c cc/util.c cc/lex.c cc/pp.c cc/type.c cc/parse.c cc/gen.c
 all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/HELLO.EXE \
 	$(O)/CC.EXE $(O)/LINK.EXE $(O)/TLS.DLL $(O)/HTTPS.EXE $(O)/GUI.DLL $(O)/IMG.DLL \
 	$(O)/BROWSER.EXE $(O)/IMAGEVW.EXE $(O)/VIDPLAY.EXE $(O)/FONTADV.EXE $(O)/COMMAND.EXE $(O)/HTTPD.EXE \
+	$(O)/WIDGETS.EXE \
 	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
 	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
 	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/COBRA.EXE $(O)/GIT.EXE $(O)/AGENT.EXE $(O)/LLAMA.EXE
@@ -48,8 +49,11 @@ all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/H
 $(B)/gui_gui.obj: gui/gui.c include/gui.h $(HCC) $(HEADERS) | $(B)
 	$(HCC) -c $< -o $@
 
-$(O)/GUI.DLL: $(B)/gui_gui.obj $(O)/LIBC.DLL $(LINK)
-	$(HCC) -dll -o $@ $(B)/gui_gui.obj
+$(B)/gui_widgets.obj: gui/widgets.c include/widgets.h include/gui.h $(HCC) $(HEADERS) | $(B)
+	$(HCC) -c $< -o $@
+
+$(O)/GUI.DLL: $(B)/gui_gui.obj $(B)/gui_widgets.obj $(O)/LIBC.DLL $(LINK)
+	$(HCC) -dll -o $@ $(B)/gui_gui.obj $(B)/gui_widgets.obj
 
 $(B)/img_img.obj: img/img.c include/img.h $(HCC) $(HEADERS) | $(B)
 	$(HCC) -c $< -o $@
@@ -78,6 +82,10 @@ $(O)/VIDPLAY.EXE: ../utils/videoplay.c $(O)/GUI.DLL $(O)/IMG.DLL $(HCC) $(HEADER
 # Fontes avancadas: lista D:\SODOS\FONTS e desenha a frase em TTF.
 $(O)/FONTADV.EXE: ../fonts/fontadv.c ../fonts/ttfrast.c ../fonts/ttfrast.h $(O)/GUI.DLL $(HCC) $(HEADERS)
 	$(HCC) -o $@ ../fonts/fontadv.c ../fonts/ttfrast.c $(O)/GUI.DLL
+
+# Painel de demonstracao dos widgets (botoes, checks, lista, progresso).
+$(O)/WIDGETS.EXE: ../utils/widgets_demo.c $(O)/GUI.DLL include/widgets.h $(HCC) $(HEADERS)
+	$(HCC) -o $@ ../utils/widgets_demo.c $(O)/GUI.DLL
 
 # Prompt de comando. A janela preta e desenhada pelo WIN; o EXE abre outra copia.
 $(O)/COMMAND.EXE: examples/command.c $(HCC) $(HEADERS)
