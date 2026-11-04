@@ -8,10 +8,18 @@
 #include <gui.h>
 #include "ttfrast.h"
 
-#define NFONTS 4
+#define NFONTS 12
 #define LIST_W 168
 
 static const char* paths[NFONTS] = {
+  "D:\\SODOS\\FONTS\\INTER.TTF",
+  "D:\\SODOS\\FONTS\\INTERBD.TTF",
+  "D:\\SODOS\\FONTS\\ROBOTO.TTF",
+  "D:\\SODOS\\FONTS\\MONTSR.TTF",
+  "D:\\SODOS\\FONTS\\MONTSBD.TTF",
+  "D:\\SODOS\\FONTS\\JBMONO.TTF",
+  "D:\\SODOS\\FONTS\\JBMONBD.TTF",
+  "D:\\SODOS\\FONTS\\FIRAMON.TTF",
   "D:\\SODOS\\FONTS\\NOTOSANS.TTF",
   "D:\\SODOS\\FONTS\\NOTOSERF.TTF",
   "D:\\SODOS\\FONTS\\NOTOMONO.TTF",
@@ -19,6 +27,14 @@ static const char* paths[NFONTS] = {
 };
 
 static const char* labels[NFONTS] = {
+  "Inter",
+  "Inter Bold",
+  "Roboto",
+  "Montserrat",
+  "Montserrat Bold",
+  "JetBrains Mono",
+  "JetBrains Mono Bold",
+  "Fira Mono",
   "Noto Sans",
   "Noto Serif",
   "Noto Sans Mono",
@@ -26,10 +42,34 @@ static const char* labels[NFONTS] = {
 };
 
 static const char* files[NFONTS] = {
+  "INTER.TTF",
+  "INTERBD.TTF",
+  "ROBOTO.TTF",
+  "MONTSR.TTF",
+  "MONTSBD.TTF",
+  "JBMONO.TTF",
+  "JBMONBD.TTF",
+  "FIRAMON.TTF",
   "NOTOSANS.TTF",
   "NOTOSERF.TTF",
   "NOTOMONO.TTF",
   "SANSCOLL.TTF"
+};
+
+/* licenca de cada face (mostrada no rodape) */
+static const char* licenses[NFONTS] = {
+  "SIL Open Font License 1.1",
+  "SIL Open Font License 1.1",
+  "Apache License 2.0",
+  "SIL Open Font License 1.1",
+  "SIL Open Font License 1.1",
+  "SIL Open Font License 1.1",
+  "SIL Open Font License 1.1",
+  "SIL Open Font License 1.1",
+  "SIL Open Font License 1.1",
+  "SIL Open Font License 1.1",
+  "SIL Open Font License 1.1",
+  "SIL Open Font License 1.1"
 };
 
 static int list_row;
@@ -146,7 +186,7 @@ static void paint(int sel, int px, gui_edit_t* ed, uint8_t* rgba, int rw, int rh
   gui_text(LIST_W + 12, y, "Marcas registradas", -1, muted, bg, 0);
   gui_text_fit(LIST_W + 12 + 22 * cw, y, tm[0] ? tm : "-", W - (LIST_W + 24 + 22 * cw), ink, bg, 0);
   y += ch + 3;
-  gui_text(LIST_W + 12, y, "Licenca SIL OFL 1.1", -1, muted, bg, 0);
+  gui_text(LIST_W + 12, y, licenses[sel], -1, muted, bg, 0);
 }
 
 int main(void) {
