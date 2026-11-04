@@ -20,3 +20,15 @@ Regras:
 - Depois de aplicar, `docs/03-fases.md` e o README do port são atualizados.
 - Nada de patch “por acidente” de build (flags, caminhos): isso vai no
   `mozconfig`/Makefile.
+
+## Patches existentes (estado atual)
+
+| Arquivo | Assunto |
+|---|---|
+| `001-firefox-sodos-target.patch | alvo x86_64-sodos no configure |
+| `002-sodos-rust-bringup.patch | bring-up do Rust (core/alloc/std) |
+| `003-firefox-sodos-build.patch | ajustes de build do SpiderMonkey |
+| `004-js-shell-sodos-file-io.patch | ler .js sem stat (FILEs da libc sao em memoria) |
+
+Os marcadores SODOS_MARK em js/src/shell/js.cpp (bytes na serial COM1)
+sao temporarios de depuracao e **nao** fazem parte de nenhum patch.

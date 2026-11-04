@@ -541,7 +541,8 @@ voltam a aparecer em outros programas grandes.
    `mbsrtowcs` tinha o mesmo defeito.
 5. **`libc/stdio.c`: `fileno()` devolvia -1**, e `js::ReadCompleteFile` chama
    `fstat(fileno(fp))` para descobrir o tamanho. Fallback em
-   `js/src/util/CompleteFile.cpp` (fseek/ftell) quando o `fstat` falha.
+   `js/src/util/CompleteFile.cpp` (fseek/ftell) quando o `fstat` falha —
+   versionado em `patches/0004-js-shell-sodos-file-io.patch`.
 6. **Pilha do modulo**: o `link64` passou a pedir 16 MB (`h.stack_size`) e o
    `crt0` registra o topo em `__sodos_stack_top`; `pthread_attr_getstack`
    reporta esse intervalo (o SpiderMonkey usa para o limite de recursao).

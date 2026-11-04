@@ -1,0 +1,31 @@
+From: SODOS port <sodos@local>
+Subject: [PATCH] js: ler arquivos sem fstat (FILEs da libc sao em memoria)
+
+A libc do SODOS implementa fopen/fread sobre um buffer em memoria e nao
+oferece fstat para esses FILE* (fileno() devolve -1). js::ReadCompleteFile
+usa fstat(fileno(fp)) para dimensionar o buffer e falhava com
+"error reading file".
+
+Fallback: quando o fstat falha, descobre o tamanho com fseek/ftell.
+
+---
+--- a/js/src/util/CompleteFile.cpp
++++ b/js/src/util/CompleteFile.cpp
+@@ -21,6 +21,17 @@
+   struct stat st;
+   int ok = fstat(fileno(fp), &st);
+   if (ok != 0) {
++    /* SODOS: os FILE* da libc sao em memoria e nao tem fd; a libc tambem
++     * nao expoe fstat para eles. Usa fseek/ftell para descobrir o tamanho. */
++    long end = -1;
++    if (fseek(fp, 0, SEEK_END) == 0) end = ftell(fp);
++    if (end >= 0) {
++      rewind(fp);
++      memset(&st, 0, sizeof(st));
++      st.st_mode = S_IFREG | S_IRUSR;
++      st.st_size = (off_t)end;
++      ok = 0;
++    }
+   }
+   if (ok != 0) {
+     // Use the Latin1 variant here (and below), because the encoding of
