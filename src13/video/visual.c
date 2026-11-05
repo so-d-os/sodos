@@ -3349,6 +3349,17 @@ static void gq_push(struct gui_win* w, int type, int x, int y, int key) {
   w->qn++;
 }
 
+/* Injeta uma tecla (ASCII) na janela GUI com foco. Usado pelo httpd, para
+ * automatizar testes de digito sem teclado fisico. */
+int win_api_key(int ch) {
+  if (!gwins || gui_focus < 0 || gui_focus >= GUI_MAX || !gwins[gui_focus].open)
+    return -1;
+  gq_push(&gwins[gui_focus], GUI_EV_KEY, 0, 0, ch);
+  win_api_dirty = 1;
+  return 0;
+}
+
+
 static void gui_q_push(int type, int x, int y, int key) {
   gq_push(&gui, type, x, y, key);
 }

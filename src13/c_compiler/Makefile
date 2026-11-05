@@ -373,5 +373,5 @@ $(O)/MENUCFG.EXE: ../utils/menu_cfg.c $(O)/GUI.DLL include/widgets.h $(HCC) $(HE
 	$(HCC) -o $@ ../utils/menu_cfg.c $(O)/GUI.DLL
 
 # Painel de IA: janela docada na lateral direita (chat).
-$(O)/AIPANEL.EXE: ../utils/ai_panel.c $(O)/GUI.DLL include/widgets.h $(HCC) $(HEADERS)
-	$(HCC) -o $@ ../utils/ai_panel.c $(O)/GUI.DLL
+$(O)/AIPANEL.EXE: ../utils/ai_panel.c agent/ai_client.c $(O)/GUI.DLL $(O)/TLS.DLL include/widgets.h include/ai_client.h $(HCC) $(HEADERS) $(O)/KERNEL.IMP
+	$(HCC) -o $@ ../utils/ai_panel.c agent/ai_client.c $(O)/GUI.DLL $(O)/TLS.DLL

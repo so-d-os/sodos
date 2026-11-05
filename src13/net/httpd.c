@@ -381,6 +381,25 @@ static void handle(char* req) {
     else send_bmp();
     return;
   }
+  if (eq(path, "/win/key")) {
+    char ks[12];
+    int ch = -1;
+    ks[0] = 0;
+    if (!form_get(q, "k", ks, (int)sizeof(ks))) form_get(body, "k", ks, (int)sizeof(ks));
+    if (ks[0]) {
+      int i = 0;
+      while (ks[i]) {
+        ch = (ch < 0 ? 0 : ch) * 10 + (ks[i] - '0');
+        i++;
+      }
+    }
+    if (ch >= 0 && win_api_key(ch) == 0) {
+      reply(200, "OK", "ok\n", 3, head);
+    } else {
+      reply(404, "Not Found", "sem janela com foco\n", 21, head);
+    }
+    return;
+  }
   if (eq(path, "/win/mouse/coord") || eq(path, "/win/windows") ||
       eq(path, "/win/close") || eq(path, "/win/execute") ||
       eq(path, "/win/mouse")) {

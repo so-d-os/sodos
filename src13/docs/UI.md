@@ -148,3 +148,47 @@ Ao aplicar, grava `menupos`, `ia` e `glass` no `D:\SODOS\VIDEO.CFG` e chama
 Como o botao "junto ao painel" depende da janela do painel, `ui_logo_x()` consulta
 `gui_panel_left()` (a borda esquerda do canvas "SODOS IA"); o mesmo X e usado
 pelo desenho da barra, pelo menu Iniciar e pelo teste de clique.
+
+## Painel de IA: configuracao do AGENT e chat convencional
+
+![Chat do painel de IA](img/ui-ia-chat.png)
+
+O `AIPANEL.EXE` **usa o mesmo `AGENT.CFG`** do `AGENT.EXE` (procura na pasta
+atual, `D:\`, `U:\` e `C:\`):
+
+```
+key=sk-...                                   # ou deepseek=sk-...
+url=https://api.deepseek.com/chat/completions
+model=deepseek-chat
+```
+
+A leitura e o protocolo ficam em `c_compiler/agent/ai_client.c`: configuracao,
+POST com TLS/HTTP, `chunked` e as linhas `data:` do stream SSE. O painel mostra
+o nome do modelo no cabecalho e "sem key" na barra se o arquivo nao existir.
+
+Chat no padrao convencional:
+
+- mensagem do usuario a direita (azul), do SODOS a esquerda (painel escuro),
+  com o nome de quem falou acima de cada bolha;
+- **Enter envia**, **Esc fecha**, botao "novo" limpa a conversa;
+- a resposta vai sendo escrita **enquanto chega** (streaming): o kernel avisa
+  cada pedaco em `on_token`, o painel converte UTF-8 -> CP850 e redesenha;
+- erro de rede/API aparece como linha do sistema em cinza (`[sem conexao...]`,
+  `[API respondeu 401]`), sem derrubar a janela;
+- quebra de linha por palavra (nao corta no meio da palavra).
+
+Historico: as mensagens ficam em memoria (60 bolhas); o `system` fixo diz que o
+assistente e do SODOS e responde em portugues curto.
+
+### Teste automatizado
+
+Para testar sem teclado fisico, o httpd do kernel ganhou:
+
+```
+GET /win/key?k=111      # injeta a tecla ASCII 111 ('o') na janela com foco
+```
+
+Com isso o roteiro de teste digita, manda Enter e confere a resposta. Neste
+commit o teste foi feito com um servidor SSE local respondendo "Ola! Recebi: ...":
+a bolha do usuario, a resposta em streaming e o status "ok" apareceram como
+esperado.

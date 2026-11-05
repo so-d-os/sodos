@@ -60,6 +60,8 @@ void mouse_api(int x, int y, int click);
 void mouse_api_pos(int* x, int* y);
 /* 1 se o WIN (ou o modo grafico) esta na tela. */
 int win_screen_size(int* w, int* h);
+/* Injeta uma tecla ASCII na janela GUI com foco (automacao/testes). */
+int win_api_key(int ch);
 /* Linha y em BGR. Devolve a largura, ou -1. */
 int win_screen_bgr(int y, uint8_t* dst, int max_px);
 /* Configuracao de video (VIDEOCFG.EXE): 0 = retro, 1 = avancado. */
