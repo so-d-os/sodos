@@ -4410,7 +4410,7 @@ static void wm_open_fonts(struct wm_win* wins, int* focus, int big) {
 }
 
 /* Menu de contexto do desktop: Console e Configuracoes de tela. */
-#define POP_N 2
+#define POP_N 3
 static void pop_geom(int ax, int ay, int scale, int scr_w, int scr_h, int bar_h,
                      int* x, int* y, int* rw, int* rh) {
   int ch = (vga_bios_font_ok ? FONT_H : 8) * scale;
@@ -4440,7 +4440,7 @@ static void start_menu_geom(struct start_menu* m, int scr_w, int scr_h, int bar_
   m->h = menu_item_h * m->n + 4;
   m->y = scr_h - bar_h - m->h;
   m->sub_w = 18 * FONT_W * scale + 16;
-  m->sub_h = menu_item_h * 3 + 4;
+  m->sub_h = menu_item_h * 4 + 4;
   m->sub_x = m->x + m->w - 4;
   m->sub_y = m->y + 3 * menu_item_h;
   if (m->sub_x + m->sub_w > scr_w - 2)
@@ -4778,6 +4778,8 @@ static void chrome_paint_over(void) {
                          gm.sub_w, gm.item_h);
     int adv_hot = wm_pt((int)sys_mx, (int)sys_my, gm.sub_x, gm.sub_y + 2 * gm.item_h,
                         gm.sub_w, gm.item_h);
+    int design_hot = wm_pt((int)sys_mx, (int)sys_my, gm.sub_x,
+                           gm.sub_y + 3 * gm.item_h, gm.sub_w, gm.item_h);
     fill_rect(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h, c_win);
     menu_row(gm.sub_x + 1, gm.sub_y + 2, gm.sub_w - 2, gm.item_h - 2,
              "Tela", tela_hot, 1, c_win, c_title, c_white, c_black, c_scale);
@@ -4785,6 +4787,8 @@ static void chrome_paint_over(void) {
              "Fontes", font_hot, 0, c_win, c_title, c_white, c_black, c_scale);
     menu_row(gm.sub_x + 1, gm.sub_y + 2 + 2 * gm.item_h, gm.sub_w - 2, gm.item_h - 2,
              "Fontes avancadas", adv_hot, 0, c_win, c_title, c_white, c_black, c_scale);
+    menu_row(gm.sub_x + 1, gm.sub_y + 2 + 3 * gm.item_h, gm.sub_w - 2, gm.item_h - 2,
+             "Design", design_hot, 0, c_win, c_title, c_white, c_black, c_scale);
     menu_frame(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h, c_black);
   }
   if (c_cfg && *c_cfg && c_tela && *c_tela) {
@@ -4815,6 +4819,15 @@ static void host_open_advanced(struct wm_win* wins, int* focus, int big) {
   if (gui_raise_title("Fontes avancadas")) return;
   if (!desk_find("D:\\SODOS\\FONTADV.EXE", exe, (int)sizeof(exe)))
     wm_copy_str(exe, (int)sizeof(exe), "D:\\SODOS\\FONTADV.EXE");
+  wm_exec(wins, focus, big, exe);
+}
+
+static void host_open_design(struct wm_win* wins, int* focus, int big) {
+  char exe[48];
+  if (gui_raise_title("Configurar tela")) return;
+  if (!desk_find("D:\\SODOS\\VIDEOCFG.EXE", exe, (int)sizeof(exe)) &&
+      !desk_find("D:\\VIDEOCFG.EXE", exe, (int)sizeof(exe)))
+    wm_copy_str(exe, (int)sizeof(exe), "D:\\SODOS\\VIDEOCFG.EXE");
   wm_exec(wins, focus, big, exe);
 }
 
@@ -4852,11 +4865,16 @@ static int chrome_on_click(int x, int y) {
       *c_cfg = 0;
       *c_tela = 0;
       wm_open_fonts(c_wins, c_focus, c_big);
-    } else {
+    } else if (item == 2) {
       *chrome_menu = 0;
       *c_cfg = 0;
       *c_tela = 0;
       host_open_advanced(c_wins, c_focus, c_big);
+    } else {
+      *chrome_menu = 0;
+      *c_cfg = 0;
+      *c_tela = 0;
+      host_open_design(c_wins, c_focus, c_big);
     }
     return 1;
   }
@@ -5125,6 +5143,8 @@ static int win_wm_run(void) {
                              gm.sub_w, gm.item_h);
         int adv_hot = wm_pt((int)mx, (int)my, gm.sub_x, gm.sub_y + 2 * gm.item_h,
                             gm.sub_w, gm.item_h);
+        int design_hot = wm_pt((int)mx, (int)my, gm.sub_x, gm.sub_y + 3 * gm.item_h,
+                               gm.sub_w, gm.item_h);
         fill_rect(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h, col_win);
         menu_row(gm.sub_x + 1, gm.sub_y + 2, gm.sub_w - 2, gm.item_h - 2,
                  "Tela", tela_hot, 1, col_win, col_title, col_white, col_black, scale);
@@ -5132,6 +5152,8 @@ static int win_wm_run(void) {
                  "Fontes", font_hot, 0, col_win, col_title, col_white, col_black, scale);
         menu_row(gm.sub_x + 1, gm.sub_y + 2 + 2 * gm.item_h, gm.sub_w - 2, gm.item_h - 2,
                  "Fontes avancadas", adv_hot, 0, col_win, col_title, col_white, col_black, scale);
+        menu_row(gm.sub_x + 1, gm.sub_y + 2 + 3 * gm.item_h, gm.sub_w - 2, gm.item_h - 2,
+                 "Design", design_hot, 0, col_win, col_title, col_white, col_black, scale);
         menu_frame(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h, col_black);
       }
       if (menu_open && menu_cfg && menu_tela) {
@@ -5221,6 +5243,8 @@ static int win_wm_run(void) {
           menu_row(px + 1, py + 2, pw - 2, ih, "Console", pop_hot == 0, 0,
                    col_win, col_title, col_white, col_black, scale);
           menu_row(px + 1, py + 2 + ih, pw - 2, ih, "Configuracoes de tela", pop_hot == 1, 0,
+                   col_win, col_title, col_white, col_black, scale);
+          menu_row(px + 1, py + 2 + 2 * ih, pw - 2, ih, "Design", pop_hot == 2, 0,
                    col_win, col_title, col_white, col_black, scale);
         }
         menu_frame(px, py, pw, ph, col_black);
@@ -5385,7 +5409,8 @@ static int win_wm_run(void) {
               int ih = (ph - 4) / POP_N;
               int item = ih > 0 ? ((int)my - (py + 2)) / ih : 0;
               if (item <= 0) wm_open_command(wins, &focus, big);
-              else wm_open_display(wins, &focus, big);
+              else if (item == 1) wm_open_display(wins, &focus, big);
+              else host_open_design(wins, &focus, big);
             }
             handled = 1;
             need_draw = 1;
@@ -5489,11 +5514,16 @@ static int win_wm_run(void) {
                 menu_cfg = 0;
                 menu_tela = 0;
                 wm_open_fonts(wins, &focus, big);
-              } else {
+              } else if (item == 2) {
                 menu_open = 0;
                 menu_cfg = 0;
                 menu_tela = 0;
                 host_open_advanced(wins, &focus, big);
+              } else {
+                menu_open = 0;
+                menu_cfg = 0;
+                menu_tela = 0;
+                host_open_design(wins, &focus, big);
               }
               handled = 1;
               need_draw = 1;

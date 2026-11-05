@@ -77,3 +77,17 @@ encontrada). As imagens tambem precisam caber em 8.3 (`WALL1.PNG`).
 - `utils/video_cfg.c` — o configurador (`VIDEOCFG.EXE`).
 - `content/wallpapers/*.PNG` — papeis de parede de exemplo (gerados aqui).
 - `kernel/kexports.c` — os tres exports novos.
+
+## Como abrir o configurador
+
+Duas entradas no menu:
+
+- **Iniciar -> Configuracoes -> Design** (ao lado de "Tela" e "Fontes avancadas");
+- **botao direito no desktop -> Design** (o menu de contexto tambem tem
+  "Console" e "Configuracoes de tela").
+
+![Menu Iniciar com a entrada Design](img/menu-design.png)
+
+O atalho chama `D:\SODOS\VIDEOCFG.EXE` (com fallback para `D:\VIDEOCFG.EXE`,
+que e onde o `make disk-files` deixa os .EXE). Se a janela "Configurar tela" ja
+estiver aberta, ela so vem para a frente em vez de abrir outra.
