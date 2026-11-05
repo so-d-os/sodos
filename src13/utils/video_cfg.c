@@ -344,6 +344,9 @@ int main(void) {
     return 1;
   }
   g_mode = k_gui_quality(-1) ? 1 : 0;
+  g_menupos = k_ui_menu_pos(-1) ? 1 : 0;
+  g_glass = k_ui_glass(-1) ? 1 : 0;
+  g_ia = k_ui_ia(-1) ? 1 : 0;
   scan_walls();
   {
     /* le o cfg para o estado inicial da interface */
@@ -430,35 +433,8 @@ int main(void) {
       set_status("modelo avancado: alfa misturado");
     }
 
-    /* --------------------------------------------------------- interface */
-    ly += 96 + 8;
-    wg_group(lx, ly, lw, 124, "Interface");
-    {
-      int bx = lx + 14, by = ly + 24;
-      int bw = 108, gap = 6;
-      if (wg_button(&id_pos0, bx, by, bw, bh - 10,
-                    g_menupos == 0 ? "[ Esquerda ]" : "Esquerda", g_ready))
-        { g_menupos = 0; k_ui_menu_pos(0); set_status("menu Iniciar a esquerda"); }
-      if (wg_button(&id_pos1, bx + bw + gap, by, bw, bh - 10,
-                    g_menupos == 1 ? "[ Centro ]" : "Centro", g_ready))
-        { g_menupos = 1; k_ui_menu_pos(1); set_status("menu Iniciar no centro"); }
-      if (wg_button(&id_pos2, bx + 2 * (bw + gap), by, bw, bh - 10,
-                    g_menupos == 2 ? "[ Direita ]" : "Direita", g_ready))
-        { g_menupos = 2; k_ui_menu_pos(2); set_status("menu Iniciar a direita"); }
-      by += bh - 4;
-      if (wg_check(&id_glass, bx, by, "Menu transparente", &g_glass)) {
-        k_ui_glass(g_glass);
-        set_status(g_glass ? "menu translucido ligado" : "menu opaco");
-      }
-      by += bh - 6;
-      if (wg_check(&id_ia, bx, by, "Painel de IA (lateral direita)", &g_ia)) {
-        k_ui_ia(g_ia);
-        set_status(g_ia ? "painel de IA ligado" : "painel de IA desligado");
-      }
-    }
-
     /* ------------------------------------------------------ cor de fundo */
-    ly += 124 + 8;
+    ly += 96 + 8;
     wg_group(lx, ly, lw, 132, "Cor de fundo");
     for (i = 0; i < 16; i++) {
       int cx = lx + 16 + (i % 8) * 48;

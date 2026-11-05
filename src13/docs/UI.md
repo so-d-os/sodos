@@ -101,8 +101,9 @@ D:\SODOS\VIDEO.CFG
   ia=0            ; 1 = abre o AIPANEL.EXE docado na lateral direita
 ```
 
-Tudo isso se ajusta na hora em **Design -> Interface** (tres botoes de posicao +
-dois checks) e no botao **Aplicar**. O kernel le os mesmos campos no boot
+Tudo isso se ajusta na hora em **Iniciar -> Configuracoes -> Menu** (tela
+`MENUCFG.EXE`) e no botao **Aplicar**; o **Design** cuida de modelo, cor e
+papel de parede. O kernel le os mesmos campos no boot
 (`win_load_cfg`), entao a escolha sobrevive ao reinicio.
 
 ### Posicao do menu
@@ -127,3 +128,23 @@ parede). O destaque azul dos itens tambem e misturado.
   Explicar) e campo de mensagem. **Ainda nao ha modelo de linguagem**: as
   respostas sao locais e dizem isso. O layout e o encaixe estao prontos para
   plugar o modelo depois (o `AGENT.EXE`/`LLAMA.EXE` do repositorio e o caminho).
+
+### Tela Menu (`MENUCFG.EXE`)
+
+![Configuracao do menu](img/ui-menu-cfg.png)
+
+`Iniciar -> Configuracoes -> Menu` abre uma tela propria:
+
+- **Posicao do botao do menu**: `1 - Esquerda` ou `2 - Junto ao painel`.
+  "Junto ao painel" encosta o "S" na borda esquerda do painel de IA (ou na
+  borda direita da tela, se o painel estiver fechado).
+- **Painel (IA na lateral direita)**: liga/desliga o `AIPANEL.EXE`.
+- **Transparencia do menu**: menu opaco ou translucido.
+- **Previa**: mini barra mostrando onde o "S" fica, o painel e a amostra do menu.
+
+Ao aplicar, grava `menupos`, `ia` e `glass` no `D:\SODOS\VIDEO.CFG` e chama
+`k_ui_menu_pos` / `k_ui_ia` / `k_ui_glass`, que ja redesenham na hora.
+
+Como o botao "junto ao painel" depende da janela do painel, `ui_logo_x()` consulta
+`gui_panel_left()` (a borda esquerda do canvas "SODOS IA"); o mesmo X e usado
+pelo desenho da barra, pelo menu Iniciar e pelo teste de clique.
