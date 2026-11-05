@@ -1,0 +1,2 @@
+Pasta pronta para um projeto C++ publico pequeno.
+Escolha 1-4 no chat; so depois fazemos o download.

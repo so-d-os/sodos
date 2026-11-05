@@ -3238,6 +3238,7 @@ int gui_coop_pause(void) {
 }
 
 static int gui_event_coop(int* ev, int timeout_ms) {
+  uint32_t t0 = net_ms();
   int i;
   for (i = 0; i < 4; i++) ev[i] = 0;
   if (!gui_ok()) return -1;
@@ -3259,7 +3260,13 @@ static int gui_event_coop(int* ev, int timeout_ms) {
       if (gui_q_pop(ev)) return ev[0];
       return GUI_EV_NONE;
     }
-    gui_yield(WAKE_BLOCK);
+    if (timeout_ms > 0) {
+      /* WAKE_BLOCK so acorda com evento: o prazo nunca venceria */
+      if ((int)(net_ms() - t0) >= timeout_ms) return GUI_EV_NONE;
+      gui_yield(WAKE_POLL);
+    } else {
+      gui_yield(WAKE_BLOCK);
+    }
     if (!gui_ok()) return -1;
   }
 }
@@ -4204,6 +4211,18 @@ static void wm_open_app(struct wm_win* wins, int* focus, int big) {
   *focus = i;
 }
 
+/* Menu Iniciar: EXPLORER.EXE; sem ele no disco, o explorer.asm embutido. */
+static void wm_open_explorer(struct wm_win* wins, int* focus, int big) {
+  char exe[48];
+  if (gui_raise_title("Explorer")) return;
+  if (desk_find("D:\\EXPLORER.EXE", exe, (int)sizeof(exe)) && file_size(exe) > 0) {
+    wm_exec(wins, focus, big, exe);
+    return;
+  }
+  serial_puts("[visual] sem D:EXPLORER.EXE nem U:EXPLORER.EXE; usando explorer.asm\n");
+  wm_open_app(wins, focus, big);
+}
+
 static void wm_open_mgr(struct wm_win* wins, int* focus, int big) {
   int i = wm_find_kind(wins, WM_KIND_MGR);
   if (i < 0) i = wm_alloc(wins);
@@ -4526,6 +4545,13 @@ static int z_top(struct wm_win* wins, int x, int y, int* kind) {
   return best;
 }
 
+/* 1 = nenhuma janela no ponto: o clique pode chegar aos icones do desktop. */
+static int z_empty(struct wm_win* wins, int x, int y) {
+  int hk = HIT_NONE;
+  z_top(wins, x, y, &hk);
+  return hk == HIT_NONE;
+}
+
 static void chrome_unbind(void) {
   tasks_shutdown();
   gui_session(0);
@@ -4786,7 +4812,7 @@ static int chrome_on_click(int x, int y) {
       *c_tela = 0;
       if (item <= 0) wm_open_notepad(c_wins, c_focus, c_big);
       else if (item == 1) wm_open_mgr(c_wins, c_focus, c_big);
-      else if (item == 2) wm_open_app(c_wins, c_focus, c_big);
+      else if (item == 2) wm_open_explorer(c_wins, c_focus, c_big);
       else if (item == 4) wm_open_browser(c_wins, c_focus, c_big);
       else if (item == 5) wm_open_command(c_wins, c_focus, c_big);
       else if (item >= 6) {
@@ -4809,21 +4835,23 @@ static int chrome_on_click(int x, int y) {
     *c_tela = 0;
     return 1;
   }
-  if (wm_pt(x, y, 12, c_icon4_y, c_icon, c_icon)) {
-    wm_open_command(c_wins, c_focus, c_big);
-    return 1;
-  }
-  if (wm_pt(x, y, 12, c_icon3_y, c_icon, c_icon)) {
-    wm_open_browser(c_wins, c_focus, c_big);
-    return 1;
-  }
-  if (wm_pt(x, y, 12, c_icon2_y, c_icon, c_icon)) {
-    wm_open_notepad(c_wins, c_focus, c_big);
-    return 1;
-  }
-  if (wm_pt(x, y, 12, 12, c_icon, c_icon)) {
-    wm_open_mgr(c_wins, c_focus, c_big);
-    return 1;
+  if (z_empty(c_wins, x, y)) {
+    if (wm_pt(x, y, 12, c_icon4_y, c_icon, c_icon)) {
+      wm_open_command(c_wins, c_focus, c_big);
+      return 1;
+    }
+    if (wm_pt(x, y, 12, c_icon3_y, c_icon, c_icon)) {
+      wm_open_browser(c_wins, c_focus, c_big);
+      return 1;
+    }
+    if (wm_pt(x, y, 12, c_icon2_y, c_icon, c_icon)) {
+      wm_open_notepad(c_wins, c_focus, c_big);
+      return 1;
+    }
+    if (wm_pt(x, y, 12, 12, c_icon, c_icon)) {
+      wm_open_mgr(c_wins, c_focus, c_big);
+      return 1;
+    }
   }
   if (!chrome_in_browser(x, y)) return 1;
   return 0;
@@ -5289,6 +5317,7 @@ static int win_wm_run(void) {
           need_draw = 1;
         } else if (left && !prev_left) {
           int handled = 0;
+          int icons_on;
           if (pop_open) {
             int px, py, pw, ph;
             pop_geom(pop_x, pop_y, scale, w, h, bar_h, &px, &py, &pw, &ph);
@@ -5420,7 +5449,7 @@ static int win_wm_run(void) {
                 menu_tela = 0;
                 if (item <= 0) wm_open_notepad(wins, &focus, big);
                 else if (item == 1) wm_open_mgr(wins, &focus, big);
-                else if (item == 2) wm_open_app(wins, &focus, big);
+                else if (item == 2) wm_open_explorer(wins, &focus, big);
                 else if (item == 4) wm_open_browser(wins, &focus, big);
                 else if (item == 5) wm_open_command(wins, &focus, big);
                 else {
@@ -5434,37 +5463,40 @@ static int win_wm_run(void) {
               need_draw = 1;
             }
           }
+          /* janela na frente: os icones do fundo nao recebem o clique */
+          icons_on = z_empty(wins, (int)mx, (int)my);
           if (handled) {
             /* ja tratado */
-          } else if (wm_pt((int)mx, (int)my, 12, icon4_y, icon, icon)) {
+          } else if (icons_on && wm_pt((int)mx, (int)my, 12, icon4_y, icon, icon)) {
             menu_open = 0;
             menu_cfg = 0;
             menu_tela = 0;
             wm_open_command(wins, &focus, big);
             handled = 1;
             need_draw = 1;
-          } else if (wm_pt((int)mx, (int)my, 12, icon3_y, icon, icon)) {
+          } else if (icons_on && wm_pt((int)mx, (int)my, 12, icon3_y, icon, icon)) {
             menu_open = 0;
             menu_cfg = 0;
             menu_tela = 0;
             wm_open_browser(wins, &focus, big);
             handled = 1;
             need_draw = 1;
-          } else if (wm_pt((int)mx, (int)my, 12, icon2_y, icon, icon)) {
+          } else if (icons_on && wm_pt((int)mx, (int)my, 12, icon2_y, icon, icon)) {
             menu_open = 0;
             menu_cfg = 0;
             menu_tela = 0;
             wm_open_notepad(wins, &focus, big);
             handled = 1;
             need_draw = 1;
-          } else if (wm_pt((int)mx, (int)my, 12, 12, icon, icon)) {
+          } else if (icons_on && wm_pt((int)mx, (int)my, 12, 12, icon, icon)) {
             menu_open = 0;
             menu_cfg = 0;
             menu_tela = 0;
             wm_open_mgr(wins, &focus, big);
             handled = 1;
             need_draw = 1;
-          } else if ((desk_i = desk_hit((int)mx, (int)my, icon, ch, scale, w, h, bar_h)) >= 0) {
+          } else if (icons_on &&
+                     (desk_i = desk_hit((int)mx, (int)my, icon, ch, scale, w, h, bar_h)) >= 0) {
             menu_open = 0;
             menu_cfg = 0;
             menu_tela = 0;
