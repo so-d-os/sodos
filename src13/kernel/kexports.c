@@ -462,6 +462,18 @@ static void k_gui_pixels(int x, int y, int w, int h, const void* rgba, int strid
   gui_pixels(x, y, w, h, rgba, stride);
 }
 
+/* 0 = retro, 1 = avancado; devolve o modo anterior (mode < 0 so consulta). */
+static int k_gui_quality(int mode) {
+  if (mode < 0) return gui_quality_get();
+  return gui_quality_set(mode);
+}
+
+static int k_win_bg(uint32_t rgb) { return win_bg_set(rgb); }
+
+static int k_win_wallpaper(const void* rgba, int w, int h) {
+  return win_wall_set((const uint8_t*)rgba, w, h);
+}
+
 struct kexp {
   const char* name;
   void* fn;
@@ -537,6 +549,9 @@ static const struct kexp table[] = {
   EXP(k_gui_present),
   EXP(k_gui_event),
   EXP(k_gui_pixels),
+  EXP(k_gui_quality),
+  EXP(k_win_bg),
+  EXP(k_win_wallpaper),
 };
 
 void* kexport_find(const char* name) {

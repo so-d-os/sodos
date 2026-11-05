@@ -641,6 +641,47 @@ static void gfx_clear(uint32_t c) {
   }
 }
 
+/* ---------------------------------------------------------------------------
+ * Configuracao de video escolhida pelo VIDEOCFG.EXE:
+ *   gfx_quality  0 = retro (como sempre foi: alfa binario, sem mistura)
+ *                1 = avancado (mistura alfa em gui_pixels)
+ *   desk_rgb     cor de fundo do desktop (0xRRGGBB; 0 = o teal padrao)
+ *   desk_wall    papel de parede ja escalado para a tela, na ordem do LFB
+ *                (palavra 0x00RRGGBB, que vira B,G,R no byte a byte)
+ * ------------------------------------------------------------------------- */
+static uint32_t* desk_wall;
+static uint32_t desk_rgb;
+static int gfx_quality;
+
+static uint32_t gui_col(uint32_t rgb);   /* definido mais abaixo */
+
+/* 0xRRGGBB -> palavra no formato que fill_rect/gfx_clear esperam */
+static uint32_t rgb_to_pixa(uint32_t rgb) {
+  return ((rgb & 0xFFu) << 16) | (rgb & 0xFF00u) | ((rgb >> 16) & 0xFFu) |
+         (0xFFu << 24);
+}
+
+/* Fundo do desktop: papel de parede, cor escolhida ou o teal padrao. */
+static void gfx_desk_clear(void) {
+  if (gfx_bochs && desk_wall) {
+    uint32_t y;
+    for (y = 0; y < gfx_h; y++) {
+      uint32_t* src = desk_wall + y * gfx_w;
+      volatile uint32_t* dst = gfx_offscreen
+        ? (volatile uint32_t*)(gfx_back + y * gfx_w * 4u)
+        : (volatile uint32_t*)(gfx_lfb + (y + gfx_draw_y0) * gfx_pitch_bytes);
+      uint32_t n = gfx_w;
+      __asm__ volatile ("rep movsl" : "+S"(src), "+D"(dst), "+c"(n) : : "memory");
+    }
+    return;
+  }
+  if (!gfx_bochs) {
+    gfx_clear(0);
+    return;
+  }
+  gfx_clear(desk_rgb ? rgb_to_pixa(desk_rgb) : gui_col(0x008080));
+}
+
 static void fill_rect(int x, int y, int w, int h, uint32_t color) {
   int x1, y1, x2, y2, dy;
   if (w <= 0 || h <= 0) return;
@@ -1495,7 +1536,7 @@ static void draw_win_desktop(uint32_t col_desk, uint32_t col_win, uint32_t col_t
   if (win_x + win_w > w - 8) win_w = w - win_x - 8;
   if (win_y + win_h > h - bar_h - 4) win_h = h - bar_h - win_y - 4;
 
-  gfx_clear(col_desk);
+  gfx_desk_clear();
 
   fill_rect(12, 12, icon, icon, col_win);
   draw_string_scaled(12, 12 + icon + 2, "DOS", col_white, col_desk, scale);
@@ -2959,8 +3000,26 @@ void gui_pixels(int x, int y, int w, int h, const void* rgba, int stride) {
     for (xx = 0; xx < w; xx++) {
       int dx = x + xx;
       const uint8_t* p = row + xx * 4;
-      if (dx < 0 || dx >= gui.cw || p[3] < 128) continue;
-      gui.pix[dy * gui.cw + dx] = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+      if (dx < 0 || dx >= gui.cw) continue;
+      if (gfx_quality < 1) {
+        /* retro: alfa binario (custo zero, como sempre foi) */
+        if (p[3] < 128) continue;
+        gui.pix[dy * gui.cw + dx] =
+            ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+      } else if (p[3] >= 255) {
+        gui.pix[dy * gui.cw + dx] =
+            ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+      } else if (p[3]) {
+        /* avancado: mistura alfa sobre o que ja esta na janela */
+        uint32_t* d = &gui.pix[dy * gui.cw + dx];
+        uint32_t a = p[3];
+        uint32_t na = 255u - a;
+        uint32_t dr = (*d >> 16) & 0xFFu, dg = (*d >> 8) & 0xFFu, db = *d & 0xFFu;
+        uint32_t r = ((uint32_t)p[0] * a + dr * na) / 255u;
+        uint32_t g = ((uint32_t)p[1] * a + dg * na) / 255u;
+        uint32_t b = ((uint32_t)p[2] * a + db * na) / 255u;
+        *d = (r << 16) | (g << 8) | b;
+      }
     }
   }
 }
@@ -3082,7 +3141,7 @@ void gui_present(void) {
   gfx_frame_begin();
   cursor_saved = 0;
   if (chrome_under) chrome_under();
-  else gfx_clear(gui_col(0x008080));
+  else gfx_desk_clear();
   fill_rect(gui.ox, gui.oy, gui.cw, gui.title_h, title_bg);
   draw_string_scaled(gui.ox + 4, ty, gui.title, white, title_bg, scale);
   fill_rect(close_x, gui.oy + 2, close_s, close_s, btn);
@@ -4668,7 +4727,7 @@ int win_close(const char* name) {
 static void chrome_paint_under(void) {
   int w = (int)gfx_w;
   int h = (int)gfx_h;
-  gfx_clear(c_desk);
+  gfx_desk_clear();
   if (!c_wins) return;
   fill_rect(12, 12, c_icon, c_icon, c_win);
   draw_string_scaled(12, 12 + c_icon + 2, "DOS", c_white, c_desk, c_scale);
@@ -5028,7 +5087,7 @@ static int win_wm_run(void) {
       start_menu_geom(&gm, w, h, bar_h, menu_w, menu_item_h, scale);
       gfx_frame_begin();
       cursor_saved = 0;
-      gfx_clear(col_desk);
+      gfx_desk_clear();
       fill_rect(12, 12, icon, icon, col_win);
       draw_string_scaled(12, 12 + icon + 2, "DOS", col_white, col_desk, scale);
       fill_rect(12, icon2_y, icon, icon, col_title);
@@ -5884,6 +5943,147 @@ static int win_wm_run(void) {
   }
 }
 
+/* ---------------------------------------------------------------------------
+ * API de configuracao de video (exportada como k_gui_quality, k_win_bg e
+ * k_win_wallpaper). Usada pelo VIDEOCFG.EXE.
+ * ------------------------------------------------------------------------- */
+int gui_quality_get(void) { return gfx_quality; }
+
+int gui_quality_set(int mode) {
+  int old = gfx_quality;
+  gfx_quality = mode ? 1 : 0;
+  win_api_dirty = 1;
+  return old;
+}
+
+int win_bg_set(uint32_t rgb) {
+  if (desk_wall) {
+    ufree(desk_wall);
+    desk_wall = 0;
+  }
+  desk_rgb = rgb & 0xFFFFFFu;
+  win_api_dirty = 1;
+  return 0;
+}
+
+/* rgba: w*h*4 (R,G,B,A). Escala para a tela e guarda como fundo. */
+int win_wall_set(const uint8_t* rgba, int sw, int sh) {
+  uint32_t* buf;
+  int x, y;
+  if (desk_wall) {
+    ufree(desk_wall);
+    desk_wall = 0;
+  }
+  if (!rgba || sw <= 0 || sh <= 0 || sw > 8192 || sh > 8192 || !gfx_bochs)
+    return -1;
+  buf = (uint32_t*)umalloc_owned((uint32_t)(gfx_w * gfx_h * 4u), 0);
+  if (!buf) return -1;
+  for (y = 0; y < (int)gfx_h; y++) {
+    int sy = (int)((uint32_t)y * (uint32_t)sh / gfx_h);
+    const uint8_t* row = rgba + (size_t)sy * (size_t)sw * 4;
+    for (x = 0; x < (int)gfx_w; x++) {
+      int sx = (int)((uint32_t)x * (uint32_t)sw / gfx_w);
+      const uint8_t* p = row + sx * 4;
+      buf[y * (int)gfx_w + x] =
+          ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+    }
+  }
+  desk_wall = buf;
+  win_api_dirty = 1;
+  return 0;
+}
+
+/* Le D:\SODOS\VIDEO.CFG (mode=0|1, bg=RRGGBB, wall=1) e aplica.
+ * O papel de parede vem de D:\SODOS\WALL.RAW: "SODW", u16 w, u16 h, RGB. */
+static int cfg_hex(const char* s) {
+  int v = 0, i;
+  for (i = 0; i < 6; i++) {
+    char c = s[i];
+    int d;
+    if (c >= '0' && c <= '9') d = c - '0';
+    else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+    else break;
+    v = v * 16 + d;
+  }
+  return v;
+}
+
+static void win_load_wall(void) {
+  int sz;
+  uint8_t* raw;
+  unsigned w, h;
+  uint8_t* rgba;
+  unsigned k;
+  sz = file_size("D:\\SODOS\\WALL.RAW");
+  if (sz < 16 || sz > (24 << 20)) return;
+  /* file_load escreve um NUL no fim e le no maximo max-1: reserva +1 */
+  raw = (uint8_t*)umalloc_owned((uint32_t)sz + 1u, 0);
+  if (!raw) return;
+  if (file_load("D:\\SODOS\\WALL.RAW", (char*)raw, sz + 1) != sz) {
+    ufree(raw);
+    return;
+  }
+  if (!(raw[0] == 'S' && raw[1] == 'O' && raw[2] == 'D' && raw[3] == 'W')) {
+    ufree(raw);
+    return;
+  }
+  w = (unsigned)raw[4] | ((unsigned)raw[5] << 8);
+  h = (unsigned)raw[6] | ((unsigned)raw[7] << 8);
+  if (!w || !h || w > 4096 || h > 4096 ||
+      8u + w * h * 3u > (unsigned)sz) {
+    ufree(raw);
+    return;
+  }
+  rgba = (uint8_t*)umalloc_owned(w * h * 4u, 0);
+  if (rgba) {
+    for (k = 0; k < w * h; k++) {
+      rgba[k * 4] = raw[8 + k * 3];
+      rgba[k * 4 + 1] = raw[9 + k * 3];
+      rgba[k * 4 + 2] = raw[10 + k * 3];
+      rgba[k * 4 + 3] = 255;
+    }
+    win_wall_set(rgba, (int)w, (int)h);
+    ufree(rgba);
+  }
+  ufree(raw);
+}
+
+static void win_load_cfg(void) {
+  static char cfg[256];
+  int n, i, mode = 0, wall = 0;
+  uint32_t bg = 0;
+  n = file_load("D:\\SODOS\\VIDEO.CFG", cfg, (int)sizeof(cfg) - 1);
+  if (n <= 0) return;
+  cfg[n] = 0;
+  i = 0;
+  while (i < n) {
+    int j = i, k;
+    while (j < n && cfg[j] != '\n' && cfg[j] != '\r') j++;
+    k = i;
+    if (k + 5 <= j && cfg[k] == 'm' && cfg[k + 1] == 'o' && cfg[k + 2] == 'd' &&
+        cfg[k + 3] == 'e' && cfg[k + 4] == '=') {
+      mode = cfg[k + 5] == '1' ? 1 : 0;
+    } else if (k + 3 <= j && cfg[k] == 'b' && cfg[k + 1] == 'g' &&
+               cfg[k + 2] == '=') {
+      bg = (uint32_t)cfg_hex(cfg + k + 3);
+    } else if (k + 5 <= j && cfg[k] == 'w' && cfg[k + 1] == 'a' &&
+               cfg[k + 2] == 'l' && cfg[k + 3] == 'l' && cfg[k + 4] == '=') {
+      wall = (cfg[k + 5] != 0 && cfg[k + 5] != '\r' && cfg[k + 5] != '\n');
+    }
+    while (j < n && (cfg[j] == '\n' || cfg[j] == '\r')) j++;
+    i = j;
+  }
+  gfx_quality = mode ? 1 : 0;
+  desk_rgb = bg;
+  if (wall) win_load_wall();
+  serial_puts("[visual] cfg mode=");
+  serial_u16((uint16_t)(mode + 1));
+  serial_puts(" bg=");
+  serial_hex32(bg);
+  serial_puts("\n");
+}
+
 static void gfx_session_run(int session) {
   static int shift_on;
   static int kbd_e0;
@@ -5950,6 +6150,7 @@ gfx_restart:
 
   gfx_buf_init();
   gfx_live = 1;
+  if (session == GFX_SESSION_WIN) win_load_cfg();
   fbcon_suspend(1);
   font_cell_w = FONT_W;
   font_cell_h = vga_bios_font_ok ? FONT_H : 8;

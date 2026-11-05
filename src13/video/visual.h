@@ -62,6 +62,14 @@ void mouse_api_pos(int* x, int* y);
 int win_screen_size(int* w, int* h);
 /* Linha y em BGR. Devolve a largura, ou -1. */
 int win_screen_bgr(int y, uint8_t* dst, int max_px);
+/* Configuracao de video (VIDEOCFG.EXE): 0 = retro, 1 = avancado. */
+int gui_quality_get(void);
+int gui_quality_set(int mode);
+/* Cor de fundo do desktop (0xRRGGBB; 0 volta ao teal padrao). */
+int win_bg_set(uint32_t rgb);
+/* Papel de parede: rgba w*h*4; NULL/0 limpa. */
+int win_wall_set(const uint8_t* rgba, int w, int h);
+
 /* Lista "titulo x y w h". -1 se o desktop nao esta aberto. */
 int win_windows(char* out, int max);
 /* Fecha a janela com esse titulo. 0 = fechou. */

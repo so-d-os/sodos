@@ -495,6 +495,13 @@ disk-files: disk.img
 	@if ! mdir -i $(DISK)@@512 ::/SODOS >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS; fi
 	@if ! mdir -i $(DISK)@@512 ::/SODOS/FONTS >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS/FONTS; fi
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/FONTADV.EXE ::/SODOS/FONTADV.EXE
+	@mcopy -o -i $(DISK)@@512 c_compiler/out/VIDEOCFG.EXE ::/SODOS/VIDEOCFG.EXE
+	@if ! mdir -i $(DISK)@@512 ::/SODOS/WALLS >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS/WALLS; fi
+	@for f in content/wallpapers/*; do \
+	  [ -f "$$f" ] || continue; \
+	  n=$$(basename "$$f" | tr 'a-z' 'A-Z'); \
+	  mcopy -o -i $(DISK)@@512 "$$f" "::/SODOS/WALLS/$$n" || exit 1; \
+	done
 	@for f in fonts/ship/*; do \
 	  [ -f "$$f" ] || continue; \
 	  n=$$(basename "$$f" | tr 'a-z' 'A-Z'); \

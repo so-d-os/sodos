@@ -40,7 +40,7 @@ CC_SRC = cc/main.c cc/util.c cc/lex.c cc/pp.c cc/type.c cc/parse.c cc/gen.c
 all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/HELLO.EXE \
 	$(O)/CC.EXE $(O)/LINK.EXE $(O)/TLS.DLL $(O)/HTTPS.EXE $(O)/GUI.DLL $(O)/IMG.DLL \
 	$(O)/BROWSER.EXE $(O)/IMAGEVW.EXE $(O)/VIDPLAY.EXE $(O)/FONTADV.EXE $(O)/COMMAND.EXE $(O)/HTTPD.EXE \
-	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE \
+	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE $(O)/VIDEOCFG.EXE \
 	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
 	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
 	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/COBRA.EXE $(O)/GIT.EXE $(O)/AGENT.EXE $(O)/LLAMA.EXE
@@ -90,6 +90,10 @@ $(O)/WIDGETS.EXE: ../utils/widgets_demo.c $(O)/GUI.DLL include/widgets.h $(HCC) 
 # Gerenciador de arquivos do WIN (navegacao entre pastas e unidades).
 $(O)/EXPLORER.EXE: ../utils/explorer.c $(O)/GUI.DLL include/widgets.h $(HCC) $(HEADERS)
 	$(HCC) -o $@ ../utils/explorer.c $(O)/GUI.DLL
+
+# Configurador de tela: modelo retro/avancado, cor e imagem de fundo.
+$(O)/VIDEOCFG.EXE: ../utils/video_cfg.c $(O)/GUI.DLL $(O)/IMG.DLL include/widgets.h $(HCC) $(HEADERS)
+	$(HCC) -o $@ ../utils/video_cfg.c $(O)/GUI.DLL $(O)/IMG.DLL
 
 # Prompt de comando. A janela preta e desenhada pelo WIN; o EXE abre outra copia.
 $(O)/COMMAND.EXE: examples/command.c $(HCC) $(HEADERS)
