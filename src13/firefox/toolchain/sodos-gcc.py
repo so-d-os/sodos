@@ -25,6 +25,7 @@ SRC13 = os.path.dirname(ROOT)         # src13
 C = os.path.join(SRC13, "c_compiler")
 LINK = os.path.join(C, "build", "link")
 LINK64 = os.path.join(C, "build", "link64")
+GCC_INCLUDE = subprocess.check_output(["gcc", "-print-file-name=include"], text=True).strip()
 CRT = os.path.join(C, "build", "x_crt0.o")
 CRT64 = os.path.join(C, "build", "x_crt0_64.o")
 LIBCX = os.path.join(C, "out", "LIBCX.DLL")
@@ -118,7 +119,7 @@ def compile_one(kind, src, obj, flags):
         cmd = ["gcc", "-m64", "-ffreestanding", "-fno-pic", "-fno-pie",
                "-fno-stack-protector", "-mno-red-zone", "-mcmodel=large",
                "-nostdinc", "-isystem", os.path.join(C, "include"),
-               "-isystem", "/usr/lib/gcc/x86_64-linux-gnu/13/include",
+               "-isystem", GCC_INCLUDE,
                "-D__SODOS__", "-c", src, "-o", obj] + flags
         return run(cmd)
     cc = CXX if kind == "cxx" else CC
@@ -147,7 +148,7 @@ def main():
             return run(["gcc", "-m64", "-ffreestanding", "-fno-pic", "-fno-pie",
                         "-fno-stack-protector", "-mno-red-zone", "-mcmodel=large",
                         "-nostdinc", "-isystem", os.path.join(C, "include"),
-                        "-isystem", "/usr/lib/gcc/x86_64-linux-gnu/13/include",
+                        "-isystem", GCC_INCLUDE,
                         "-D__SODOS__", "-U__linux__", "-Ulinux"] + args)
         cc = CXX if is_cxx() else CC
         # O configure descobre o kernel preprocessando um conftest; ai o alvo

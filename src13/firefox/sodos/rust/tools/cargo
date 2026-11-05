@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""cargo wrapper: mapeia --target x86_64-sodos para o JSON e build-std."""
+"""cargo wrapper: mapeia --target x86_64-sodos para o JSON.
+
+Com o std ja instalado no sysroot (sodos/scripts/patch-rust-std.sh), nao usa
+build-std: assim o cargo do Firefox nao mistura as crates do std com o vendor
+dele. SODOS_BUILD_STD=1 forca o build-std (e como o script gera o std).
+"""
+import glob
 import os
 import subprocess
 import sys
@@ -7,6 +13,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 JSON = os.path.normpath(os.path.join(HERE, "..", "custom", "x86_64-sodos.json"))
 RUSTC = os.path.join(HERE, "rustc")
+RUSTUP = os.path.expanduser("~/.cargo/bin/rustup")
 
 args = sys.argv[1:]
 out = []
@@ -26,7 +33,11 @@ while i < len(args):
 
 env = dict(os.environ)
 env["RUSTC"] = RUSTC
+sysroot = subprocess.check_output([RUSTUP, "run", "nightly", "rustc", "--print", "sysroot"],
+                                  text=True).strip()
+installed = glob.glob(os.path.join(sysroot, "lib", "rustlib", "x86_64-sodos", "lib", "libstd-*.rlib"))
 # -Z globais precisam vir antes do subcomando (build/check/...).
-cmd = [os.path.expanduser("~/.cargo/bin/rustup"), "run", "nightly", "cargo",
-       "-Zjson-target-spec", "-Zbuild-std=std,panic_abort"] + out
-sys.exit(subprocess.call(cmd, env=env))
+cmd = [RUSTUP, "run", "nightly", "cargo", "-Zjson-target-spec"]
+if os.environ.get("SODOS_BUILD_STD") or not installed:
+    cmd.append("-Zbuild-std=std,panic_abort")
+sys.exit(subprocess.call(cmd + out, env=env))

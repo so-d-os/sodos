@@ -5,13 +5,13 @@ camada de plataforma, o build, os patches sobre o upstream e a documentação.
 O código do Firefox em si não é copiado para o repositório; `setup.sh` baixa a
 árvore oficial para `vendor/` (fora do git).
 
-> **Estado em 2026-11-03 (M0 + M1 + M2a + M2b parcial):** a fundação
-> (`libsodos`), o **NSPR 4.35**, o **runtime C++ mínimo** e o **núcleo da
-> libc++** (containers, algoritmos, `string`, `chrono`, `std::thread`/`mutex`)
-> estão portados e testados. O Firefox **ainda não compila**: faltam
-> iostreams/locale e exceções da libc++, NSS/ICU, VM com páginas sob demanda,
-> múltiplas conexões e preempção no kernel. O plano completo está em
-> [docs/03-fases.md](docs/03-fases.md).
+> **Estado em 2026-11-04 (até M3):** a fundação (`libsodos`), o **NSPR**, a
+> **libc++** e o **`std` do Rust** estão portados, e o **SpiderMonkey
+> (`JS.EXE`, com JIT) roda no SODOS**, reproduzível pelos passos em
+> [docs/05-firefox-build.md](docs/05-firefox-build.md). O navegador **ainda
+> não compila**: falta um toolkit próprio (o `cairo-headless` não existe mais)
+> e, no kernel, preempção, memória virtual, várias conexões TCP e processos.
+> O plano completo está em [docs/03-fases.md](docs/03-fases.md).
 
 ## O que já funciona
 

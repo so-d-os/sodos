@@ -77,6 +77,17 @@ rust64:
 rust64-custom:
 	sh sodos/rust/build_custom.sh
 
+# SpiderMonkey (JS.EXE). Passo a passo em docs/05-firefox-build.md.
+.PHONY: js64-std js64-configure js64
+js64-std:
+	sh sodos/scripts/patch-rust-std.sh
+
+js64-configure:
+	sh sodos/scripts/build-js64.sh configure
+
+js64:
+	sh sodos/scripts/build-js64.sh build
+
 # ---- C++ minimo (M2a) -----------------------------------------------------
 # Runtime proprio (new/delete, __cxa_*, construtores globais via .init_array)
 # + CXXTEST. O g++ local vem de sodos/scripts/fetch-gxx.sh.

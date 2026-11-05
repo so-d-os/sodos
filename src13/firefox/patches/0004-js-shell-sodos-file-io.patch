@@ -11,7 +11,7 @@ Fallback: quando o fstat falha, descobre o tamanho com fseek/ftell.
 ---
 --- a/js/src/util/CompleteFile.cpp
 +++ b/js/src/util/CompleteFile.cpp
-@@ -21,6 +21,17 @@
+@@ -21,6 +21,19 @@
    struct stat st;
    int ok = fstat(fileno(fp), &st);
    if (ok != 0) {
@@ -26,6 +26,8 @@ Fallback: quando o fstat falha, descobre o tamanho com fseek/ftell.
 +      st.st_size = (off_t)end;
 +      ok = 0;
 +    }
-   }
-   if (ok != 0) {
++  }
++  if (ok != 0) {
      // Use the Latin1 variant here (and below), because the encoding of
+     // strerror() is platform-dependent.
+     JS_ReportErrorLatin1(cx, "error reading file: %s", strerror(errno));

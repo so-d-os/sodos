@@ -493,6 +493,60 @@ Logs completos ficam fora do git (em `$HOME/ffsrc`):
 
 Reprodução: `sodos/scripts/fetch-firefox.sh` + o patch acima + `toolchain/`.
 
+## Reproducao em maquina limpa (2026-11-04)
+
+Refeito do zero em Debian 12 (gcc 12, glibc 2.36, 16 nucleos). O build do `js`
+levou poucos minutos; a arvore e o objdir ocupam cerca de 14 GB em `~/ffsrc`.
+
+```sh
+cd src13/firefox
+# 1. Fonte (conferir com o SHA512SUMS da Mozilla) e patches 0001 a 0004
+FIREFOX_DIR=$HOME/ffsrc/firefox-153.6.0esr sh sodos/scripts/fetch-firefox.sh
+cd $HOME/ffsrc/firefox-153.6.0esr
+for p in /caminho/src13/firefox/patches/000*.patch; do patch -p1 < "$p"; done
+cd -
+# 2. GCC >= 13 em ~/ffsrc/gcc-13 (a libc++ 18 usa o builtin __is_convertible)
+export PATH=$HOME/ffsrc/gcc-13/bin:$PATH LD_LIBRARY_PATH=$HOME/ffsrc/gcc-13/lib64
+# 3. Dependencias do host
+rustup toolchain install nightly --profile minimal --component rust-src
+cargo +stable install cbindgen --locked
+sh sodos/scripts/fetch-libcxx.sh
+# 4. Base LP64, std do Rust e o shell
+make libcxx64
+make js64-std
+make js64-configure
+make js64        # gera $HOME/ffsrc/obj-js64/dist/bin/js (41,9 MB)
+# 5. Copiar para o D: como JS.EXE (com o QEMU fechado) e rodar:
+#    curl -s -X POST --data-binary 'D:\JS.EXE D:\T.JS' http://127.0.0.1:8797/exec
+```
+
+O que estava faltando no repositorio e foi versionado nessa refeitura:
+
+- **`std` do Rust**: `patches/rust-std-sodos.patch` (alocador sobre `malloc`,
+  erros `generic`, aleatorio `unsupported`, TLS `no_threads`). O script instala
+  o `std` pre-compilado, com bitcode, em `rustlib/x86_64-sodos/lib`; assim o
+  cargo do Firefox nao precisa de `build-std` nem de copiar crates para o
+  vendor dele. **Threads Rust nao existem**: o TLS assume uma thread so.
+- **`__config_site` LP64** sem `_LIBCPP_HAS_NO_LOCALIZATION` (o `build.sh`
+  compila `locale.cpp`).
+- **`crt0.c`** define `__sodos_stack_top`, como o `crt0_64.S`.
+- **`--without-system-zlib`**: senao o `pkg-config` acha a zlib do Linux.
+- **`--disable-shared-js`**: o SODOS nao liga a `libmozjs.so`.
+- **`objdump`** no lugar do `llvm-objdump`, que so o configure exige.
+- Scripts com bit de execucao e caminho do gcc perguntado ao compilador.
+
+### Pendencias encontradas
+
+- **`make test` (x32) nao liga**: `sodos_extra.c` usa `__sodos_stack_size`,
+  `wait` e `waitpid`, que nao existem no link x32. O caminho do port e o LP64,
+  mas o criterio geral 2 de `03-fases.md` esta quebrado.
+- **`aligned_alloc`/`memalign`/`posix_memalign`** ignoram alinhamento maior
+  que 16 (`c_compiler/lib/stdlib.c`).
+- **Marcadores de depuracao** (`!MU`, `!FB`) continuam saindo na serial.
+- **Toolkit**: `--enable-default-toolkit=cairo-headless` nao existe no 153 (so
+  variantes de GTK). O proximo passo, o `libxul`, precisa de um toolkit `sodos`
+  no `toolkit/moz.configure`; o `widget/headless` existe e pode servir de base.
+
 ## Execucao do shell JS (marco)
 
 `JS.EXE` roda JavaScript no SODOS. Um arquivo de teste (`T.JS`) imprime:

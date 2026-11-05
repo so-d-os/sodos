@@ -22,5 +22,5 @@ exec "$GXX" $B -m64 -mcmodel=large -mno-red-zone -ffreestanding -fno-pic -fno-pi
   -fno-stack-protector -fno-asynchronous-unwind-tables -fno-jump-tables -fcf-protection=none \
   -fno-tree-loop-distribute-patterns -nostdinc -nostdinc++ -fno-exceptions \
   -isystem "$D/libcxx64/include" -isystem "$L" -isystem "$D/libcxx/include" \
-  -isystem "$D/include" -isystem "$C/include" -isystem /usr/lib/gcc/x86_64-linux-gnu/13/include -D__SODOS__ \
+  -isystem "$D/include" -isystem "$C/include" -isystem "$(gcc -print-file-name=include)" -D__SODOS__ \
   -D_LIBCPP_PSTL_CPU_BACKEND_SERIAL "$@"
