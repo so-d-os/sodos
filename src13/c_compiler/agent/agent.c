@@ -200,6 +200,32 @@ static void show_utf8(const char* s, int n) {
   s_free(&t);
 }
 
+/* Esconde os blocos de chamada de ferramenta (<|DSML|...>) da tela: eles
+ * viram acao, nao conversa. O texto normal continua aparecendo. */
+static int hide_dsml;
+
+static void show_clean(const char* s, int n) {
+  int i = 0;
+  while (i < n) {
+    if (hide_dsml) {
+      if (s[i] == '>' && i >= 5 && !memcmp(s + i - 5, "calls", 5)) hide_dsml = 0;
+      i++;
+      continue;
+    }
+    if (s[i] == '<' && i + 1 < n && (s[i + 1] == '|' || s[i + 1] == '?')) {
+      hide_dsml = 1;
+      i += 2;
+      continue;
+    }
+    {
+      int j = i;
+      while (j < n && !(s[j] == '<' && j + 1 < n && (s[j + 1] == '|' || s[j + 1] == '?'))) j++;
+      show_utf8(s + i, j - i);
+      i = j;
+    }
+  }
+}
+
 /* ---------- JSON ---------- */
 static void json_str(str_t* s, const char* v) {
   s_addc(s, '"');
@@ -437,7 +463,7 @@ static void sse_line(resp_t* r, const char* l, int n) {
       r->thinking = 2;
     }
     s_addn(&r->text, v.p, v.len);
-    show_utf8(v.p, v.len);
+    show_clean(v.p, v.len);
   } else {
     s_clear(&v);
     if (r->thinking == 0 && json_get(l, end, "reasoning_content", &v) && v.len) {
@@ -647,6 +673,11 @@ static const char sys_head[] =
   "```cmd\n<one prompt line, at most 200 characters>\n```\n"
   "or, to create or overwrite a file with the full content:\n"
   "```write D:\\PATH\\FILE.EXT\n<content>\n```\n"
+  "Your call is also accepted as an XML block: "
+  "<|DSML| invoke name=\"write\"> with parameter path and content, or "
+  "name=\"cmd\"> with parameter command. The user only sees your prose: the "
+  "call markup is hidden and executed. When you need something from the user, "
+  "just ask in plain text, with no call block.\n"
   "After each action you receive its output and exit code. "
   "When the task is finished, or you need the user, reply with NO action block.\n\n"
   "Rules:\n"
@@ -680,10 +711,70 @@ static void build_system(void) {
   s_free(&s);
 }
 
+/* Valor de um <|DSML| parameter name="NAME" ...>VALOR</|DSML| parameter>
+ * dentro de [a,b). 1 = achou. */
+static int dsml_param(const char* a, const char* b, const char* name, str_t* out) {
+  int nl = (int)strlen(name);
+  const char* p = a;
+  while (p < b) {
+    const char* q = strstr(p, "name=\"");
+    const char* v, * e;
+    if (!q || q >= b) return 0;
+    q += 6;
+    if (q + nl <= b && !memcmp(q, name, (size_t)nl) && q[nl] == '"') {
+      v = q + nl + 1;
+      while (v < b && *v != '>') v++;
+      if (v >= b) return 0;
+      v++;
+      e = v;
+      while (e < b && !(*e == '<' && e + 1 < b && e[1] == '/')) e++;
+      utf8_to_cp850(out, v, (int)(e - v));
+      return 1;
+    }
+    p = q + 1;
+  }
+  return 0;
+}
+
+/* Chamada de ferramenta no formato <|DSML| invoke name="..."> (o modelo as
+ * vezes responde assim em vez do bloco ```). kind 'c' = cmd, 'w' = write. */
+static int find_dsml(const char* t, int* kind, str_t* arg, str_t* body) {
+  const char* inv = strstr(t, "DSML");
+  const char* end;
+  const char* nm;
+  if (!inv) return 0;
+  nm = strstr(inv, "invoke name=\"");
+  if (!nm) return 0;
+  {
+    const char* ce = strstr(inv, "calls>");
+    end = ce ? ce + 6 : t + strlen(t);
+  }
+  nm += 13;
+  if (!strncmp(nm, "write", 5) || !strncmp(nm, "create", 6) || !strncmp(nm, "save", 4)) {
+    if (dsml_param(inv, end, "path", arg) || dsml_param(inv, end, "file", arg) ||
+        dsml_param(inv, end, "filename", arg)) {
+      if (!dsml_param(inv, end, "content", body) && !dsml_param(inv, end, "text", body))
+        dsml_param(inv, end, "body", body);
+      *kind = 'w';
+      return 1;
+    }
+  }
+  if (!strncmp(nm, "cmd", 3) || !strncmp(nm, "run", 3) || !strncmp(nm, "shell", 5) ||
+      !strncmp(nm, "exec", 4) || !strncmp(nm, "bash", 4)) {
+    if (dsml_param(inv, end, "command", arg) || dsml_param(inv, end, "cmd", arg) ||
+        dsml_param(inv, end, "line", arg)) {
+      *kind = 'c';
+      return 1;
+    }
+  }
+  return 0;
+}
+
 /* Acha o bloco de acao na resposta. kind 'c' = cmd, 'w' = write.
  * arg = linha do comando ou caminho; body = conteudo do write. */
 static int find_action(const char* t, int* kind, str_t* arg, str_t* body) {
   const char* p = t;
+  if (find_dsml(t, kind, arg, body)) return 1;
   while ((p = strstr(p, "```")) != 0) {
     const char* tag = p + 3;
     const char* nl = strchr(tag, '\n');
