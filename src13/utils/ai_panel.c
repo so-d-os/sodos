@@ -41,6 +41,9 @@ static char g_status[120];
 static int g_mx, g_my, g_down, g_ready;
 static const char id_send, id_edit, id_new;
 static ai_tool_t g_tools[4];
+static int g_busy;   /* enviando: nao aceitar cliques de acao */
+static void draw_all(void);
+static void send_now(void);
 
 static const char* SYS_PROMPT =
     "You are AGENT, the assistant that runs natively inside SODOS (a small "
@@ -396,6 +399,7 @@ static void on_token(void* ud, const char* s, int n) {
     g_stream_len += n;
     g_stream[g_stream_len] = 0;
   }
+  if (g_waiting) draw_all();   /* mostra o texto chegando */
 }
 
 /* Chamada da API com o historico atual. 0 = ok, -1 = erro (texto em g_stream
@@ -449,11 +453,12 @@ static void send_now(void) {
   }
   add_msg(ROLE_ME, q);
   gui_edit_set(&g_edit, "");
+  g_busy = 1;
 
   for (step = 0; step < STEPS_MAX; step++) {
     g_waiting = 1;
     set_status(step ? "executando e perguntando de novo..." : "esperando a API...");
-    gui_present();
+    draw_all();   /* a pergunta aparece antes de sair para a API */
     {
       int rc = call_api();
       if (rc < 0) {
@@ -497,10 +502,76 @@ static void send_now(void) {
     }
   }
   if (step == STEPS_MAX) add_msg(ROLE_SYS, "[limite de acoes neste pedido]");
+  g_busy = 0;
   g_waiting = 0;
   g_stream_len = 0;
   g_stream[0] = 0;
   set_status("ok");
+}
+
+/* Desenha a conversa inteira (usado pelo laco e durante o envio). */
+static void draw_all(void) {
+  int pad = 8;
+  int head_h = 52;
+  int input_h = 34;
+  int status_h = 22;
+  int sw = gui_width();
+  int sh = gui_height();
+  int ytop, ybot, i, y;
+
+  if (!g_ready && k_ms() > 500) g_ready = 1;
+  wg_input(g_mx, g_my, g_down);
+  gui_fill(0, 0, sw, sh, wg_theme()->bg);
+
+  gui_fill(0, 0, sw, head_h, wg_theme()->panel);
+  wg_dot(18, 26, 13, wg_theme()->accent);
+  gui_text(14, 18, "S", 1, wg_theme()->sel_text, wg_theme()->accent, GUI_TEXT_NOBG);
+  gui_text(38, 8, "Assistente SODOS", -1, wg_theme()->text, wg_theme()->panel,
+           GUI_TEXT_NOBG);
+  gui_text(38, 28, g_cfg.model, 20, wg_theme()->text_dim, wg_theme()->panel,
+           GUI_TEXT_NOBG);
+  if (!g_busy && wg_button(&id_new, sw - 78, 10, 68, 32, "novo", g_ready)) {
+    g_n = 0;
+    add_msg(ROLE_SYS, "Conversa nova. Enter envia, Esc fecha.");
+    set_status("conversa limpa");
+  }
+
+  ytop = head_h + 6;
+  ybot = sh - status_h - input_h - 12;
+  y = ybot;
+  for (i = g_n - 1; i >= 0; i--) {
+    int h;
+    if (g_msgs[i].role == ROLE_OBS) continue;
+    h = msg_height(g_msgs[i].text, sw - 2 * pad - 4);
+    if (y - h < ytop) break;
+    y -= h;
+    draw_bubble(pad, sw - 2 * pad, y, &g_msgs[i]);
+    y -= 6;
+  }
+  if (g_waiting) {
+    struct msg tmp;
+    int h;
+    tmp.role = ROLE_AI;
+    snprintf(tmp.text, sizeof(tmp.text), "%s", g_stream_len ? g_stream : "...");
+    h = msg_height(tmp.text, sw - 2 * pad - 4);
+    if (y - h >= ytop) {
+      y -= h;
+      draw_bubble(pad, sw - 2 * pad, y, &tmp);
+    }
+  }
+
+  {
+    int by = sh - status_h - input_h;
+    int bw = sw - 2 * pad - 90;
+    wg_edit_box(&id_edit, &g_edit, pad, by, bw, input_h);
+    if (!g_busy &&
+        wg_button(&id_send, pad + bw + 6, by, 84, input_h, "Enviar",
+                  g_ready && !g_waiting))
+      send_now();
+  }
+  wg_status(0, sh - status_h, sw, g_status, g_cfg.key[0] ? "online" : "sem key");
+
+  gui_present();
 }
 
 int main(void) {
@@ -529,58 +600,8 @@ int main(void) {
     int ch = gui_char_h();
     int ytop, ybot, i, y;
 
-    if (!g_ready && k_ms() > 500) g_ready = 1;
-    wg_input(g_mx, g_my, g_down);
-    gui_fill(0, 0, sw, sh, wg_theme()->bg);
+    draw_all();
 
-    gui_fill(0, 0, sw, head_h, wg_theme()->panel);
-    wg_dot(18, 26, 13, wg_theme()->accent);
-    gui_text(14, 18, "S", 1, wg_theme()->sel_text, wg_theme()->accent, GUI_TEXT_NOBG);
-    gui_text(38, 8, "Assistente SODOS", -1, wg_theme()->text, wg_theme()->panel,
-             GUI_TEXT_NOBG);
-    gui_text(38, 28, g_cfg.model, 20, wg_theme()->text_dim, wg_theme()->panel,
-             GUI_TEXT_NOBG);
-    if (wg_button(&id_new, sw - 78, 10, 68, 32, "novo", g_ready)) {
-      g_n = 0;
-      add_msg(ROLE_SYS, "Conversa nova. Enter envia, Esc fecha.");
-      set_status("conversa limpa");
-    }
-
-    ytop = head_h + 6;
-    ybot = sh - status_h - input_h - 12;
-    y = ybot;
-    for (i = g_n - 1; i >= 0; i--) {
-      int h;
-      if (g_msgs[i].role == ROLE_OBS) continue;
-      h = msg_height(g_msgs[i].text, sw - 2 * pad - 4);
-      if (y - h < ytop) break;
-      y -= h;
-      draw_bubble(pad, sw - 2 * pad, y, &g_msgs[i]);
-      y -= 6;
-    }
-    if (g_waiting) {
-      struct msg tmp;
-      int h;
-      tmp.role = ROLE_AI;
-      snprintf(tmp.text, sizeof(tmp.text), "%s", g_stream_len ? g_stream : "...");
-      h = msg_height(tmp.text, sw - 2 * pad - 4);
-      if (y - h >= ytop) {
-        y -= h;
-        draw_bubble(pad, sw - 2 * pad, y, &tmp);
-      }
-    }
-
-    {
-      int by = sh - status_h - input_h;
-      int bw = sw - 2 * pad - 90;
-      wg_edit_box(&id_edit, &g_edit, pad, by, bw, input_h);
-      if (wg_button(&id_send, pad + bw + 6, by, 84, input_h, "Enviar",
-                    g_ready && !g_waiting))
-        send_now();
-    }
-    wg_status(0, sh - status_h, sw, g_status, g_cfg.key[0] ? "online" : "sem key");
-
-    gui_present();
 
     if (gui_wait(&ev, 120) != GUI_EV_NONE) {
       if (ev.type == GUI_EV_CLOSE) run = 0;
