@@ -494,7 +494,7 @@ disk-files: disk.img
 	@mcopy -o -i $(DISK)@@512 utils/image_view.c ::/IMAGEVW.C
 	@if ! mdir -i $(DISK)@@512 ::/SODOS >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS; fi
 	@if ! mdir -i $(DISK)@@512 ::/SODOS/FONTS >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS/FONTS; fi
-	@mcopy -o -i $(DISK)@512 c_compiler/out/FONTADV.EXE ::/SODOS/FONTADV.EXE
+	@mcopy -o -i $(DISK)@@512 c_compiler/out/FONTADV.EXE ::/SODOS/FONTADV.EXE
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/VIDEOCFG.EXE ::/SODOS/VIDEOCFG.EXE
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/IMGBIG.DLL ::/SODOS/IMGBIG.DLL
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/AIPANEL.EXE ::/SODOS/AIPANEL.EXE

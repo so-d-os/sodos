@@ -673,8 +673,8 @@ float modff(float x, float* ip) {
   return r;
 }
 
-#endif
-
 float nearbyintf(float x) { return x; }
 
 float scalbnf(float x, int n) { return (float)scalbn(x, n); }
+
+#endif

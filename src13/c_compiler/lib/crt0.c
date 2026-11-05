@@ -12,7 +12,16 @@ char* __sodos_stack_top;
 
 void _start(int argc, char** argv) {
   int rc;
+#ifdef __GNUC__
   __sodos_stack_top = (char*)__builtin_frame_address(0);
+#else
+  /* o cc do SODOS nao tem __builtin_frame_address: um endereco local serve
+   * (o valor e so uma referencia aproximada do topo da pilha). */
+  {
+    char probe;
+    __sodos_stack_top = &probe;
+  }
+#endif
   __so_libc_start();
   __sodos_ctors();
   rc = main(argc, argv);
