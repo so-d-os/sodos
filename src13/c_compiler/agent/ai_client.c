@@ -8,7 +8,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <so.h>
-#include <tls.h>
 #include <ai_client.h>
 
 #define HDR_MAX 8192
@@ -354,11 +353,46 @@ static int url_parse(const char* s, url_t* u) {
   return n ? 0 : -1;
 }
 
+/* TLS carregado em tempo de execucao (k_dll_sym): o linker do SODOS corrompe
+ * o heap quando um EXE importa GUI.DLL e TLS.DLL juntos. */
+typedef struct {
+  int (*connect)(const char*, int);
+  int (*send)(const char*, int);
+  int (*recv)(char*, int);
+  void (*close)(void);
+  const char* (*error)(void);
+  int ok;
+} tls_api_t;
+
+static tls_api_t tlsapi;
+
+static int tls_load(void) {
+  int h;
+  if (tlsapi.ok) return 0;
+  h = k_dll_load("TLS.DLL");
+  if (!h) return -1;
+  tlsapi.connect = (int (*)(const char*, int))k_dll_sym(h, "tls_connect");
+  tlsapi.send = (int (*)(const char*, int))k_dll_sym(h, "tls_send");
+  tlsapi.recv = (int (*)(char*, int))k_dll_sym(h, "tls_recv");
+  tlsapi.close = (void (*)(void))k_dll_sym(h, "tls_close");
+  tlsapi.error = (const char* (*)(void))k_dll_sym(h, "tls_error");
+  if (!tlsapi.connect || !tlsapi.send || !tlsapi.recv || !tlsapi.close) {
+    set_err("TLS.DLL sem as funcoes esperadas");
+    return -1;
+  }
+  tlsapi.ok = 1;
+  return 0;
+}
+
 static int c_tls;
-static int c_send(const char* d, int n) { return c_tls ? tls_send(d, n) : k_tcp_send(d, n); }
-static int c_recv(char* d, int cap) { return c_tls ? tls_recv(d, cap) : k_tcp_recv(d, cap); }
+static int c_send(const char* d, int n) {
+  return c_tls ? tlsapi.send(d, n) : k_tcp_send(d, n);
+}
+static int c_recv(char* d, int cap) {
+  return c_tls ? tlsapi.recv(d, cap) : k_tcp_recv(d, cap);
+}
 static void c_close(void) {
-  if (c_tls) tls_close();
+  if (c_tls) tlsapi.close();
   else k_tcp_close();
 }
 
@@ -538,8 +572,9 @@ int ai_chat(const ai_cfg_t* c, const ai_msg_t* msgs, int n,
   c_tls = u.tls;
   t0 = k_ms();
   if (u.tls) {
-    if (tls_connect(u.host, u.port) != 0) {
-      snprintf(err, sizeof(err), "TLS: %s", tls_error());
+    if (tls_load() != 0 || tlsapi.connect(u.host, u.port) != 0) {
+      snprintf(err, sizeof(err), "TLS: %s",
+               tlsapi.error ? tlsapi.error() : "TLS.DLL indisponivel");
       s_free(&json);
       return -1;
     }

@@ -144,6 +144,8 @@ int k_win_wallpaper(const void* rgba, int w, int h);
 int k_ui_menu_pos(int pos);
 int k_ui_glass(int on);
 int k_ui_ia(int on);
+/* Pede ao WIN que abra um programa (janela); 0 = pedido aceito. */
+int k_win_launch(const char* path);
 
 /* No cc, __export em uma funcao ou variavel global a coloca na tabela de
  * exports da DLL. No gcc (bootstrap) use link /export:nome ou /exportall. */

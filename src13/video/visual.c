@@ -657,6 +657,9 @@ static int ui_menu_pos;
 static int ui_glass;      /* 1 = menu Iniciar translucido */
 static int ui_ia;         /* 1 = painel de IA ligado */
 static int ui_ia_launch;  /* pedido de abrir o AIPANEL pendente */
+/* pedido de abrir um programa no WIN (k_win_launch) */
+static char launch_path[64];
+static int launch_pending;
 
 static uint32_t gui_col(uint32_t rgb);   /* definido mais abaixo */
 
@@ -5369,6 +5372,11 @@ static int win_wm_run(void) {
     }
     mx = sys_mx;
     my = sys_my;
+    if (launch_pending) {
+      launch_pending = 0;
+      wm_exec(wins, &focus, big, launch_path);
+      need_draw = 1;
+    }
     if (ui_ia_launch) {
       ui_ia_launch = 0;
       if (!gui_raise_title("SODOS IA")) {
@@ -6293,6 +6301,19 @@ int ui_glass_set(int on) {
   ui_glass = on ? 1 : 0;
   win_api_dirty = 1;
   return old;
+}
+
+/* Pedido de abrir um programa no WIN (o laco executa no proximo quadro). */
+int win_launch(const char* path) {
+  int i = 0;
+  if (!path || !path[0]) return -1;
+  while (path[i] && i < (int)sizeof(launch_path) - 1) {
+    launch_path[i] = path[i];
+    i++;
+  }
+  launch_path[i] = 0;
+  launch_pending = 1;
+  return 0;
 }
 
 int ui_ia_set(int on) {

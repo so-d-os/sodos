@@ -373,5 +373,8 @@ $(O)/MENUCFG.EXE: ../utils/menu_cfg.c $(O)/GUI.DLL include/widgets.h $(HCC) $(HE
 	$(HCC) -o $@ ../utils/menu_cfg.c $(O)/GUI.DLL
 
 # Painel de IA: janela docada na lateral direita (chat).
+# O painel inclui o ai_client.c (fonte unica): um objeto, como no AGENT.
+# TLS carregado com k_dll_load em tempo de execucao (o linker do SODOS nao
+# consegue GUI.DLL + TLS.DLL no mesmo EXE).
 $(O)/AIPANEL.EXE: ../utils/ai_panel.c agent/ai_client.c $(O)/GUI.DLL $(O)/TLS.DLL include/widgets.h include/ai_client.h $(HCC) $(HEADERS) $(O)/KERNEL.IMP
-	$(HCC) -o $@ ../utils/ai_panel.c agent/ai_client.c $(O)/GUI.DLL $(O)/TLS.DLL
+	$(HCC) -o $@ ../utils/ai_panel.c $(O)/GUI.DLL

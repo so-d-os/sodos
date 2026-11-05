@@ -81,6 +81,8 @@ int ui_glass_get(void);
 int ui_ia_get(void);
 /* abre a janela canvas docada na lateral direita (painel de IA). */
 int gui_dock_open(const char* title, int w);
+/* Pede ao WIN que abra um programa (janela). Executa no proximo quadro. */
+int win_launch(const char* path);
 
 /* Lista "titulo x y w h". -1 se o desktop nao esta aberto. */
 int win_windows(char* out, int max);

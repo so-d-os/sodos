@@ -472,6 +472,8 @@ static int k_win_bg(uint32_t rgb) { return win_bg_set(rgb); }
 
 static int k_win_key(int ch) { return win_api_key(ch); }
 
+static int k_win_launch(const char* path) { return win_launch(path); }
+
 static int k_win_wallpaper(const void* rgba, int w, int h) {
   return win_wall_set((const uint8_t*)rgba, w, h);
 }
@@ -570,6 +572,7 @@ static const struct kexp table[] = {
   EXP(k_win_bg),
   EXP(k_win_wallpaper),
   EXP(k_win_key),
+  EXP(k_win_launch),
   EXP(k_ui_menu_pos),
   EXP(k_ui_glass),
   EXP(k_ui_ia),
