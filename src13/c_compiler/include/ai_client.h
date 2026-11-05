@@ -32,6 +32,8 @@ const char* ai_last_error(void);
 
 /* UTF-8 (API) -> CP850 (fonte do console); devolve o tamanho. */
 int ai_utf8_to_cp850(char* dst, int cap, const char* src, int n);
+/* CP850 (teclado) -> UTF-8 (o que a API entende). */
+int ai_cp850_to_utf8(char* dst, int cap, const char* src, int n);
 
 /* Envia a conversa e chama on_token a cada pedaco de texto do modelo.
  * on_token pode ser 0 (so acumula). Devolve 0 = ok; -1 = erro. */

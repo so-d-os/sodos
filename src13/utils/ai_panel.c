@@ -17,7 +17,7 @@
 
 #define LINES_MAX 64
 #define MSG_MAX 60
-#define MSG_LEN 1400
+#define MSG_LEN 2000
 #define ROLE_ME 1
 #define ROLE_AI 0
 #define ROLE_SYS 2
@@ -77,10 +77,11 @@ static int chars_per_line(int w) {
 static int wrap_lines(const char* text, int cpl, int* start, int* len);
 
 static int msg_height(const char* text, int w) {
+  static char disp[MSG_LEN * 2];
   int cpl = chars_per_line(w);
-  int nl, i, s[LINES_MAX], l[LINES_MAX];
-  (void)i;
-  nl = wrap_lines(text, cpl, s, l);
+  int nl, s[LINES_MAX], l[LINES_MAX];
+  ai_utf8_to_cp850(disp, (int)sizeof(disp), text, (int)strlen(text));
+  nl = wrap_lines(disp, cpl, s, l);
   return nl * (gui_char_h() + 2) + 16 + gui_char_h();
 }
 
@@ -124,6 +125,7 @@ static int wrap_lines(const char* text, int cpl, int* start, int* len) {
 }
 
 static void draw_bubble(int x, int w, int y, struct msg* m) {
+  static char disp[MSG_LEN * 2];
   int pad = 8;
   int cw = gui_char_w();
   int ch = gui_char_h();
@@ -136,8 +138,9 @@ static void draw_bubble(int x, int w, int y, struct msg* m) {
   if (ch < 1) ch = 12;
   cpl = chars_per_line(w);
   if (cpl < 8) cpl = 8;
-  len = (int)strlen(m->text);
-  nlines = wrap_lines(m->text, cpl, lstart, llen);
+  ai_utf8_to_cp850(disp, (int)sizeof(disp), m->text, (int)strlen(m->text));
+  len = (int)strlen(disp);
+  nlines = wrap_lines(disp, cpl, lstart, llen);
   for (li = 0; li < nlines; li++)
     if (llen[li] > maxlen) maxlen = llen[li];
   bw = (maxlen > 0 ? maxlen : 1) * cw + pad * 2;
@@ -163,20 +166,17 @@ static void draw_bubble(int x, int w, int y, struct msg* m) {
   (void)len;
   for (li = 0; li < nlines; li++) {
     if (llen[li] <= 0) break;
-    gui_text(bx + pad, y + ch + 2 + pad + li * (ch + 2), m->text + lstart[li],
+    gui_text(bx + pad, y + ch + 2 + pad + li * (ch + 2), disp + lstart[li],
              llen[li], fg, bg, GUI_TEXT_NOBG);
   }
 }
 
 static void on_token(void* ud, const char* s, int n) {
-  char buf[MSG_LEN];
-  int add;
   (void)ud;
-  ai_utf8_to_cp850(buf, (int)sizeof(buf), s, n);
-  add = (int)strlen(buf);
-  if (g_stream_len + add < MSG_LEN - 1) {
-    memcpy(g_stream + g_stream_len, buf, (size_t)add);
-    g_stream_len += add;
+  if (n <= 0) return;
+  if (g_stream_len + n < MSG_LEN - 1) {
+    memcpy(g_stream + g_stream_len, s, (size_t)n);
+    g_stream_len += n;
     g_stream[g_stream_len] = 0;
   }
 }
@@ -186,12 +186,7 @@ static void send_now(void) {
   int i, k = 0, rc;
   char q[MSG_LEN];
 
-  i = 0;
-  while (g_edit.text[i] && i < MSG_LEN - 1) {
-    q[i] = g_edit.text[i];
-    i++;
-  }
-  q[i] = 0;
+  ai_cp850_to_utf8(q, (int)sizeof(q), g_edit.text, (int)strlen(g_edit.text));
   if (!q[0]) {
     set_status("escreva uma mensagem");
     return;

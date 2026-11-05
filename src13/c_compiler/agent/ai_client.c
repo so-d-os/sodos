@@ -102,6 +102,33 @@ static int cp850_of(unsigned u) {
   }
 }
 
+/* CP850 (teclado/historico antigo) -> UTF-8. */
+int ai_cp850_to_utf8(char* dst, int cap, const char* src, int n) {
+  int i, o = 0;
+  for (i = 0; i < n; i++) {
+    int c = (unsigned char)src[i];
+    if (c < 0x80) {
+      if (o < cap - 1) dst[o++] = (char)c;
+    } else {
+      unsigned u = 0;
+      unsigned k;
+      for (k = 0; k < 96; k++)
+        if ((unsigned)latin1_cp850[k] == (unsigned)c) {
+          u = 0xA0 + k;
+          break;
+        }
+      if (!u) u = 0x3F;
+      if (o + 3 >= cap) break;
+      if (u < 0x800) {
+        dst[o++] = (char)(0xC0 | (u >> 6));
+        dst[o++] = (char)(0x80 | (u & 0x3F));
+      }
+    }
+  }
+  dst[o] = 0;
+  return o;
+}
+
 /* Converte UTF-8 para CP850 em dst (cap-1 bytes, com NUL). Devolve o tamanho. */
 int ai_utf8_to_cp850(char* dst, int cap, const char* src, int n) {
   int i = 0, o = 0;
