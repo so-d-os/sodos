@@ -124,10 +124,8 @@ parede). O destaque azul dos itens tambem e misturado.
   (`ui_ia_launch`, com `gui_raise_title` para nao duplicar).
 - O painel usa `gui_dock_open(titulo, largura)` -> `k_gui_dock`: o kernel calcula
   x,y,w,h para encostar na lateral direita, acima da barra.
-- Conteudo: cabecalho, historico em bolhas, sugestoes (Buscar / Abrir app /
-  Explicar) e campo de mensagem. **Ainda nao ha modelo de linguagem**: as
-  respostas sao locais e dizem isso. O layout e o encaixe estao prontos para
-  plugar o modelo depois (o `AGENT.EXE`/`LLAMA.EXE` do repositorio e o caminho).
+- Conteudo: cabecalho, historico em bolhas e campo de mensagem. A conversa de
+  verdade (AGENT.CFG + stream da API) esta na secao "Painel de IA" mais abaixo.
 
 ### Tela Menu (`MENUCFG.EXE`)
 
