@@ -554,6 +554,9 @@ static const struct kexp table[] = {
   EXP(k_win_wallpaper),
 };
 
+int rtc_date(void) { return k_date(); }
+int rtc_time(void) { return k_time(); }
+
 void* kexport_find(const char* name) {
   unsigned i;
   for (i = 0; i < sizeof(table) / sizeof(table[0]); i++) {

@@ -1,0 +1,68 @@
+# Interface: tema "vidro escuro"
+
+Redesign do desktop no estilo do mockup aprovado (2026-11): fundo escuro,
+cantos arredondados e texto claro sobre paineis. Primeira etapa concluida.
+
+![Desktop com a barra nova](img/ui-desktop.png)
+
+![Menu Iniciar e submenu](img/ui-submenu.png)
+
+## Cores do tema (`video/visual.c`)
+
+| Constante | Valor | Uso |
+|---|---|---|
+| `UI_BAR` | `0x0B1522` | barra de tarefas |
+| `UI_PANEL` | `0x101C2B` | menu Iniciar, submenu, menu de contexto |
+| `UI_TITLE_A` | `0x16283E` | barra de titulo da janela ativa |
+| `UI_TITLE_I` | `0x1B2230` | janela sem foco |
+| `UI_TEXT` | `0xE8F0FA` | texto principal |
+| `UI_DIM` | `0x93A8C4` | texto secundario (data, setas) |
+| `UI_ACCENT` | `0x2F80D0` | logo "S", item em destaque |
+| `UI_BORDER` | `0x2E4A6C` | contornos de 1px |
+| `UI_RADIUS` | `8` | raio dos cantos |
+
+## Funcoes novas
+
+- `fill_rect_a(x,y,w,h,cor,alfa)` — retangulo com mistura alfa sobre o que ja
+  esta na tela (alfa 255 = opaco). Usa a mesma convencao de cor do `fill_rect`
+  (palavra `PIXA`: `0xFF_BB_GG_RR`).
+- `round_rect(x,y,w,h,raio,cor,alfa)` / `fill_round(...)` — cantos arredondados,
+  raio em pixels (calculado por arcos de circunferencia, sem tabela).
+- `round_frame(...)` — contorno de 1px (sem tocar no miolo).
+- `draw_text_t(px,py,texto,cor,escala)` — texto **sem** pintar o fundo do glifo,
+  para desenhar sobre vidro/papel de parede. O `draw_string_scaled` antigo pinta
+  o fundo (necessario nos apps de console) e continua igual.
+
+## O que ja esta no novo estilo
+
+- **Barra de tarefas**: fundo escuro, botao "S" (abre o menu Iniciar), marca
+  `SODOS` e **data/hora** a direita (`rtc_date`/`rtc_time`, mes em portugues).
+- **Menu Iniciar**: painel escuro, itens com texto claro, destaque azul
+  arredondado no item sob o mouse; submenu (Tela / Fontes / Fontes avancadas /
+  Design) no mesmo estilo.
+- **Menu de contexto do desktop**: mesmo painel escuro.
+- **Barras de titulo**: vidro escuro com cantos de cima arredondados, botao de
+  fechar vermelho arredondado, texto claro.
+
+## Roadmap das proximas etapas
+
+1. Icones do desktop (Este computador, Lixeira) com tiles escuros e rotulos
+   claros; icones de atalho no padrao novo.
+2. Apps no tema escuro por padrao: `wg_theme_use(1)` como padrao no GUI.DLL
+   (Explorer, VIDEOCFG, WIDGETS) e `FONTADV` ja e escuro.
+3. Botoes minimizar/maximizar de verdade na barra de titulo.
+4. Botoes das janelas abertas na barra de tarefas (trocar foco pelo clique).
+5. Painel lateral do assistente (como no mockup): por enquanto e so desenho;
+   as acoes ("Buscar arquivos", "Abrir aplicativo") podem chamar o
+   `k_win_*`/`wm_open_*` que ja existem.
+6. Papel de parede oficial do mockup: aguardando o PNG do Valmor (basta copiar
+   para `D:\SODOS\WALLS` e escolher em **Design**).
+
+## Notas de implementacao
+
+- Os paineis hoje sao **opacos** (`fill_round`); a versao translucida depende de
+  `fill_rect_a` sobre o papel de parede e ficou para depois — o caminho do alfa
+  ja esta pronto e testado em `gui_pixels` (janelas canvas).
+- Cores: `gui_col(0xRRGGBB)` converte para a palavra do framebuffer. Duas
+  conversoes seguidas (`gui_col` + `rgb_to_pixa`) trocavam R/B — foi o bug que
+  deixou os paineis marrons na primeira tentativa.

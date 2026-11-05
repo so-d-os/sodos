@@ -710,6 +710,102 @@ static void fill_rect(int x, int y, int w, int h, uint32_t color) {
   }
 }
 
+/* ---------------------------------------------------------------------------
+ * Tema "vidro escuro" (VIDEOCFG -> Avancado): preenchimentos translucidos e
+ * cantos arredondados. Em 8bpp (modo 13h) nao ha mistura: fica solido.
+ * ------------------------------------------------------------------------- */
+#define UI_BAR        0x0B1522u
+#define UI_BAR_A      205
+#define UI_PANEL      0x101C2Bu
+#define UI_PANEL_A    230
+#define UI_TITLE_A    0x16283Eu
+#define UI_TITLE_I    0x1B2230u
+#define UI_TEXT       0xE8F0FAu
+#define UI_DIM        0x93A8C4u
+#define UI_ACCENT     0x2F80D0u
+#define UI_BORDER     0x2E4A6Cu
+#define UI_RADIUS     8
+
+/* Retangulo com alfa sobre o que ja esta na tela (alpha <= 0 = opaco). */
+static void fill_rect_a(int x, int y, int w, int h, uint32_t rgb, int alpha) {
+  int x1, y1, x2, y2, dy;
+  uint32_t a, na, sr, sg, sb;
+  if (w <= 0 || h <= 0) return;
+  if (alpha >= 255) {
+    fill_rect(x, y, w, h, rgb);       /* mesma convencao do fill_rect (PIXA) */
+    return;
+  }
+  if (alpha <= 0) return;
+  if (!gfx_bochs) return;
+  x1 = x;
+  y1 = y;
+  x2 = x + w;
+  y2 = y + h;
+  if (x1 < 0) x1 = 0;
+  if (y1 < 0) y1 = 0;
+  if (x2 > (int)gfx_w) x2 = (int)gfx_w;
+  if (y2 > (int)gfx_h) y2 = (int)gfx_h;
+  if (x1 >= x2 || y1 >= y2) return;
+  a = (uint32_t)alpha;
+  na = 255u - a;
+  /* rgb vem no formato PIXA (0xFF_BB_GG_RR): B no alto, R no byte baixo */
+  sr = rgb & 0xFFu;
+  sg = (rgb >> 8) & 0xFFu;
+  sb = (rgb >> 16) & 0xFFu;
+  for (dy = y1; dy < y2; dy++) {
+    volatile uint32_t* row = gfx_offscreen
+      ? (volatile uint32_t*)(gfx_back + ((uint32_t)dy * gfx_w + (uint32_t)x1) * 4u)
+      : (volatile uint32_t*)(gfx_lfb + ((uint32_t)dy + gfx_draw_y0) * gfx_pitch_bytes +
+                             (uint32_t)x1 * 4u);
+    int dx;
+    for (dx = 0; dx < x2 - x1; dx++) {
+      uint32_t d = row[dx];
+      uint32_t dr = (d >> 16) & 0xFFu, dg = (d >> 8) & 0xFFu, db = d & 0xFFu;
+      row[dx] = (((sr * a + dr * na) / 255u) << 16) |
+                (((sg * a + dg * na) / 255u) << 8) |
+                ((sb * a + db * na) / 255u);
+    }
+  }
+}
+
+/* Retangulo de cantos arredondados (raio r), com alfa opcional. */
+static void round_rect(int x, int y, int w, int h, int r, uint32_t rgb, int alpha) {
+  int j, d;
+  if (w <= 0 || h <= 0) return;
+  if (r < 2) {
+    fill_rect_a(x, y, w, h, rgb, alpha);
+    return;
+  }
+  if (r * 2 > w) r = w / 2;
+  if (r * 2 > h) r = h / 2;
+  /* miolo */
+  fill_rect_a(x + r, y, w - 2 * r, h, rgb, alpha);
+  fill_rect_a(x, y + r, r, h - 2 * r, rgb, alpha);
+  fill_rect_a(x + w - r, y + r, r, h - 2 * r, rgb, alpha);
+  /* cantos: para cada linha do arco, acha o recuo d da circunferencia */
+  for (j = 0; j < r; j++) {
+    int dy = r - j;
+    d = 0;
+    while (d < r && (r - d) * (r - d) + dy * dy > r * r) d++;
+    fill_rect_a(x + d, y + j, w - 2 * d, 1, rgb, alpha);
+    fill_rect_a(x + d, y + h - 1 - j, w - 2 * d, 1, rgb, alpha);
+  }
+}
+
+static void fill_round(int x, int y, int w, int h, int r, uint32_t rgb) {
+  round_rect(x, y, w, h, r, rgb, 255);
+}
+
+/* Contorno de 1px (sem preencher o miolo). */
+static void round_frame(int x, int y, int w, int h, int r, uint32_t rgb) {
+  (void)r;
+  if (w < 2 || h < 2) return;
+  fill_rect(x + 1, y, w - 2, 1, rgb);
+  fill_rect(x + 1, y + h - 1, w - 2, 1, rgb);
+  fill_rect(x, y + 1, 1, h - 2, rgb);
+  fill_rect(x + w - 1, y + 1, 1, h - 2, rgb);
+}
+
 static int gfx_ram_ok(void) {
   uint32_t bytes = gfx_w * gfx_h * (gfx_bochs ? 4u : 1u);
   volatile uint32_t* p = (volatile uint32_t*)GFX_BACK_PHYS;
@@ -820,6 +916,28 @@ static void draw_char_scaled(int px, int py, char c, uint32_t fg, uint32_t bg, i
       else
         fill_rect(px + x * scale, py + i * scale, scale, scale, col);
     }
+  }
+}
+
+/* Texto sem pintar o fundo do glifo: para desenhar sobre vidro/papel. */
+static void draw_char_t(int px, int py, char c, uint32_t fg, int scale) {
+  const uint8_t* g = glyph16((unsigned char)c);
+  int rows = glyph_rows();
+  int i, x;
+  if (scale < 1) scale = 1;
+  for (i = 0; i < rows; i++) {
+    uint8_t bits = g[i];
+    for (x = 0; x < FONT_W; x++)
+      if (bits & (uint8_t)(1 << (7 - x)))
+        fill_rect(px + x * scale, py + i * scale, scale, scale, fg);
+  }
+}
+
+static void draw_text_t(int px, int py, const char* s, uint32_t fg, int scale) {
+  if (scale < 1) scale = 1;
+  while (*s) {
+    draw_char_t(px, py, *s++, fg, scale);
+    px += FONT_W * scale;
   }
 }
 
@@ -2401,11 +2519,13 @@ static void wm_draw_window(struct wm_win* w, int focus, int title_h, int scale,
   uint32_t tc = focus ? col_title : col_inactive;
   int ty = w->y + (title_h - ch) / 2;
   fill_rect(w->x, w->y, w->w, w->h, col_win);
-  fill_rect(w->x, w->y, w->w, title_h, tc);
-  draw_string_scaled(w->x + 4, ty, w->title, col_white, tc, scale);
-  fill_rect(close_x, w->y + 2, close_s, close_s, col_btn);
-  draw_string_scaled(close_x + (close_s > FONT_W * scale ? (close_s - FONT_W * scale) / 2 : 0),
-                     ty, "x", col_black, col_btn, scale);
+  /* barra de titulo de vidro, cantos de cima arredondados */
+  fill_round(w->x, w->y, w->w, title_h + 10, UI_RADIUS,
+             gui_col(focus ? UI_TITLE_A : UI_TITLE_I));
+  draw_text_t(w->x + 12, ty, w->title, gui_col(UI_TEXT), scale);
+  fill_round(close_x, w->y + 3, close_s, close_s, 5, gui_col(0xC23440));
+  draw_text_t(close_x + (close_s > FONT_W * scale ? (close_s - FONT_W * scale) / 2 : 0),
+              ty, "x", gui_col(UI_TEXT), scale);
   fill_rect(w->x + w->w - 12, w->y + w->h - 12, 10, 10, col_black);
   fill_rect(w->x + w->w - 11, w->y + w->h - 11, 8, 8, col_btn);
   if (w->kind == WM_KIND_NOTE) {
@@ -4461,22 +4581,21 @@ static void start_menu_geom(struct start_menu* m, int scr_w, int scr_h, int bar_
 static void menu_row(int x, int y, int w, int h, const char* label, int hot, int arrow,
                      uint32_t col_win, uint32_t col_title, uint32_t col_white,
                      uint32_t col_black, int scale) {
-  uint32_t bg = hot ? col_title : col_win;
-  uint32_t fg = hot ? col_white : col_black;
-  fill_rect(x, y, w, h, bg);
-  draw_string_scaled(x + 6, y + (h - (vga_bios_font_ok ? FONT_H : 8) * scale) / 2,
-                     label, fg, bg, scale);
+  int ch = (vga_bios_font_ok ? FONT_H : 8) * scale;
+  int ty = y + (h - ch) / 2;
+  (void)col_win;
+  (void)col_black;
+  (void)col_title;
+  (void)col_white;
+  if (hot) fill_round(x + 2, y, w - 4, h, 6, gui_col(UI_ACCENT));
+  draw_text_t(x + 12, ty, label, gui_col(UI_TEXT), scale);
   if (arrow)
-    draw_string_scaled(x + w - FONT_W * scale - 4,
-                       y + (h - (vga_bios_font_ok ? FONT_H : 8) * scale) / 2,
-                       ">", fg, bg, scale);
+    draw_text_t(x + w - FONT_W * scale - 14, ty, ">", gui_col(UI_DIM), scale);
 }
 
 static void menu_frame(int x, int y, int w, int h, uint32_t edge) {
-  fill_rect(x, y, w, 1, edge);
-  fill_rect(x, y + h - 1, w, 1, edge);
-  fill_rect(x, y, 1, h, edge);
-  fill_rect(x + w - 1, y, 1, h, edge);
+  (void)edge;
+  round_frame(x, y, w, h, UI_RADIUS, gui_col(UI_BORDER));
 }
 
 /* Desktop vivo enquanto um .EXE (o navegador) ocupa o processador. */
@@ -4518,12 +4637,14 @@ static void gui_draw_frame(struct gui_win* w, int active, uint32_t col_title, ui
   int close_x = w->ox + w->cw - close_s - 2;
   int ty = w->oy + (w->title_h - ch) / 2;
   int xoff = close_s > FONT_W * scale ? (close_s - FONT_W * scale) / 2 : 0;
-  uint32_t tb = active ? col_title : col_inactive;
   int hh = w->title_h + w->ch;
-  fill_rect(w->ox, w->oy, w->cw, w->title_h, tb);
-  draw_string_scaled(w->ox + 4, ty, w->title, col_white, tb, scale);
-  fill_rect(close_x, w->oy + 2, close_s, close_s, col_btn);
-  draw_string_scaled(close_x + xoff, ty, "x", col_black, col_btn, scale);
+  (void)col_title;
+  (void)col_inactive;
+  fill_round(w->ox, w->oy, w->cw, w->title_h + 10, UI_RADIUS,
+             gui_col(active ? UI_TITLE_A : UI_TITLE_I));
+  draw_text_t(w->ox + 12, ty, w->title, gui_col(UI_TEXT), scale);
+  fill_round(close_x, w->oy + 3, close_s, close_s, 5, gui_col(0xC23440));
+  draw_text_t(close_x + xoff, ty, "x", gui_col(UI_TEXT), scale);
   gui_blit_win(w);
   fill_rect(w->ox, w->oy, w->cw, 1, col_black);
   fill_rect(w->ox, w->oy + hh - 1, w->cw, 1, col_black);
@@ -4742,6 +4863,53 @@ static void chrome_paint_under(void) {
   paint_stacked(c_wins, c_title_h, c_scale, c_win, c_title, c_white, c_black, c_btn, c_inactive);
 }
 
+/* Barra de tarefas: logo "S" (abre o menu), marca e data/hora. */
+static void draw_taskbar(int w, int h, int bar_h, int ch, int scale, int start_w) {
+  static const char* mon[12] = {"JAN", "FEV", "MAR", "ABR", "MAI", "JUN",
+                                "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"};
+  int by = h - bar_h;
+  int ty = by + (bar_h - ch) / 2;
+  int lw = start_w > 0 ? start_w : 44;
+  int cw = FONT_W * scale;
+  int t, d, x;
+  char clk[8];
+  char dat[12];
+
+  fill_rect(0, by, w, bar_h, gui_col(UI_BAR));
+  fill_rect(0, by, w, 1, gui_col(UI_BORDER));
+  fill_round(6, by + 5, lw, bar_h - 10, UI_RADIUS, gui_col(UI_ACCENT));
+  draw_text_t(6 + (lw - cw) / 2, ty, "S", gui_col(UI_TEXT), scale);
+  draw_text_t(6 + lw + 14, ty, "SODOS", gui_col(UI_TEXT), scale);
+
+  t = rtc_time();
+  if (t >= 0 && t <= 235959) {
+    int hh = t / 10000, mm = (t / 100) % 100;
+    clk[0] = (char)('0' + (hh / 10) % 10);
+    clk[1] = (char)('0' + hh % 10);
+    clk[2] = ':';
+    clk[3] = (char)('0' + (mm / 10) % 10);
+    clk[4] = (char)('0' + mm % 10);
+    clk[5] = 0;
+    x = w - 12 - 5 * cw;
+    draw_text_t(x, ty, clk, gui_col(UI_TEXT), scale);
+    d = rtc_date();
+    if (d > 0) {
+      int dd = d % 100, mo = (d / 100) % 100, n = 0;
+      if (dd >= 10) dat[n++] = (char)('0' + dd / 10);
+      dat[n++] = (char)('0' + dd % 10);
+      dat[n++] = ' ';
+      if (mo >= 1 && mo <= 12) {
+        dat[n++] = mon[mo - 1][0];
+        dat[n++] = mon[mo - 1][1];
+        dat[n++] = mon[mo - 1][2];
+      }
+      dat[n] = 0;
+      x -= 14 + n * cw;
+      draw_text_t(x, ty, dat, gui_col(UI_DIM), scale);
+    }
+  }
+}
+
 static void chrome_paint_over(void) {
   int w = (int)gfx_w;
   int h = (int)gfx_h;
@@ -4751,16 +4919,13 @@ static void chrome_paint_over(void) {
   int mi;
   if (!chrome_menu) return;
   start_menu_geom(&gm, w, h, c_bar_h, c_menu_w, c_item_h, c_scale);
-  fill_rect(0, h - c_bar_h, w, c_bar_h, c_bar);
-  fill_rect(2, h - c_bar_h + 2, c_start_w, c_bar_h - 4, c_btn);
-  draw_string_scaled(6, bar_ty, "Iniciar", c_black, c_btn, c_scale);
-  draw_string_scaled(c_big ? w - 8 * 8 * c_scale : w - 64, bar_ty, "ESC=DOS", c_white, c_bar, c_scale);
+  draw_taskbar(w, h, c_bar_h, ch, c_scale, c_start_w);
   if (!*chrome_menu) return;
   {
     static const char* labels[] = {
       "Bloco de notas", "Gerenciador", "Explorer", "Configuracoes", "Navegador", "Command", "Sair"
     };
-    fill_rect(gm.x, gm.y, gm.w, gm.h, c_win);
+    fill_round(gm.x, gm.y, gm.w, gm.h, UI_RADIUS, gui_col(UI_PANEL));
     for (mi = 0; mi < gm.n; mi++) {
       int hot = (mi == 3 && c_cfg && *c_cfg) ||
                 ((int)sys_mx >= gm.x && (int)sys_mx < gm.x + gm.w &&
@@ -4780,7 +4945,7 @@ static void chrome_paint_over(void) {
                         gm.sub_w, gm.item_h);
     int design_hot = wm_pt((int)sys_mx, (int)sys_my, gm.sub_x,
                            gm.sub_y + 3 * gm.item_h, gm.sub_w, gm.item_h);
-    fill_rect(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h, c_win);
+    fill_round(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h, UI_RADIUS, gui_col(UI_PANEL));
     menu_row(gm.sub_x + 1, gm.sub_y + 2, gm.sub_w - 2, gm.item_h - 2,
              "Tela", tela_hot, 1, c_win, c_title, c_white, c_black, c_scale);
     menu_row(gm.sub_x + 1, gm.sub_y + 2 + gm.item_h, gm.sub_w - 2, gm.item_h - 2,
@@ -4792,7 +4957,7 @@ static void chrome_paint_over(void) {
     menu_frame(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h, c_black);
   }
   if (c_cfg && *c_cfg && c_tela && *c_tela) {
-    fill_rect(gm.mode_x, gm.mode_y, gm.mode_w, gm.mode_h, c_win);
+    fill_round(gm.mode_x, gm.mode_y, gm.mode_w, gm.mode_h, UI_RADIUS, gui_col(UI_PANEL));
     for (mi = 0; mi < DISP_N; mi++) {
       int mode = mi - 1;
       int hot = (int)sys_mx >= gm.mode_x && (int)sys_mx < gm.mode_x + gm.mode_w &&
@@ -5117,15 +5282,12 @@ static int win_wm_run(void) {
       desk_draw(icon, ch, scale, w, h, bar_h, col_desk, col_white, col_black);
       paint_stacked(wins, title_h, scale, col_win, col_title, col_white, col_black,
                     col_btn, col_inactive);
-      fill_rect(0, h - bar_h, w, bar_h, col_bar);
-      fill_rect(2, h - bar_h + 2, start_w, bar_h - 4, col_btn);
-      draw_string_scaled(6, bar_ty, "Iniciar", col_black, col_btn, scale);
-      draw_string_scaled(big ? w - 8 * 8 * scale : w - 64, bar_ty, "ESC=DOS", col_white, col_bar, scale);
+      draw_taskbar(w, h, bar_h, ch, scale, start_w);
       if (menu_open) {
         static const char* labels[] = {
           "Bloco de notas", "Gerenciador", "Explorer", "Configuracoes", "Navegador", "Command", "Sair"
         };
-        fill_rect(gm.x, gm.y, gm.w, gm.h, col_win);
+        fill_round(gm.x, gm.y, gm.w, gm.h, UI_RADIUS, gui_col(UI_PANEL));
         for (mi = 0; mi < gm.n; mi++) {
           int hot = (mi == 3 && menu_cfg) ||
                     ((int)mx >= gm.x && (int)mx < gm.x + gm.w &&
@@ -5145,7 +5307,7 @@ static int win_wm_run(void) {
                             gm.sub_w, gm.item_h);
         int design_hot = wm_pt((int)mx, (int)my, gm.sub_x, gm.sub_y + 3 * gm.item_h,
                                gm.sub_w, gm.item_h);
-        fill_rect(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h, col_win);
+        fill_round(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h, UI_RADIUS, gui_col(UI_PANEL));
         menu_row(gm.sub_x + 1, gm.sub_y + 2, gm.sub_w - 2, gm.item_h - 2,
                  "Tela", tela_hot, 1, col_win, col_title, col_white, col_black, scale);
         menu_row(gm.sub_x + 1, gm.sub_y + 2 + gm.item_h, gm.sub_w - 2, gm.item_h - 2,
@@ -5157,7 +5319,7 @@ static int win_wm_run(void) {
         menu_frame(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h, col_black);
       }
       if (menu_open && menu_cfg && menu_tela) {
-        fill_rect(gm.mode_x, gm.mode_y, gm.mode_w, gm.mode_h, col_win);
+        fill_round(gm.mode_x, gm.mode_y, gm.mode_w, gm.mode_h, UI_RADIUS, gui_col(UI_PANEL));
         for (mi = 0; mi < DISP_N; mi++) {
           int mode = mi - 1;
           int hot = (int)mx >= gm.mode_x && (int)mx < gm.mode_x + gm.mode_w &&
@@ -5237,7 +5399,7 @@ static int win_wm_run(void) {
       if (pop_open) {
         int px, py, pw, ph;
         pop_geom(pop_x, pop_y, scale, w, h, bar_h, &px, &py, &pw, &ph);
-        fill_rect(px, py, pw, ph, col_win);
+        fill_round(px, py, pw, ph, UI_RADIUS, gui_col(UI_PANEL));
         {
           int ih = (ph - 4) / POP_N;
           menu_row(px + 1, py + 2, pw - 2, ih, "Console", pop_hot == 0, 0,

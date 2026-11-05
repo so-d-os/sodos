@@ -4,6 +4,11 @@
 
 void* kexport_find(const char* name);
 
+/* Relogio de parede para o desktop: data AAAAMMDD e hora HHMMSS (UTC).
+ * 0/-1 quando o RTC nao e confiavel. */
+int rtc_date(void);
+int rtc_time(void);
+
 /* Enquanto um .EXE roda dentro de uma janela do WIN, a saida de texto dele
  * vai para 'hook' em vez da tela de texto. 0 volta ao console. */
 void kexp_set_console_hook(void (*hook)(char c));
