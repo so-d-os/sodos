@@ -26,6 +26,9 @@ static const unsigned cores[16] = {
 };
 
 static int g_mode;
+static int g_menupos;   /* 0 esquerda, 1 centro, 2 direita */
+static int g_glass;     /* menu translucido */
+static int g_ia;        /* painel de IA na lateral */
 static unsigned g_bg;
 static char g_wall[32];          /* nome escolhido ("" = nenhum) */
 static int g_wall_sel = -1;
@@ -39,6 +42,7 @@ static int g_ready;   /* so aceita cliques depois de a janela assentar */
 
 static const char id_mode0, id_mode1;
 static const char id_apply, id_reset, id_exit, id_list, id_default;
+static const char id_pos0, id_pos1, id_pos2, id_glass, id_ia;
 
 static void set_status(const char* s) {
   int i = 0;
@@ -191,6 +195,9 @@ static void apply_all(void) {
   int n = 0;
 
   k_gui_quality(g_mode);
+  k_ui_menu_pos(g_menupos);
+  k_ui_glass(g_glass);
+  k_ui_ia(g_ia);
   if (g_mode < 1) {
     /* no retro a cor fica valendo; o papel de parede continua, mas sem
      * mistura (o kernel so muda o tratamento do alfa). */
@@ -228,8 +235,10 @@ static void apply_all(void) {
   }
 
   buf[0] = 0;
-  n = snprintf(buf, sizeof(buf), "mode=%d\nbg=%06X\nwall=%s\n", g_mode,
-               g_bg, (g_wall[0] && g_rgba) ? g_wall : "");
+  n = snprintf(buf, sizeof(buf),
+               "mode=%d\nbg=%06X\nwall=%s\nmenupos=%d\nglass=%d\nia=%d\n",
+               g_mode, g_bg, (g_wall[0] && g_rgba) ? g_wall : "",
+               g_menupos, g_glass, g_ia);
   f = fopen(CFG_PATH, "wb");
   if (f) {
     fwrite(buf, 1, (size_t)n, f);
@@ -242,6 +251,12 @@ static void apply_all(void) {
 
 static void reset_default(void) {
   g_mode = 0;
+  g_menupos = 0;
+  g_glass = 0;
+  g_ia = 0;
+  k_ui_menu_pos(0);
+  k_ui_glass(0);
+  k_ui_ia(0);
   g_bg = 0;
   free_wall();
   g_wall_sel = -1;
@@ -344,6 +359,14 @@ int main(void) {
           if (p[0] == 'm' && p[1] == 'o' && p[2] == 'd' && p[3] == 'e' &&
               p[4] == '=') {
             g_mode = p[5] == '1';
+          } else if (p[0] == 'm' && p[1] == 'e' && p[2] == 'n' && p[3] == 'u' &&
+                     p[4] == 'p' && p[5] == 'o' && p[6] == 's' && p[7] == '=') {
+            g_menupos = p[8] == '2' ? 2 : (p[8] == '1' ? 1 : 0);
+          } else if (p[0] == 'g' && p[1] == 'l' && p[2] == 'a' && p[3] == 's' &&
+                     p[4] == 's' && p[5] == '=') {
+            g_glass = p[6] == '1';
+          } else if (p[0] == 'i' && p[1] == 'a' && p[2] == '=') {
+            g_ia = p[3] == '1';
           } else if (p[0] == 'w' && p[1] == 'a' && p[2] == 'l' && p[3] == 'l' &&
                      p[4] == '=') {
             int k = 0;
@@ -407,8 +430,35 @@ int main(void) {
       set_status("modelo avancado: alfa misturado");
     }
 
-    /* ------------------------------------------------------ cor de fundo */
+    /* --------------------------------------------------------- interface */
     ly += 96 + 8;
+    wg_group(lx, ly, lw, 124, "Interface");
+    {
+      int bx = lx + 14, by = ly + 24;
+      int bw = 108, gap = 6;
+      if (wg_button(&id_pos0, bx, by, bw, bh - 10,
+                    g_menupos == 0 ? "[ Esquerda ]" : "Esquerda", g_ready))
+        { g_menupos = 0; k_ui_menu_pos(0); set_status("menu Iniciar a esquerda"); }
+      if (wg_button(&id_pos1, bx + bw + gap, by, bw, bh - 10,
+                    g_menupos == 1 ? "[ Centro ]" : "Centro", g_ready))
+        { g_menupos = 1; k_ui_menu_pos(1); set_status("menu Iniciar no centro"); }
+      if (wg_button(&id_pos2, bx + 2 * (bw + gap), by, bw, bh - 10,
+                    g_menupos == 2 ? "[ Direita ]" : "Direita", g_ready))
+        { g_menupos = 2; k_ui_menu_pos(2); set_status("menu Iniciar a direita"); }
+      by += bh - 4;
+      if (wg_check(&id_glass, bx, by, "Menu transparente", &g_glass)) {
+        k_ui_glass(g_glass);
+        set_status(g_glass ? "menu translucido ligado" : "menu opaco");
+      }
+      by += bh - 6;
+      if (wg_check(&id_ia, bx, by, "Painel de IA (lateral direita)", &g_ia)) {
+        k_ui_ia(g_ia);
+        set_status(g_ia ? "painel de IA ligado" : "painel de IA desligado");
+      }
+    }
+
+    /* ------------------------------------------------------ cor de fundo */
+    ly += 124 + 8;
     wg_group(lx, ly, lw, 132, "Cor de fundo");
     for (i = 0; i < 16; i++) {
       int cx = lx + 16 + (i % 8) * 48;

@@ -652,6 +652,11 @@ static void gfx_clear(uint32_t c) {
 static uint32_t* desk_wall;
 static uint32_t desk_rgb;
 static int gfx_quality;
+/* Interface escolhida em Design (VIDEO.CFG). menu_pos: 0 esquerda, 1 centro, 2 direita. */
+static int ui_menu_pos;
+static int ui_glass;      /* 1 = menu Iniciar translucido */
+static int ui_ia;         /* 1 = painel de IA ligado */
+static int ui_ia_launch;  /* pedido de abrir o AIPANEL pendente */
 
 static uint32_t gui_col(uint32_t rgb);   /* definido mais abaixo */
 
@@ -2980,6 +2985,14 @@ void gui_session(int allowed) {
   gui_ix = save;
 }
 
+/* Pedido de encaixe: a proxima gui_open nasce docada a direita. */
+static int gui_dock_w;
+
+int gui_dock_open(const char* title, int w) {
+  gui_dock_w = w > 0 ? w : 360;
+  return gui_open(title);
+}
+
 int gui_open(const char* title) {
   uint32_t bytes;
   int i, n = 0, slot = -1;
@@ -3045,6 +3058,21 @@ int gui_open(const char* title) {
     if (gui.ox < 0) gui.ox = 0;
     if (gui.oy < 0) gui.oy = 0;
     gui_clamp_pos();
+  }
+  if (gui_dock_w > 0) {
+    int scale = (gfx_h >= 400u) ? 2 : 1;
+    int font_h = (vga_bios_font_ok ? FONT_H : 8) * scale;
+    int bar = font_h + (gfx_h >= 400u ? 8 : 2);
+    int w = gui_dock_w;
+    if (w < 240) w = 240;
+    if (w > (int)gfx_w / 2) w = (int)gfx_w / 2;
+    gui.scale = scale;
+    gui.title_h = font_h + (gfx_h >= 400u ? 4 : 2);
+    gui.ox = (int)gfx_w - w - 4;
+    gui.oy = 4;
+    gui.cw = w;
+    gui.ch = (int)gfx_h - bar - gui.title_h - 8;
+    gui_dock_w = 0;
   }
   bytes = (uint32_t)gui.cw * (uint32_t)gui.ch * 4u;
   gui.pix = (uint32_t*)umalloc_owned(bytes, 0);
@@ -4545,6 +4573,8 @@ static void pop_geom(int ax, int ay, int scale, int scr_w, int scr_h, int bar_h,
   if (*y < 2) *y = 2;
 }
 
+static int ui_logo_x(int w, int lw);   /* definido junto da barra de tarefas */
+
 struct start_menu {
   int x, y, w, h, item_h, n;
   int sub_x, sub_y, sub_w, sub_h;
@@ -4554,7 +4584,13 @@ struct start_menu {
 static void start_menu_geom(struct start_menu* m, int scr_w, int scr_h, int bar_h,
                             int menu_w, int menu_item_h, int scale) {
   m->n = 7;
-  m->x = 2;
+  {
+    int big = scr_h >= 400;
+    int lw = (big ? 7 : 4) * FONT_W * scale + (big ? 16 : 8);
+    m->x = ui_logo_x(scr_w, lw);
+    if (m->x + menu_w > scr_w - 2) m->x = scr_w - menu_w - 2;
+    if (m->x < 2) m->x = 2;
+  }
   m->w = menu_w;
   m->item_h = menu_item_h;
   m->h = menu_item_h * m->n + 4;
@@ -4863,6 +4899,18 @@ static void chrome_paint_under(void) {
   paint_stacked(c_wins, c_title_h, c_scale, c_win, c_title, c_white, c_black, c_btn, c_inactive);
 }
 
+/* Fundo dos menus: opaco ou translucido conforme a opcao "glass". */
+static void menu_panel(int x, int y, int w, int h) {
+  round_rect(x, y, w, h, UI_RADIUS, gui_col(UI_PANEL), ui_glass ? 215 : 255);
+}
+
+/* X do botao "S" na barra, conforme a posicao escolhida em Design. */
+static int ui_logo_x(int w, int lw) {
+  if (ui_menu_pos == 1) return (w - lw) / 2;
+  if (ui_menu_pos == 2) return w - lw - 200;
+  return 6;
+}
+
 /* Barra de tarefas: logo "S" (abre o menu), marca e data/hora. */
 static void draw_taskbar(int w, int h, int bar_h, int ch, int scale, int start_w) {
   static const char* mon[12] = {"JAN", "FEV", "MAR", "ABR", "MAI", "JUN",
@@ -4875,11 +4923,15 @@ static void draw_taskbar(int w, int h, int bar_h, int ch, int scale, int start_w
   char clk[8];
   char dat[12];
 
+  int lx = ui_logo_x(w, lw);
   fill_rect(0, by, w, bar_h, gui_col(UI_BAR));
   fill_rect(0, by, w, 1, gui_col(UI_BORDER));
-  fill_round(6, by + 5, lw, bar_h - 10, UI_RADIUS, gui_col(UI_ACCENT));
-  draw_text_t(6 + (lw - cw) / 2, ty, "S", gui_col(UI_TEXT), scale);
-  draw_text_t(6 + lw + 14, ty, "SODOS", gui_col(UI_TEXT), scale);
+  fill_round(lx, by + 5, lw, bar_h - 10, UI_RADIUS, gui_col(UI_ACCENT));
+  draw_text_t(lx + (lw - cw) / 2, by + (bar_h - ch) / 2, "S", gui_col(UI_TEXT), scale);
+  if (ui_menu_pos == 2)
+    draw_text_t(lx - 14 - 5 * cw, ty, "SODOS", gui_col(UI_TEXT), scale);
+  else
+    draw_text_t(lx + lw + 14, ty, "SODOS", gui_col(UI_TEXT), scale);
 
   t = rtc_time();
   if (t >= 0 && t <= 235959) {
@@ -4925,7 +4977,7 @@ static void chrome_paint_over(void) {
     static const char* labels[] = {
       "Bloco de notas", "Gerenciador", "Explorer", "Configuracoes", "Navegador", "Command", "Sair"
     };
-    fill_round(gm.x, gm.y, gm.w, gm.h, UI_RADIUS, gui_col(UI_PANEL));
+    menu_panel(gm.x, gm.y, gm.w, gm.h);
     for (mi = 0; mi < gm.n; mi++) {
       int hot = (mi == 3 && c_cfg && *c_cfg) ||
                 ((int)sys_mx >= gm.x && (int)sys_mx < gm.x + gm.w &&
@@ -4945,7 +4997,7 @@ static void chrome_paint_over(void) {
                         gm.sub_w, gm.item_h);
     int design_hot = wm_pt((int)sys_mx, (int)sys_my, gm.sub_x,
                            gm.sub_y + 3 * gm.item_h, gm.sub_w, gm.item_h);
-    fill_round(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h, UI_RADIUS, gui_col(UI_PANEL));
+    menu_panel(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h);
     menu_row(gm.sub_x + 1, gm.sub_y + 2, gm.sub_w - 2, gm.item_h - 2,
              "Tela", tela_hot, 1, c_win, c_title, c_white, c_black, c_scale);
     menu_row(gm.sub_x + 1, gm.sub_y + 2 + gm.item_h, gm.sub_w - 2, gm.item_h - 2,
@@ -4957,7 +5009,7 @@ static void chrome_paint_over(void) {
     menu_frame(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h, c_black);
   }
   if (c_cfg && *c_cfg && c_tela && *c_tela) {
-    fill_round(gm.mode_x, gm.mode_y, gm.mode_w, gm.mode_h, UI_RADIUS, gui_col(UI_PANEL));
+    menu_panel(gm.mode_x, gm.mode_y, gm.mode_w, gm.mode_h);
     for (mi = 0; mi < DISP_N; mi++) {
       int mode = mi - 1;
       int hot = (int)sys_mx >= gm.mode_x && (int)sys_mx < gm.mode_x + gm.mode_w &&
@@ -4993,6 +5045,15 @@ static void host_open_design(struct wm_win* wins, int* focus, int big) {
   if (!desk_find("D:\\SODOS\\VIDEOCFG.EXE", exe, (int)sizeof(exe)) &&
       !desk_find("D:\\VIDEOCFG.EXE", exe, (int)sizeof(exe)))
     wm_copy_str(exe, (int)sizeof(exe), "D:\\SODOS\\VIDEOCFG.EXE");
+  wm_exec(wins, focus, big, exe);
+}
+
+static void host_open_ai(struct wm_win* wins, int* focus, int big) {
+  char exe[48];
+  if (gui_raise_title("SODOS IA")) return;
+  if (!desk_find("D:\\SODOS\\AIPANEL.EXE", exe, (int)sizeof(exe)) &&
+      !desk_find("D:\\AIPANEL.EXE", exe, (int)sizeof(exe)))
+    wm_copy_str(exe, (int)sizeof(exe), "D:\\SODOS\\AIPANEL.EXE");
   wm_exec(wins, focus, big, exe);
 }
 
@@ -5065,7 +5126,7 @@ static int chrome_on_click(int x, int y) {
     }
     return 1;
   }
-  if (wm_pt(x, y, 2, h - c_bar_h + 2, c_start_w, c_bar_h - 4)) {
+  if (wm_pt(x, y, ui_logo_x(w, c_start_w), h - c_bar_h + 2, c_start_w, c_bar_h - 4)) {
     *chrome_menu = !*chrome_menu;
     *c_cfg = 0;
     *c_tela = 0;
@@ -5263,6 +5324,13 @@ static int win_wm_run(void) {
     }
     mx = sys_mx;
     my = sys_my;
+    if (ui_ia_launch) {
+      ui_ia_launch = 0;
+      if (!gui_raise_title("SODOS IA")) {
+        host_open_ai(wins, &focus, big);
+        need_draw = 1;
+      }
+    }
     if (need_draw) {
       int bar_ty = h - bar_h + (bar_h - ch) / 2;
       struct start_menu gm;
@@ -5287,7 +5355,7 @@ static int win_wm_run(void) {
         static const char* labels[] = {
           "Bloco de notas", "Gerenciador", "Explorer", "Configuracoes", "Navegador", "Command", "Sair"
         };
-        fill_round(gm.x, gm.y, gm.w, gm.h, UI_RADIUS, gui_col(UI_PANEL));
+        menu_panel(gm.x, gm.y, gm.w, gm.h);
         for (mi = 0; mi < gm.n; mi++) {
           int hot = (mi == 3 && menu_cfg) ||
                     ((int)mx >= gm.x && (int)mx < gm.x + gm.w &&
@@ -5307,7 +5375,7 @@ static int win_wm_run(void) {
                             gm.sub_w, gm.item_h);
         int design_hot = wm_pt((int)mx, (int)my, gm.sub_x, gm.sub_y + 3 * gm.item_h,
                                gm.sub_w, gm.item_h);
-        fill_round(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h, UI_RADIUS, gui_col(UI_PANEL));
+        menu_panel(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h);
         menu_row(gm.sub_x + 1, gm.sub_y + 2, gm.sub_w - 2, gm.item_h - 2,
                  "Tela", tela_hot, 1, col_win, col_title, col_white, col_black, scale);
         menu_row(gm.sub_x + 1, gm.sub_y + 2 + gm.item_h, gm.sub_w - 2, gm.item_h - 2,
@@ -5319,7 +5387,7 @@ static int win_wm_run(void) {
         menu_frame(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h, col_black);
       }
       if (menu_open && menu_cfg && menu_tela) {
-        fill_round(gm.mode_x, gm.mode_y, gm.mode_w, gm.mode_h, UI_RADIUS, gui_col(UI_PANEL));
+        menu_panel(gm.mode_x, gm.mode_y, gm.mode_w, gm.mode_h);
         for (mi = 0; mi < DISP_N; mi++) {
           int mode = mi - 1;
           int hot = (int)mx >= gm.mode_x && (int)mx < gm.mode_x + gm.mode_w &&
@@ -5399,7 +5467,7 @@ static int win_wm_run(void) {
       if (pop_open) {
         int px, py, pw, ph;
         pop_geom(pop_x, pop_y, scale, w, h, bar_h, &px, &py, &pw, &ph);
-        fill_round(px, py, pw, ph, UI_RADIUS, gui_col(UI_PANEL));
+        menu_panel(px, py, pw, ph);
         {
           int ih = (ph - 4) / POP_N;
           menu_row(px + 1, py + 2, pw - 2, ih, "Console", pop_hot == 0, 0,
@@ -5645,7 +5713,7 @@ static int win_wm_run(void) {
           }
           if (handled) {
             /* ja tratado */
-          } else if (wm_pt((int)mx, (int)my, 2, h - bar_h + 2, start_w, bar_h - 4)) {
+          } else if (wm_pt((int)mx, (int)my, ui_logo_x(w, start_w), h - bar_h + 2, start_w, bar_h - 4)) {
             menu_open = !menu_open;
             menu_cfg = 0;
             menu_tela = 0;
@@ -6159,6 +6227,32 @@ int win_bg_set(uint32_t rgb) {
 }
 
 /* rgba: w*h*4 (R,G,B,A). Escala para a tela e guarda como fundo. */
+int ui_menu_pos_set(int pos) {
+  int old = ui_menu_pos;
+  ui_menu_pos = (pos == 1 || pos == 2) ? pos : 0;
+  win_api_dirty = 1;
+  return old;
+}
+
+int ui_glass_set(int on) {
+  int old = ui_glass;
+  ui_glass = on ? 1 : 0;
+  win_api_dirty = 1;
+  return old;
+}
+
+int ui_ia_set(int on) {
+  int old = ui_ia;
+  ui_ia = on ? 1 : 0;
+  if (ui_ia) ui_ia_launch = 1;
+  win_api_dirty = 1;
+  return old;
+}
+
+int ui_menu_pos_get(void) { return ui_menu_pos; }
+int ui_glass_get(void) { return ui_glass; }
+int ui_ia_get(void) { return ui_ia; }
+
 int win_wall_set(const uint8_t* rgba, int sw, int sh) {
   uint32_t* buf;
   int x, y;
@@ -6265,6 +6359,16 @@ static void win_load_cfg(void) {
     } else if (k + 5 <= j && cfg[k] == 'w' && cfg[k + 1] == 'a' &&
                cfg[k + 2] == 'l' && cfg[k + 3] == 'l' && cfg[k + 4] == '=') {
       wall = (cfg[k + 5] != 0 && cfg[k + 5] != '\r' && cfg[k + 5] != '\n');
+    } else if (k + 8 <= j && cfg[k] == 'm' && cfg[k + 1] == 'e' && cfg[k + 2] == 'n' &&
+               cfg[k + 3] == 'u' && cfg[k + 4] == 'p' && cfg[k + 5] == 'o' &&
+               cfg[k + 6] == 's' && cfg[k + 7] == '=') {
+      ui_menu_pos = cfg[k + 8] == '2' ? 2 : (cfg[k + 8] == '1' ? 1 : 0);
+    } else if (k + 6 <= j && cfg[k] == 'g' && cfg[k + 1] == 'l' && cfg[k + 2] == 'a' &&
+               cfg[k + 3] == 's' && cfg[k + 4] == 's' && cfg[k + 5] == '=') {
+      ui_glass = cfg[k + 6] == '1';
+    } else if (k + 3 <= j && cfg[k] == 'i' && cfg[k + 1] == 'a' && cfg[k + 2] == '=') {
+      ui_ia = cfg[k + 3] == '1';
+      if (ui_ia) ui_ia_launch = 1;
     }
     while (j < n && (cfg[j] == '\n' || cfg[j] == '\r')) j++;
     i = j;

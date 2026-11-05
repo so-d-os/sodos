@@ -474,6 +474,21 @@ static int k_win_wallpaper(const void* rgba, int w, int h) {
   return win_wall_set((const uint8_t*)rgba, w, h);
 }
 
+/* interface: posicao do menu (0 esq, 1 centro, 2 dir), menu translucido, painel IA */
+static int k_ui_menu_pos(int pos) {
+  if (pos < 0) return ui_menu_pos_get();
+  return ui_menu_pos_set(pos);
+}
+static int k_ui_glass(int on) {
+  if (on < 0) return ui_glass_get();
+  return ui_glass_set(on);
+}
+static int k_ui_ia(int on) {
+  if (on < 0) return ui_ia_get();
+  return ui_ia_set(on);
+}
+static int k_gui_dock(const char* title, int w) { return gui_dock_open(title, w); }
+
 struct kexp {
   const char* name;
   void* fn;
@@ -552,6 +567,10 @@ static const struct kexp table[] = {
   EXP(k_gui_quality),
   EXP(k_win_bg),
   EXP(k_win_wallpaper),
+  EXP(k_ui_menu_pos),
+  EXP(k_ui_glass),
+  EXP(k_ui_ia),
+  EXP(k_gui_dock),
 };
 
 int rtc_date(void) { return k_date(); }

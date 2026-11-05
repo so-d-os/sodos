@@ -33,6 +33,8 @@ typedef struct {
 
 /* abre a janela, acima da barra Iniciar; 0 = ok */
 int gui_open(const char* title);
+/* abre docada na lateral direita, com a largura pedida (painel de IA) */
+int gui_dock_open(const char* title, int w);
 void gui_close(void);
 void gui_title(const char* title);
 int gui_width(void);

@@ -139,6 +139,12 @@ int k_win_bg(unsigned rgb);
 /* papel de parede: rgba w*h*4 (R,G,B,A); rgba NULL limpa a imagem */
 int k_win_wallpaper(const void* rgba, int w, int h);
 
+/* interface (VIDEO.CFG): posicao do menu Iniciar (0 esq, 1 centro, 2 dir),
+ * menu translucido (0/1) e painel de IA (0/1). Com valor < 0 so consulta. */
+int k_ui_menu_pos(int pos);
+int k_ui_glass(int on);
+int k_ui_ia(int on);
+
 /* No cc, __export em uma funcao ou variavel global a coloca na tabela de
  * exports da DLL. No gcc (bootstrap) use link /export:nome ou /exportall. */
 #ifdef __GNUC__

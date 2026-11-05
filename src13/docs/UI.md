@@ -86,3 +86,44 @@ dois arquivos.
 
 Escala no kernel: `win_wall_set()` percorre a origem com passo fixo 16.16 (sem
 divisao por pixel) — com 1920x1080 isso faz diferenca no boot.
+
+## VIDEO.CFG: as tres opcoes de interface
+
+![Painel de IA, menu a direita e menu translucido](img/ui-ia.png)
+
+```
+D:\SODOS\VIDEO.CFG
+  mode=1          ; 0 retro, 1 avancado (alfa)
+  bg=000000       ; cor de fundo quando nao ha imagem
+  wall=PICO.PNG   ; imagem de D:\SODOS\WALLS (vazio = so a cor)
+  menupos=0       ; posicao do botao "S": 0 esquerda, 1 centro, 2 direita
+  glass=1         ; 1 = menu Iniciar translucido
+  ia=0            ; 1 = abre o AIPANEL.EXE docado na lateral direita
+```
+
+Tudo isso se ajusta na hora em **Design -> Interface** (tres botoes de posicao +
+dois checks) e no botao **Aplicar**. O kernel le os mesmos campos no boot
+(`win_load_cfg`), entao a escolha sobrevive ao reinicio.
+
+### Posicao do menu
+
+`ui_logo_x()` decide o X do botao "S" e o menu Iniciar nasce logo acima dele
+(`start_menu_geom` usa a mesma funcao), inclusive o teste de clique do botao.
+Na posicao direita a marca "SODOS" passa para a esquerda do logo.
+
+### Menu translucido
+
+`menu_panel()` desenha o painel com `round_rect(..., alfa = ui_glass ? 215 : 255)`.
+O alfa passa pelo `fill_rect_a`, que mistura com o que ja esta na tela (papel de
+parede). O destaque azul dos itens tambem e misturado.
+
+### Painel de IA
+
+- `ia=1` faz o laco do WIN executar `D:\SODOS\AIPANEL.EXE` uma vez
+  (`ui_ia_launch`, com `gui_raise_title` para nao duplicar).
+- O painel usa `gui_dock_open(titulo, largura)` -> `k_gui_dock`: o kernel calcula
+  x,y,w,h para encostar na lateral direita, acima da barra.
+- Conteudo: cabecalho, historico em bolhas, sugestoes (Buscar / Abrir app /
+  Explicar) e campo de mensagem. **Ainda nao ha modelo de linguagem**: as
+  respostas sao locais e dizem isso. O layout e o encaixe estao prontos para
+  plugar o modelo depois (o `AGENT.EXE`/`LLAMA.EXE` do repositorio e o caminho).

@@ -14,6 +14,15 @@ __export int gui_open(const char* title) {
   return 0;
 }
 
+/* Janela docada na lateral direita (painel de IA): w = largura em pixels. */
+__export int gui_dock_open(const char* title, int w) {
+  int rc = k_gui_dock(title, w);
+  if (rc != 0) return rc;
+  k_gui_size(&win_w, &win_h);
+  k_gui_font(&char_w, &char_h);
+  return 0;
+}
+
 __export void gui_close(void) { k_gui_close(); }
 __export void gui_title(const char* title) { k_gui_title(title); }
 __export int gui_width(void) { return win_w; }

@@ -69,6 +69,16 @@ int gui_quality_set(int mode);
 int win_bg_set(uint32_t rgb);
 /* Papel de parede: rgba w*h*4; NULL/0 limpa. */
 int win_wall_set(const uint8_t* rgba, int w, int h);
+/* interface: posicao do menu (0 esq, 1 centro, 2 dir), menu translucido,
+ * painel de IA ligado. Os _get devolvem o valor atual. */
+int ui_menu_pos_set(int pos);
+int ui_glass_set(int on);
+int ui_ia_set(int on);
+int ui_menu_pos_get(void);
+int ui_glass_get(void);
+int ui_ia_get(void);
+/* abre a janela canvas docada na lateral direita (painel de IA). */
+int gui_dock_open(const char* title, int w);
 
 /* Lista "titulo x y w h". -1 se o desktop nao esta aberto. */
 int win_windows(char* out, int max);
