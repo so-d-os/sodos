@@ -19,6 +19,20 @@ typedef struct {
   const char* text;  /* UTF-8 */
 } ai_msg_t;
 
+/* Uma chamada de ferramenta devolvida pela API (formato OpenAI). */
+typedef struct {
+  int kind;        /* 0 nenhuma, 'w' gravar, 'c' comando, 'o' abrir */
+  char arg[128];   /* caminho/programa/comando */
+  char body[1400]; /* conteudo do write */
+  char id[80];     /* tool_call id */
+} ai_tool_t;
+
+/* Igual a ai_chat, mas declara as ferramentas (write/run/open) e devolve as
+ * chamadas em tools[0..n-1]. Devolve quantas chamadas (0 = so texto) ou -1. */
+int ai_chat_tools(const ai_cfg_t* c, const ai_msg_t* msgs, int n,
+                  void (*on_token)(void* ud, const char* s, int n), void* ud,
+                  ai_tool_t* tools, int max_tools);
+
 /* padroes: url do DeepSeek, model=deepseek-chat, key vazia */
 void ai_cfg_defaults(ai_cfg_t* c);
 

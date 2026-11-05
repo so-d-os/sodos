@@ -410,7 +410,75 @@ typedef struct {
   int done;
   void (*on_token)(void* ud, const char* s, int n);
   void* ud;
+  /* chamadas de ferramenta (formato OpenAI, em deltas) */
+  ai_tool_t* tools;
+  int max_tools;
+  int n_tools;
+  str_t tc_args[4];
+  char tc_name[4][24];
+  char tc_id[4][80];
 } resp_t;
+
+/* strstr limitado a [a,b). */
+static int has_word(const char* a, const char* b, const char* w) {
+  int n = (int)strlen(w);
+  const char* p;
+  for (p = a; p + n <= b; p++)
+    if (!memcmp(p, w, (size_t)n)) return 1;
+  return 0;
+}
+
+/* Guarda um pedaco de tool_call: index, id, nome e argumentos (JSON). */
+static void tool_delta(resp_t* r, const char* line, const char* end) {
+  const char* p = line;
+  while ((p = strstr(p, "\"index\":")) != 0 && p < end) {
+    int idx = 0;
+    const char* q = p + 8;
+    const char* idp;
+    const char* namep;
+    while (q < end && *q == ' ') q++;
+    while (q < end && *q >= '0' && *q <= '9') idx = idx * 10 + (*q++ - '0');
+    if (idx < 0 || idx > 3) { p = q; continue; }
+    if (idx + 1 > r->n_tools) r->n_tools = idx + 1;
+    idp = strstr(q, "\"id\":");
+    if (idp && idp < end) {
+      const char* v = idp + 5;
+      str_t tmp;
+      memset(&tmp, 0, sizeof(tmp));
+      v = json_read_str(v, end, &tmp);
+      if (tmp.p && !r->tc_id[idx][0]) {
+        int k = 0;
+        while (tmp.p[k] && k < 79) { r->tc_id[idx][k] = tmp.p[k]; k++; }
+        r->tc_id[idx][k] = 0;
+      }
+      s_free(&tmp);
+    }
+    namep = strstr(q, "\"name\":");
+    if (namep && namep < end && !r->tc_name[idx][0]) {
+      const char* v = namep + 7;
+      str_t tmp;
+      memset(&tmp, 0, sizeof(tmp));
+      v = json_read_str(v, end, &tmp);
+      if (tmp.p) {
+        int k = 0;
+        while (tmp.p[k] && k < 23) { r->tc_name[idx][k] = tmp.p[k]; k++; }
+        r->tc_name[idx][k] = 0;
+      }
+      s_free(&tmp);
+    }
+    {
+      const char* ap = strstr(q, "\"arguments\":");
+      if (ap && ap < end) {
+        str_t tmp;
+        memset(&tmp, 0, sizeof(tmp));
+        if (json_read_str(ap + 12, end, &tmp) && tmp.p)
+          s_addn(&r->tc_args[idx], tmp.p, tmp.len);
+        s_free(&tmp);
+      }
+    }
+    p = q;
+  }
+}
 
 static int ci_has(const char* hay, const char* needle) {
   int nl = (int)strlen(needle);
@@ -446,6 +514,8 @@ static void sse_line(resp_t* r, const char* l, int n) {
     return;
   }
   if (json_get(l, end, "content", &v) && v.len) emit(r, v.p, v.len);
+  else if (has_word(l, end, "tool_calls"))
+    tool_delta(r, l, end);
   s_free(&v);
 }
 
@@ -514,7 +584,75 @@ static void feed(resp_t* r, const char* d, int n) {
   }
 }
 
+/* Transforma os deltas acumulados em chamadas prontas. */
+static int collect_tools(resp_t* r) {
+  int i, k = 0;
+  for (i = 0; i < r->n_tools && k < r->max_tools; i++) {
+    ai_tool_t* o = &r->tools[k];
+    const char* name = r->tc_name[i];
+    const char* args = r->tc_args[i].p;
+    int n = r->tc_args[i].len;
+    int j;
+    memset(o, 0, sizeof(*o));
+    for (j = 0; j < 79 && r->tc_id[i][j]; j++) o->id[j] = r->tc_id[i][j];
+    o->id[j] = 0;
+    if (!name[0] || !args || n <= 0) continue;
+    if (!strcmp(name, "write")) {
+      str_t v;
+      memset(&v, 0, sizeof(v));
+      if (json_get(args, args + n, "path", &v)) {
+        int m = v.len > 127 ? 127 : v.len;
+        memcpy(o->arg, v.p, (size_t)m);
+        o->arg[m] = 0;
+      }
+      s_free(&v);
+      memset(&v, 0, sizeof(v));
+      if (json_get(args, args + n, "content", &v)) {
+        int m = v.len > 1399 ? 1399 : v.len;
+        memcpy(o->body, v.p, (size_t)m);
+        o->body[m] = 0;
+      }
+      s_free(&v);
+      if (o->arg[0]) {
+        o->kind = 'w';
+        k++;
+      }
+    } else if (!strcmp(name, "run") || !strcmp(name, "cmd") ||
+               !strcmp(name, "shell")) {
+      str_t v;
+      memset(&v, 0, sizeof(v));
+      if (json_get(args, args + n, "command", &v)) {
+        int m = v.len > 127 ? 127 : v.len;
+        memcpy(o->arg, v.p, (size_t)m);
+        o->arg[m] = 0;
+      }
+      s_free(&v);
+      if (o->arg[0]) {
+        o->kind = 'c';
+        k++;
+      }
+    } else if (!strcmp(name, "open") || !strcmp(name, "launch")) {
+      str_t v;
+      memset(&v, 0, sizeof(v));
+      if (json_get(args, args + n, "program", &v) ||
+          json_get(args, args + n, "path", &v)) {
+        int m = v.len > 127 ? 127 : v.len;
+        memcpy(o->arg, v.p, (size_t)m);
+        o->arg[m] = 0;
+      }
+      s_free(&v);
+      if (o->arg[0]) {
+        o->kind = 'o';
+        k++;
+      }
+    }
+  }
+  return k;
+}
+
 static void resp_free(resp_t* r) {
+  int i;
+  for (i = 0; i < 4; i++) s_free(&r->tc_args[i]);
   s_free(&r->hdr);
   s_free(&r->ck_line);
   s_free(&r->line);
@@ -522,7 +660,25 @@ static void resp_free(resp_t* r) {
   s_free(&r->text);
 }
 
-static int build_json(const ai_cfg_t* c, const ai_msg_t* msgs, int n, str_t* j) {
+/* Definicao das ferramentas no formato OpenAI. */
+static const char* TOOLS_JSON =
+    ",\"tools\":["
+    "{\"type\":\"function\",\"function\":{\"name\":\"write\",\"description\":"
+    "\"Cria ou sobrescreve um arquivo no SODOS\",\"parameters\":{\"type\":\"object\","
+    "\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},"
+    "\"required\":[\"path\",\"content\"]}}},"
+    "{\"type\":\"function\",\"function\":{\"name\":\"run\",\"description\":"
+    "\"Roda uma linha no prompt do SODOS (dir, type, copy, del, mkdir, cc)\","
+    "\"parameters\":{\"type\":\"object\",\"properties\":{\"command\":"
+    "{\"type\":\"string\"}},\"required\":[\"command\"]}}},"
+    "{\"type\":\"function\",\"function\":{\"name\":\"open\",\"description\":"
+    "\"Abre a janela de um programa .EXE (D:\\\\EXPLORER.EXE etc)\",\"parameters\":"
+    "{\"type\":\"object\",\"properties\":{\"program\":{\"type\":\"string\"}},"
+    "\"required\":[\"program\"]}}}"
+    "],\"tool_choice\":\"auto\"";
+
+static int build_json_t(const ai_cfg_t* c, const ai_msg_t* msgs, int n, str_t* j,
+                        int with_tools) {
   int i;
   s_clear(j);
   s_add(j, "{\"model\":");
@@ -536,13 +692,20 @@ static int build_json(const ai_cfg_t* c, const ai_msg_t* msgs, int n, str_t* j) 
     json_str(j, msgs[i].text);
     s_addc(j, '}');
   }
-  s_add(j, "]}");
+  s_addc(j, ']');
+  if (with_tools) s_add(j, TOOLS_JSON);
+  s_addc(j, '}');
   return j->len;
 }
 
+static int build_json(const ai_cfg_t* c, const ai_msg_t* msgs, int n, str_t* j) {
+  return build_json_t(c, msgs, n, j, 0);
+}
+
 /* ---------- conversa ---------- */
-int ai_chat(const ai_cfg_t* c, const ai_msg_t* msgs, int n,
-            void (*on_token)(void* ud, const char* s, int n), void* ud) {
+static int chat_core(const ai_cfg_t* c, const ai_msg_t* msgs, int n,
+                     void (*on_token)(void* ud, const char* s, int n), void* ud,
+                     int with_tools, ai_tool_t* tools, int max_tools) {
   url_t u;
   char req[1024];
   char buf[4096];
@@ -560,7 +723,10 @@ int ai_chat(const ai_cfg_t* c, const ai_msg_t* msgs, int n,
   memset(&resp, 0, sizeof(resp));
   resp.on_token = on_token;
   resp.ud = ud;
-  if (build_json(c, msgs, n, &json) <= 0) {
+  resp.tools = tools;
+  resp.max_tools = max_tools;
+  resp_tools_init:;
+  if (build_json_t(c, msgs, n, &json, with_tools) <= 0) {
     set_err("sem memoria para o pedido");
     return -1;
   }
@@ -626,7 +792,9 @@ int ai_chat(const ai_cfg_t* c, const ai_msg_t* msgs, int n,
   }
   {
     int got = resp.text.len;
+    int nt = with_tools ? collect_tools(&resp) : 0;
     resp_free(&resp);
+    if (nt > 0) return nt;
     return got > 0 ? 0 : -1;
   }
 send_err:
@@ -635,4 +803,15 @@ send_err:
   s_free(&json);
   resp_free(&resp);
   return -1;
+}
+
+int ai_chat(const ai_cfg_t* c, const ai_msg_t* msgs, int n,
+            void (*on_token)(void* ud, const char* s, int n), void* ud) {
+  return chat_core(c, msgs, n, on_token, ud, 0, 0, 0);
+}
+
+int ai_chat_tools(const ai_cfg_t* c, const ai_msg_t* msgs, int n,
+                  void (*on_token)(void* ud, const char* s, int n), void* ud,
+                  ai_tool_t* tools, int max_tools) {
+  return chat_core(c, msgs, n, on_token, ud, 1, tools, max_tools);
 }

@@ -40,6 +40,7 @@ static gui_edit_t g_edit;
 static char g_status[120];
 static int g_mx, g_my, g_down, g_ready;
 static const char id_send, id_edit, id_new;
+static ai_tool_t g_tools[4];
 
 static const char* SYS_PROMPT =
     "You are AGENT, the assistant that runs natively inside SODOS (a small "
@@ -421,7 +422,7 @@ static int call_api(void) {
     list[k].text = g_msgs[i].text;
     k++;
   }
-  rc = ai_chat(&g_cfg, list, k, on_token, 0);
+  rc = ai_chat_tools(&g_cfg, list, k, on_token, 0, g_tools, 4);
   free(list);
   return rc;
 }
@@ -453,7 +454,9 @@ static void send_now(void) {
     g_waiting = 1;
     set_status(step ? "executando e perguntando de novo..." : "esperando a API...");
     gui_present();
-    if (call_api() != 0) {
+    {
+      int rc = call_api();
+      if (rc < 0) {
       char st[200];
       if (g_stream_len > 0) {
         strip_tool_markup(g_stream, shown, (int)sizeof(shown));
@@ -461,27 +464,36 @@ static void send_now(void) {
       }
       snprintf(st, sizeof(st), "[%s]",
                ai_last_error()[0] ? ai_last_error() : "sem resposta");
-      add_msg(ROLE_SYS, st);
-      set_status(ai_last_error());
-      g_waiting = 0;
-      return;
-    }
-    strip_tool_markup(g_stream, shown, (int)sizeof(shown));
-    if (shown[0]) add_msg(ROLE_AI, shown);
-
-    cur = g_stream;
-    {
-      int did = 0;
-      while (parse_tool(cur, &cur, &tl)) {
+        add_msg(ROLE_SYS, st);
+        set_status(ai_last_error());
+        g_waiting = 0;
+        return;
+      }
+      strip_tool_markup(g_stream, shown, (int)sizeof(shown));
+      if (shown[0]) add_msg(ROLE_AI, shown);
+      if (rc == 0) {
+        /* modelo sem tools: aceita os blocos ``` do AGENT como reserva */
+        cur = g_stream;
+        if (!parse_tool(cur, &cur, &tl)) break;
         obs[0] = 0;
         label[0] = 0;
         run_tool(&tl, obs, (int)sizeof(obs), label, (int)sizeof(label));
         if (label[0]) add_msg(ROLE_SYS, label);
         add_msg(ROLE_OBS, obs);
-        did = 1;
-        if (!cur || !*cur) break;
+      } else {
+        int ti;
+        for (ti = 0; ti < rc; ti++) {
+          memset(&tl, 0, sizeof(tl));
+          tl.kind = g_tools[ti].kind;
+          snprintf(tl.arg, sizeof(tl.arg), "%s", g_tools[ti].arg);
+          snprintf(tl.body, sizeof(tl.body), "%s", g_tools[ti].body);
+          obs[0] = 0;
+          label[0] = 0;
+          run_tool(&tl, obs, (int)sizeof(obs), label, (int)sizeof(label));
+          if (label[0]) add_msg(ROLE_SYS, label);
+          add_msg(ROLE_OBS, obs);
+        }
       }
-      if (!did) break;
     }
   }
   if (step == STEPS_MAX) add_msg(ROLE_SYS, "[limite de acoes neste pedido]");
