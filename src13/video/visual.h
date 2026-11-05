@@ -7,6 +7,15 @@ void visual_run(void);
 void win_run(void);
 /* Carrega a fonte 8x16 CP850 (chamar no boot, ainda em modo texto). */
 void vga_capture_bios_font(void);
+/* Desenho em uso do caractere ch: 16 linhas, um byte por linha, bit 7 a esquerda. */
+const uint8_t* vga_font_glyph(int ch);
+int vga_font_get(int ch, uint8_t* glyph);
+/* -1 se ch for invalido ou o modo grafico estiver na tela. */
+int vga_font_set(int ch, const uint8_t* glyph);
+/* Volta todos os caracteres ao desenho padrao. */
+void vga_font_reset(void);
+/* 0: bit 7 do atributo vira fundo claro em vez de piscar. 1: volta a piscar. */
+void vga_text_blink(int on);
 /* Forca modo texto 80x25 para que panic/exception seja visivel (ex.: em isr_dispatch). */
 void vga_force_text_mode(void);
 

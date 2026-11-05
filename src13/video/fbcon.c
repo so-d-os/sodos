@@ -3,13 +3,12 @@
 #include "bootinfo.h"
 #include "serial.h"
 #include "fbcon.h"
+#include "visual.h"
 
 #define COLS 80
 #define ROWS 25
 #define CELL_W 8
 #define CELL_H 16
-
-extern const uint8_t font8x16_cp850[256][16];
 
 volatile uint16_t* vga_text = (volatile uint16_t*)0xB8000;
 
@@ -93,7 +92,7 @@ int fbcon_init(const struct BootInfo* bi) {
 }
 
 static void draw_cell(int idx, uint16_t cell, int with_cursor) {
-  const uint8_t* g = font8x16_cp850[cell & 0xFFu];
+  const uint8_t* g = vga_font_glyph((int)(cell & 0xFFu));
   uint32_t fg = pal[(cell >> 8) & 0x0Fu];
   uint32_t bg = pal[(cell >> 12) & 0x0Fu];
   uint32_t x0 = org_x + (uint32_t)(idx % COLS) * CELL_W * (uint32_t)scale;
@@ -128,6 +127,14 @@ void fbcon_sync(void) {
 void fbcon_cursor(int pos) {
   if (!active) return;
   cur_pos = (pos >= 0 && pos < COLS * ROWS) ? pos : -1;
+  fbcon_sync();
+}
+
+void fbcon_font_changed(int ch) {
+  int i;
+  if (!active) return;
+  for (i = 0; i < COLS * ROWS; i++)
+    if (ch < 0 || (shadow[i] & 0xFFu) == (uint16_t)ch) drawn[i] = (uint16_t)~shadow[i];
   fbcon_sync();
 }
 

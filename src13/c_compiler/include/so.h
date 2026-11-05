@@ -64,6 +64,17 @@ unsigned k_drive_mask(void);
 int k_vput(int row, int col, const unsigned short* cells, int n);
 /* cursor na linha/coluna; row < 0 esconde */
 void k_cursor(int row, int col);
+/* Desenho do caractere ch na tela de texto: 16 bytes, um por linha, bit 7 a
+ * esquerda. Vale para ch em toda a tela, inclusive o que ja esta escrito.
+ * 0 ok; -1 ch invalido. k_font_set tambem da -1 no WIN ou com a saida desviada.
+ * k_font_reset volta todos ao padrao; o kernel tambem faz isso quando o
+ * programa que mudou a fonte termina. */
+int k_font_get(int ch, unsigned char* glyph);
+int k_font_set(int ch, const unsigned char* glyph);
+void k_font_reset(void);
+/* 0: o bit 7 da cor deixa de piscar e da fundo claro (cores 8-15). 1: volta a
+ * piscar; o kernel tambem faz isso quando o programa termina. -1 no WIN. */
+int k_blink(int on);
 
 /* memoria do programa (liberada sozinha quando ele termina) */
 void* k_malloc(unsigned n);

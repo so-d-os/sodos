@@ -23,5 +23,7 @@ int fbcon_active(void);
 /* Desenha as celulas alteradas e o cursor (pos = linha * 80 + coluna). */
 void fbcon_sync(void);
 void fbcon_cursor(int pos);
+/* Redesenha as celulas com o caractere ch (ch < 0: todas). */
+void fbcon_font_changed(int ch);
 /* O desktop grafico usa a tela: 1 para de desenhar; 0 redesenha tudo. */
 void fbcon_suspend(int on);

@@ -516,6 +516,7 @@ Functions not wrapped by libc are imported from the `KERNEL` library (45 exports
 | Group | Functions |
 |---|---|
 | Console | `k_putc`, `k_puts`, `k_write`, `k_getc`, `k_readline`, `k_clear` |
+| Text screen | `k_vput`, `k_cursor`, `k_font_get`, `k_font_set`, `k_font_reset`, `k_blink` |
 | Files | `k_fsize`, `k_fload`, `k_fread`, `k_fsave`, `k_flist`, `k_drive`, `k_set_drive` |
 | Memory | `k_malloc`, `k_free`, `k_realloc`, `k_msize`, `k_meminfo` |
 | Process | `k_exit`, `k_exec`, `k_shell`, `k_last_error` |
@@ -523,6 +524,8 @@ Functions not wrapped by libc are imported from the `KERNEL` library (45 exports
 | Time | `k_rdtsc`, `k_ms`, `k_date`, `k_random` |
 | Network | `k_net_ready`, `k_dns`, `k_tcp_connect`, `k_tcp_send`, `k_tcp_recv`, `k_tcp_close` |
 | Window | `k_gui_open`, `k_gui_close`, `k_gui_title`, `k_gui_size`, `k_gui_font`, `k_gui_fill`, `k_gui_text`, `k_gui_present`, `k_gui_event`, `k_gui_pixels` |
+
+`k_font_set(ch, glyph)` changes how a character is drawn (16 bytes, one per row, bit 7 on the left) across the whole text screen, on both BIOS and UEFI; `k_font_get` reads the current glyph and `k_font_reset` restores the default. In WIN or with redirected output, `k_font_set` returns -1. The kernel restores the font when the program that changed it ends. `k_blink(0)` replaces blinking with bright backgrounds (colors 8 to 15), also until the program ends. Example: `examples/special.cpp`.
 
 `k_fload`/`k_fsave` read/write the whole file; `k_fread` reads a range starting at an offset (useful for large files). `k_msize` returns the allocated size; `k_meminfo` returns total and free.
 

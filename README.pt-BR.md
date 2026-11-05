@@ -516,6 +516,7 @@ Funções que a libc não embrulha são importadas da biblioteca `KERNEL` (45 ex
 | Grupo | Funções |
 |---|---|
 | Console | `k_putc`, `k_puts`, `k_write`, `k_getc`, `k_readline`, `k_clear` |
+| Tela de texto | `k_vput`, `k_cursor`, `k_font_get`, `k_font_set`, `k_font_reset`, `k_blink` |
 | Arquivos | `k_fsize`, `k_fload`, `k_fread`, `k_fsave`, `k_flist`, `k_drive`, `k_set_drive` |
 | Memória | `k_malloc`, `k_free`, `k_realloc`, `k_msize`, `k_meminfo` |
 | Processo | `k_exit`, `k_exec`, `k_shell`, `k_last_error` |
@@ -523,6 +524,8 @@ Funções que a libc não embrulha são importadas da biblioteca `KERNEL` (45 ex
 | Tempo | `k_rdtsc`, `k_ms`, `k_date`, `k_random` |
 | Rede | `k_net_ready`, `k_dns`, `k_tcp_connect`, `k_tcp_send`, `k_tcp_recv`, `k_tcp_close` |
 | Janela | `k_gui_open`, `k_gui_close`, `k_gui_title`, `k_gui_size`, `k_gui_font`, `k_gui_fill`, `k_gui_text`, `k_gui_present`, `k_gui_event`, `k_gui_pixels` |
+
+`k_font_set(ch, glifo)` troca o desenho de um caractere (16 bytes, um por linha, bit 7 à esquerda) em toda a tela de texto, no BIOS e no UEFI; `k_font_get` lê o desenho atual e `k_font_reset` volta ao padrão. No WIN ou com a saída desviada, `k_font_set` devolve -1. O kernel restaura a fonte quando o programa que a mudou termina. `k_blink(0)` troca o piscar pelo fundo claro (cores 8 a 15), também até o programa terminar. Exemplo: `examples/special.cpp`.
 
 `k_fload`/`k_fsave` leem/gravam o arquivo inteiro; `k_fread` lê um trecho a partir de um deslocamento (útil para arquivos grandes). `k_msize` devolve o tamanho alocado; `k_meminfo` devolve total e livre.
 

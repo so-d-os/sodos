@@ -170,6 +170,36 @@ static int k_vput(int row, int col, const uint16_t* cells, int n) {
   return 0;
 }
 
+/* Fonte da tela de texto. Quem mudou primeiro responde por ela: quando esse
+ * programa termina, kexp_release_pid volta ao desenho padrao. */
+static uint32_t font_pid;
+
+static int k_font_get(int ch, uint8_t* glyph) { return vga_font_get(ch, glyph); }
+
+static int k_font_set(int ch, const uint8_t* glyph) {
+  int rc;
+  if (!text_screen_ok()) return -1;
+  rc = vga_font_set(ch, glyph);
+  if (rc == 0 && !font_pid) font_pid = mod_current_pid();
+  return rc;
+}
+
+static void k_font_reset(void) {
+  if (!text_screen_ok()) return;
+  vga_font_reset();
+  font_pid = 0;
+}
+
+/* Fundo claro na tela de texto: dura ate o programa que pediu terminar. */
+static uint32_t blink_pid;
+
+static int k_blink(int on) {
+  if (!text_screen_ok()) return -1;
+  vga_text_blink(on);
+  blink_pid = on ? 0 : mod_current_pid();
+  return 0;
+}
+
 /* Cursor em (row, col); row < 0 esconde. */
 static int cur_hidden;
 static uint8_t cur_start;
@@ -402,7 +432,16 @@ static void k_tcp_close(void) {
 }
 
 void kexp_release_pid(uint32_t pid) {
-  if (!pid || tcp_pid != pid) return;
+  if (!pid) return;
+  if (font_pid == pid) {
+    vga_font_reset();
+    font_pid = 0;
+  }
+  if (blink_pid == pid) {
+    vga_text_blink(1);
+    blink_pid = 0;
+  }
+  if (tcp_pid != pid) return;
   net_tcp_close();
   tcp_pid = 0;
 }
@@ -456,6 +495,10 @@ static const struct kexp table[] = {
   EXP(k_drive_mask),
   EXP(k_vput),
   EXP(k_cursor),
+  EXP(k_font_get),
+  EXP(k_font_set),
+  EXP(k_font_reset),
+  EXP(k_blink),
   EXP(k_drive),
   EXP(k_set_drive),
   EXP(k_exe_drive),
