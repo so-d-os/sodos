@@ -36,7 +36,7 @@ ln -s "$FF"/mozglue/misc/* "$INC/mozilla/" 2>/dev/null || true
 # -include ctype.h: Printf.cpp usa islower sem incluir <ctype.h>.
 # emmintrin.h vem do GCC; -include stdint.h supre intptr_t em Assertions.h.
 CF="-std=c++20 -O2 -DXP_UNIX -I$INC -I$FF -I$FF/mfbt/double-conversion"
-CF="$CF -isystem /usr/lib/gcc/x86_64-linux-gnu/13/include -include stdint.h -include ctype.h"
+CF="$CF -isystem $(gcc -print-file-name=include) -include stdint.h -include ctype.h"
 
 compile() {
   if ! $CC $CF -c "$1" -o "$2" >>"$LOG" 2>&1; then

@@ -1,0 +1,134 @@
+diff -ruN a/std/build.rs b/std/build.rs
+--- a/std/build.rs	2026-11-04 23:06:06.368884627 -0300
++++ b/std/build.rs	2026-11-04 23:06:06.370884606 -0300
+@@ -52,6 +52,7 @@
+         || target_os == "hurd"
+         || target_os == "uefi"
+         || target_os == "teeos"
++        || target_os == "sodos"
+         || target_os == "zkvm"
+         || target_os == "rtems"
+         || target_os == "nuttx"
+diff -ruN a/std/src/sys/alloc/mod.rs b/std/src/sys/alloc/mod.rs
+--- a/std/src/sys/alloc/mod.rs	2026-11-04 23:00:04.902395733 -0300
++++ b/std/src/sys/alloc/mod.rs	2026-11-04 23:00:04.917395602 -0300
+@@ -92,6 +92,9 @@
+     target_os = "solid_asp3" => {
+         mod solid;
+     }
++    target_os = "sodos" => {
++        mod sodos;
++    }
+     target_os = "uefi" => {
+         mod uefi;
+     }
+diff -ruN a/std/src/sys/alloc/sodos.rs b/std/src/sys/alloc/sodos.rs
+--- a/std/src/sys/alloc/sodos.rs	1969-12-31 21:00:00.000000000 -0300
++++ b/std/src/sys/alloc/sodos.rs	2026-11-04 23:00:04.918395594 -0300
+@@ -0,0 +1,57 @@
++//! Alocador do SODOS sobre o malloc da LIBCX64, que devolve 16-alinhado.
++//! Alinhamentos maiores guardam o ponteiro original antes do bloco.
++use crate::alloc::{GlobalAlloc, Layout, System};
++use crate::ptr;
++
++const MIN_ALIGN: usize = 16;
++
++unsafe extern "C" {
++    fn malloc(size: usize) -> *mut u8;
++    fn free(p: *mut u8);
++    fn realloc(p: *mut u8, size: usize) -> *mut u8;
++}
++
++#[stable(feature = "alloc_system_type", since = "1.28.0")]
++unsafe impl GlobalAlloc for System {
++    #[inline]
++    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
++        unsafe {
++            if layout.align() <= MIN_ALIGN {
++                return malloc(layout.size());
++            }
++            let Some(total) = layout.size().checked_add(layout.align()) else {
++                return ptr::null_mut();
++            };
++            let raw = malloc(total);
++            if raw.is_null() {
++                return raw;
++            }
++            let addr = (raw.addr() + layout.align()) & !(layout.align() - 1);
++            let p = raw.with_addr(addr);
++            p.cast::<*mut u8>().sub(1).write_unaligned(raw);
++            p
++        }
++    }
++
++    #[inline]
++    unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
++        unsafe {
++            if layout.align() <= MIN_ALIGN {
++                free(p);
++            } else {
++                free(p.cast::<*mut u8>().sub(1).read_unaligned());
++            }
++        }
++    }
++
++    #[inline]
++    unsafe fn realloc(&self, p: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
++        unsafe {
++            if layout.align() <= MIN_ALIGN {
++                realloc(p, new_size)
++            } else {
++                super::realloc_fallback(self, p, layout, new_size)
++            }
++        }
++    }
++}
+diff -ruN a/std/src/sys/io/error/mod.rs b/std/src/sys/io/error/mod.rs
+--- a/std/src/sys/io/error/mod.rs	2026-11-04 23:00:04.903395725 -0300
++++ b/std/src/sys/io/error/mod.rs	2026-11-04 23:00:04.917395602 -0300
+@@ -40,6 +40,7 @@
+         pub use xous::*;
+     }
+     any(
++        target_os = "sodos",
+         target_os = "vexos",
+         target_family = "wasm",
+         target_os = "zkvm",
+diff -ruN a/std/src/sys/random/mod.rs b/std/src/sys/random/mod.rs
+--- a/std/src/sys/random/mod.rs	2026-11-04 23:00:04.905395707 -0300
++++ b/std/src/sys/random/mod.rs	2026-11-04 23:00:04.918395594 -0300
+@@ -104,6 +104,7 @@
+     }
+     any(
+         all(target_family = "wasm", target_os = "unknown"),
++        target_os = "sodos",
+         target_os = "xous",
+         target_os = "vexos",
+     ) => {
+@@ -119,6 +120,7 @@
+     target_os = "linux",
+     target_os = "android",
+     all(target_family = "wasm", target_os = "unknown"),
++    target_os = "sodos",
+     all(target_os = "wasi", not(target_env = "p1")),
+     target_os = "xous",
+     target_os = "vexos",
+diff -ruN a/std/src/sys/thread_local/mod.rs b/std/src/sys/thread_local/mod.rs
+--- a/std/src/sys/thread_local/mod.rs	2026-11-04 23:00:04.906395699 -0300
++++ b/std/src/sys/thread_local/mod.rs	2026-11-04 23:00:04.918395594 -0300
+@@ -26,6 +26,7 @@
+ cfg_select! {
+     any(
+         all(target_family = "wasm", not(target_feature = "atomics")),
++        target_os = "sodos",
+         target_os = "uefi",
+         target_os = "zkvm",
+         target_os = "trusty",
+@@ -96,6 +97,7 @@
+             all(target_family = "wasm", not(
+                 all(target_os = "wasi", target_env = "p1", target_feature = "atomics")
+             )),
++            target_os = "sodos",
+             target_os = "uefi",
+             target_os = "zkvm",
+             target_os = "trusty",

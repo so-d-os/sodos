@@ -29,6 +29,7 @@ Regras:
 | `002-sodos-rust-bringup.patch | bring-up do Rust (core/alloc/std) |
 | `003-firefox-sodos-build.patch | ajustes de build do SpiderMonkey |
 | `004-js-shell-sodos-file-io.patch | ler .js sem stat (FILEs da libc sao em memoria) |
+| `rust-std-sodos.patch` | `std` do Rust para `target_os = "sodos"`; aplica no `rust-src` do nightly (`sodos/scripts/patch-rust-std.sh`), nao na arvore do Firefox |
 
 Os marcadores SODOS_MARK em js/src/shell/js.cpp (bytes na serial COM1)
 sao temporarios de depuracao e **nao** fazem parte de nenhum patch.
