@@ -55,8 +55,8 @@ cantos arredondados e texto claro sobre paineis. Primeira etapa concluida.
 5. Painel lateral do assistente (como no mockup): por enquanto e so desenho;
    as acoes ("Buscar arquivos", "Abrir aplicativo") podem chamar o
    `k_win_*`/`wm_open_*` que ja existem.
-6. Papel de parede oficial do mockup: aguardando o PNG do Valmor (basta copiar
-   para `D:\SODOS\WALLS` e escolher em **Design**).
+6. ~~Papel de parede oficial do mockup~~: `PICO.PNG` ja esta em
+   `content/wallpapers` e vem de fabrica como fundo (ver abaixo).
 
 ## Notas de implementacao
 
@@ -66,3 +66,23 @@ cantos arredondados e texto claro sobre paineis. Primeira etapa concluida.
 - Cores: `gui_col(0xRRGGBB)` converte para a palavra do framebuffer. Duas
   conversoes seguidas (`gui_col` + `rgb_to_pixa`) trocavam R/B — foi o bug que
   deixou os paineis marrons na primeira tentativa.
+
+## Papel de parede PICO
+
+O fundo do mockup (lago, montanhas, lua) esta em
+`content/wallpapers/PICO.PNG` (1672x941) e entra em `D:\SODOS\WALLS` pelo
+`make disk-files`. O `VIDEOCFG.EXE` linka o **IMGBIG.DLL** em vez do IMG.DLL:
+
+- `IMG.DLL` limita a saida a 800 px de lado (bom para miniaturas e paginas);
+- `IMGBIG.DLL` e o mesmo `img.c` compilado com `IMG_MAXS=1920`, entao o papel
+  de parede sai em resolucao de tela em vez de borrado.
+
+![Desktop com o papel de parede PICO](img/desktop-pico.png)
+
+Como vem de fabrica: `D:\SODOS\VIDEO.CFG` com `mode=1`, `bg=000000` e
+`wall=PICO.PNG`, e `D:\SODOS\WALL.RAW` ja escalado para 1920x1080 (o kernel
+assim so copia, sem escalar). Escolher outra imagem em **Design** substitui os
+dois arquivos.
+
+Escala no kernel: `win_wall_set()` percorre a origem com passo fixo 16.16 (sem
+divisao por pixel) — com 1920x1080 isso faz diferenca no boot.

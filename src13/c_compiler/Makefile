@@ -40,7 +40,7 @@ CC_SRC = cc/main.c cc/util.c cc/lex.c cc/pp.c cc/type.c cc/parse.c cc/gen.c
 all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/HELLO.EXE \
 	$(O)/CC.EXE $(O)/LINK.EXE $(O)/TLS.DLL $(O)/HTTPS.EXE $(O)/GUI.DLL $(O)/IMG.DLL \
 	$(O)/BROWSER.EXE $(O)/IMAGEVW.EXE $(O)/VIDPLAY.EXE $(O)/FONTADV.EXE $(O)/COMMAND.EXE $(O)/HTTPD.EXE \
-	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE $(O)/VIDEOCFG.EXE \
+	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE $(O)/VIDEOCFG.EXE $(O)/IMGBIG.DLL \
 	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
 	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
 	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/COBRA.EXE $(O)/GIT.EXE $(O)/AGENT.EXE $(O)/LLAMA.EXE
@@ -60,6 +60,13 @@ $(B)/img_img.obj: img/img.c include/img.h $(HCC) $(HEADERS) | $(B)
 
 $(O)/IMG.DLL: $(B)/img_img.obj $(O)/LIBC.DLL $(LINK)
 	$(HCC) -dll -o $@ $(B)/img_img.obj
+
+# Mesmo decodificador, com IMG_MAXS=1920: papel de parede em resolucao cheia.
+$(B)/img_img_big.obj: img/img_big.c img/img.c include/img.h $(HCC) $(HEADERS) | $(B)
+	$(HCC) -c $< -o $@
+
+$(O)/IMGBIG.DLL: $(B)/img_img_big.obj $(O)/LIBC.DLL $(LINK)
+	$(HCC) -dll -o $@ $(B)/img_img_big.obj
 
 BROWSER_OBJ = $(B)/br_main.obj $(B)/br_url.obj $(B)/br_http.obj $(B)/br_html.obj $(B)/br_js.obj \
 	$(B)/br_search.obj $(B)/br_cache.obj
@@ -92,8 +99,8 @@ $(O)/EXPLORER.EXE: ../utils/explorer.c $(O)/GUI.DLL include/widgets.h $(HCC) $(H
 	$(HCC) -o $@ ../utils/explorer.c $(O)/GUI.DLL
 
 # Configurador de tela: modelo retro/avancado, cor e imagem de fundo.
-$(O)/VIDEOCFG.EXE: ../utils/video_cfg.c $(O)/GUI.DLL $(O)/IMG.DLL include/widgets.h $(HCC) $(HEADERS)
-	$(HCC) -o $@ ../utils/video_cfg.c $(O)/GUI.DLL $(O)/IMG.DLL
+$(O)/VIDEOCFG.EXE: ../utils/video_cfg.c $(O)/GUI.DLL $(O)/IMGBIG.DLL include/widgets.h $(HCC) $(HEADERS)
+	$(HCC) -o $@ ../utils/video_cfg.c $(O)/GUI.DLL $(O)/IMGBIG.DLL
 
 # Prompt de comando. A janela preta e desenhada pelo WIN; o EXE abre outra copia.
 $(O)/COMMAND.EXE: examples/command.c $(HCC) $(HEADERS)

@@ -6170,14 +6170,17 @@ int win_wall_set(const uint8_t* rgba, int sw, int sh) {
     return -1;
   buf = (uint32_t*)umalloc_owned((uint32_t)(gfx_w * gfx_h * 4u), 0);
   if (!buf) return -1;
+  /* escala por passo fixo (16.16): sem divisao por pixel */
   for (y = 0; y < (int)gfx_h; y++) {
-    int sy = (int)((uint32_t)y * (uint32_t)sh / gfx_h);
+    uint32_t sy = (uint32_t)(((uint64_t)(uint32_t)y * (uint32_t)sh) / gfx_h);
     const uint8_t* row = rgba + (size_t)sy * (size_t)sw * 4;
+    uint32_t acc = 0;
+    uint32_t step = (uint32_t)(((uint64_t)(uint32_t)sw << 16) / gfx_w);
+    uint32_t* out = buf + (size_t)y * (size_t)gfx_w;
     for (x = 0; x < (int)gfx_w; x++) {
-      int sx = (int)((uint32_t)x * (uint32_t)sw / gfx_w);
-      const uint8_t* p = row + sx * 4;
-      buf[y * (int)gfx_w + x] =
-          ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+      const uint8_t* p = row + (size_t)(acc >> 16) * 4u;
+      out[x] = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+      acc += step;
     }
   }
   desk_wall = buf;
