@@ -430,15 +430,23 @@ static int has_word(const char* a, const char* b, const char* w) {
 
 /* Guarda um pedaco de tool_call: index, id, nome e argumentos (JSON). */
 static void tool_delta(resp_t* r, const char* line, const char* end) {
-  const char* p = line;
-  while ((p = strstr(p, "\"index\":")) != 0 && p < end) {
+  /* A linha tem dois "index": o da choice e o do tool_call. So o segundo
+   * interessa -- e so um fragmento por linha (senao duplica os pedacos). */
+  const char* tcp = NULL;
+  const char* q0;
+  for (q0 = line; q0 + 10 <= end; q0++)
+    if (!memcmp(q0, "tool_calls", 10)) { tcp = q0; break; }
+  if (!tcp) return;
+  {
+    const char* p = strstr(tcp, "\"index\":");
+    if (!p || p >= end) return;
     int idx = 0;
     const char* q = p + 8;
     const char* idp;
     const char* namep;
     while (q < end && *q == ' ') q++;
     while (q < end && *q >= '0' && *q <= '9') idx = idx * 10 + (*q++ - '0');
-    if (idx < 0 || idx > 3) { p = q; continue; }
+    if (idx < 0 || idx > 3) return;
     if (idx + 1 > r->n_tools) r->n_tools = idx + 1;
     idp = strstr(q, "\"id\":");
     if (idp && idp < end) {
@@ -476,7 +484,6 @@ static void tool_delta(resp_t* r, const char* line, const char* end) {
         s_free(&tmp);
       }
     }
-    p = q;
   }
 }
 
@@ -587,6 +594,7 @@ static void feed(resp_t* r, const char* d, int n) {
 /* Transforma os deltas acumulados em chamadas prontas. */
 static int collect_tools(resp_t* r) {
   int i, k = 0;
+
   for (i = 0; i < r->n_tools && k < r->max_tools; i++) {
     ai_tool_t* o = &r->tools[k];
     const char* name = r->tc_name[i];
@@ -607,10 +615,16 @@ static int collect_tools(resp_t* r) {
       }
       s_free(&v);
       memset(&v, 0, sizeof(v));
-      if (json_get(args, args + n, "content", &v)) {
+      if (!json_get(args, args + n, "content", &v))
+        if (!json_get(args, args + n, "text", &v))
+          if (!json_get(args, args + n, "body", &v))
+            json_get(args, args + n, "data", &v);
+      {
         int m = v.len > 1399 ? 1399 : v.len;
-        memcpy(o->body, v.p, (size_t)m);
-        o->body[m] = 0;
+        if (m > 0) {
+          memcpy(o->body, v.p, (size_t)m);
+          o->body[m] = 0;
+        }
       }
       s_free(&v);
       if (o->arg[0]) {
@@ -631,7 +645,8 @@ static int collect_tools(resp_t* r) {
         o->kind = 'c';
         k++;
       }
-    } else if (!strcmp(name, "open") || !strcmp(name, "launch")) {
+    } else if (!strcmp(name, "open") || !strcmp(name, "launch") ||
+               !strcmp(name, "start") || !strcmp(name, "exec_program")) {
       str_t v;
       memset(&v, 0, sizeof(v));
       if (json_get(args, args + n, "program", &v) ||
@@ -645,6 +660,52 @@ static int collect_tools(resp_t* r) {
         o->kind = 'o';
         k++;
       }
+    } else {
+      /* nome inventado pelo modelo: decide pelo formato dos argumentos */
+      str_t v;
+      memset(&v, 0, sizeof(v));
+      if (json_get(args, args + n, "command", &v) && v.len) {
+        int m = v.len > 127 ? 127 : v.len;
+        memcpy(o->arg, v.p, (size_t)m);
+        o->arg[m] = 0;
+        o->kind = 'c';
+        s_free(&v);
+        k++;
+        continue;
+      }
+      s_free(&v);
+      memset(&v, 0, sizeof(v));
+      if (json_get(args, args + n, "path", &v) && v.len) {
+        int m = v.len > 127 ? 127 : v.len;
+        memcpy(o->arg, v.p, (size_t)m);
+        o->arg[m] = 0;
+        s_free(&v);
+        memset(&v, 0, sizeof(v));
+        if (!json_get(args, args + n, "content", &v))
+          if (!json_get(args, args + n, "text", &v))
+            json_get(args, args + n, "body", &v);
+        if (v.len > 0) {
+          int m2 = v.len > 1399 ? 1399 : v.len;
+          memcpy(o->body, v.p, (size_t)m2);
+          o->body[m2] = 0;
+        }
+        s_free(&v);
+        o->kind = 'w';
+        k++;
+        continue;
+      }
+      s_free(&v);
+      memset(&v, 0, sizeof(v));
+      if (json_get(args, args + n, "program", &v) && v.len) {
+        int m = v.len > 127 ? 127 : v.len;
+        memcpy(o->arg, v.p, (size_t)m);
+        o->arg[m] = 0;
+        o->kind = 'o';
+        s_free(&v);
+        k++;
+        continue;
+      }
+      s_free(&v);
     }
   }
   return k;
@@ -795,6 +856,7 @@ static int chat_core(const ai_cfg_t* c, const ai_msg_t* msgs, int n,
     int nt = with_tools ? collect_tools(&resp) : 0;
     resp_free(&resp);
     if (nt > 0) return nt;
+    if (got == 0) set_err("resposta sem texto e sem ferramenta");
     return got > 0 ? 0 : -1;
   }
 send_err:
