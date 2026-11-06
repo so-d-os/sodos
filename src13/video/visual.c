@@ -2351,6 +2351,7 @@ struct cmd_con {
   int inlen;
   int ocol;
   int busy; /* um .EXE digitado aqui ainda roda: sem prompt */
+  int hist; /* posicao no historico: 0 = linha nova, 1 = comando mais recente */
 };
 
 static struct cmd_con* cons_cap;
@@ -2426,6 +2427,28 @@ static int cmd_is_exit(const char* s) {
 static void desk_load(void);
 static int cmd_spawn(const char* path, int argc, char** argv);
 
+/* Troca a linha digitada e sai da navegacao no historico (ESC, Enter). */
+static void cmd_set_input(struct cmd_con* c, const char* s) {
+  int i;
+  if (!c) return;
+  for (i = 0; i < CMD_IN - 1 && s[i]; i++) c->in[i] = s[i];
+  c->in[i] = '\0';
+  c->inlen = i;
+  c->hist = 0;
+}
+
+/* Setas: dir 1 = mais antigo, -1 = mais novo. O historico e o mesmo do prompt
+ * do DOS, gravado por shell_exec_line. */
+static void cmd_hist(struct wm_win* w, int dir) {
+  struct cmd_con* c = (struct cmd_con*)w->st;
+  int n;
+  if (!c || c->busy) return;
+  n = c->hist + dir;
+  if (n < 0 || n > history_count) return;
+  cmd_set_input(c, n ? history[history_count - n] : "");
+  c->hist = n;
+}
+
 static int cmd_enter(struct wm_win* w) {
   struct cmd_con* c = (struct cmd_con*)w->st;
   char shown[CMD_COLS];
@@ -2442,8 +2465,7 @@ static int cmd_enter(struct wm_win* w) {
   cmd_push(c, shown);
   for (i = 0; i < c->inlen && i < CMD_IN - 1; i++) buf[i] = c->in[i];
   buf[i] = '\0';
-  c->inlen = 0;
-  c->in[0] = '\0';
+  cmd_set_input(c, "");
   c->ocol = 0;
   if (buf[0]) {
     cons_cap = c;
@@ -2462,6 +2484,7 @@ static int cmd_enter(struct wm_win* w) {
 static int cmd_key(struct wm_win* w, char ch) {
   struct cmd_con* c = (struct cmd_con*)w->st;
   if (!c || c->busy) return 0;
+  c->hist = 0; /* editou a linha: as setas recomecam do mais recente */
   if (ch == '\b') {
     if (c->inlen > 0) c->in[--c->inlen] = '\0';
     return 0;
@@ -3399,11 +3422,11 @@ static int gui_key_event(uint8_t data, int* key) {
     return 0;
   }
   {
-    int k = gui_key_ext(data);
     int was_e0 = gui.e0;
+    int k = (was_e0 || keymap_kp_nav(data)) ? gui_key_ext(data) : 0;
     gui.e0 = 0;
-    if (!k && !was_e0) {
-      int c = keymap_char(data);
+    if (!k) {
+      int c = was_e0 ? keymap_ext_char(data) : keymap_char(data);
       k = c;
       if (c == '\n') k = '\r';
     }
@@ -6105,7 +6128,10 @@ static int win_wm_run(void) {
     wm_key:
     {
       uint8_t sc = data;
-      if (kbd_e0) {
+      int kp = 0; /* Enter e / do teclado numerico: seguem como tecla comum */
+      if (keymap_kp_nav(sc)) kbd_e0 = 1; /* NumLock desligado: vira seta, Home... */
+      if (kbd_e0 && !(sc & 0x80)) kp = keymap_ext_char(sc);
+      if (kbd_e0 && !kp) {
         kbd_e0 = 0;
         if (!(sc & 0x80) && gwins && gui_focus >= 0 && gui_focus < GUI_MAX && gwins[gui_focus].open) {
           int k = gui_key_ext(sc);
@@ -6130,9 +6156,14 @@ static int win_wm_run(void) {
             note_dlg_caret = note_dlg_len;
             need_draw = 1;
           }
+        } else if (!(sc & 0x80) && focus >= 0 && wins[focus].used && wins[focus].kind == WM_KIND_CMD) {
+          if (sc == 0x48) cmd_hist(&wins[focus], 1);
+          else if (sc == 0x50) cmd_hist(&wins[focus], -1);
+          need_draw = 1;
         }
         continue;
       }
+      kbd_e0 = 0;
       if (sc == 0xE0) {
         kbd_e0 = 1;
         continue;
@@ -6169,6 +6200,11 @@ static int win_wm_run(void) {
           gq_push(&gwins[gui_focus], GUI_EV_KEY, 0, 0, 27);
           continue;
         }
+        if (focus >= 0 && wins[focus].used && wins[focus].kind == WM_KIND_CMD) {
+          cmd_set_input((struct cmd_con*)wins[focus].st, "");
+          need_draw = 1;
+          continue;
+        }
         if (focus >= 0 && wins[focus].used && wins[focus].kind == WM_KIND_NOTE && note_dirty)
           note_save();
         serial_puts("[visual] ESC\n");
@@ -6185,7 +6221,7 @@ static int win_wm_run(void) {
         continue;
       }
       {
-        char c = (char)keymap_char(sc);
+        char c = kp ? (char)kp : (char)keymap_char(sc);
         if (c == 27) {
           if (note_dlg) {
             note_dlg = 0;
@@ -6623,10 +6659,12 @@ gfx_restart:
 
     {
       uint8_t sc = data;
+      int kp = 0;
 
       if (kbd_e0) {
         kbd_e0 = 0;
-        continue;
+        if (!(sc & 0x80)) kp = keymap_ext_char(sc);
+        if (!kp) continue;
       }
       if (sc == 0xE0) {
         kbd_e0 = 1;
@@ -6652,7 +6690,7 @@ gfx_restart:
       }
 
       {
-        char c = (char)keymap_char(sc);
+        char c = kp ? (char)kp : (char)keymap_char(sc);
         if (c == 27) {
           serial_puts("[visual] ESC (map)\n");
           break;

@@ -17,5 +17,12 @@ void keymap_watch(int ext, uint8_t key, int up);
  * devolve 0 e combina com a proxima: ~ e a viram ã. Se nao combina, sai o
  * acento e a tecla fica em keymap_pending(). */
 int keymap_char(uint8_t sc);
+/* Igual, para as teclas com prefixo E0 que sao caractere: o Enter e a / do
+ * teclado numerico. As demais (setas, Home...) devolvem 0. */
+int keymap_ext_char(uint8_t sc);
+/* 1 se sc (sem E0) e tecla do teclado numerico com o NumLock desligado: vale
+ * como a tecla E0 de mesmo codigo (seta, Home...). Ligado, keymap_char da o
+ * numero. */
+int keymap_kp_nav(uint8_t sc);
 /* Tecla que sobrou de uma combinacao que nao existe (0 = nenhuma). */
 int keymap_pending(void);

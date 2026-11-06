@@ -499,6 +499,21 @@ static int get_key(int wait) {
     break;
   }
 
+  /* Tabela propria. Um if/switch denso o gcc vira jmp [reg*4]
+   * e um buraco dessa tabela executa INT3 (#BP). */
+  static const uint16_t ext_keys[256] = {
+    [0x48] = KEY_UP,
+    [0x50] = KEY_DOWN,
+    [0x4B] = KEY_LEFT,
+    [0x4D] = KEY_RIGHT,
+    [0x49] = KEY_PGUP,
+    [0x51] = KEY_PGDN,
+    [0x47] = KEY_HOME,
+    [0x4F] = KEY_END,
+    [0x53] = KEY_DEL,
+    [0x52] = KEY_INS,
+  };
+
   if (sc == 0xE0) {
     int n = 100000;
     int got;
@@ -506,25 +521,16 @@ static int get_key(int wait) {
     if (!got) return 0;
     break_fire();
     if (sc & 0x80) return 0;
-    /* Tabela propria. Um if/switch denso o gcc vira jmp [reg*4]
-     * e um buraco dessa tabela executa INT3 (#BP). */
-    static const uint16_t ext_keys[256] = {
-      [0x48] = KEY_UP,
-      [0x50] = KEY_DOWN,
-      [0x4B] = KEY_LEFT,
-      [0x4D] = KEY_RIGHT,
-      [0x49] = KEY_PGUP,
-      [0x51] = KEY_PGDN,
-      [0x47] = KEY_HOME,
-      [0x4F] = KEY_END,
-      [0x53] = KEY_DEL,
-      [0x52] = KEY_INS,
-    };
+    {
+      int c = keymap_ext_char(sc);
+      if (c) return c;
+    }
     return ext_keys[sc];
   }
 
   if (sc & 0x80)
     return 0;
+  if (keymap_kp_nav(sc)) return ext_keys[sc];
   if (sc >= 0x3B && sc <= 0x44) return KEY_F(sc - 0x3A);
   if (sc == 0x57 || sc == 0x58) return KEY_F(sc - 0x57 + 11);
   return keymap_char(sc);

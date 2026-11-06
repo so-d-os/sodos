@@ -20,7 +20,7 @@ static const uint16_t us_norm[128] = {
   0x62, 0x6E, 0x6D, 0x2C, 0x2E, 0x2F, 0, 0x2A,  /* 0x30 */
   0, 0x20, 0, 0, 0, 0, 0, 0,  /* 0x38 */
   0, 0, 0, 0, 0, 0, 0, 0,  /* 0x40 */
-  0, 0, 0, 0, 0, 0, 0, 0,  /* 0x48 */
+  0, 0, 0x2D, 0, 0, 0, 0x2B, 0,  /* 0x48: - e + do teclado numerico */
   0, 0, 0, 0, 0, 0, 0x5C, 0,  /* 0x50 */
   0, 0, 0, 0, 0, 0, 0, 0,  /* 0x58 */
   0, 0, 0, 0, 0, 0, 0, 0,  /* 0x60 */
@@ -38,7 +38,7 @@ static const uint16_t us_shift[128] = {
   0x42, 0x4E, 0x4D, 0x3C, 0x3E, 0x3F, 0, 0x2A,  /* 0x30 */
   0, 0x20, 0, 0, 0, 0, 0, 0,  /* 0x38 */
   0, 0, 0, 0, 0, 0, 0, 0,  /* 0x40 */
-  0, 0, 0, 0, 0, 0, 0, 0,  /* 0x48 */
+  0, 0, 0x2D, 0, 0, 0, 0x2B, 0,  /* 0x48: - e + do teclado numerico */
   0, 0, 0, 0, 0, 0, 0x7C, 0,  /* 0x50 */
   0, 0, 0, 0, 0, 0, 0, 0,  /* 0x58 */
   0, 0, 0, 0, 0, 0, 0, 0,  /* 0x60 */
@@ -56,13 +56,13 @@ static const uint16_t br_norm[128] = {
   0x62, 0x6E, 0x6D, 0x2C, 0x2E, 0x3B, 0, 0x2A,  /* 0x30 */
   0, 0x20, 0, 0, 0, 0, 0, 0,  /* 0x38 */
   0, 0, 0, 0, 0, 0, 0, 0,  /* 0x40 */
-  0, 0, 0, 0, 0, 0, 0, 0,  /* 0x48 */
+  0, 0, 0x2D, 0, 0, 0, 0x2B, 0,  /* 0x48: - e + do teclado numerico */
   0, 0, 0, 0, 0, 0, 0x5C, 0,  /* 0x50 */
   0, 0, 0, 0, 0, 0, 0, 0,  /* 0x58 */
   0, 0, 0, 0, 0, 0, 0, 0,  /* 0x60 */
   0, 0, 0, 0, 0, 0, 0, 0,  /* 0x68 */
   0, 0, 0, 0x2F, 0, 0, 0, 0,  /* 0x70 */
-  0, 0, 0, 0, 0, 0, 0, 0,  /* 0x78 */
+  0, 0, 0, 0, 0, 0, 0x2E, 0,  /* 0x78: 0x7E = . do teclado numerico ABNT2 */
 };
 static const uint16_t br_shift[128] = {
   0, 27, 0x21, 0x40, 0x23, 0x24, 0x25, 0x105,  /* 0x00 */
@@ -74,13 +74,13 @@ static const uint16_t br_shift[128] = {
   0x42, 0x4E, 0x4D, 0x3C, 0x3E, 0x3A, 0, 0x2A,  /* 0x30 */
   0, 0x20, 0, 0, 0, 0, 0, 0,  /* 0x38 */
   0, 0, 0, 0, 0, 0, 0, 0,  /* 0x40 */
-  0, 0, 0, 0, 0, 0, 0, 0,  /* 0x48 */
+  0, 0, 0x2D, 0, 0, 0, 0x2B, 0,  /* 0x48: - e + do teclado numerico */
   0, 0, 0, 0, 0, 0, 0x7C, 0,  /* 0x50 */
   0, 0, 0, 0, 0, 0, 0, 0,  /* 0x58 */
   0, 0, 0, 0, 0, 0, 0, 0,  /* 0x60 */
   0, 0, 0, 0, 0, 0, 0, 0,  /* 0x68 */
   0, 0, 0, 0x3F, 0, 0, 0, 0,  /* 0x70 */
-  0, 0, 0, 0, 0, 0, 0, 0,  /* 0x78 */
+  0, 0, 0, 0, 0, 0, 0x2E, 0,  /* 0x78: 0x7E = . do teclado numerico ABNT2 */
 };
 static const uint16_t br_altgr[128] = {
   0, 0, 0xFB, 0xFD, 0xFC, 0x9C, 0xBD, 0xAA,  /* 0x00 */
@@ -115,6 +115,7 @@ static int layout = KEYB_BR;
 static uint8_t km_shift;   /* bit 1 esquerdo, bit 2 direito */
 static int km_altgr;
 static int km_caps;
+static int km_num = 1;   /* NumLock: comeca ligado; o LED nao e sincronizado */
 static int km_dead;
 static int km_pending;
 
@@ -145,25 +146,31 @@ void keymap_watch(int ext, uint8_t key, int up) {
   }
   if (key == 0x3A && !ext && !up)
     km_caps = !km_caps;
+  if (key == 0x45 && !ext && !up)
+    km_num = !km_num;
+}
+
+/* Teclado numerico sem E0, de 0x47 a 0x53. 0x4A e 0x4E (- e +) nao dependem
+ * do NumLock e ficam nas tabelas. */
+static const uint8_t kp_keys[13] = {
+  '7', '8', '9', 0, '4', '5', '6', 0, '1', '2', '3', '0', '.'
+};
+
+static int is_kp(uint8_t sc) {
+  return sc >= 0x47 && sc <= 0x53 && kp_keys[sc - 0x47];
+}
+
+int keymap_kp_nav(uint8_t sc) {
+  return !km_num && is_kp(sc);
 }
 
 static int is_letter(uint16_t c) {
   return (c >= 'a' && c <= 'z') || c == 0x87;   /* 0x87 = ç */
 }
 
-int keymap_char(uint8_t sc) {
-  const uint16_t* norm = layout == KEYB_US ? us_norm : br_norm;
-  const uint16_t* shifted = layout == KEYB_US ? us_shift : br_shift;
-  int shift = km_shift != 0;
-  uint16_t v;
+/* Aplica a tecla morta pendente ao valor da tabela. */
+static int km_resolve(uint16_t v) {
   unsigned i;
-  if (sc >= 128) return 0;
-  if (layout == KEYB_BR && km_altgr) {
-    v = br_altgr[sc];
-  } else {
-    if (km_caps && is_letter(norm[sc])) shift = !shift;
-    v = shift ? shifted[sc] : norm[sc];
-  }
   if (!v) return 0;
   if (v & DEAD) {
     int d = v & 0xFF;
@@ -184,6 +191,27 @@ int keymap_char(uint8_t sc) {
     return dead_alone[d];
   }
   return v;
+}
+
+int keymap_char(uint8_t sc) {
+  const uint16_t* norm = layout == KEYB_US ? us_norm : br_norm;
+  const uint16_t* shifted = layout == KEYB_US ? us_shift : br_shift;
+  int shift = km_shift != 0;
+  if (sc >= 128) return 0;
+  if (km_num && is_kp(sc)) {
+    /* No ABNT2 o separador decimal do teclado numerico e a virgula. */
+    if (sc == 0x53 && layout == KEYB_BR) return km_resolve(',');
+    return km_resolve(kp_keys[sc - 0x47]);
+  }
+  if (layout == KEYB_BR && km_altgr) return km_resolve(br_altgr[sc]);
+  if (km_caps && is_letter(norm[sc])) shift = !shift;
+  return km_resolve(shift ? shifted[sc] : norm[sc]);
+}
+
+int keymap_ext_char(uint8_t sc) {
+  if (sc == 0x1C) return km_resolve(10);    /* E0 1C: Enter */
+  if (sc == 0x35) return km_resolve('/');   /* E0 35: / */
+  return 0;
 }
 
 int keymap_pending(void) {
