@@ -94,4 +94,8 @@ int vsscanf(const char* s, const char* fmt, va_list ap);
 #ifdef __cplusplus
 }
 #endif
+/* lote2 */
+ssize_t getline(char** line, size_t* n, FILE* f);
+ssize_t getdelim(char** line, size_t* n, int delim, FILE* f);
+
 #endif

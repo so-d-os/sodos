@@ -84,6 +84,17 @@ void __cxa_pure_virtual(void) {
   for (;;) {}
 }
 
+/* Sem threads reais morrendo: os destrutores de thread_local rodam na saida. */
+int __cxa_thread_atexit(void (*fn)(void*), void* obj, void* dso) {
+  return __cxa_atexit(fn, obj, dso);
+}
+
+/* Sem demangler: quem chama (abseil) mostra o nome como esta. */
+char* __cxa_demangle(const char*, char*, size_t*, int* status) {
+  if (status) *status = -2;
+  return nullptr;
+}
+
 void __stack_chk_fail(void) {
   k_exit(5);
   for (;;) {}

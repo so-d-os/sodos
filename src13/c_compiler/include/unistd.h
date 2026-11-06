@@ -14,6 +14,25 @@ extern "C" {
 ssize_t read(int fd, void* buf, size_t n);
 ssize_t write(int fd, const void* buf, size_t n);
 ssize_t readlink(const char* path, char* buf, size_t n);
+ssize_t pread(int fd, void* buf, size_t n, off_t off);
+ssize_t pwrite(int fd, const void* buf, size_t n, off_t off);
+int symlink(const char* target, const char* path);
+int link(const char* oldpath, const char* newpath);
+int chown(const char* path, uid_t uid, gid_t gid);
+int fchown(int fd, uid_t uid, gid_t gid);
+unsigned alarm(unsigned seconds);
+int getpagesize(void);
+#define _POSIX_TIMERS 200809L
+#define _POSIX_MONOTONIC_CLOCK 200809L
+pid_t gettid(void);
+int pipe2(int fds[2], int flags);
+int pause(void);
+int truncate(const char* path, off_t len);
+int execlp(const char* file, const char* arg, ...);
+extern char** environ;
+int getopt(int argc, char* const argv[], const char* optstring);
+extern char* optarg;
+extern int optind, opterr, optopt;
 long syscall(long number, ...);
 off_t lseek(int fd, off_t off, int whence);
 int close(int fd);

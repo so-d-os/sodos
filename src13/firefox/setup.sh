@@ -18,6 +18,7 @@ sh "$S/sodos/scripts/fetch-libcxx.sh" || echo "aviso: nao foi possivel baixar a 
 # unzip local: o configure do browser exige.
 if command -v apt-get >/dev/null 2>&1; then
   sh "$S/sodos/scripts/fetch-unzip.sh" || echo "aviso: nao foi possivel baixar o unzip"
+  sh "$S/sodos/scripts/fetch-clang-headers.sh" || echo "aviso: nao foi possivel baixar os headers do clang"
 fi
 case "$1" in
   firefox) echo "Firefox ESR: ainda nao habilitado; veja docs/03-fases.md (M2+)." ;;

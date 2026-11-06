@@ -47,4 +47,24 @@ int msync(void* addr, size_t len, int flags);
 }
 #endif
 
+/* lote2 */
+#ifdef __cplusplus
+extern "C" {
+#endif
+#define MADV_HUGEPAGE 14
+#define MADV_NOHUGEPAGE 15
+#define MADV_DONTDUMP 16
+#define MADV_DODUMP 17
+#define MADV_FREE 8
+#define MAP_NORESERVE 0x4000
+#define MAP_POPULATE 0x8000
+#define MREMAP_MAYMOVE 1
+void* mremap(void* old, size_t oldsz, size_t newsz, int flags, ...);
+int shm_open(const char* name, int flags, unsigned mode);
+int shm_unlink(const char* name);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif

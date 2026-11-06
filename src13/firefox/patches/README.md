@@ -30,6 +30,7 @@ Regras:
 | `003-firefox-sodos-build.patch | ajustes de build do SpiderMonkey |
 | `004-js-shell-sodos-file-io.patch | ler .js sem stat (FILEs da libc sao em memoria) |
 | `0005-firefox-sodos-browser.patch` | toolkit `cairo-sodos`, diretorio `widget/sodos` e NSPR da arvore no alvo |
+| `0006-firefox-sodos-linux-abi.patch` | alvo SODOS com ABI e fontes do Linux no Gecko (`OS_ARCH`, `XP_LINUX`), backend `widget/sodos` ligado ao build, FreeType da arvore e inicializacao sem `dlopen` |
 | `rust-std-sodos.patch` | `std` do Rust para `target_os = "sodos"`; aplica no `rust-src` do nightly (`sodos/scripts/patch-rust-std.sh`), nao na arvore do Firefox |
 
 Os marcadores SODOS_MARK em js/src/shell/js.cpp (bytes na serial COM1)

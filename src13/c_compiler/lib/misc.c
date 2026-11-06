@@ -245,7 +245,33 @@ char* realpath(const char* path, char* out) {
 }
 
 /* O SODOS ainda nao tem links simbolicos; a ICU so usa para o fuso. */
+#if __SIZEOF_POINTER__ == 8
+extern char** __sodos_argv __attribute__((weak));
+/* /proc/self/exe: argv[0] (D:\\X.EXE) no formato Unix que o Gecko exige (/D/X.EXE). */
+static ssize_t self_exe_path(char* buf, size_t n) {
+  const char* a;
+  size_t i = 0, j = 0;
+  if (!&__sodos_argv || !__sodos_argv || !__sodos_argv[0]) return -1;
+  a = __sodos_argv[0];
+  if (a[0] == 0 || a[1] != ':' || n < 3) return -1;
+  buf[j++] = '/';
+  buf[j++] = a[0];
+  i = 2;
+  while (a[i] && j < n) {
+    buf[j++] = a[i] == '\\' ? '/' : a[i];
+    i++;
+  }
+  return (ssize_t)j;
+}
+#endif
+
 ssize_t readlink(const char* path, char* buf, size_t n) {
+#if __SIZEOF_POINTER__ == 8
+  if (path && strcmp(path, "/proc/self/exe") == 0) {
+    ssize_t r = self_exe_path(buf, n);
+    if (r > 0) return r;
+  }
+#endif
   (void)path;
   (void)buf;
   (void)n;

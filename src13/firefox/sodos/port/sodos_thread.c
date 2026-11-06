@@ -155,7 +155,10 @@ static void resched(void) {
       struct sodos_thread* prev = cur;
       next->state = ST_RUN;
       cur = next;
-      if (next != prev) sodos_ctx_switch(&prev->rsp, next->rsp);
+      if (next != prev) {
+        sodos__tls_switch(next->tls_tp);
+        sodos_ctx_switch(&prev->rsp, next->rsp);
+      }
       in_finish = 0;   /* quem morreu ja saiu da propria pilha */
       return;
     }
@@ -293,6 +296,7 @@ int pthread_create(pthread_t* out, const pthread_attr_t* attr,
     free(t);
     return EAGAIN;
   }
+  t->tls_tp = sodos__tls_new(&t->tls_raw);
   t->state = ST_READY;
   q_push(&run_h, &run_t, t);
   if (out) *out = t;
@@ -331,6 +335,7 @@ int pthread_join(pthread_t t, void** retval) {
     sodos__block((void**)&t->join_head, (void**)&t->join_tail);
   if (retval) *retval = t->retval;
   if (t->alloc) k_free((void*)(uintptr_t)t->alloc);
+  free(t->tls_raw);
   t->magic = 0;
   free(t);
   return 0;

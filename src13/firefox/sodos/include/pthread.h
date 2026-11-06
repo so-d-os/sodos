@@ -157,4 +157,24 @@ int pthread_kill(pthread_t t, int sig);
 }
 #endif
 
+/* lote2 */
+#ifdef __cplusplus
+extern "C" {
+#endif
+#include <sched.h>
+#ifndef PTHREAD_PROCESS_PRIVATE
+#define PTHREAD_PROCESS_PRIVATE 0
+#define PTHREAD_PROCESS_SHARED 1
+#endif
+int pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void));
+int pthread_getcpuclockid(pthread_t t, int* clk);
+int pthread_getschedparam(pthread_t t, int* policy, struct sched_param* param);
+int pthread_setschedparam(pthread_t t, int policy, const struct sched_param* param);
+int pthread_setaffinity_np(pthread_t t, size_t n, const cpu_set_t* set);
+int pthread_mutexattr_setpshared(pthread_mutexattr_t* a, int shared);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif

@@ -6,6 +6,10 @@
 #include <sys/types.h>
 #include <netinet/in.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef unsigned int socklen_t;
 
 #ifndef _SA_FAMILY_T_DEFINED
@@ -85,5 +89,44 @@ int getsockname(int fd, struct sockaddr* addr, socklen_t* len);
 int getpeername(int fd, struct sockaddr* addr, socklen_t* len);
 int socketpair(int domain, int type, int protocol, int sv[2]);
 ssize_t sendfile(int out_fd, int in_fd, off_t* offset, size_t count);
+
+/* lote2 */
+#include <sys/uio.h>
+#define PF_UNSPEC AF_UNSPEC
+#define SOCK_SEQPACKET 5
+#define SOCK_NONBLOCK 04000
+#define SOCK_CLOEXEC 02000000
+#define MSG_CTRUNC 0x8
+#define MSG_TRUNC 0x20
+#define MSG_WAITALL 0x100
+#define SCM_RIGHTS 1
+struct msghdr {
+  void* msg_name;
+  socklen_t msg_namelen;
+  struct iovec* msg_iov;
+  size_t msg_iovlen;
+  void* msg_control;
+  size_t msg_controllen;
+  int msg_flags;
+};
+struct cmsghdr {
+  size_t cmsg_len;
+  int cmsg_level;
+  int cmsg_type;
+};
+#define CMSG_ALIGN(n) (((n) + sizeof(size_t) - 1) & ~(sizeof(size_t) - 1))
+#define CMSG_LEN(n) (CMSG_ALIGN(sizeof(struct cmsghdr)) + (n))
+#define CMSG_SPACE(n) (CMSG_ALIGN(sizeof(struct cmsghdr)) + CMSG_ALIGN(n))
+#define CMSG_DATA(c) ((unsigned char*)(c) + CMSG_ALIGN(sizeof(struct cmsghdr)))
+#define CMSG_FIRSTHDR(m) \
+  ((m)->msg_controllen >= sizeof(struct cmsghdr) ? (struct cmsghdr*)(m)->msg_control : (struct cmsghdr*)0)
+#define CMSG_NXTHDR(m, c) ((struct cmsghdr*)0)
+ssize_t sendmsg(int fd, const struct msghdr* msg, int flags);
+ssize_t recvmsg(int fd, struct msghdr* msg, int flags);
+int accept4(int fd, struct sockaddr* addr, socklen_t* len, int flags);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

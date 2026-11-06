@@ -28,4 +28,6 @@ typedef long long off64_t;
 #ifdef __cplusplus
 }
 #endif
+typedef long loff_t;
+typedef char* caddr_t;
 #endif

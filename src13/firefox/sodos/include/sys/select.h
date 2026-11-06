@@ -4,6 +4,10 @@
 
 #include <sys/time.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #ifndef FD_SETSIZE
 #define FD_SETSIZE 64
 #endif
@@ -24,5 +28,13 @@ typedef struct {
 
 int select(int nfds, fd_set* readfds, fd_set* writefds, fd_set* exceptfds,
            struct timeval* timeout);
+
+/* lote2 */
+typedef unsigned int fd_mask;
+#define NFDBITS (8 * (int)sizeof(fd_mask))
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

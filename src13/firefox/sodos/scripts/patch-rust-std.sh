@@ -25,6 +25,7 @@ export PATH="$S/toolchain/bin:$PATH"
   "$S/sodos/rust/tools/cargo" build --release --target x86_64-sodos)
 rm -rf "$LIB"
 mkdir -p "$LIB"
-find "$T/x86_64-sodos/release/deps" -name '*.rlib' -exec cp {} "$LIB/" \;
-find "$T/x86_64-sodos/release/deps" -name '*.rmeta' -exec cp {} "$LIB/" \;
+# O cargo novo guarda os artefatos em release/build/*/*/out; o antigo, em deps.
+find "$T/x86_64-sodos/release" -name '*.rlib' -exec cp {} "$LIB/" \;
+find "$T/x86_64-sodos/release" -name '*.rmeta' -exec cp {} "$LIB/" \;
 echo "std instalado em $LIB ($(ls "$LIB" | wc -l) arquivos)"

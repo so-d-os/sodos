@@ -12,6 +12,10 @@ O código do Firefox em si não é copiado para o repositório; `setup.sh` baixa
 > não compila**: falta um toolkit próprio (o `cairo-headless` não existe mais)
 > e, no kernel, preempção, memória virtual, várias conexões TCP e processos.
 > O plano completo está em [docs/03-fases.md](docs/03-fases.md).
+>
+> **Estado em 2026-11-06:** o browser compila inteiro e liga em um executavel:
+> `FIREFOX.EXE --version` roda no SODOS. Ainda nao ha janela, perfil nem navegacao.
+> Ver [docs/05-firefox-build.md](docs/05-firefox-build.md#build-do-browser-estado-em-2026-11-06).
 
 ## O que já funciona
 

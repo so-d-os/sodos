@@ -34,7 +34,13 @@ struct sodos_thread {
   uint64_t wake_ms;
   void* tls[PTHREAD_KEYS_MAX];
   unsigned magic;
+  void* tls_tp;         /* ponteiro de thread (TLS estatico); NULL = thread principal */
+  void* tls_raw;        /* bloco a liberar */
 };
+
+/* sodos_tls.c */
+void* sodos__tls_new(void** raw);
+void sodos__tls_switch(void* tp);
 
 void sodos__sched_init(void);
 struct sodos_thread* sodos__self(void);

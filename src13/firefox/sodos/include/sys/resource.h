@@ -4,6 +4,10 @@
 
 #include <sys/time.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct rusage {
   struct timeval ru_utime;
   struct timeval ru_stime;
@@ -42,5 +46,19 @@ struct rlimit {
 int getrusage(int who, struct rusage* usage);
 int getrlimit(int resource, struct rlimit* rlim);
 int setrlimit(int resource, const struct rlimit* rlim);
+
+/* lote2 */
+#ifndef RLIM_INFINITY
+#define RLIM_INFINITY (~(rlim_t)0)
+#endif
+#define PRIO_PROCESS 0
+#define PRIO_PGRP 1
+#define PRIO_USER 2
+int getpriority(int which, unsigned who);
+int setpriority(int which, unsigned who, int prio);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -30,6 +30,7 @@ struct module {
   uint32_t pid;
   char name[32];
   uint8_t* base;
+  uint8_t* raw;
   uint32_t size;
   uint32_t entry;
   uint32_t stack_size;
@@ -225,7 +226,7 @@ static void unload(int id) {
   if (m->is_dll && m->entry != SOX_NO_ENTRY)
     ((dllmain_fn)(m->base + m->entry))(SOX_DLL_DETACH);
   for (i = 0; i < m->ndeps; i++) release(m->deps[i]);
-  ufree(m->base);
+  ufree(m->raw);
   ufree(m->exports);
   ufree(m->strtab);
   m->used = 0;
@@ -349,11 +350,13 @@ static int load(const char* req, int want_dll) {
   }
   m = &mods[id];
   total = h->image_size + h->bss_size;
-  m->base = (uint8_t*)umalloc_owned(total ? total : 1u, 0);
+  /* PIEs tem dados com alinhamento de ate uma pagina. */
+  m->raw = (uint8_t*)umalloc_owned((total ? total : 1u) + 4096u, 0);
+  m->base = m->raw ? (uint8_t*)(((uintptr_t)m->raw + 4095u) & ~(uintptr_t)4095u) : 0;
   m->strtab = (char*)umalloc_owned(h->strtab_size + 1u, 0);
   m->exports = (struct sox_export*)umalloc_owned(h->nexports * sizeof(struct sox_export) + 1u, 0);
   if (!m->base || !m->strtab || !m->exports) {
-    ufree(m->base);
+    ufree(m->raw);
     ufree(m->strtab);
     ufree(m->exports);
     ufree(file);
@@ -571,6 +574,11 @@ int mod_exec(const char* path, int argc, char** argv) {
     serial_puts("\n");
       rc = mod_call_entry(mods[id].base + mods[id].entry, nargc, av, av);
       mod_fs_write(prev_fs);
+      serial_puts("[mod] saiu ");
+      serial_puts(mods[id].name);
+      serial_puts(" rc=");
+      serial_hex32((uint32_t)rc);
+      serial_puts("\n");
     }
   }
   dyn_release_pid(pid);

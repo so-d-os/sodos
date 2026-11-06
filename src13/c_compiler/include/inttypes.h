@@ -84,7 +84,25 @@ uintmax_t strtoumax(const char* s, char** end, int base);
 intmax_t imaxabs(intmax_t v);
 
 
+/* lote6 */
+#ifndef PRIXPTR
+#define PRIXPTR "lX"
+#define PRIxPTR "lx"
+#define PRIdPTR "ld"
+#define PRIuPTR "lu"
+#endif
+
 #ifdef __cplusplus
 }
 #endif
+/* lote2 */
+#define PRIi8 "i"
+#define PRIi16 "i"
+#define PRIx8 "x"
+#define PRIx16 "x"
+#define PRIX8 "X"
+#define PRIX16 "X"
+#define PRIo8 "o"
+#define PRIo16 "o"
+
 #endif

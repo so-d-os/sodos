@@ -17,6 +17,15 @@ extern "C" {
 #define O_APPEND 0x400
 #define O_NONBLOCK 0x800
 #define O_ACCMODE 3
+#define O_NOFOLLOW 0x20000
+#define O_PATH 010000000
+#define AT_FDCWD -100
+#define AT_EACCESS 0x200
+#define AT_SYMLINK_NOFOLLOW 0x100
+int faccessat(int dirfd, const char* path, int mode, int flags);
+#define O_DIRECTORY 0x10000
+ssize_t readahead(int fd, long off, size_t n);
+#define O_CLOEXEC 0x80000
 #define O_BINARY 0
 #define O_TEXT   0
 #define O_SYNC   0x101000

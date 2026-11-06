@@ -12,6 +12,8 @@ extern "C" {
 #define CLOCKS_PER_SEC 1000
 #define CLOCK_REALTIME 0
 #define CLOCK_MONOTONIC 1
+#define CLOCK_PROCESS_CPUTIME_ID 2
+#define CLOCK_THREAD_CPUTIME_ID 3
 #define TIME_UTC 1
 typedef int clockid_t;
 
@@ -25,7 +27,14 @@ struct tm {
   int tm_wday;   /* 0 = domingo */
   int tm_yday;
   int tm_isdst;
+#if __SIZEOF_POINTER__ == 8
+  /* So em LP64 (estatico): nao muda o layout das DLLs x32. */
+  long tm_gmtoff;
+  const char* tm_zone;
+#endif
 };
+
+char* strptime(const char* s, const char* fmt, struct tm* tm);
 
 struct timespec {
   time_t tv_sec;

@@ -3,8 +3,26 @@
 #include <stdlib.h>
 #include <ctype.h>
 
+#if __SIZEOF_POINTER__ == 8
+/* A pagina 0 e mapeada e guarda a IDT do kernel: um ponteiro nulo em memset ou
+ * memcpy derrubaria a maquina sem mensagem. Melhor parar com a pilha na serial. */
+extern void k_exit(int code);
+extern void sodos_dump_stack(void) __attribute__((weak));
+static void null_dest(void) {
+  if (sodos_dump_stack) sodos_dump_stack();
+  k_exit(126);
+}
+#define CHECK_DEST(d, n)                          \
+  do {                                            \
+    if ((n) && (unsigned long)(d) < 0x100000) null_dest(); \
+  } while (0)
+#else
+#define CHECK_DEST(d, n)
+#endif
+
 void* memcpy(void* d, const void* s, size_t n) {
   char* a = (char*)d;
+  CHECK_DEST(d, n);
   const char* b = (const char*)s;
   while (n >= 4) {
     *(unsigned*)a = *(const unsigned*)b;
@@ -30,6 +48,7 @@ void* memmove(void* d, const void* s, size_t n) {
 void* memset(void* d, int c, size_t n) {
   unsigned char* a = (unsigned char*)d;
   unsigned v = (unsigned char)c;
+  CHECK_DEST(d, n);
   v |= v << 8;
   v |= v << 16;
   while (n && ((unsigned)a & 3)) {

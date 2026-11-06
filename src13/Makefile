@@ -333,13 +333,13 @@ iso: os.img
 	  exit 1; \
 	fi
 
-# Disco secundário 256MB (drive 1). Criado no primeiro run se não existir.
-# 256MB cabe o content/ (videos grandes) em D:\user\default\desktop.
+# Disco secundario de 2 GB (drive 1), criado no primeiro run se nao existir. O FAT16
+# vai ate perto disso; o kernel nao le FAT32. Cabem o content/ e o FIREFOX.EXE.
+DISK_SECTORS := 4096000
 disk.img: os.img
 	@if [ ! -f disk.img ]; then \
-	  echo "Creating 256MB secondary disk (disk.img)..."; \
-	  dd if=/dev/zero of=disk.img bs=1M count=256 2>/dev/null || \
-	  dd if=/dev/zero of=disk.img bs=512 count=524288 2>/dev/null || \
+	  echo "Creating 2 GB secondary disk (disk.img)..."; \
+	  truncate -s $$(( $(DISK_SECTORS) * 512 )) disk.img || \
 	  (echo "Error: Could not create disk.img"; exit 1); \
 	fi
 
@@ -392,9 +392,9 @@ vbox-update: os.img disk.img disk2.img
 	}
 	$(VBOX_CMD)
 
-# Formata disk.img (256MB) como FAT16 pelo Linux: MBR + partição 0 + mkfs.fat
+# Formata disk.img (2 GB) como FAT16 pelo Linux: MBR + partição 0 + mkfs.fat
 # Uso: make format-disk [DISK=disk.img] [FAT_LABEL=MYDISK]
-# Cluster de 8KB: 256MB continua FAT16 (o kernel recusa FAT32).
+# Cluster de 32KB: 2 GB continua FAT16 (o kernel recusa FAT32).
 # Requer: dosfstools (mkfs.fat ou mkfs.vfat), util-linux (sfdisk)
 DISK ?= disk.img
 FAT_LABEL ?= MYDISK
@@ -405,27 +405,48 @@ MKFSFAT := $(shell PATH="$(PATH_SBIN)" command -v mkfs.fat 2>/dev/null || PATH="
 format-disk:
 	@echo "Formatando $(DISK) como FAT16 (rótulo $(FAT_LABEL))..."
 	@if [ ! -f $(DISK) ]; then \
-	  echo "Criando $(DISK) 256MB..."; \
-	  dd if=/dev/zero of=$(DISK) bs=1M count=256 2>/dev/null || \
-	  dd if=/dev/zero of=$(DISK) bs=512 count=524288 2>/dev/null; \
+	  echo "Criando $(DISK) de 2 GB..."; \
+	  truncate -s $$(( $(DISK_SECTORS) * 512 )) $(DISK); \
 	fi
-	@if [ ! -f $(DISK) ] || [ "$$(wc -c < $(DISK))" -lt 268435456 ]; then \
-	  dd if=/dev/zero of=$(DISK) bs=1M seek=256 count=0 2>/dev/null || \
-	  dd if=/dev/zero of=$(DISK) bs=1M count=256 conv=notrunc 2>/dev/null; \
+	@if [ "$$(wc -c < $(DISK))" -lt $$(( $(DISK_SECTORS) * 512 )) ]; then \
+	  truncate -s $$(( $(DISK_SECTORS) * 512 )) $(DISK); \
 	fi
-	@echo "Criando MBR e partição (LBA 1, 524287 setores, tipo FAT16)..."
-	@printf 'label: dos\nunit: sectors\nstart=1, size=524287, type=6\n' | $(SFDISK) $(DISK) --no-reread --force 2>/dev/null || \
+	@echo "Criando MBR e partição (LBA 1, $$(( $(DISK_SECTORS) - 1 )) setores, tipo FAT16)..."
+	@printf 'label: dos\nunit: sectors\nstart=1, size=%d, type=6\n' $$(( $(DISK_SECTORS) - 1 )) | $(SFDISK) $(DISK) --no-reread --force 2>/dev/null || \
 	  (echo "Erro: sfdisk falhou. Tente: PATH=\"/usr/sbin:$$PATH\" make format-disk"; exit 1)
 	@echo "Formatando partição com mkfs.fat -F 16..."
-	@dd if=$(DISK) bs=512 skip=1 count=524287 of=$(DISK).part 2>/dev/null
+	@rm -f $(DISK).part
+	@truncate -s $$(( ($(DISK_SECTORS) - 1) * 512 )) $(DISK).part
 	@if [ -z "$(MKFSFAT)" ]; then \
 	  echo "Erro: mkfs.fat não encontrado. Instale dosfstools: sudo apt install dosfstools"; rm -f $(DISK).part; exit 1; \
 	fi
-	@$(MKFSFAT) -F 16 -s 16 -n $(FAT_LABEL) $(DISK).part || \
+	@$(MKFSFAT) -F 16 -s 64 -n $(FAT_LABEL) $(DISK).part || \
 	  (echo "Erro: formatação falhou (veja acima). Se faltar o comando: sudo apt install dosfstools"; rm -f $(DISK).part; exit 1)
 	@dd if=$(DISK).part of=$(DISK) bs=512 seek=1 conv=notrunc 2>/dev/null
 	@rm -f $(DISK).part
 	@echo "Pronto. $(DISK) está com MBR + partição FAT16. No SO: mount 0"
+
+# Aumenta um disk.img antigo para 2 GB sem perder os arquivos. O disco atual fica
+# guardado em disk-256mb.img, que so voce apaga depois de conferir o novo.
+.PHONY: grow-disk
+grow-disk:
+	@if pgrep -f "[q]emu-system.*file=$(DISK)" >/dev/null; then \
+	  echo "Feche o QEMU antes de aumentar o disco."; exit 1; fi
+	@if [ "$$(wc -c < $(DISK))" -ge $$(( $(DISK_SECTORS) * 512 )) ]; then \
+	  echo "$(DISK) ja tem 2 GB."; exit 0; fi; \
+	if [ -e disk-256mb.img ]; then \
+	  echo "disk-256mb.img ja existe; mova-o antes de continuar."; exit 1; fi; \
+	T=$$(mktemp -d /tmp/sodos-grow-XXXXXX); \
+	mcopy -s -n -m -i $(DISK)@@512 ::/ "$$T/" || { rm -rf "$$T"; exit 1; }; \
+	antes=$$(find "$$T" -type f | wc -l); \
+	mv $(DISK) disk-256mb.img; \
+	$(MAKE) format-disk DISK=$(DISK) || { mv disk-256mb.img $(DISK); rm -rf "$$T"; exit 1; }; \
+	cd "$$T" && mcopy -s -n -m -i "$(CURDIR)/$(DISK)@@512" * ::/ || exit 1; \
+	cd "$(CURDIR)"; \
+	depois=$$(mdir -/ -b -i $(DISK)@@512 ::/ | grep -vc '/$$'); \
+	rm -rf "$$T"; \
+	echo "Migrados: $$antes arquivos; no disco novo: $$depois. Antigo em disk-256mb.img."; \
+	if [ "$$antes" != "$$depois" ]; then echo "ATENCAO: as contagens diferem."; exit 1; fi
 
 # Copia compilador, linker, libc, headers e exemplos para a raiz do disk.img
 # (D: no SO). Formata antes se o disco ainda nao tiver FAT. Requer mtools.
@@ -521,6 +542,7 @@ disk-files: disk.img
 	done
 	@# AGENT.CFG tem a chave da API: fica fora do git, vai so para o disco
 	@if [ -f AGENT.CFG ]; then mcopy -o -i $(DISK)@@512 AGENT.CFG ::/AGENT.CFG || exit 1; fi
+	@sh firefox/sodos/scripts/copy-firefox-disk.sh $(DISK)
 	@mdir -i $(DISK)@@512 -w ::/
 
 # Sobe o QEMU e mostra os comandos para formatar o disco (digite no prompt do QEMU)

@@ -129,6 +129,64 @@ def compile_one(kind, src, obj, flags):
     return run(cmd)
 
 
+def kernel_stubs(tmp):
+    """Um thunk e um slot para cada export do kernel (preenchidos pelo loader)."""
+    asm = [".text"]
+    data = [".data", ".balign 8"]
+    with open(KERNEL, encoding="latin-1") as f:
+        for line in f:
+            name = line.strip()
+            if not name or name.startswith(("LIBRARY", "EXPORTS", ";")):
+                continue
+            name = name.split()[0]
+            asm += [".globl %s" % name, ".type %s,@function" % name, "%s:" % name,
+                    "    jmp *__sodos_imp_%s(%%rip)" % name]
+            data += [".globl __sodos_imp_%s" % name, "__sodos_imp_%s:" % name, "    .quad 0"]
+    src = os.path.join(tmp, "kstubs.s")
+    obj = os.path.join(tmp, "kstubs.o")
+    with open(src, "w") as f:
+        f.write("\n".join(asm + data + ['.section .note.GNU-stack,"",@progbits', ""]))
+    if run(["gcc", "-c", src, "-o", obj]) != 0:
+        return None
+    return obj
+
+
+def gnu_link(out, kind, local_objs, objs, rlibs, tmp, shared):
+    """-shared vira um objeto relocavel; o programa final e PIE e depois SOX2."""
+    if shared:
+        cmd = ["ld", "-r", "--allow-multiple-definition", "-o", out] + local_objs + objs
+        if rlibs:
+            cmd += ["--whole-archive"] + rlibs + ["--no-whole-archive"]
+        return run(cmd)
+    stubs = kernel_stubs(tmp)
+    if not stubs:
+        return 1
+    libs = []
+    if kind == "cxx":
+        # Sem INIT64: ele redefine __init_array_start, que aqui vem do ld.
+        libs += [CXXRT64, OVR64]
+        libs += glob.glob(os.path.join(ROOT, "build", "libcxx64", "obj", "*.o"))
+    libs += glob.glob(os.path.join(PORT64, "*.o"))
+    if os.path.exists(POSIX64):
+        libs.append(POSIX64)
+    libs += glob.glob(os.path.join(C, "build", "x64_*.o"))
+    elf = out + ".elf"
+    cmd = ["ld", "-pie", "--no-dynamic-linker", "-z", "notext", "-z", "norelro",
+           "-z", "max-page-size=0x1000", "-z", "noexecstack", "--no-eh-frame-hdr",
+           "--gc-sections", "--strip-debug", "--allow-multiple-definition", "-e", "_start",
+           "--defsym=__sodos_stack_size=0x1000000", "-o", elf, CRT64, stubs]
+    cmd += local_objs + objs + ["--start-group"] + rlibs + libs + ["--end-group"]
+    r = run(cmd)
+    if r != 0:
+        return r
+    r = run([sys.executable, os.path.join(HERE, "elf2sox2.py"), elf, out])
+    if r == 0:
+        os.chmod(out, 0o755)
+        if not os.environ.get("SODOS_KEEP_ELF"):
+            os.unlink(elf)
+    return r
+
+
 def main():
     args = expand_response_files(sys.argv[1:])
     if args:
@@ -246,6 +304,9 @@ def main():
         if out is None:
             out = "a.out"
 
+        if is64() and os.environ.get("SODOS_LINKER") != "link64":
+            return gnu_link(out, kind, local_objs, objs, rlibs, tmp, shared)
+
         cmd = [linker]
         if is64():
             cmd += ["/out:" + out, crt]
@@ -253,10 +314,10 @@ def main():
             if kind == "cxx":
                 cmd += [CXXRT64, INIT64, OVR64]
                 cmd += glob.glob(os.path.join(ROOT, "build", "libcxx64", "obj", "*.o"))
-                # libc++ com threads usa os pthreads da libsodos64.
-                cmd += glob.glob(os.path.join(PORT64, "*.o"))
-                if os.path.exists(POSIX64):
-                    cmd.append(POSIX64)
+            # pthreads e ABI Linux: tambem em C, para o configure achar pthread_create.
+            cmd += glob.glob(os.path.join(PORT64, "*.o"))
+            if os.path.exists(POSIX64):
+                cmd.append(POSIX64)
             if rlibs:
                 combined = os.path.join(tmp, "rust_combined.o")
                 ld = ["ld", "-r", "--force-group-allocation", "--allow-multiple-definition"] + objs
@@ -267,9 +328,10 @@ def main():
                 if kind == "cxx":
                     cmd += [CXXRT64, INIT64, OVR64]
                     cmd += glob.glob(os.path.join(ROOT, "build", "libcxx64", "obj", "*.o"))
-                    cmd += glob.glob(os.path.join(PORT64, "*.o"))
-                    if os.path.exists(POSIX64):
-                        cmd.append(POSIX64)
+                # O std do Rust usa a ABI Linux (sodos_linux_abi.c), mesmo em C.
+                cmd += glob.glob(os.path.join(PORT64, "*.o"))
+                if os.path.exists(POSIX64):
+                    cmd.append(POSIX64)
             cmd += glob.glob(os.path.join(C, "build", "x64_*.o"))
             if os.path.exists(KERNEL):
                 cmd.append(KERNEL)

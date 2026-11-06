@@ -18,6 +18,9 @@ extern "C" {
 #define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
 #define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
 
+#if __SIZEOF_POINTER__ == 8
+#include <time.h>
+#endif
 struct stat {
   mode_t st_mode;
   off_t st_size;
@@ -28,11 +31,33 @@ struct stat {
    * nao mudar o layout que o resto do SO ja usa. */
   time_t st_atime;
   time_t st_ctime;
+#if __SIZEOF_POINTER__ == 8
+  /* So em LP64 (estatico): nao muda o layout das DLLs x32. Zerados por stat. */
+  unsigned long st_nlink;
+  unsigned int st_uid;
+  unsigned int st_gid;
+  long st_blksize;
+  long st_blocks;
+  struct timespec st_atim;
+  struct timespec st_mtim;
+  struct timespec st_ctim;
+#endif
 };
 
+#if __SIZEOF_POINTER__ == 8 && !defined(SODOS_NO_STAT64_ALIAS)
+/* LP64: stat e stat64 sao o mesmo tipo para quem compila contra estes headers. */
+#define stat64 stat
+#define lstat64 lstat
+#define fstat64 fstat
+#endif
 int stat(const char* path, struct stat* st);
 int fstat(int fd, struct stat* st);
 int mkdir(const char* path, mode_t mode);
+int lstat(const char* path, struct stat* st);
+int chmod(const char* path, mode_t mode);
+int fchmod(int fd, mode_t mode);
+int mkfifo(const char* path, mode_t mode);
+mode_t umask(mode_t mask);
 
 #define S_IRWXG 070
 #define S_IRGRP 040
@@ -45,6 +70,8 @@ int mkdir(const char* path, mode_t mode);
 #define S_IFLNK 0120000
 #define S_ISLNK(m) 0
 #define S_ISCHR(m) 0
+#define S_ISBLK(m) 0
+#define S_ISSOCK(m) 0
 #define S_ISFIFO(m) 0
 
 

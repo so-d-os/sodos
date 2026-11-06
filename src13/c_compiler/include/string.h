@@ -39,6 +39,9 @@ int strcoll(const char* a, const char* b);
 size_t strxfrm(char* d, const char* s, size_t n);
 
 
+/* lote3 */
+char* strsep(char** s, const char* delim);
+
 #ifdef __cplusplus
 }
 #endif

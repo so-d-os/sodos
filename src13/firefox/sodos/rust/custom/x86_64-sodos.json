@@ -10,17 +10,21 @@
   "llvm-target": "x86_64-unknown-linux-gnu",
   "max-atomic-width": 64,
   "metadata": {
-    "description": "SODOS LP64 (SOX2)",
+    "description": "SODOS LP64 (SOX2), ABI Linux/POSIX",
     "host_tools": false,
     "std": false,
     "tier": 3
   },
-  "os": "sodos",
+  "os": "linux",
   "panic-strategy": "abort",
   "position-independent-executables": false,
   "relocation-model": "static",
   "static-position-independent-executables": false,
   "target-pointer-width": 64,
-  "singlethread": true,
-  "vendor": "unknown"
+  "vendor": "unknown",
+  "env": "gnu",
+  "target-family": [
+    "unix"
+  ],
+  "dynamic-linking": false
 }

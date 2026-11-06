@@ -8,7 +8,7 @@
 # no mesmo gmake -j, o compile nao espera os headers gerados pelo export.
 #
 # Copia sodos/widget para widget/sodos na arvore antes de cada passo. A arvore
-# precisa dos patches 0001 a 0005 (patches/README.md) e do std do Rust instalado
+# precisa dos patches 0001 a 0006 (patches/README.md) e do std do Rust instalado
 # (make js64-std).
 #
 # Variaveis: FIREFOX_DIR (fonte), FIREFOX_OBJ (objdir), GCC13 (prefixo de um
@@ -51,6 +51,18 @@ EXTRA=
 if [ -f "$LIBCLANG/libclang.so" ]; then
   export LIBCLANG_PATH="$LIBCLANG"
   EXTRA="$EXTRA --with-libclang-path=$LIBCLANG"
+fi
+
+# bindgen ve o alvo como Linux, com os mesmos headers do compilador.
+export BINDGEN_CFLAGS="-nostdinc -nostdinc++ -D__linux__=1 -D__SODOS__=1 -D_LIBCPP_PSTL_CPU_BACKEND_SERIAL \
+-isystem $S/sodos/libcxx64/include -isystem $S/vendor/libcxx-18.1.8/include \
+-isystem $S/sodos/libcxx/include -isystem $S/sodos/include \
+-isystem $S/../c_compiler/include \
+-isystem $S/vendor/tools/usr/lib/llvm-18/lib/clang/18/include"
+
+# Sem g++ no sistema, os build scripts do Rust acham a libstdc++ do g++ local.
+if ! command -v g++ >/dev/null 2>&1; then
+  export LIBRARY_PATH="$S/vendor/gxx/usr/lib/gcc/x86_64-linux-gnu/13${LIBRARY_PATH:+:$LIBRARY_PATH}"
 fi
 
 # cp -p mantem as datas: arquivo igual nao recompila.

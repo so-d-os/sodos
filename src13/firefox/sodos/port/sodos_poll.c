@@ -10,6 +10,14 @@
 #include "poll.h"
 #include "sodos.h"
 
+#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+extern int sodos_pipe_is(int fd);
+extern short sodos_pipe_poll(int fd, short events);
+#else
+#define sodos_pipe_is(fd) 0
+#define sodos_pipe_poll(fd, events) 0
+#endif
+
 int poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
   uint64_t start = sodos_now_ms();
 
@@ -33,6 +41,8 @@ int poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
           else if (pending < 0) ev |= POLLHUP;
           if (fds[i].events & POLLOUT) ev |= POLLOUT;
         }
+      } else if (sodos_pipe_is(fd)) {
+        ev = sodos_pipe_poll(fd, fds[i].events);
       } else {
         ev = POLLNVAL;
       }
@@ -42,7 +52,11 @@ int poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
     }
 
     if (ready) return ready;
-    if (timeout_ms == 0) return 0;
+    if (timeout_ms == 0) {
+      /* Threads cooperativas: um laco com poll(0) nao pode prender as demais. */
+      sodos_yield();
+      return 0;
+    }
 
     {
       uint64_t elapsed = sodos_now_ms() - start;

@@ -69,6 +69,10 @@ struct tm* gmtime_r(const time_t* tp, struct tm* tm) {
   tm->tm_year = (int)(y - 1900);
   tm->tm_yday = (int)(days - days_from_civil(y, 1, 1));
   tm->tm_isdst = 0;
+#if __SIZEOF_POINTER__ == 8
+  tm->tm_gmtoff = 0;
+  tm->tm_zone = "UTC";
+#endif
   return tm;
 }
 
@@ -264,8 +268,17 @@ size_t strftime(char* s, size_t max, const char* fmt, const struct tm* tm) {
 }
 
 /* REALTIME: segundos do RTC + ms do relogio de maquina (o RTC so tem segundos) */
+#if __SIZEOF_POINTER__ == 8
+extern int sched_yield(void) __attribute__((weak));
+#endif
+
 int clock_gettime(clockid_t id, struct timespec* ts) {
   unsigned ms = k_ms();
+#if __SIZEOF_POINTER__ == 8
+  /* Threads cooperativas: quem espera olhando o relogio tambem precisa ceder. */
+  static unsigned calls;
+  if (sched_yield && (++calls & 63u) == 0) sched_yield();
+#endif
   if (id == CLOCK_MONOTONIC) {
     ts->tv_sec = (time_t)(ms / 1000);
     ts->tv_nsec = (long)(ms % 1000) * 1000000L;

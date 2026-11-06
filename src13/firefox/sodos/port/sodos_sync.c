@@ -53,6 +53,17 @@ static void* q_pop(void** head, void** tail) {
   return t;
 }
 
+/* Filas de thread (mutex, semaforo): o sodos__block as encadeia por qnext. O q_pop
+ * acima so serve para os nos de condicao, com o proximo no inicio do no. */
+static struct sodos_thread* thread_q_pop(void** head, void** tail) {
+  struct sodos_thread* t = (struct sodos_thread*)*head;
+  if (!t) return NULL;
+  *head = t->qnext;
+  if (!*head) *tail = NULL;
+  t->qnext = NULL;
+  return t;
+}
+
 static void q_push(void** head, void** tail, void* t) {
   *(void**)t = NULL;
   if (*tail) *(void**)*tail = t;
@@ -118,7 +129,7 @@ int pthread_mutex_unlock(pthread_mutex_t* m) {
   if (--m->count > 0) return 0;
   m->owner = NULL;
   if (m->wait_head) {
-    struct sodos_thread* t = (struct sodos_thread*)q_pop(&m->wait_head, &m->wait_tail);
+    struct sodos_thread* t = thread_q_pop(&m->wait_head, &m->wait_tail);
     sodos__wake(t);
   }
   return 0;
@@ -151,7 +162,7 @@ static void cond_release_mutex(pthread_mutex_t* m, int* saved) {
   m->owner = NULL;
   m->count = 0;
   if (m->wait_head) {
-    struct sodos_thread* t = (struct sodos_thread*)q_pop(&m->wait_head, &m->wait_tail);
+    struct sodos_thread* t = thread_q_pop(&m->wait_head, &m->wait_tail);
     sodos__wake(t);
   }
 }
@@ -461,7 +472,7 @@ int sem_post(sem_t* s) {
   if (s->value == SEM_VALUE_MAX) return EOVERFLOW;
   s->value++;
   if (s->wait_head) {
-    struct sodos_thread* t = (struct sodos_thread*)q_pop(&s->wait_head, &s->wait_tail);
+    struct sodos_thread* t = thread_q_pop(&s->wait_head, &s->wait_tail);
     sodos__wake(t);
   }
   return 0;

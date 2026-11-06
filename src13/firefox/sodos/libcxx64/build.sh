@@ -21,7 +21,7 @@ hash.cpp vector.cpp optional.cpp any.cpp system_error.cpp error_category.cpp \
 thread.cpp mutex.cpp mutex_destructor.cpp condition_variable.cpp \
 condition_variable_destructor.cpp call_once.cpp shared_mutex.cpp future.cpp \
 locale.cpp ios.cpp ios.instantiations.cpp iostream.cpp ostream.cpp \
-fstream.cpp"
+fstream.cpp chrono.cpp regex.cpp"
 
 CFLAGS="-std=c++20 -O2 -g -D_LIBCPP_BUILDING_LIBRARY \
  -D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS -fno-exceptions -I$L/src \
@@ -64,7 +64,11 @@ PO=$T/port
 rm -rf "$PO"; mkdir -p "$PO"
 for f in "$S"/sodos/port/*.c; do
   $S/sodos/sodos-cc64 -O2 -g -I "$S/sodos/include" -I "$C/include" \
-    -c "$f" -o "$PO/$(basename "${f%.c}").o" >>"$LOG" 2>&1
+    -c "$f" -o "$PO/$(basename "${f%.c}").o" >>"$LOG" 2>&1 || {
+    echo "ERRO compilando $f:" >&2
+    grep -E "error:" "$LOG" | tail -8 >&2
+    exit 1
+  }
 done
 $S/sodos/sodos-cc64 -O2 -g -I "$S/sodos/include" -I "$C/include" \
   -c "$S/../libs/posix-lite/posix.c" -o "$T/posix64.o" >>"$LOG" 2>&1

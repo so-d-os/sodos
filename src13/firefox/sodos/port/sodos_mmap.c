@@ -237,8 +237,9 @@ int madvise(void* addr, size_t len, int advice) {
     dbg_hex((unsigned)advice);
     dbg_txt("\n");
   }
-  /* MADV_DONTNEED/MADV_FREE: o chamador espera achar zeros no reuso. */
-  if (addr && len) memset(addr, 0, len);
+  /* So MADV_DONTNEED/MADV_FREE descartam: o chamador espera achar zeros no reuso.
+   * Os demais sao dicas (o Gecko pede MADV_NOHUGEPAGE sobre a pilha em uso). */
+  if ((advice == MADV_DONTNEED || advice == MADV_FREE) && addr && len) memset(addr, 0, len);
   return 0;
 }
 

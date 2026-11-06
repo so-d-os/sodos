@@ -54,6 +54,17 @@ static void join_cwd(const char* path, char* out, int max) {
   char cwd[PATH_MAX];
   int i = 0, j = 0;
   if (!path) path = "";
+  if (path[0] == '/' && ((path[1] >= 'A' && path[1] <= 'Z') || (path[1] >= 'a' && path[1] <= 'z')) &&
+      (path[2] == '/' || path[2] == 0)) {
+    out[j++] = path[1];
+    out[j++] = ':';
+    i = 2;
+    if (!path[2]) out[j++] = '\\';
+    while (path[i] && j < max - 1) out[j++] = path[i++];
+    out[j] = 0;
+    norm_sep(out);
+    return;
+  }
   if (is_abs_dos(path) || path[0] == '\\' || path[0] == '/') {
     while (path[i] && j < max - 1) out[j++] = path[i++];
     out[j] = 0;
@@ -402,8 +413,22 @@ __export int creat(const char* path, mode_t mode) {
   return open(path, O_WRONLY | O_CREAT | O_TRUNC, (int)mode);
 }
 
+#if __SIZEOF_POINTER__ == 8
+/* sodos_pipe.c: pipes e socketpair em memoria, com descritores a partir de 2000. */
+extern int sodos_pipe_close(int fd);
+extern ssize_t sodos_pipe_read(int fd, void* buf, size_t n);
+extern ssize_t sodos_pipe_write(int fd, const void* buf, size_t n);
+#define PIPE_FD(fd) ((fd) >= 2000)
+#else
+#define PIPE_FD(fd) 0
+#define sodos_pipe_close(fd) (-1)
+#define sodos_pipe_read(fd, buf, n) (-1)
+#define sodos_pipe_write(fd, buf, n) (-1)
+#endif
+
 __export int close(int fd) {
   struct fd_ent* e;
+  if (PIPE_FD(fd)) return sodos_pipe_close(fd);
   if (fd < 3 || fd >= FD_MAX || !fds[fd].used) {
     errno = EBADF;
     return -1;
@@ -424,6 +449,7 @@ __export int close(int fd) {
 }
 
 __export ssize_t read(int fd, void* buf, size_t n) {
+  if (PIPE_FD(fd)) return sodos_pipe_read(fd, buf, n);
   struct fd_ent* e;
   size_t left;
   if (fd == 0) {
@@ -456,6 +482,7 @@ __export ssize_t read(int fd, void* buf, size_t n) {
 }
 
 __export ssize_t write(int fd, const void* buf, size_t n) {
+  if (PIPE_FD(fd)) return sodos_pipe_write(fd, buf, n);
   struct fd_ent* e;
   char* nb;
   int need;
@@ -607,6 +634,11 @@ __export int fstat(int fd, struct stat* st) {
   st->st_mtime = file_mtime(e->path);
   st->st_atime = st->st_mtime;
   st->st_ctime = st->st_mtime;
+#if __SIZEOF_POINTER__ == 8
+  st->st_nlink = 1;
+  st->st_blksize = 512;
+  st->st_atim.tv_sec = st->st_mtim.tv_sec = st->st_ctim.tv_sec = st->st_mtime;
+#endif
   return 0;
 }
 
@@ -634,6 +666,11 @@ __export int stat(const char* path, struct stat* st) {
   st->st_mtime = file_mtime(full);
   st->st_atime = st->st_mtime;
   st->st_ctime = st->st_mtime;
+#if __SIZEOF_POINTER__ == 8
+  st->st_nlink = 1;
+  st->st_blksize = 512;
+  st->st_atim.tv_sec = st->st_mtim.tv_sec = st->st_ctim.tv_sec = st->st_mtime;
+#endif
   return 0;
 }
 

@@ -637,46 +637,82 @@ suficiente para W^X "de fachada".
 
 ## Build do browser: estado em 2026-11-06
 
+**`FIREFOX.EXE --version` roda no SODOS:** imprime `Mozilla Firefox 153.6.0esr` e sai
+com codigo 0 (QEMU, 4 GB de RAM, cerca de 50 s, quase todos carregando o arquivo).
+
 ```sh
-sh sodos/scripts/fetch-unzip.sh                        # sem root, em vendor/tools
+sh setup.sh                                            # unzip e headers do clang em vendor/tools
+make libcxx64 js64-std                                 # libc++ LP64 e std do Rust
 sh sodos/scripts/build-browser64.sh configure
 sh sodos/scripts/build-browser64.sh build pre-export export
-sh sodos/scripts/build-browser64.sh build compile
+sh sodos/scripts/build-browser64.sh build compile      # termina com erro: ver abaixo
+sh sodos/scripts/link-firefox64.sh                     # dist/bin/FIREFOX.EXE (257 MB)
 ```
 
-Rode `compile` numa chamada separada: no mesmo `gmake -j`, ele concorre com o
-`export` e falha por headers gerados que ainda nao existem (`ErrorList.h`).
+O `compile` compila tudo (3.626 objetos, 0 erros), mas o `make` termina com erro nas
+bibliotecas compartilhadas: `-shared` vira objeto relocavel, e os checks do Gecko
+(`check_textrel`) nao o reconhecem. O executavel sai do `link-firefox64.sh`.
 
-| Etapa | Resultado |
-|---|---|
-| `configure` (`--enable-application=browser`) | passa |
-| `pre-export`, `export` | passam |
-| `compile` (`gmake -k`) | 2.894 objetos gerados, 588 com falha, 1.109 erros de compilador, 959 erros de Rust |
-| link, empacotamento | nao testados |
+Rode `compile` numa chamada separada: no mesmo `gmake -j`, ele concorre com o `export`.
+Ao mudar o driver, apague `configure.cache` do objdir: ele guarda respostas antigas.
 
-O que destravou: `.gitattributes` (LF nos scripts), patch 0005, mozconfig so com
-opcoes validas sem GTK, `unzip` local e o caminho C do `sodos-gcc.py` (agora usa
-`sodos/include` e so esconde `__linux__` no `-E`). As linhas de erro de
-compilador cairam de 25.457 para 1.109. O `js` continua compilando e ligando
-(0 erros, 41,9 MB); nao foi reexecutado no QEMU depois dessa mudanca.
+Para testar no SODOS, com o QEMU fechado:
 
-### O que falta, pela ordem do log
+```sh
+make grow-disk    # uma vez: passa o disk.img para 2 GB; o antigo fica em disk-256mb.img
+make disk-files   # copia tudo, e o Firefox vai para D:\FIREFOX
+make run          # no SODOS: D:\FIREFOX\FIREFOX.EXE --version
+```
 
-1. **Headers**: `memory.h` (277 erros, quase todos do libaom), `endian.h`,
-   `byteswap.h`, `sys/sem.h`, `sys/param.h`, `sys/eventfd.h`, `strings.h`,
-   `elf.h`, `syslog.h`, `syscall.h`, `alloca.h`, `pwd.h`, `grp.h`, `fenv.h`,
-   `mntent.h`, `link.h`, `cxxabi.h`; `tm_gmtoff` em `struct tm`, `si_pid` em
-   `siginfo_t` e `cmsghdr`.
-2. **`ipc/chromium`**: falta `PlatformThreadId` para o SODOS (cerca de 280 erros).
-3. **Rust**: crate `libc` sem tipos para o alvo (`c_char`...); a causa provavel e
-   o target JSON nao declarar a familia `unix`. Crates que falham: `ash`,
-   `breach-alerts`, `dirs`, `errno`, `mtu`, `qcms`, `rkv`, `rsdparsa_capi`,
-   `rure`, `socket2`, `webext-storage`, `webrender`, `xpcom`.
-4. **bindgen**: o libclang nao acha `version`/`stddef.h`/`cstddef`
-   (`gecko-profiler`, `nss-rs`, `ohttp`).
-5. **Terceiros**: pixman (`PIXMAN_NO_TLS`), cairo PDF, NSS, sqlite, `gmp-plugin-openh264`.
-6. **`widget/sodos`/`gfx`**: o `moz.build` nao lista fontes; faltam
-   `nsLookAndFeel.h`, `nsIconURI.h`, `GfxInfo` e `UnscaledFontFreeType.h`.
-7. **Link**: o `firefox` carrega o `libxul` com `dlopen`, o `g++64` ignora
-   `-shared`, e os limites do `link64` (`MAX_GOT` 8192, `MAX_SEC` 131072,
-   `MAX_SYM` 200000, `MAX_REL` 2 milhoes) nao devem bastar.
+O disco fica em 2 GB porque o FAT16 chega perto disso e o kernel nao le FAT32. O
+`disk-files` so copia de `dist/bin` os nomes que cabem em 8.3: o kernel nao le nomes
+longos, e os demais (cerca de 7 mil, como `application.ini`) ficam de fora ate o
+`omni.ja` ser empacotado.
+
+### Decisoes
+
+- **ABI Linux em tres camadas**, so o toolkit e proprio (`cairo-sodos`):
+  - Gecko (patch 0006): `OS_ARCH`/`OS_TARGET` = `Linux` e `XP_LINUX`;
+  - Rust: target JSON com `os=linux`, `env=gnu`, familia `unix`; o `std` usa pthreads;
+  - C/C++: `__linux__` no compilador, `__SODOS__` para diferenciar, e
+    `sodos/port/sodos_linux_abi.c` com a ABI glibc que falta.
+- **Linker**: `ld -pie` seguido de `toolchain/elf2sox2.py`. As relocacoes
+  `R_X86_64_RELATIVE` viram a lista do SOX2. O `link64` so continua nos testes antigos;
+  `SODOS_LINKER=link64` o seleciona no driver e `SODOS_KEEP_ELF=1` guarda o ELF para
+  simbolizar crashes.
+- **Executavel unico**: libxul, mozglue, NSPR, NSS e os demais entram no `FIREFOX.EXE`,
+  e o `nsBrowserApp` chama `XRE_GetBootstrap` direto, sem `dlopen`.
+- **TLS estatico**: `sodos/port/sodos_tls.c` monta o bloco de cada thread e troca a base
+  do FS (MSR `0xC0000100`) no escalonador cooperativo.
+- **Caminhos**: o Gecko exige `/`; `/D/x.exe` equivale a `D:\x.exe` na camada POSIX, e
+  `readlink("/proc/self/exe")` responde a partir de `argv[0]`.
+- **Backend** em `sodos/widget/`: janelas `HeadlessWidget`, fontes FreeType da arvore
+  (caminho do Android), tema nao nativo, vsync por temporizador, sem GPU.
+- **Fora do build**: gamepad, netlink, webserial, DMABuf, rapl, cairo PDF, `llama.cpp`,
+  icones `moz-icon`.
+
+### O que ainda nao funciona
+
+So o `--version` funciona. Ele para antes de iniciar o XPCOM completo, entao nao ha
+perfil, `omni.ja`, layout nem janela. O `--headless` termina com "headless mode is not
+currently supported on this platform", uma checagem do `nsAppRunner` que ainda nao
+conhece o SODOS. Conhecido:
+
+1. **Empacotamento**: os tiers `misc`/`libs` param em `multilocale.txt` e faltam
+   `omni.ja` e `application.ini`. As fontes sao lidas de `D:\SODOS\FONTS`.
+2. **NSS**: `softokn3` e `freeblpriv3` estao fora do executavel; o NSS os carrega por
+   `dlopen`, que so atende `dlopen(NULL)`. Precisam de ligacao estatica.
+3. **Janela**: ligar o `HeadlessWidget` ao `k_gui_*` e aos eventos.
+4. **Funcoes que so devolvem erro**: sockets, `getaddrinfo`, processos, `shm_open`,
+   System V IPC, `epoll`, `eventfd`, `strptime`, `mremap`. O `dladdr` e o `dlsym` nao
+   acham nada.
+5. **Kernel**: preempcao, `mmap` de arquivo (hoje e copia), varias conexoes TCP, FAT32 ou
+   disco maior, e um carregador que nao precise de duas copias da imagem na memoria.
+
+### Verificacao em 2026-11-06
+
+No QEMU, em copias dos discos: `FIREFOX.EXE --version`, `JS.EXE` (com JIT) e `STLTEST64`.
+Um teste separado confirmou TLS com valor inicial e por thread. `HELLO64.EXE` nao liga
+(`__sodos_ctors` no `crt0_64`), o que nao vem destas mudancas. Os demais programas do
+SODOS nao foram retestados; as mudancas de layout em `struct stat`, `struct tm` e
+`siginfo_t` valem so para LP64.

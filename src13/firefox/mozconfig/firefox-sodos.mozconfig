@@ -1,7 +1,7 @@
 # mozconfig/firefox-sodos.mozconfig
 #
 # Opcoes do browser (libxul) no SODOS, LP64/SOX2. Usado por
-# sodos/scripts/build-browser64.sh; a arvore precisa dos patches 0001 a 0005.
+# sodos/scripts/build-browser64.sh; a arvore precisa dos patches 0001 a 0006.
 #
 # So entram opcoes que o configure aceita com o toolkit cairo-sodos: as que
 # dependem de GTK (--disable-dbus, --disable-necko-wifi...) nao existem nele.

@@ -8,6 +8,9 @@
     .globl __sodos_stack_top
 __sodos_stack_top:
     .quad 0
+    .globl __sodos_argv
+__sodos_argv:
+    .quad 0
 
     .text
     .globl _start
@@ -18,6 +21,7 @@ _start:
     movq %rsp, __sodos_stack_top(%rip)
     movq %rdi, %rbx          /* argc */
     movq %rsi, %r12          /* argv */
+    movq %rsi, __sodos_argv(%rip)
     call __sodos_ctors
     movq %rbx, %rdi
     movq %r12, %rsi

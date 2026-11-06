@@ -27,4 +27,15 @@ int sem_getvalue(sem_t* s, int* value);
 }
 #endif
 
+/* lote2 */
+#ifdef __cplusplus
+extern "C" {
+#endif
+#include <time.h>
+int sem_timedwait(sem_t* s, const struct timespec* abstime);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif

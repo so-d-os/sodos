@@ -60,7 +60,8 @@ void longjmp_mangled(void* b, int v) { longjmp(*(jmp_buf*)b, v); }
 int setjmp_mangled(void* b) { return setjmp(*(jmp_buf*)b); }
 
 #include <dlfcn.h>
-void* dlopen(const char* f, int m) { (void)f; (void)m; return 0; }
+/* Tudo esta no proprio executavel: dlopen(NULL) e o programa, o resto nao existe. */
+void* dlopen(const char* f, int m) { (void)m; return f ? 0 : (void*)1; }
 void* dlsym(void* h, const char* n) { (void)h; (void)n; return 0; }
 char* dlerror(void) { return (char*)"no dynamic loader"; }
 int dlclose(void* h) { (void)h; return 0; }

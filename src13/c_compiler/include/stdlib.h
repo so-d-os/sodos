@@ -55,6 +55,13 @@ int setenv(const char* name, const char* value, int overwrite);
 int unsetenv(const char* name);
 int putenv(char* s);
 char* realpath(const char* path, char* out);
+int mkstemp(char* tmpl);
+long random(void);
+void srandom(unsigned int seed);
+char* mkdtemp(char* tmpl);
+#ifndef alloca
+#define alloca(n) __builtin_alloca(n)
+#endif
 
 int abs(int v);
 long labs(long v);
@@ -67,6 +74,10 @@ void qsort(void* base, size_t n, size_t sz, int (*cmp)(const void*, const void*)
 void* bsearch(const void* key, const void* base, size_t n, size_t sz,
               int (*cmp)(const void*, const void*));
 
+
+/* lote3 */
+unsigned int arc4random(void);
+void arc4random_buf(void* buf, size_t n);
 
 #ifdef __cplusplus
 }

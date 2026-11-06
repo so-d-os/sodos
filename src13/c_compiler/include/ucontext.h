@@ -13,12 +13,18 @@ typedef struct {
 } stack_t;
 #endif
 
+struct _libc_fpstate {
+  unsigned short cwd, swd, ftw, fop;
+  unsigned long rip, rdp;
+  unsigned int mxcsr, mxcr_mask;
+};
+
 typedef long greg_t;
 typedef greg_t gregset_t[23];
 
 typedef struct {
   gregset_t gregs;
-  void* fpregs;
+  struct _libc_fpstate* fpregs;
   unsigned long __reserved1[8];
 } mcontext_t;
 

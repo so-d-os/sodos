@@ -58,8 +58,20 @@ typedef struct {
   int si_errno;
   int si_code;
   int __pad0;
+#if __SIZEOF_POINTER__ == 8
+  union {
+    void* si_addr;
+    struct {
+      int si_pid;
+      unsigned int si_uid;
+      int si_status;
+    };
+    long __pad[15];
+  };
+#else
   void* si_addr;
   long __pad[14];
+#endif
 } siginfo_t;
 
 struct sigaction {
@@ -89,6 +101,38 @@ int sigdelset(sigset_t* set, int sig);
 int sigismember(const sigset_t* set, int sig);
 int sigaction(int sig, const struct sigaction* act, struct sigaction* old);
 int sigprocmask(int how, const sigset_t* set, sigset_t* old);
+int pthread_sigmask(int how, const sigset_t* set, sigset_t* old);
+#ifndef _STACK_T_DEFINED
+#define _STACK_T_DEFINED
+typedef struct {
+  void* ss_sp;
+  int ss_flags;
+  unsigned long ss_size;
+} stack_t;
+#endif
+#define SS_ONSTACK 1
+#define SS_DISABLE 2
+#define MINSIGSTKSZ 2048
+#define SIGSTKSZ 8192
+int sigaltstack(const stack_t* ss, stack_t* old);
+#define SIGRTMIN 34
+#define SIGRTMAX 64
+#define SEGV_MAPERR 1
+#define SEGV_ACCERR 2
+#define CLD_EXITED 1
+#define CLD_KILLED 2
+#define CLD_DUMPED 3
+#define CLD_TRAPPED 4
+#define CLD_STOPPED 5
+#define CLD_CONTINUED 6
+#define FPE_INTDIV 1
+#define FPE_INTOVF 2
+#define FPE_FLTDIV 3
+#define FPE_FLTOVF 4
+#define FPE_FLTUND 5
+#define FPE_FLTRES 6
+#define FPE_FLTINV 7
+#define FPE_FLTSUB 8
 int sigwait(const sigset_t* set, int* sig);
 
 

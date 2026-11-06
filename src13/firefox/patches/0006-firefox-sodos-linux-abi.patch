@@ -1,0 +1,819 @@
+Fase M5: o alvo SODOS usa a ABI e os fontes do Linux no Gecko.
+Aplicar depois do 0005. Teste: sodos/scripts/build-browser64.sh build compile
+
+--- a/browser/app/nsBrowserApp.cpp
++++ b/browser/app/nsBrowserApp.cpp
+@@ -269,11 +269,21 @@
+   return gBootstrap->XRE_main(argc, argv, config);
+ }
+ 
++#ifdef __SODOS__
++extern "C" void XRE_GetBootstrap(mozilla::Bootstrap::UniquePtr& b);
++#endif
++
+ static nsresult InitXPCOMGlue(LibLoadingStrategy aLibLoadingStrategy) {
+   if (gBootstrap) {
+     return NS_OK;
+   }
+ 
++#ifdef __SODOS__
++  XRE_GetBootstrap(gBootstrap);
++  gBootstrap->NS_LogInit();
++  return NS_OK;
++#endif
++
+   UniqueFreePtr<char> exePath = BinaryPath::Get();
+   if (!exePath) {
+     Output("Couldn't find the application directory.\n");
+--- a/build/moz.configure/init.configure
++++ b/build/moz.configure/init.configure
+@@ -804,6 +804,10 @@
+     elif target.kernel == "Darwin" or (target.kernel == "Linux" and target.os == "GNU"):
+         os_target = target.kernel
+         os_arch = target.kernel
++    elif target.kernel == "SODOS":
++        # O SODOS expoe uma ABI Linux/POSIX: moz.build escolhe os fontes do Linux.
++        os_target = "Linux"
++        os_arch = "Linux"
+     else:
+         os_target = target.os
+         os_arch = target.kernel
+@@ -908,7 +912,13 @@
+         return True
+ 
+ 
+-set_define("XP_LINUX", target_has_linux_kernel)
++@depends(target)
++def target_defines_xp_linux(target):
++    if target.kernel in ("Linux", "SODOS"):
++        return True
++
++
++set_define("XP_LINUX", target_defines_xp_linux)
+ 
+ 
+ @depends(target)
+--- a/dom/base/nsViewportInfo.cpp
++++ b/dom/base/nsViewportInfo.cpp
+@@ -44,10 +44,14 @@
+ 
+ // static
+ const float& nsViewportInfo::Min(const float& aA, const float& aB) {
+-  return MinOrMax(aA, aB, std::min);
++  return MinOrMax(aA, aB, [](const float& a, const float& b) -> const float& {
++    return std::min(a, b);
++  });
+ }
+ 
+ // static
+ const float& nsViewportInfo::Max(const float& aA, const float& aB) {
+-  return MinOrMax(aA, aB, std::max);
++  return MinOrMax(aA, aB, [](const float& a, const float& b) -> const float& {
++    return std::max(a, b);
++  });
+ }
+--- a/dom/gamepad/moz.build
++++ b/dom/gamepad/moz.build
+@@ -57,7 +57,7 @@
+     UNIFIED_SOURCES += ["windows/WindowsGamepad.cpp"]
+ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "android":
+     UNIFIED_SOURCES += ["android/AndroidGamepad.cpp"]
+-elif CONFIG["OS_ARCH"] in ("Linux", "FreeBSD", "DragonFly"):
++elif CONFIG["OS_ARCH"] in ("Linux", "FreeBSD", "DragonFly") and CONFIG["MOZ_WIDGET_TOOLKIT"] != "sodos":
+     UNIFIED_SOURCES += ["linux/LinuxGamepad.cpp"]
+ else:
+     UNIFIED_SOURCES += ["fallback/FallbackGamepad.cpp"]
+--- a/dom/ipc/PContent.ipdl
++++ b/dom/ipc/PContent.ipdl
+@@ -202,7 +202,7 @@
+ // SetXPCOMProcessAttributes passes an array of font data to the child,
+ // but each platform needs different details so we have platform-specific
+ // versions of the SystemFontListEntry type:
+-#if defined(ANDROID)
++#if defined(ANDROID) || defined(MOZ_WIDGET_SODOS)
+ // Used on Android to pass the list of fonts on the device
+ // to the child process
+ struct SystemFontListEntry {
+--- a/dom/webgpu/SharedTexture.cpp
++++ b/dom/webgpu/SharedTexture.cpp
+@@ -10,7 +10,7 @@
+ #  include "mozilla/webgpu/SharedTextureD3D11.h"
+ #endif
+ 
+-#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
++#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID) && !defined(MOZ_WIDGET_SODOS)
+ #  include "mozilla/webgpu/SharedTextureDMABuf.h"
+ #endif
+ 
+@@ -32,7 +32,7 @@
+ #ifdef XP_WIN
+   texture = SharedTextureD3D11::Create(aParent, aDeviceId, aWidth, aHeight,
+                                        aFormat, aUsage);
+-#elif defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
++#elif defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID) && !defined(MOZ_WIDGET_SODOS)
+   texture = SharedTextureDMABuf::Create(aParent, aDeviceId, aWidth, aHeight,
+                                         aFormat, aUsage);
+ #elif defined(XP_MACOSX)
+--- a/dom/webgpu/ipc/WebGPUParent.cpp
++++ b/dom/webgpu/ipc/WebGPUParent.cpp
+@@ -26,7 +26,7 @@
+ #  include "mozilla/webgpu/SharedTextureD3D11.h"
+ #endif
+ 
+-#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
++#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID) && !defined(MOZ_WIDGET_SODOS)
+ #  include "mozilla/webgpu/SharedTextureDMABuf.h"
+ #endif
+ 
+@@ -105,7 +105,7 @@
+ }
+ #endif
+ 
+-#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
++#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID) && !defined(MOZ_WIDGET_SODOS)
+ extern int32_t wgpu_server_get_dma_buf_fd(WGPUWebGPUParentPtr aParent,
+                                           WGPUTextureId aId) {
+   auto* parent = static_cast<WebGPUParent*>(aParent);
+@@ -127,7 +127,7 @@
+ }
+ #endif
+ 
+-#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
++#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID) && !defined(MOZ_WIDGET_SODOS)
+ extern const WGPUVkImageHandle* wgpu_server_get_vk_image_handle(
+     WGPUWebGPUParentPtr aParent, WGPUTextureId aId) {
+   auto* parent = static_cast<WebGPUParent*>(aParent);
+@@ -1954,7 +1954,7 @@
+ }
+ #endif
+ 
+-#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
++#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID) && !defined(MOZ_WIDGET_SODOS)
+ VkImageHandle::~VkImageHandle() {
+   if (!mParent) {
+     return;
+--- a/dom/webgpu/moz.build
++++ b/dom/webgpu/moz.build
+@@ -84,7 +84,7 @@
+         "SharedTextureD3D11.cpp",
+     ]
+ 
+-if CONFIG["OS_TARGET"] == "Linux":
++if CONFIG["OS_TARGET"] == "Linux" and CONFIG["MOZ_WIDGET_TOOLKIT"] != "sodos":
+     EXPORTS.mozilla.webgpu += [
+         "SharedTextureDMABuf.h",
+     ]
+--- a/dom/webidl/moz.build
++++ b/dom/webidl/moz.build
+@@ -1146,7 +1146,7 @@
+ ]
+ 
+ # Native llama.cpp for ml engine.
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] != "android":
++if CONFIG["MOZ_WIDGET_TOOLKIT"] not in ("android", "sodos"):
+     WEBIDL_FILES += [
+         "LlamaRunner.webidl",
+     ]
+--- a/dom/webserial/SerialPlatformService.cpp
++++ b/dom/webserial/SerialPlatformService.cpp
+@@ -15,7 +15,7 @@
+ namespace mozilla::dom {
+ 
+ #if !defined(XP_WIN) && !defined(XP_MACOSX) && \
+-    !(defined(XP_LINUX) && !defined(ANDROID))
++    !(defined(XP_LINUX) && !defined(ANDROID) && !defined(MOZ_WIDGET_SODOS))
+ already_AddRefed<SerialPlatformService>
+ SerialPlatformService::GetInstanceImpl() {
+   return MakeAndAddRef<TestSerialPlatformService>();
+--- a/dom/webserial/moz.build
++++ b/dom/webserial/moz.build
+@@ -26,9 +26,9 @@
+         "cfgmgr32",
+         "setupapi",
+     ]
+-elif (CONFIG["OS_TARGET"] == "Darwin" and CONFIG["TARGET_OS"] != "iOS") or CONFIG[
+-    "OS_TARGET"
+-] == "Linux":
++elif (CONFIG["OS_TARGET"] == "Darwin" and CONFIG["TARGET_OS"] != "iOS") or (
++    CONFIG["OS_TARGET"] == "Linux" and CONFIG["MOZ_WIDGET_TOOLKIT"] != "sodos"
++):
+     UNIFIED_SOURCES += [
+         "PosixSerialPlatformService.cpp",
+     ]
+--- a/gfx/2d/2D.h
++++ b/gfx/2d/2D.h
+@@ -34,7 +34,7 @@
+ 
+ #include "nsRegionFwd.h"
+ 
+-#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_GTK)
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_SODOS)
+ #  ifndef MOZ_ENABLE_FREETYPE
+ #    define MOZ_ENABLE_FREETYPE
+ #  endif
+@@ -2237,7 +2237,7 @@
+       RefPtr<SharedFTFace> aFace, FcPattern* aPattern);
+ #endif
+ 
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_SODOS)
+   static already_AddRefed<ScaledFont> CreateScaledFontForFreeTypeFont(
+       const RefPtr<UnscaledFont>& aUnscaledFont, Float aSize,
+       RefPtr<SharedFTFace> aFace, bool aApplySyntheticBold = false);
+--- a/gfx/2d/Factory.cpp
++++ b/gfx/2d/Factory.cpp
+@@ -27,7 +27,7 @@
+ #  include "UnscaledFontFreeType.h"
+ #endif
+ 
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_SODOS)
+ #  include "ScaledFontFreeType.h"
+ #  include "NativeFontResourceFreeType.h"
+ #  include "UnscaledFontFreeType.h"
+@@ -413,7 +413,7 @@
+     case FontType::FONTCONFIG:
+       return NativeFontResourceFontconfig::Create(
+           aData, aSize, static_cast<FT_Library>(aFontContext));
+-#elif defined(MOZ_WIDGET_ANDROID)
++#elif defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_SODOS)
+     case FontType::FREETYPE:
+       return NativeFontResourceFreeType::Create(
+           aData, aSize, static_cast<FT_Library>(aFontContext));
+@@ -441,7 +441,7 @@
+     case FontType::FONTCONFIG:
+       return UnscaledFontFontconfig::CreateFromFontDescriptor(
+           aData, aDataLength, aIndex);
+-#elif defined(MOZ_WIDGET_ANDROID)
++#elif defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_SODOS)
+     case FontType::FREETYPE:
+       return UnscaledFontFreeType::CreateFromFontDescriptor(aData, aDataLength,
+                                                             aIndex);
+@@ -471,7 +471,7 @@
+ }
+ #endif
+ 
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_SODOS)
+ already_AddRefed<ScaledFont> Factory::CreateScaledFontForFreeTypeFont(
+     const RefPtr<UnscaledFont>& aUnscaledFont, Float aSize,
+     RefPtr<SharedFTFace> aFace, bool aApplySyntheticBold) {
+--- a/gfx/2d/NativeFontResourceFreeType.cpp
++++ b/gfx/2d/NativeFontResourceFreeType.cpp
+@@ -35,7 +35,7 @@
+   return resource.forget();
+ }
+ 
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_SODOS)
+ already_AddRefed<NativeFontResourceFreeType> NativeFontResourceFreeType::Create(
+     const uint8_t* aFontData, uint32_t aDataLength, FT_Library aFTLibrary) {
+   return CreateInternal<NativeFontResourceFreeType>(aFontData, aDataLength,
+--- a/gfx/2d/NativeFontResourceFreeType.h
++++ b/gfx/2d/NativeFontResourceFreeType.h
+@@ -19,7 +19,7 @@
+  public:
+   MOZ_DECLARE_REFCOUNTED_VIRTUAL_TYPENAME(NativeFontResourceFreeType, override)
+ 
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_SODOS)
+   static already_AddRefed<NativeFontResourceFreeType> Create(
+       const uint8_t* aFontData, uint32_t aDataLength,
+       FT_Library aFTLibrary = nullptr);
+--- a/gfx/2d/ScaledFontFreeType.cpp
++++ b/gfx/2d/ScaledFontFreeType.cpp
+@@ -3,6 +3,7 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "ScaledFontFreeType.h"
++#include "mozilla/StaticPrefs_gfx.h"
+ #include "UnscaledFontFreeType.h"
+ #include "NativeFontResourceFreeType.h"
+ #include "Logging.h"
+--- a/gfx/2d/UnscaledFontFreeType.cpp
++++ b/gfx/2d/UnscaledFontFreeType.cpp
+@@ -177,7 +177,7 @@
+   }
+ }
+ 
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_SODOS)
+ 
+ already_AddRefed<ScaledFont> UnscaledFontFreeType::CreateScaledFont(
+     Float aGlyphSize, const uint8_t* aInstanceData,
+--- a/gfx/2d/UnscaledFontFreeType.h
++++ b/gfx/2d/UnscaledFontFreeType.h
+@@ -39,7 +39,7 @@
+ 
+   RefPtr<SharedFTFace> InitFace();
+ 
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_SODOS)
+   static already_AddRefed<UnscaledFont> CreateFromFontDescriptor(
+       const uint8_t* aData, uint32_t aDataLength, uint32_t aIndex);
+ 
+--- a/gfx/2d/moz.build
++++ b/gfx/2d/moz.build
+@@ -89,7 +89,7 @@
+     ]
+     DEFINES["WIN32"] = True
+ 
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk"):
++if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk", "sodos"):
+     EXPORTS.mozilla.gfx += [
+         "UnscaledFontFreeType.h",
+     ]
+@@ -103,7 +103,7 @@
+         "ScaledFontFontconfig.cpp",
+     ]
+ 
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] == "android":
++if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "sodos"):
+     SOURCES += [
+         "ScaledFontFreeType.cpp",
+     ]
+@@ -195,12 +195,12 @@
+ for var in ("USE_CAIRO", "MOZ2D_HAS_MOZ_CAIRO"):
+     DEFINES[var] = True
+ 
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk"):
++if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk", "sodos"):
+     DEFINES["MOZ_ENABLE_FREETYPE"] = True
+ 
+ COMPILE_FLAGS["WARNINGS_CXXFLAGS"] += ["-Werror=switch"]
+ 
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk"):
++if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk", "sodos"):
+     CXXFLAGS += CONFIG["CAIRO_FT_CFLAGS"]
+ 
+ LOCAL_INCLUDES += CONFIG["SKIA_INCLUDES"]
+--- a/gfx/cairo/cairo/src/moz.build
++++ b/gfx/cairo/cairo/src/moz.build
+@@ -13,7 +13,7 @@
+     'pixman-rename.h',
+ ]
+ 
+-if CONFIG['MOZ_WIDGET_TOOLKIT'] not in ('cocoa', 'uikit'):
++if CONFIG['MOZ_WIDGET_TOOLKIT'] not in ('cocoa', 'uikit', 'sodos'):
+     EXPORTS.cairo += [
+         'cairo-pdf.h',
+     ]
+--- a/gfx/skia/moz.build
++++ b/gfx/skia/moz.build
+@@ -563,7 +563,7 @@
+     SOURCES += [
+         'skia/src/ports/SkTypeface_mac_ct.cpp',
+     ]
+-if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'gtk':
++if CONFIG['MOZ_WIDGET_TOOLKIT'] in ('gtk', 'sodos'):
+     UNIFIED_SOURCES += [
+         'skia/src/ports/SkLog_stdio.cpp',
+         'skia/src/ports/SkOSFile_posix.cpp',
+@@ -655,7 +655,7 @@
+     "/gfx/harfbuzz/src",
+ ]
+ 
+-if CONFIG['MOZ_WIDGET_TOOLKIT'] in ('gtk', 'android'):
++if CONFIG['MOZ_WIDGET_TOOLKIT'] in ('gtk', 'android', 'sodos'):
+     LOCAL_INCLUDES += [
+         "/gfx/cairo/cairo/src",
+     ]
+--- a/gfx/thebes/gfxFT2FontList.cpp
++++ b/gfx/thebes/gfxFT2FontList.cpp
+@@ -15,8 +15,10 @@
+ 
+ #include "nsXULAppAPI.h"
+ #include <dirent.h>
+-#include <android/log.h>
+-#define ALOG(args...) __android_log_print(ANDROID_LOG_INFO, "Gecko", ##args)
++#ifdef MOZ_WIDGET_ANDROID
++#  include <android/log.h>
++#  define ALOG(args...) __android_log_print(ANDROID_LOG_INFO, "Gecko", ##args)
++#endif
+ 
+ #include "ft2build.h"
+ #include FT_FREETYPE_H
+@@ -1550,6 +1552,10 @@
+   }
+   mFontNameCache->Init();
+ 
++#if defined(MOZ_WIDGET_SODOS)
++  // Diretorio de fontes do SODOS; o nome da variavel e o do bloco comum abaixo.
++  nsAutoCString androidFontsRoot("/D/SODOS/FONTS"_ns);
++#endif
+ #if defined(MOZ_WIDGET_ANDROID)
+   // Android API 29+ provides system font and font matcher API for native code.
+ 
+@@ -1924,7 +1930,7 @@
+     FontVisibilityProvider* aFontVisibilityProvider, const gfxFontStyle* aStyle,
+     nsAtom* aLanguage) {
+   FontFamily ff;
+-#if defined(MOZ_WIDGET_ANDROID)
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_SODOS)
+   ff = FindFamily(aFontVisibilityProvider, "Roboto"_ns);
+   if (ff.IsNull()) {
+     ff = FindFamily(aFontVisibilityProvider, "Droid Sans"_ns);
+--- a/gfx/thebes/gfxFT2Fonts.cpp
++++ b/gfx/thebes/gfxFT2Fonts.cpp
+@@ -8,6 +8,9 @@
+ #elif defined(XP_WIN)
+ #  include "gfxWindowsPlatform.h"
+ #  define gfxToolkitPlatform gfxWindowsPlatform
++#elif defined(MOZ_WIDGET_SODOS)
++#  include "gfxPlatformSodos.h"
++#  define gfxToolkitPlatform gfxPlatformSodos
+ #elif defined(ANDROID)
+ #  include "gfxAndroidPlatform.h"
+ #  define gfxToolkitPlatform gfxAndroidPlatform
+--- a/gfx/thebes/gfxPlatform.cpp
++++ b/gfx/thebes/gfxPlatform.cpp
+@@ -79,6 +79,8 @@
+ #elif defined(XP_DARWIN)
+ #  include "gfxPlatformMac.h"
+ #  include "gfxQuartzSurface.h"
++#elif defined(MOZ_WIDGET_SODOS)
++#  include "gfxPlatformSodos.h"
+ #elif defined(MOZ_WIDGET_GTK)
+ #  include "gfxPlatformGtk.h"
+ #  include "DMABufFormats.h"
+@@ -789,6 +791,8 @@
+     sHasVariationFontSupport = gfxWindowsPlatform::CheckVariationFontSupport();
+ #elif defined(XP_DARWIN)
+     sHasVariationFontSupport = gfxPlatformMac::CheckVariationFontSupport();
++#elif defined(MOZ_WIDGET_SODOS)
++    sHasVariationFontSupport = gfxPlatformSodos::CheckVariationFontSupport();
+ #elif defined(MOZ_WIDGET_GTK)
+     sHasVariationFontSupport = gfxPlatformGtk::CheckVariationFontSupport();
+ #elif defined(ANDROID)
+@@ -914,6 +918,8 @@
+   gPlatform = new gfxWindowsPlatform;
+ #elif defined(XP_DARWIN)
+   gPlatform = new gfxPlatformMac;
++#elif defined(MOZ_WIDGET_SODOS)
++  gPlatform = new gfxPlatformSodos;
+ #elif defined(MOZ_WIDGET_GTK)
+   gPlatform = new gfxPlatformGtk;
+ #elif defined(ANDROID)
+--- a/gfx/thebes/moz.build
++++ b/gfx/thebes/moz.build
+@@ -99,6 +99,19 @@
+     UNIFIED_SOURCES += [
+         "AndroidSystemFontIterator.cpp",
+     ]
++elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "sodos":
++    EXPORTS += [
++        "/widget/sodos/gfxPlatformSodos.h",
++        "gfxFT2FontBase.h",
++        "gfxFT2Fonts.h",
++    ]
++    SOURCES += [
++        "/widget/sodos/gfxPlatformSodos.cpp",
++        "gfxFT2FontBase.cpp",
++        "gfxFT2FontList.cpp",
++        "gfxFT2Fonts.cpp",
++        "gfxFT2Utils.cpp",
++    ]
+ elif CONFIG["MOZ_WIDGET_TOOLKIT"] in ("cocoa", "uikit"):
+     EXPORTS += [
+         "gfxMacUtils.h",
+@@ -279,10 +292,10 @@
+     "/widget/gtk",
+ ]
+ 
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk"):
++if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk", "sodos"):
+     DEFINES["MOZ_ENABLE_FREETYPE"] = True
+ 
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android"):
++if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "sodos"):
+     CXXFLAGS += CONFIG["CAIRO_FT_CFLAGS"]
+ 
+ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
+--- a/gfx/webrender_bindings/Moz2DImageRenderer.cpp
++++ b/gfx/webrender_bindings/Moz2DImageRenderer.cpp
+@@ -181,7 +181,7 @@
+ #elif defined(XP_WIN)
+     font.mUnscaledFont = new UnscaledFontDWrite(
+         reinterpret_cast<IDWriteFontFace*>(aHandle), nullptr);
+-#elif defined(ANDROID)
++#elif defined(ANDROID) || defined(MOZ_WIDGET_SODOS)
+     font.mUnscaledFont = new UnscaledFontFreeType(
+         reinterpret_cast<const char*>(aHandle), aIndex);
+ #else
+@@ -255,7 +255,7 @@
+       FontType::MAC;
+ #elif defined(XP_WIN)
+       FontType::DWRITE;
+-#elif defined(ANDROID)
++#elif defined(ANDROID) || defined(MOZ_WIDGET_SODOS)
+       FontType::FREETYPE;
+ #else
+       FontType::FONTCONFIG;
+--- a/gfx/webrender_bindings/moz.build
++++ b/gfx/webrender_bindings/moz.build
+@@ -105,7 +105,7 @@
+         "RenderCompositorNative.cpp",
+     ]
+ 
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk"):
++if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk", "sodos"):
+     CXXFLAGS += CONFIG["CAIRO_FT_CFLAGS"]
+ 
+ if CONFIG["COMPILE_ENVIRONMENT"]:
+--- a/intl/locale/moz.build
++++ b/intl/locale/moz.build
+@@ -18,6 +18,8 @@
+     DIRS += ["gtk"]
+ elif toolkit == "android":
+     DIRS += ["android"]
++elif toolkit == "sodos":
++    SOURCES += ["/widget/sodos/OSPreferences_sodos.cpp"]
+ 
+ XPIDL_SOURCES += [
+     "mozILocaleService.idl",
+--- a/ipc/chromium/moz.build
++++ b/ipc/chromium/moz.build
+@@ -112,7 +112,7 @@
+         "src/base/time_posix.cc",
+     ]
+ 
+-if CONFIG["TARGET_KERNEL"] == "Linux":
++if CONFIG["TARGET_KERNEL"] in ("Linux", "SODOS"):
+     SOURCES += [
+         "src/base/process_util_linux.cc",
+         "src/base/set_process_title_linux.cc",
+--- a/ipc/chromium/src/base/message_loop.cc
++++ b/ipc/chromium/src/base/message_loop.cc
+@@ -277,6 +277,8 @@
+   if (type_ == TYPE_UI) {
+ #  if defined(XP_DARWIN)
+     pump_ = base::MessagePumpMac::Create();
++#  elif defined(MOZ_WIDGET_SODOS)
++    pump_ = new base::MessagePumpDefault();
+ #  elif defined(XP_LINUX) || defined(__DragonFly__) || defined(XP_FREEBSD) || \
+       defined(XP_NETBSD) || defined(XP_OPENBSD)
+     pump_ = new base::MessagePumpForUI();
+--- a/ipc/glue/GeckoChildProcessHost.cpp
++++ b/ipc/glue/GeckoChildProcessHost.cpp
+@@ -329,7 +329,7 @@
+ // orthogonal IPC machinery there. Conversely, there are tier-3 non-Linux
+ // platforms (BSD and Solaris) where we want the "linux" IPC machinery. So
+ // we use MOZ_WIDGET_* to choose the platform backend.
+-#  elif defined(MOZ_WIDGET_GTK)
++#  elif defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_SODOS)
+ class LinuxProcessLauncher : public PosixProcessLauncher {
+  public:
+   LinuxProcessLauncher(GeckoChildProcessHost* aHost,
+@@ -1164,7 +1164,7 @@
+   }
+ }
+ 
+-#if defined(MOZ_WIDGET_GTK)
++#if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_SODOS)
+ Result<Ok, LaunchError> LinuxProcessLauncher::DoSetup() {
+   Result<Ok, LaunchError> aError = PosixProcessLauncher::DoSetup();
+   if (aError.isErr()) {
+--- a/layout/base/nsLayoutUtils.cpp
++++ b/layout/base/nsLayoutUtils.cpp
+@@ -9782,7 +9782,7 @@
+   // Keep consistency with nsLookAndFeel::NativeGetFont.
+   aName = u"Roboto"_ns;
+   aStyle.size = 12;
+-#elif defined(MOZ_WIDGET_GTK)
++#elif defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_SODOS)
+   // On Linux, there is not a default. For example, GNOME on Debian uses
+   // Cantarell, 14.667px. Ubuntu Mate uses the Ubuntu font, but also 14.667px.
+   // Fedora with KDE uses Noto Sans, 13.3333px, but it uses Noto Sans on
+--- a/layout/style/nsMediaFeatures.cpp
++++ b/layout/style/nsMediaFeatures.cpp
+@@ -256,7 +256,7 @@
+ #elif defined(ANDROID)
+     case StylePlatform::Android:
+       return true;
+-#elif defined(MOZ_WIDGET_GTK)
++#elif defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_SODOS)
+     case StylePlatform::Linux:
+       return true;
+ #elif defined(XP_MACOSX)
+--- a/memory/mozalloc/mozalloc_abort.cpp
++++ b/memory/mozalloc/mozalloc_abort.cpp
+@@ -76,7 +76,20 @@
+ // When building for fuzzing without ASan or TSan, we automatically pull in the
+ // UndefinedBehaviorSanitizer runtime which also requires the same workaround
+ // as with ASan or TSan.
++#if defined(__SODOS__)
++#  include <unistd.h>
++extern "C" void sodos_dump_stack(void);
++#endif
++
+ extern "C" void abort(void) {
++#if defined(__SODOS__)
++  // Endereco 0 e mapeado no SODOS: MOZ_CRASH nao falha e voltaria para ca.
++  static int sAborting;
++  if (sAborting++) {
++    sodos_dump_stack();
++    _exit(127);
++  }
++#endif
+ #  ifdef MOZ_WIDGET_ANDROID
+   char msg[64] = {};
+   fillAbortMessage(msg, uintptr_t(__builtin_return_address(0)));
+--- a/modules/libpref/init/StaticPrefList.yaml
++++ b/modules/libpref/init/StaticPrefList.yaml
+@@ -7750,7 +7750,7 @@
+   value: false
+   mirror: always
+ 
+-#if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_ANDROID)
++#if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_SODOS)
+   # -1 = disabled (no preblend, original behavior)
+   #  0 = sRGB transfer
+   # >0 = value/100.0 exponent
+--- a/mozglue/baseprofiler/core/ProfilerUtils.cpp
++++ b/mozglue/baseprofiler/core/ProfilerUtils.cpp
+@@ -100,7 +100,11 @@
+ namespace mozilla::baseprofiler {
+ 
+ BaseProfilerThreadId profiler_current_thread_id() {
++#  if defined(__SODOS__)
++  pid_t tid = 0;
++#  else
+   static thread_local pid_t tid;
++#  endif
+   if (!tid) {
+     // glibc doesn't provide a wrapper for gettid() until 2.30
+     tid = static_cast<pid_t>(syscall(SYS_gettid));
+--- a/mozglue/moz.build
++++ b/mozglue/moz.build
+@@ -12,7 +12,8 @@
+     DIRS += ["android"]
+ 
+ if CONFIG["OS_ARCH"] == "Linux" and not CONFIG["FUZZING_SNAPSHOT"]:
+-    DIRS += ["interposers"]
++    if CONFIG["MOZ_WIDGET_TOOLKIT"] != "sodos":
++        DIRS += ["interposers"]
+ 
+ DIRS += [
+     "baseprofiler",
+--- a/netwerk/base/nsNetUtil.cpp
++++ b/netwerk/base/nsNetUtil.cpp
+@@ -102,7 +102,7 @@
+ #include "nsSocketTransportService2.h"
+ #include "nsViewSourceHandler.h"
+ #include "nsJARURI.h"
+-#ifndef XP_IOS
++#if !defined(XP_IOS) && !defined(MOZ_WIDGET_SODOS)
+ #  include "nsIconURI.h"
+ #endif
+ #include "nsAboutProtocolHandler.h"
+@@ -2032,7 +2032,7 @@
+         .Finalize(aURI);
+   }
+ 
+-#ifndef XP_IOS
++#if !defined(XP_IOS) && !defined(MOZ_WIDGET_SODOS)
+   if (scheme.EqualsLiteral("moz-icon")) {
+     return NS_MutateURI(new nsMozIconURI::Mutator())
+         .SetSpec(aSpec)
+--- a/netwerk/build/components.conf
++++ b/netwerk/build/components.conf
+@@ -884,7 +884,7 @@
+         'headers': ['/netwerk/system/android/nsAndroidNetworkLinkService.h'],
+         'init_method': 'Init',
+     }
+-elif buildconfig.substs['OS_ARCH'] == 'Linux':
++elif buildconfig.substs['OS_ARCH'] == 'Linux' and toolkit != 'sodos':
+     link_service = {
+         'type': 'nsNetworkLinkService',
+         'headers': ['/netwerk/system/linux/nsNetworkLinkService.h'],
+--- a/netwerk/dns/GetAddrInfo.cpp
++++ b/netwerk/dns/GetAddrInfo.cpp
+@@ -217,7 +217,7 @@
+ ////////////////////////////////////
+ 
+ static bool SkipIPv6DNSLookup() {
+-#if defined(XP_WIN) || defined(XP_LINUX) || defined(XP_MACOSX)
++#if defined(XP_WIN) || (defined(XP_LINUX) && !defined(MOZ_WIDGET_SODOS)) || defined(XP_MACOSX)
+   return StaticPrefs::network_dns_skip_ipv6_when_no_addresses() &&
+          !nsINetworkLinkService::HasNonLocalIPv6Address();
+ #else
+--- a/netwerk/system/moz.build
++++ b/netwerk/system/moz.build
+@@ -14,7 +14,7 @@
+ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "android":
+     DIRS += ["android", "netlink"]
+ 
+-elif CONFIG["OS_ARCH"] == "Linux":
++elif CONFIG["OS_ARCH"] == "Linux" and CONFIG["MOZ_WIDGET_TOOLKIT"] != "sodos":
+     DIRS += ["linux", "netlink"]
+ 
+ SOURCES += [
+--- a/toolkit/components/ml/moz.build
++++ b/toolkit/components/ml/moz.build
+@@ -18,7 +18,7 @@
+     "tests",
+ ]
+ 
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] != "android":
++if CONFIG["MOZ_WIDGET_TOOLKIT"] not in ("android", "sodos"):
+     DIRS += ["backends/llama"]
+ 
+ XPCSHELL_TESTS_MANIFESTS += ["tests/xpcshell/xpcshell.toml"]
+--- a/toolkit/components/processtools/moz.build
++++ b/toolkit/components/processtools/moz.build
+@@ -36,7 +36,7 @@
+ 
+ # Platform-specific implementations of `ProcInfo`.
+ toolkit = CONFIG["MOZ_WIDGET_TOOLKIT"]
+-if toolkit == "gtk" or toolkit == "android":
++if toolkit in ("gtk", "android", "sodos"):
+     if CONFIG["OS_TARGET"] in ("FreeBSD", "OpenBSD"):
+         UNIFIED_SOURCES += ["ProcInfo_bsd.cpp"]
+     elif CONFIG["OS_TARGET"] == "SunOS":
+--- a/toolkit/moz.configure
++++ b/toolkit/moz.configure
+@@ -1309,7 +1309,7 @@
+ # ==============================================================
+ @depends(target)
+ def tree_freetype(target):
+-    if target.os == "Android":
++    if target.os in ("Android", "SODOS"):
+         return True
+ 
+ 
+--- a/toolkit/xre/nsAppRunner.cpp
++++ b/toolkit/xre/nsAppRunner.cpp
+@@ -4387,7 +4387,7 @@
+   }
+ 
+   if (gfxPlatform::IsHeadless()) {
+-#if defined(XP_WIN) || defined(MOZ_WIDGET_GTK) || defined(XP_MACOSX)
++#if defined(XP_WIN) || defined(MOZ_WIDGET_GTK) || defined(XP_MACOSX) || defined(MOZ_WIDGET_SODOS)
+     printf_stderr("*** You are running in headless mode.\n");
+ #else
+     Output(
+--- a/toolkit/xre/nsXREDirProvider.cpp
++++ b/toolkit/xre/nsXREDirProvider.cpp
+@@ -1164,7 +1164,7 @@
+   const char* homeDir = PR_GetEnv("HOME");
+   if (!homeDir || !*homeDir) return NS_ERROR_FAILURE;
+ 
+-#  ifdef ANDROID /* We want (ProfD == ProfLD) on Android. */
++#  if defined(ANDROID) || defined(MOZ_WIDGET_SODOS) /* ProfD == ProfLD */
+   MOZ_TRY(NS_NewNativeLocalFile(nsDependentCString(homeDir),
+                                 getter_AddRefs(localDir)));
+ #  else
+--- a/tools/power/moz.build
++++ b/tools/power/moz.build
+@@ -14,6 +14,9 @@
+ ):
+     do_rapl = True
+ 
++if CONFIG["MOZ_WIDGET_TOOLKIT"] == "sodos":
++    do_rapl = False
++
+ if do_rapl:
+     SimplePrograms([
+         "rapl",
+--- a/uriloader/exthandler/moz.build
++++ b/uriloader/exthandler/moz.build
+@@ -82,7 +82,7 @@
+         osdir + "/nsOSHelperAppService.cpp",
+     ]
+ 
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
++if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("gtk", "sodos"):
+     UNIFIED_SOURCES += [
+         "unix/nsGNOMERegistry.cpp",
+         "unix/nsMIMEInfoUnix.cpp",
+--- a/widget/Theme.cpp
++++ b/widget/Theme.cpp
+@@ -1499,7 +1499,7 @@
+   return MakeUnique<ScrollbarDrawingWin>();
+ #elif defined(MOZ_WIDGET_COCOA) || defined(MOZ_WIDGET_UIKIT)
+   return MakeUnique<ScrollbarDrawingCocoa>();
+-#elif MOZ_WIDGET_GTK
++#elif defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_SODOS)
+   return MakeUnique<ScrollbarDrawingGTK>();
+ #elif ANDROID
+   return MakeUnique<ScrollbarDrawingAndroid>();
+--- a/widget/moz.build
++++ b/widget/moz.build
+@@ -336,7 +336,7 @@
+ if CONFIG["MOZ_X11"] or CONFIG["MOZ_WAYLAND"]:
+     DIRS += ["x11"]
+ 
+-if toolkit in {"gtk", "cocoa", "windows", "android", "uikit"}:
++if toolkit in {"gtk", "cocoa", "windows", "android", "uikit", "sodos"}:
+     UNIFIED_SOURCES += [
+         "nsBaseFilePicker.cpp",
+     ]
+@@ -346,7 +346,7 @@
+         "nsBaseColorPicker.cpp",
+     ]
+ 
+-if toolkit in ("gtk", "windows", "cocoa", "uikit", "android"):
++if toolkit in ("gtk", "windows", "cocoa", "uikit", "android", "sodos"):
+     UNIFIED_SOURCES += [
+         "nsNativeTheme.cpp",
+     ]
