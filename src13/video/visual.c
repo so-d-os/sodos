@@ -4713,6 +4713,173 @@ static int stack_top_z(struct wm_win* wins) {
   return top;
 }
 
+/* ---------------------------------------------------------------------------
+ * Arraste rapido. Refazer a tela a cada movimento custa dois quadros inteiros
+ * (papel de parede e copia para o video). No primeiro movimento um quadro
+ * normal guarda a tela sem a janela (bg) e a imagem da janela (win); depois so
+ * se escreve a regiao que mudou, uma copia por pixel. O que esta atras fica
+ * congelado ate soltar: o quadro inteiro pendente sai quando o arraste termina.
+ * ------------------------------------------------------------------------- */
+#define DC_CLEAR 0x01010101u   /* canto arredondado: pixel que e do fundo */
+
+static struct {
+  int on;        /* bg e win prontos: use dc_present */
+  int capture;   /* o proximo quadro inteiro guarda bg e win */
+  int moved;     /* ha posicao nova para mostrar */
+  int wm, gw;    /* janela arrastada: indice em wins ou em gwins (-1 = nao e) */
+  int x, y, w, h;
+  int cx, cy;    /* ultima posicao do cursor */
+  uint32_t* bg;
+  uint32_t* win;
+  uint32_t* line; /* linha com cursor ou canto: compoe aqui para nao piscar */
+} dc = { .wm = -1, .gw = -1 };
+
+static void dc_copy(volatile uint32_t* dst, const volatile uint32_t* src, uint32_t n) {
+  __asm__ volatile ("rep movsl" : "+S"(src), "+D"(dst), "+c"(n) : : "memory");
+}
+
+static void dc_end(void) {
+  if (dc.bg) ufree(dc.bg);
+  if (dc.win) ufree(dc.win);
+  if (dc.line) ufree(dc.line);
+  dc.bg = dc.win = dc.line = 0;
+  dc.on = dc.capture = dc.moved = 0;
+  dc.wm = dc.gw = -1;
+}
+
+/* A janela mudou de lugar. 1: dc_present cuida. 0: precisa do quadro inteiro
+ * (o de captura, ou o caminho antigo se nao ha memoria para os buffers). */
+static int dc_track(int wm, int gw, int w, int h) {
+  uint32_t screen = gfx_w * gfx_h * 4u;
+  if (dc.on) {
+    dc.moved = 1;
+    return 1;
+  }
+  if (dc.capture || !gfx_bochs || !um_ready()) return 0;
+  if (w > (int)gfx_w) w = (int)gfx_w;
+  if (h > (int)gfx_h) h = (int)gfx_h;
+  if (w < 1 || h < 1) return 0;
+  dc.bg = (uint32_t*)umalloc_owned(screen, 0);
+  dc.win = (uint32_t*)umalloc_owned((uint32_t)w * (uint32_t)h * 4u, 0);
+  dc.line = (uint32_t*)umalloc_owned(gfx_w * 4u, 0);
+  if (!dc.bg || !dc.win || !dc.line) {
+    dc_end();
+    return 0;
+  }
+  dc.wm = wm;
+  dc.gw = gw;
+  dc.w = w;
+  dc.h = h;
+  dc.capture = 1;
+  return 0;
+}
+
+static void dc_snap_bg(void) {
+  uint32_t y;
+  for (y = 0; y < gfx_h; y++)
+    dc_copy(dc.bg + y * gfx_w, (const volatile uint32_t*)gfx_at(0, (int)y), gfx_w);
+}
+
+/* A janela ja esta desenhada sobre o fundo guardado em dc_snap_bg. */
+static void dc_snap_win(int x, int y, int cx, int cy) {
+  int r, c;
+  for (r = 0; r < dc.h; r++) {
+    int sy = y + r;
+    uint32_t* dst = dc.win + r * dc.w;
+    for (c = 0; c < dc.w; c++) {
+      int sx = x + c;
+      if (sx < 0 || sy < 0 || sx >= (int)gfx_w || sy >= (int)gfx_h) {
+        dst[c] = DC_CLEAR;
+        continue;
+      }
+      dst[c] = *(const volatile uint32_t*)gfx_at(sx, sy);
+      /* A barra de titulo tem cantos redondos: ali o fundo nao anda junto. */
+      if (r < UI_RADIUS && dst[c] == dc.bg[(uint32_t)sy * gfx_w + (uint32_t)sx])
+        dst[c] = DC_CLEAR;
+    }
+  }
+  dc.x = x;
+  dc.y = y;
+  dc.cx = cx;
+  dc.cy = cy;
+  dc.capture = 0;
+  dc.on = 1;
+}
+
+static void dc_grow(int* x0, int* y0, int* x1, int* y1, int x, int y, int w, int h) {
+  if (x < *x0) *x0 = x;
+  if (y < *y0) *y0 = y;
+  if (x + w > *x1) *x1 = x + w;
+  if (y + h > *y1) *y1 = y + h;
+}
+
+/* Escreve fundo, janela e cursor na pagina visivel, so na regiao que mudou. Sem
+ * trocar de pagina: a outra volta no quadro inteiro, ao soltar. */
+static void dc_present(int x, int y, int cx, int cy) {
+  int scale = cur_scale();
+  int cw = CUR_W * scale, chh = CUR_H * scale;
+  int x0 = x, y0 = y, x1 = x + dc.w, y1 = y + dc.h;
+  int wx0 = x < 0 ? 0 : x;
+  int wx1 = x + dc.w > (int)gfx_w ? (int)gfx_w : x + dc.w;
+  uint32_t black = pix32(PIXA(0, 0, 0)), white = pix32(PIXA(255, 255, 255));
+  int r;
+  dc_grow(&x0, &y0, &x1, &y1, dc.x, dc.y, dc.w, dc.h);
+  dc_grow(&x0, &y0, &x1, &y1, dc.cx, dc.cy, cw, chh);
+  dc_grow(&x0, &y0, &x1, &y1, cx, cy, cw, chh);
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > (int)gfx_w) x1 = (int)gfx_w;
+  if (y1 > (int)gfx_h) y1 = (int)gfx_h;
+  dc.moved = 0;
+  cursor_saved = 0;
+  dc.x = x;
+  dc.y = y;
+  dc.cx = cx;
+  dc.cy = cy;
+  if (x0 >= x1 || y0 >= y1) return;
+
+  for (r = y0; r < y1; r++) {
+    const uint32_t* bg = dc.bg + (uint32_t)r * gfx_w;
+    volatile uint32_t* out =
+        (volatile uint32_t*)(gfx_lfb + ((uint32_t)r + gfx_front_y) * gfx_pitch_bytes);
+    int in_win = r >= y && r < y + dc.h && wx0 < wx1;
+    const uint32_t* src = in_win ? dc.win + (r - y) * dc.w : 0;
+    int corner = in_win && r - y < UI_RADIUS;
+    int in_cur = r >= cy && r < cy + chh;
+    if (!in_cur && !corner) {
+      /* Caso comum: cada pedaco vai direto, sem copia intermediaria. */
+      if (!in_win) {
+        dc_copy(out + x0, bg + x0, (uint32_t)(x1 - x0));
+        continue;
+      }
+      if (x0 < wx0) dc_copy(out + x0, bg + x0, (uint32_t)(wx0 - x0));
+      dc_copy(out + wx0, src + (wx0 - x), (uint32_t)(wx1 - wx0));
+      if (wx1 < x1) dc_copy(out + wx1, bg + wx1, (uint32_t)(x1 - wx1));
+      continue;
+    }
+    dc_copy(dc.line + x0, bg + x0, (uint32_t)(x1 - x0));
+    if (corner) {
+      int c;
+      for (c = wx0; c < wx1; c++)
+        if (src[c - x] != DC_CLEAR) dc.line[c] = src[c - x];
+    } else if (in_win) {
+      dc_copy(dc.line + wx0, src + (wx0 - x), (uint32_t)(wx1 - wx0));
+    }
+    if (in_cur) {
+      const char* row = cur_row[(r - cy) / scale];
+      int rx, ox;
+      for (rx = 0; rx < CUR_W; rx++) {
+        if (row[rx] == ' ') continue;
+        for (ox = 0; ox < scale; ox++) {
+          int px = cx + rx * scale + ox;
+          if (px >= x0 && px < x1) dc.line[px] = row[rx] == 'W' ? white : black;
+        }
+      }
+    }
+    dc_copy(out + x0, dc.line + x0, (uint32_t)(x1 - x0));
+  }
+}
+
 static void gui_draw_frame(struct gui_win* w, int active, uint32_t col_title, uint32_t col_white,
                            uint32_t col_black, uint32_t col_btn, uint32_t col_inactive) {
   int scale = w->scale > 0 ? w->scale : 1;
@@ -4745,12 +4912,14 @@ static void paint_stacked(struct wm_win* wins, int title_h, int scale, uint32_t 
   if (!wins) return;
   for (i = 0; i < WM_MAX; i++) {
     if (!wins[i].used || run_hidden(&wins[i])) continue;
+    if (dc.capture && dc.wm == i) continue;
     order[n] = i;
     kind[n] = 1;
     n++;
   }
   for (i = 0; gwins && i < GUI_MAX; i++) {
     if (!gwins[i].open) continue;
+    if (dc.capture && dc.gw == i) continue;
     order[n] = i;
     kind[n] = 2;
     n++;
@@ -4817,6 +4986,7 @@ static int z_empty(struct wm_win* wins, int x, int y) {
 }
 
 static void chrome_unbind(void) {
+  dc_end();
   tasks_shutdown();
   gui_session(0);
   chrome_under = 0;
@@ -5300,6 +5470,7 @@ static int win_wm_run(void) {
   int pop_hot = 0;
   int shift_on = 0;
   int kbd_e0 = 0;
+  int draw_skip = 0;
   int pkt_idx = 0;
   uint8_t packet[3];
   int32_t mx;
@@ -5407,7 +5578,24 @@ static int win_wm_run(void) {
         need_draw = 1;
       }
     }
-    if (need_draw) {
+    /* A janela arrastada sumiu (programa fechou, por exemplo). */
+    if ((dc.on || dc.capture) &&
+        !(dc.wm >= 0 ? (drag == dc.wm && wins[dc.wm].used)
+                     : (g_drag == dc.gw && gwins && gwins[dc.gw].open))) {
+      dc_end();
+      need_draw = 1;
+    }
+    /* Com entrada na fila, um quadro agora so mostraria uma posicao velha.
+     * O limite garante um quadro mesmo com o mouse sem parar. */
+    if ((need_draw || dc.moved) && (inb(0x64) & 1) && ++draw_skip < 64) {
+      /* desenha depois de ler */
+    } else if (dc.on) {
+      draw_skip = 0;
+      if (dc.moved) {
+        if (dc.wm >= 0) dc_present(wins[dc.wm].x, wins[dc.wm].y, (int)mx, (int)my);
+        else dc_present(gwins[dc.gw].ox, gwins[dc.gw].oy, (int)mx, (int)my);
+      }
+    } else if (need_draw) {
       int bar_ty = h - bar_h + (bar_h - ch) / 2;
       struct start_menu gm;
       int mi;
@@ -5559,9 +5747,21 @@ static int win_wm_run(void) {
         }
         menu_frame(px, py, pw, ph, col_black);
       }
+      if (dc.capture) {
+        dc_snap_bg();
+        if (dc.wm >= 0) {
+          wm_draw_window(&wins[dc.wm], 1, title_h, scale, col_win, col_title, col_white,
+                         col_black, col_btn, col_inactive);
+          dc_snap_win(wins[dc.wm].x, wins[dc.wm].y, (int)mx, (int)my);
+        } else {
+          gui_draw_frame(&gwins[dc.gw], 1, col_title, col_white, col_black, col_btn, col_inactive);
+          dc_snap_win(gwins[dc.gw].ox, gwins[dc.gw].oy, (int)mx, (int)my);
+        }
+      }
       cursor_redraw_at((int)mx, (int)my, col_cursor);
       gfx_frame_end();
       need_draw = 0;
+      draw_skip = 0;
     }
 
     {
@@ -5686,7 +5886,8 @@ static int win_wm_run(void) {
           gui_ix = g_drag;
           gui_clamp_pos();
           gui_ix = save;
-          need_draw = 1;
+          if (!dc_track(-1, g_drag, gwins[g_drag].cw, gwins[g_drag].title_h + gwins[g_drag].ch))
+            need_draw = 1;
         } else if (left && gwins && g_cap >= 0 && g_cap < GUI_MAX && gwins[g_cap].open) {
           gq_push(&gwins[g_cap], GUI_EV_DRAG, (int)mx - gwins[g_cap].ox,
                   (int)my - (gwins[g_cap].oy + gwins[g_cap].title_h), 1);
@@ -5707,7 +5908,8 @@ static int win_wm_run(void) {
           if (wins[drag].x + wins[drag].w > w) wins[drag].x = w - wins[drag].w;
           if (wins[drag].y + wins[drag].h > h - bar_h)
             wins[drag].y = h - bar_h - wins[drag].h;
-          need_draw = 1;
+          if (drag_mode != 0 || !dc_track(drag, -1, wins[drag].w, wins[drag].h))
+            need_draw = 1;
         } else if (left && !prev_left) {
           int handled = 0;
           int icons_on;
@@ -6079,6 +6281,10 @@ static int win_wm_run(void) {
           g_cap = -1;
           g_drag = -1;
           drag = -1;
+          if (dc.on || dc.capture) {
+            dc_end();
+            need_draw = 1;
+          }
         }
         prev_left = left;
         {
@@ -6120,7 +6326,7 @@ static int win_wm_run(void) {
           }
           prev_right = right;
         }
-        if (!need_draw) cursor_draw((int)mx, (int)my, col_cursor);
+        if (!need_draw && !dc.on) cursor_draw((int)mx, (int)my, col_cursor);
       }
       continue;
     }
