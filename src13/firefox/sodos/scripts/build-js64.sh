@@ -24,7 +24,10 @@ export MOZBUILD_STATE_PATH="${MOZBUILD_STATE_PATH:-$HOME/.mozbuild}"
 export CC="$TC/x86_64-sodos-gcc64"
 export CXX="$TC/x86_64-sodos-g++64"
 export HOST_CC=gcc
-export HOST_CXX=g++
+if [ -z "$HOST_CXX" ]; then
+  if command -v g++ >/dev/null 2>&1; then HOST_CXX=g++; else HOST_CXX="$HOME/bin/gxx"; fi
+fi
+export HOST_CXX
 export RUSTC="$RT/rustc"
 export CARGO="$RT/cargo"
 # So o configure exige: o build do shell nao precisa do llvm-objdump.

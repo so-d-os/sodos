@@ -1,0 +1,41 @@
+Fase M5: toolkit cairo-sodos, diretorio widget/sodos e NSPR da arvore no alvo.
+Afeta: toolkit/moz.configure, widget/moz.build, config/external/nspr/pr/moz.build
+Teste: sodos/scripts/build-browser64.sh configure
+
+diff -ruN a/config/external/nspr/pr/moz.build b/config/external/nspr/pr/moz.build
+--- a/config/external/nspr/pr/moz.build	2026-11-06 09:53:21.036490808 -0300
++++ b/config/external/nspr/pr/moz.build	2026-11-06 09:53:21.046375913 -0300
+@@ -20,7 +20,8 @@
+ OS_LIBS += CONFIG["SOCKET_LIBS"]
+ 
+ DEFINES["_NSPR_BUILD_"] = True
+-if CONFIG["OS_ARCH"] == "Linux":
++# SODOS: LP64 com os mesmos fontes e a mesma config do Linux.
++if CONFIG["OS_ARCH"] in ("Linux", "SODOS"):
+     OS_LIBS += CONFIG["REALTIME_LIBS"]
+     DEFINES["LINUX"] = True
+     DEFINES["HAVE_FCNTL_FILE_LOCKING"] = True
+diff -ruN a/toolkit/moz.configure b/toolkit/moz.configure
+--- a/toolkit/moz.configure	2026-11-06 09:53:21.036490808 -0300
++++ b/toolkit/moz.configure	2026-11-06 09:53:21.036490808 -0300
+@@ -529,6 +529,8 @@
+         return ("cairo-uikit",)
+     elif target.os == "Android":
+         return ("cairo-android",)
++    elif target.os == "SODOS":
++        return ("cairo-sodos",)
+     else:
+         # cairo-gtk3 - X11 backend with optional Wayland backend (auto detected)
+         # cairo-gtk3-wayland - Wayland backend with optional X11 backend (auto detected)
+diff -ruN a/widget/moz.build b/widget/moz.build
+--- a/widget/moz.build	2026-11-06 09:53:21.036490808 -0300
++++ b/widget/moz.build	2026-11-06 09:53:21.046375913 -0300
+@@ -53,7 +53,7 @@
+     "components.conf",
+ ]
+ 
+-if toolkit in ("android", "cocoa", "gtk", "uikit", "windows"):
++if toolkit in ("android", "cocoa", "gtk", "sodos", "uikit", "windows"):
+     DIRS += [toolkit]
+ 
+ if toolkit == "cocoa":

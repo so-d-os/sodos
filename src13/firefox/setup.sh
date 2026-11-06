@@ -15,6 +15,10 @@ if [ ! -x "$S/vendor/gxx/usr/bin/x86_64-linux-gnu-g++-13" ] && command -v apt-ge
 fi
 # libc++ (headers + fontes do runtime) para o M2b.
 sh "$S/sodos/scripts/fetch-libcxx.sh" || echo "aviso: nao foi possivel baixar a libc++"
+# unzip local: o configure do browser exige.
+if command -v apt-get >/dev/null 2>&1; then
+  sh "$S/sodos/scripts/fetch-unzip.sh" || echo "aviso: nao foi possivel baixar o unzip"
+fi
 case "$1" in
   firefox) echo "Firefox ESR: ainda nao habilitado; veja docs/03-fases.md (M2+)." ;;
 esac

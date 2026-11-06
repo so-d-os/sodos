@@ -634,3 +634,49 @@ fim
 
 `mprotect`/`madvise` sao no-ops no shim (sem protecao por pagina), o que e
 suficiente para W^X "de fachada".
+
+## Build do browser: estado em 2026-11-06
+
+```sh
+sh sodos/scripts/fetch-unzip.sh                        # sem root, em vendor/tools
+sh sodos/scripts/build-browser64.sh configure
+sh sodos/scripts/build-browser64.sh build pre-export export
+sh sodos/scripts/build-browser64.sh build compile
+```
+
+Rode `compile` numa chamada separada: no mesmo `gmake -j`, ele concorre com o
+`export` e falha por headers gerados que ainda nao existem (`ErrorList.h`).
+
+| Etapa | Resultado |
+|---|---|
+| `configure` (`--enable-application=browser`) | passa |
+| `pre-export`, `export` | passam |
+| `compile` (`gmake -k`) | 2.894 objetos gerados, 588 com falha, 1.109 erros de compilador, 959 erros de Rust |
+| link, empacotamento | nao testados |
+
+O que destravou: `.gitattributes` (LF nos scripts), patch 0005, mozconfig so com
+opcoes validas sem GTK, `unzip` local e o caminho C do `sodos-gcc.py` (agora usa
+`sodos/include` e so esconde `__linux__` no `-E`). As linhas de erro de
+compilador cairam de 25.457 para 1.109. O `js` continua compilando e ligando
+(0 erros, 41,9 MB); nao foi reexecutado no QEMU depois dessa mudanca.
+
+### O que falta, pela ordem do log
+
+1. **Headers**: `memory.h` (277 erros, quase todos do libaom), `endian.h`,
+   `byteswap.h`, `sys/sem.h`, `sys/param.h`, `sys/eventfd.h`, `strings.h`,
+   `elf.h`, `syslog.h`, `syscall.h`, `alloca.h`, `pwd.h`, `grp.h`, `fenv.h`,
+   `mntent.h`, `link.h`, `cxxabi.h`; `tm_gmtoff` em `struct tm`, `si_pid` em
+   `siginfo_t` e `cmsghdr`.
+2. **`ipc/chromium`**: falta `PlatformThreadId` para o SODOS (cerca de 280 erros).
+3. **Rust**: crate `libc` sem tipos para o alvo (`c_char`...); a causa provavel e
+   o target JSON nao declarar a familia `unix`. Crates que falham: `ash`,
+   `breach-alerts`, `dirs`, `errno`, `mtu`, `qcms`, `rkv`, `rsdparsa_capi`,
+   `rure`, `socket2`, `webext-storage`, `webrender`, `xpcom`.
+4. **bindgen**: o libclang nao acha `version`/`stddef.h`/`cstddef`
+   (`gecko-profiler`, `nss-rs`, `ohttp`).
+5. **Terceiros**: pixman (`PIXMAN_NO_TLS`), cairo PDF, NSS, sqlite, `gmp-plugin-openh264`.
+6. **`widget/sodos`/`gfx`**: o `moz.build` nao lista fontes; faltam
+   `nsLookAndFeel.h`, `nsIconURI.h`, `GfxInfo` e `UnscaledFontFreeType.h`.
+7. **Link**: o `firefox` carrega o `libxul` com `dlopen`, o `g++64` ignora
+   `-shared`, e os limites do `link64` (`MAX_GOT` 8192, `MAX_SEC` 131072,
+   `MAX_SYM` 200000, `MAX_REL` 2 milhoes) nao devem bastar.

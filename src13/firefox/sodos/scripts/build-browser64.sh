@@ -4,6 +4,9 @@
 #   sh sodos/scripts/build-browser64.sh configure
 #   sh sodos/scripts/build-browser64.sh build [alvo...]
 #
+# Rode "build pre-export export" antes de "build compile", em chamadas separadas:
+# no mesmo gmake -j, o compile nao espera os headers gerados pelo export.
+#
 # Copia sodos/widget para widget/sodos na arvore antes de cada passo. A arvore
 # precisa dos patches 0001 a 0005 (patches/README.md) e do std do Rust instalado
 # (make js64-std).

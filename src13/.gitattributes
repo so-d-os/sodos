@@ -1,0 +1,15 @@
+# Arquivos executados no WSL/Linux precisam de LF mesmo em checkout no Windows
+# (core.autocrlf=true quebra o shebang e os Makefiles).
+*.sh        text eol=lf
+*.py        text eol=lf
+*.patch     text eol=lf
+*.mozconfig text eol=lf
+*.mozbuild  text eol=lf
+moz.build   text eol=lf
+Makefile    text eol=lf
+
+# Scripts sem extensao
+firefox/sodos/sodos-*          text eol=lf
+firefox/sodos/rust/tools/*     text eol=lf
+firefox/toolchain/bin/*        text eol=lf
+vendor/netsurf/sodos/sodos-cc  text eol=lf

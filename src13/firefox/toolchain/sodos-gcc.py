@@ -37,6 +37,7 @@ CXXRT = os.path.join(ROOT, "build", "cxx", "cxx_runtime.o")
 CXXRT2 = os.path.join(ROOT, "build", "libcxx", "cxx_runtime.o")
 FP = os.path.join(ROOT, "build", "libcxx", "fpconv.o")
 MATH = os.path.join(ROOT, "build", "libcxx", "mathx.o")
+SODOS_INCLUDE = os.path.join(ROOT, "sodos", "include")
 CC = os.path.join(ROOT, "sodos", "sodos-cc")
 CXX = os.path.join(ROOT, "sodos", "sodos-cxxlib")
 CXX64 = os.path.join(ROOT, "sodos", "sodos-cxxlib64")
@@ -118,7 +119,8 @@ def compile_one(kind, src, obj, flags):
             return run([CXX64, "-c", src, "-o", obj] + flags)
         cmd = ["gcc", "-m64", "-ffreestanding", "-fno-pic", "-fno-pie",
                "-fno-stack-protector", "-mno-red-zone", "-mcmodel=large",
-               "-nostdinc", "-isystem", os.path.join(C, "include"),
+               "-nostdinc", "-isystem", SODOS_INCLUDE,
+               "-isystem", os.path.join(C, "include"),
                "-isystem", GCC_INCLUDE,
                "-D__SODOS__", "-c", src, "-o", obj] + flags
         return run(cmd)
@@ -142,14 +144,16 @@ def main():
     compile_only = any(a in ("-c", "-E", "-S", "-M", "-MM") for a in args)
     if compile_only:
         if is64():
+            # Como no x32: so o -E do configure deixa de ver __linux__.
+            undef = ["-U__linux__", "-Ulinux"] if "-E" in args else []
             if is_cxx():
-                undef = ["-U__linux__", "-Ulinux"] if "-E" in args else []
                 return run([CXX64] + undef + args)
             return run(["gcc", "-m64", "-ffreestanding", "-fno-pic", "-fno-pie",
                         "-fno-stack-protector", "-mno-red-zone", "-mcmodel=large",
-                        "-nostdinc", "-isystem", os.path.join(C, "include"),
+                        "-nostdinc", "-isystem", SODOS_INCLUDE,
+                        "-isystem", os.path.join(C, "include"),
                         "-isystem", GCC_INCLUDE,
-                        "-D__SODOS__", "-U__linux__", "-Ulinux"] + args)
+                        "-D__SODOS__"] + undef + args)
         cc = CXX if is_cxx() else CC
         # O configure descobre o kernel preprocessando um conftest; ai o alvo
         # precisa parecer SODOS e nao Linux. Compilar/ligar mantem __linux__
