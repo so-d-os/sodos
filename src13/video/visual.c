@@ -814,6 +814,49 @@ static void round_frame(int x, int y, int w, int h, int r, uint32_t rgb) {
   fill_rect(x + w - 1, y + 1, 1, h - 2, rgb);
 }
 
+/* Recuo da linha j (0 = topo) no arco de raio r. */
+static int round_inset(int j, int r) {
+  int dy = r - j, d = 0;
+  while (d < r && (r - d) * (r - d) + dy * dy > r * r) d++;
+  return d;
+}
+
+/* Retangulo opaco so com os cantos de cima arredondados. */
+static void round_top(int x, int y, int w, int h, int r, uint32_t rgb) {
+  int j;
+  if (w <= 0 || h <= 0) return;
+  if (r * 2 > w) r = w / 2;
+  if (r > h) r = h;
+  for (j = 0; j < r; j++) {
+    int d = round_inset(j, r);
+    fill_rect(x + d, y + j, w - 2 * d, 1, rgb);
+  }
+  fill_rect(x, y + r, w, h - r, rgb);
+}
+
+/* Contorno de 1px que acompanha o round_top. */
+static void round_top_frame(int x, int y, int w, int h, int r, uint32_t rgb) {
+  int j, prev = 0;
+  if (w < 2 || h < 2) return;
+  if (r * 2 > w) r = w / 2;
+  if (r > h) r = h;
+  for (j = 0; j < r; j++) {
+    int d = round_inset(j, r);
+    /* no arco, a borda vai de d ate onde a linha de cima comecava */
+    int len = j == 0 ? w - 2 * d : (prev - d > 1 ? prev - d : 1);
+    if (j == 0) {
+      fill_rect(x + d, y, len, 1, rgb);
+    } else {
+      fill_rect(x + d, y + j, len, 1, rgb);
+      fill_rect(x + w - d - len, y + j, len, 1, rgb);
+    }
+    prev = d;
+  }
+  fill_rect(x, y + r, 1, h - r, rgb);
+  fill_rect(x + w - 1, y + r, 1, h - r, rgb);
+  fill_rect(x, y + h - 1, w, 1, rgb);
+}
+
 static int gfx_ram_ok(void) {
   uint32_t bytes = gfx_w * gfx_h * (gfx_bochs ? 4u : 1u);
   volatile uint32_t* p = (volatile uint32_t*)GFX_BACK_PHYS;
@@ -2541,18 +2584,19 @@ static void wm_open_command(struct wm_win* wins, int* focus, int big) {
   *focus = i;
 }
 
-static void wm_draw_window(struct wm_win* w, int focus, int title_h, int scale,
-                           uint32_t col_win, uint32_t col_title, uint32_t col_white,
-                           uint32_t col_black, uint32_t col_btn, uint32_t col_inactive) {
+static void wm_draw_inner(struct wm_win* w, int focus, int title_h, int scale,
+                          uint32_t col_win, uint32_t col_title, uint32_t col_white,
+                          uint32_t col_black, uint32_t col_btn, uint32_t col_inactive) {
   int ch = (vga_bios_font_ok ? FONT_H : 8) * scale;
   int close_s = title_h - 4;
   int close_x = w->x + w->w - close_s - 2;
   uint32_t tc = focus ? col_title : col_inactive;
   int ty = w->y + (title_h - ch) / 2;
-  fill_rect(w->x, w->y, w->w, w->h, col_win);
-  /* barra de titulo de vidro, cantos de cima arredondados */
-  fill_round(w->x, w->y, w->w, title_h + 10, UI_RADIUS,
-             gui_col(focus ? UI_TITLE_A : UI_TITLE_I));
+  /* barra de titulo de vidro, cantos de cima arredondados; nos cantos aparece
+     o que esta atras da janela */
+  round_top(w->x, w->y, w->w, title_h, UI_RADIUS,
+            gui_col(focus ? UI_TITLE_A : UI_TITLE_I));
+  fill_rect(w->x, w->y + title_h, w->w, w->h - title_h, col_win);
   draw_text_t(w->x + 12, ty, w->title, gui_col(UI_TEXT), scale);
   fill_round(close_x, w->y + 3, close_s, close_s, 5, gui_col(0xC23440));
   draw_text_t(close_x + (close_s > FONT_W * scale ? (close_s - FONT_W * scale) / 2 : 0),
@@ -2647,6 +2691,14 @@ static void wm_draw_window(struct wm_win* w, int focus, int title_h, int scale,
     draw_string_scaled(w->x + 8, w->y + title_h + 8 + ch + 2, "Arraste a barra. Canto = tamanho.", col_black, col_win, scale);
     draw_string_scaled(w->x + 8, w->y + title_h + 8 + 2 * (ch + 2), "X fecha. Iniciar: Bloco de notas.", col_black, col_win, scale);
   }
+}
+
+static void wm_draw_window(struct wm_win* w, int focus, int title_h, int scale,
+                           uint32_t col_win, uint32_t col_title, uint32_t col_white,
+                           uint32_t col_black, uint32_t col_btn, uint32_t col_inactive) {
+  wm_draw_inner(w, focus, title_h, scale, col_win, col_title, col_white, col_black, col_btn,
+                col_inactive);
+  round_top_frame(w->x, w->y, w->w, w->h, UI_RADIUS, gui_col(UI_BORDER));
 }
 
 static int disp_row_h(int scale) {
@@ -4891,16 +4943,14 @@ static void gui_draw_frame(struct gui_win* w, int active, uint32_t col_title, ui
   int hh = w->title_h + w->ch;
   (void)col_title;
   (void)col_inactive;
-  fill_round(w->ox, w->oy, w->cw, w->title_h + 10, UI_RADIUS,
-             gui_col(active ? UI_TITLE_A : UI_TITLE_I));
+  round_top(w->ox, w->oy, w->cw, w->title_h, UI_RADIUS,
+            gui_col(active ? UI_TITLE_A : UI_TITLE_I));
   draw_text_t(w->ox + 12, ty, w->title, gui_col(UI_TEXT), scale);
   fill_round(close_x, w->oy + 3, close_s, close_s, 5, gui_col(0xC23440));
   draw_text_t(close_x + xoff, ty, "x", gui_col(UI_TEXT), scale);
   gui_blit_win(w);
-  fill_rect(w->ox, w->oy, w->cw, 1, col_black);
-  fill_rect(w->ox, w->oy + hh - 1, w->cw, 1, col_black);
-  fill_rect(w->ox, w->oy, 1, hh, col_black);
-  fill_rect(w->ox + w->cw - 1, w->oy, 1, hh, col_black);
+  (void)col_black;
+  round_top_frame(w->ox, w->oy, w->cw, hh, UI_RADIUS, gui_col(UI_BORDER));
 }
 
 static void paint_stacked(struct wm_win* wins, int title_h, int scale, uint32_t col_win,
