@@ -18,6 +18,7 @@
 #include "sched.h"
 #include "visual.h"
 #include "keymap.h"
+#include "clip.h"
 #include "bootinfo.h"
 #include "fbcon.h"
 #include "xhci.h"
@@ -1770,6 +1771,8 @@ static int note_len;
 static int note_scroll;
 static int note_dirty;
 static int note_missing;
+static int note_caret;    /* cursor do texto: indice em note_buf */
+static int note_anc = -1; /* inicio da marcacao; -1 = nada marcado */
 static int note_file_menu;
 static int note_dlg; /* 0=none 1=open 2=saveas */
 static char note_dlg_name[40];
@@ -1823,6 +1826,8 @@ static void note_load(const char* path) {
   }
   note_dirty = 0;
   note_scroll = 0;
+  note_caret = note_len;
+  note_anc = -1;
 }
 
 static void note_save(void) {
@@ -2120,15 +2125,138 @@ static void note_scroll_by(struct wm_win* w, int top, int scale, int dz) {
   if (note_scroll > max) note_scroll = max;
 }
 
-/* Acompanha o fim se o usuario ja estava la; senao deixa a vista onde esta. */
-static void note_follow_end(struct wm_win* w, int top, int scale) {
-  int total = note_text_lines(w, scale);
+/* Colunas por linha do texto: a mesma conta de quebra de note_text_lines. */
+static int note_cols(struct wm_win* w, int scale) {
+  int cw = FONT_W * scale;
+  int n = cw > 0 ? (w->w - 14) / cw : 1;
+  return n < 1 ? 1 : n;
+}
+
+/* Linha (sem rolagem) e coluna do cursor posto antes de note_buf[idx]. */
+static void note_rc(struct wm_win* w, int scale, int idx, int* r, int* c) {
+  int cols = note_cols(w, scale);
+  int line = 0, col = 0, i;
+  for (i = 0; i < idx && i < note_len; i++) {
+    if (note_buf[i] == '\n') {
+      line++;
+      col = 0;
+      continue;
+    }
+    if (col >= cols) {
+      line++;
+      col = 0;
+    }
+    col++;
+  }
+  if (col >= cols && idx < note_len && note_buf[idx] != '\n') {
+    line++;
+    col = 0;
+  }
+  *r = line;
+  *c = col;
+}
+
+/* Indice mais perto da linha tl, coluna tc. */
+static int note_at_rc(struct wm_win* w, int scale, int tl, int tc) {
+  int cols = note_cols(w, scale);
+  int line = 0, col = 0, i, best = -1;
+  if (tl < 0) return 0;
+  for (i = 0; i <= note_len; i++) {
+    int r = line, c = col;
+    if (c >= cols && i < note_len && note_buf[i] != '\n') {
+      r++;
+      c = 0;
+    }
+    if (r > tl) break;
+    if (r == tl && c <= tc) best = i;
+    if (i == note_len) break;
+    if (note_buf[i] == '\n') {
+      line++;
+      col = 0;
+    } else {
+      if (col >= cols) {
+        line++;
+        col = 0;
+      }
+      col++;
+    }
+  }
+  return best < 0 ? note_len : best;
+}
+
+/* Indice do texto sob o ponto (mx, my) da tela; top = barra de titulo + menu. */
+static int note_hit(struct wm_win* w, int top, int scale, int mx, int my) {
+  int cw = FONT_W * scale;
+  int ch = (vga_bios_font_ok ? FONT_H : 8) * scale;
+  int dy = my - (w->y + top + 4);
+  int tl = note_scroll + (dy < 0 ? -1 : dy / ch);
+  int tc = (mx - (w->x + 6) + cw / 2) / cw;
+  if (tl < note_scroll) tl = note_scroll;
+  if (tc < 0) tc = 0;
+  return note_at_rc(w, scale, tl, tc);
+}
+
+/* Rola so o necessario para o cursor aparecer. */
+static void note_follow_caret(struct wm_win* w, int top, int scale) {
+  int r, c;
   int vis = note_vis_lines(w, top, scale);
-  int max = total - vis;
-  if (max < 0) max = 0;
-  if (note_scroll >= max - 1) note_scroll = max;
-  if (note_scroll > max) note_scroll = max;
-  if (note_scroll < 0) note_scroll = 0;
+  note_rc(w, scale, note_caret, &r, &c);
+  if (r < note_scroll) note_scroll = r;
+  if (r >= note_scroll + vis) note_scroll = r - vis + 1;
+  note_scroll_by(w, top, scale, 0);
+}
+
+/* Trecho marcado [*a, *b); 0 se nada esta marcado. */
+static int note_sel(int* a, int* b) {
+  if (note_anc < 0 || note_anc > note_len || note_anc == note_caret) return 0;
+  *a = note_anc < note_caret ? note_anc : note_caret;
+  *b = note_anc < note_caret ? note_caret : note_anc;
+  return 1;
+}
+
+/* Apaga o trecho marcado; 0 se nao havia. */
+static int note_del_sel(void) {
+  int a, b, i;
+  if (!note_sel(&a, &b)) {
+    note_anc = -1;
+    return 0;
+  }
+  for (i = b; i <= note_len; i++) note_buf[a + i - b] = note_buf[i];
+  note_len -= b - a;
+  note_caret = a;
+  note_anc = -1;
+  note_dirty = 1;
+  return 1;
+}
+
+/* Poe n bytes de s no cursor (o que nao cabe no buffer fica de fora). */
+static void note_insert(const char* s, int n) {
+  int room = (int)sizeof(note_buf) - 1 - note_len;
+  int i;
+  if (n > room) n = room;
+  if (n <= 0) return;
+  for (i = note_len; i >= note_caret; i--) note_buf[i + n] = note_buf[i];
+  for (i = 0; i < n; i++) note_buf[note_caret + i] = s[i] == '\r' ? '\n' : s[i];
+  note_len += n;
+  note_caret += n;
+  note_dirty = 1;
+}
+
+/* Setas, Home e End (scancode sem E0). Com Shift a marcacao acompanha. */
+static void note_move(struct wm_win* w, int scale, uint8_t sc, int shift) {
+  int r, c;
+  if (shift) {
+    if (note_anc < 0) note_anc = note_caret;
+  } else {
+    note_anc = -1;
+  }
+  note_rc(w, scale, note_caret, &r, &c);
+  if (sc == 0x4B && note_caret > 0) note_caret--;
+  else if (sc == 0x4D && note_caret < note_len) note_caret++;
+  else if (sc == 0x48) note_caret = r > 0 ? note_at_rc(w, scale, r - 1, c) : 0;
+  else if (sc == 0x50) note_caret = note_at_rc(w, scale, r + 1, c);
+  else if (sc == 0x47) note_caret = note_at_rc(w, scale, r, 0);
+  else if (sc == 0x4F) note_caret = note_at_rc(w, scale, r, 0x7FFF);
 }
 
 static void draw_note_text(struct wm_win* w, int title_h, uint32_t fg, uint32_t bg, int scale) {
@@ -2143,8 +2271,11 @@ static void draw_note_text(struct wm_win* w, int title_h, uint32_t fg, uint32_t 
   int line = 0;
   int skip;
   int i;
+  int sa = 0, sb = 0;
+  int cr, cc;
   note_scroll_by(w, title_h, scale, 0);
   skip = note_scroll;
+  note_sel(&sa, &sb);
   for (i = 0; i < note_len; i++) {
     char c = note_buf[i];
     if (c == '\n') {
@@ -2164,9 +2295,20 @@ static void draw_note_text(struct wm_win* w, int title_h, uint32_t fg, uint32_t 
         if (y + ch > y1) break;
       }
     }
-    if (line >= skip)
-      draw_char_scaled(x, y, c, fg, bg, scale);
+    if (line >= skip) {
+      /* trecho marcado em video invertido */
+      if (i >= sa && i < sb) draw_char_scaled(x, y, c, bg, fg, scale);
+      else draw_char_scaled(x, y, c, fg, bg, scale);
+    }
     x += cw;
+  }
+  /* cursor: barra fina antes do caractere */
+  note_rc(w, scale, note_caret, &cr, &cc);
+  cr -= skip;
+  if (cr >= 0 && cy + (cr + 1) * ch <= y1) {
+    int px = cx + cc * cw;
+    if (px > x1 - 2) px = x1 - 2;
+    fill_rect(px, cy + cr * ch, scale > 1 ? 2 : 1, ch, fg);
   }
 }
 
@@ -2395,6 +2537,11 @@ struct cmd_con {
   int ocol;
   int busy; /* um .EXE digitado aqui ainda roda: sem prompt */
   int hist; /* posicao no historico: 0 = linha nova, 1 = comando mais recente */
+  int cur;  /* cursor na linha digitada */
+  /* Marcacao de (ar, ac) ate (br, bc): linha virtual (0..n-1 = line[], n = a do
+   * prompt) e coluna; na linha do prompt a coluna conta o prompt e depois in[]. */
+  int sel;
+  int ar, ac, br, bc;
 };
 
 static struct cmd_con* cons_cap;
@@ -2451,6 +2598,7 @@ static void cmd_push(struct cmd_con* c, const char* s) {
       for (i = 0; i < CMD_COLS; i++) c->line[row - 1][i] = c->line[row][i];
     c->n = CMD_ROWS - 1;
   }
+  c->sel = 0; /* as linhas mudam: a marcacao nao vale mais */
   row = c->n++;
   for (i = 0; i < CMD_COLS - 1 && s[i]; i++) c->line[row][i] = s[i];
   c->line[row][i] = '\0';
@@ -2477,6 +2625,8 @@ static void cmd_set_input(struct cmd_con* c, const char* s) {
   for (i = 0; i < CMD_IN - 1 && s[i]; i++) c->in[i] = s[i];
   c->in[i] = '\0';
   c->inlen = i;
+  c->cur = i;
+  c->sel = 0;
   c->hist = 0;
 }
 
@@ -2524,20 +2674,250 @@ static int cmd_enter(struct wm_win* w) {
   return 0;
 }
 
+static int cmd_plen(void) {
+  char prompt[48];
+  int n = 0;
+  drives_prompt(prompt, (int)sizeof(prompt));
+  while (prompt[n]) n++;
+  return n;
+}
+
+/* Texto da linha virtual r (n = prompt + linha digitada). */
+static int cmd_row_text(struct cmd_con* c, int r, char* out, int max) {
+  int n = 0, k;
+  if (max < 1) return 0;
+  if (r >= 0 && r < c->n) {
+    for (k = 0; c->line[r][k] && n < max - 1; k++) out[n++] = c->line[r][k];
+  } else if (r == c->n) {
+    drives_prompt(out, max);
+    while (out[n]) n++;
+    for (k = 0; k < c->inlen && n < max - 1; k++) out[n++] = c->in[k];
+  }
+  out[n] = '\0';
+  return n;
+}
+
+/* Marcacao em ordem: (*r0, *c0) antes de (*r1, *c1). 0 se vazia. */
+static int cmd_sel_span(struct cmd_con* c, int* r0, int* c0, int* r1, int* c1) {
+  int fwd;
+  if (!c->sel) return 0;
+  fwd = c->ar < c->br || (c->ar == c->br && c->ac <= c->bc);
+  *r0 = fwd ? c->ar : c->br;
+  *c0 = fwd ? c->ac : c->bc;
+  *r1 = fwd ? c->br : c->ar;
+  *c1 = fwd ? c->bc : c->ac;
+  return *r0 != *r1 || *c0 != *c1;
+}
+
+/* Ctrl+C: o trecho marcado vai para a area de transferencia do kernel. */
+static void cmd_clip_copy(struct cmd_con* c) {
+  static char out[CLIP_MAX];
+  char row[CMD_COLS + 48 + CMD_IN];
+  int r0, c0, r1, c1, r, n = 0;
+  if (!cmd_sel_span(c, &r0, &c0, &r1, &c1)) return;
+  for (r = r0; r <= r1; r++) {
+    int len = cmd_row_text(c, r, row, (int)sizeof(row));
+    int a = r == r0 ? c0 : 0;
+    int b = r == r1 ? c1 : len;
+    if (b > len) b = len;
+    while (a < b && n < CLIP_MAX - 2) out[n++] = row[a++];
+    if (r < r1) out[n++] = '\n';
+  }
+  clip_set(out, n);
+}
+
+/* Apaga o que esta marcado dentro da linha digitada; 1 se apagou. */
+static int cmd_del_sel(struct cmd_con* c) {
+  int r0, c0, r1, c1, plen, a, b, i;
+  if (!cmd_sel_span(c, &r0, &c0, &r1, &c1) || r0 != c->n || r1 != c->n) {
+    c->sel = 0;
+    return 0;
+  }
+  plen = cmd_plen();
+  a = c0 - plen;
+  b = c1 - plen;
+  c->sel = 0;
+  if (a < 0) a = 0;
+  if (b > c->inlen) b = c->inlen;
+  if (b <= a) return 0;
+  for (i = b; i <= c->inlen; i++) c->in[a + i - b] = c->in[i];
+  c->inlen -= b - a;
+  c->cur = a;
+  return 1;
+}
+
+static void cmd_insert(struct cmd_con* c, const char* s, int n) {
+  int i;
+  if (c->cur > c->inlen) c->cur = c->inlen;
+  if (n > CMD_IN - 1 - c->inlen) n = CMD_IN - 1 - c->inlen;
+  if (n <= 0) return;
+  for (i = c->inlen; i >= c->cur; i--) c->in[i + n] = c->in[i];
+  for (i = 0; i < n; i++) c->in[c->cur + i] = s[i];
+  c->inlen += n;
+  c->cur += n;
+}
+
+/* Ctrl+V: cola na linha digitada; quebras de linha viram espaco. */
+static void cmd_paste(struct cmd_con* c) {
+  static char t[CLIP_MAX];
+  int n = clip_get(t, (int)sizeof(t));
+  int k, m = 0;
+  if (c->busy) return;
+  cmd_del_sel(c);
+  while (n > 0 && (t[n - 1] == '\n' || t[n - 1] == '\r')) n--;
+  for (k = 0; k < n; k++) {
+    char ch = t[k];
+    if (ch == '\n' || ch == '\t') ch = ' ';
+    if (ch < 32 || ch > 126) continue;
+    t[m++] = ch;
+  }
+  cmd_insert(c, t, m);
+  c->hist = 0;
+}
+
+/* Setas, Home e End (sem E0) na linha digitada; com Shift marcam. */
+static void cmd_move(struct cmd_con* c, uint8_t sc, int shift) {
+  int plen;
+  if (c->busy) return;
+  plen = cmd_plen();
+  if (shift && !(c->sel && c->ar == c->n)) {
+    c->sel = 1;
+    c->ar = c->n;
+    c->ac = plen + c->cur;
+  }
+  if (sc == 0x4B && c->cur > 0) c->cur--;
+  else if (sc == 0x4D && c->cur < c->inlen) c->cur++;
+  else if (sc == 0x47) c->cur = 0;
+  else if (sc == 0x4F) c->cur = c->inlen;
+  if (shift) {
+    c->br = c->n;
+    c->bc = plen + c->cur;
+  } else {
+    c->sel = 0;
+  }
+}
+
 static int cmd_key(struct wm_win* w, char ch) {
   struct cmd_con* c = (struct cmd_con*)w->st;
   if (!c || c->busy) return 0;
   c->hist = 0; /* editou a linha: as setas recomecam do mais recente */
-  if (ch == '\b') {
-    if (c->inlen > 0) c->in[--c->inlen] = '\0';
+  if (ch == '\b' || ch == 0x7f) {
+    /* com algo marcado na linha, apaga a marcacao; senao o anterior (Del: o seguinte) */
+    if (cmd_del_sel(c)) return 0;
+    if (ch == 0x7f) {
+      if (c->cur < c->inlen) {
+        c->cur++;
+        ch = '\b';
+      } else {
+        return 0;
+      }
+    }
+    if (c->cur > 0) {
+      int i;
+      for (i = c->cur - 1; i < c->inlen; i++) c->in[i] = c->in[i + 1];
+      c->inlen--;
+      c->cur--;
+    }
     return 0;
   }
   if (ch == '\n' || ch == '\r') return cmd_enter(w);
-  if (ch >= 32 && ch < 127 && c->inlen < CMD_IN - 1) {
-    c->in[c->inlen++] = ch;
-    c->in[c->inlen] = '\0';
+  if (ch >= 32 && ch < 127) {
+    cmd_del_sel(c);
+    cmd_insert(c, &ch, 1);
   }
   return 0;
+}
+
+/* Onde cada coisa fica na janela do Command (desenho e mouse usam a mesma conta). */
+struct cmd_geo {
+  int ih, y0, x0, cell;
+  int start;      /* primeira linha de line[] mostrada */
+  int prompt_row; /* linha da tela com o prompt */
+  int maxc;       /* colunas que cabem */
+  int plen;       /* tamanho do prompt */
+  int off;        /* primeiro caractere de in[] mostrado */
+};
+
+static void cmd_geom(struct wm_win* w, struct cmd_con* c, int title_h, int scale,
+                     struct cmd_geo* g) {
+  int ch = (vga_bios_font_ok ? FONT_H : 8) * scale;
+  int vis, room;
+  g->ih = ch;
+  g->y0 = w->y + title_h;
+  g->x0 = w->x + 6;
+  vis = (w->h - title_h) / ch;
+  if (vis < 1) vis = 1;
+  /* Nasce no topo. Desce com o texto. So fica no rodape quando a janela enche. */
+  if (c->n + 1 <= vis) {
+    g->start = 0;
+    g->prompt_row = c->n;
+  } else {
+    g->start = c->n - (vis - 1);
+    g->prompt_row = vis - 1;
+  }
+  g->cell = FONT_W * scale;
+  g->maxc = g->cell > 0 ? (w->w - 12) / g->cell : 40;
+  if (g->maxc < 8) g->maxc = 8;
+  if (g->maxc > CMD_COLS - 1) g->maxc = CMD_COLS - 1;
+  g->plen = cmd_plen();
+  room = g->maxc - g->plen;
+  if (room < 1) room = 1;
+  g->off = c->inlen > room ? c->inlen - room : 0;
+  if (c->cur < g->off) g->off = c->cur;
+}
+
+/* Linha virtual e coluna sob o ponto (mx, my). */
+static void cmd_hit(struct wm_win* w, struct cmd_con* c, int title_h, int scale, int mx, int my,
+                    int* r, int* col) {
+  struct cmd_geo g;
+  int li, k;
+  cmd_geom(w, c, title_h, scale, &g);
+  li = my < g.y0 ? 0 : (my - g.y0) / g.ih;
+  k = (mx - g.x0 + g.cell / 2) / (g.cell > 0 ? g.cell : 1);
+  if (k < 0) k = 0;
+  if (li >= g.prompt_row) {
+    *r = c->n;
+    if (k > g.plen) k += g.off;
+    if (k > g.plen + c->inlen) k = g.plen + c->inlen;
+  } else {
+    *r = g.start + li;
+  }
+  *col = k;
+}
+
+static void cmd_draw(struct wm_win* w, int focus, int title_h, int scale,
+                     uint32_t col_white, uint32_t col_black) {
+  struct cmd_con* c = (struct cmd_con*)w->st;
+  struct cmd_geo g;
+  char row[CMD_COLS + 48];
+  int r0 = 0, c0 = 0, r1 = 0, c1 = 0;
+  int has = cmd_sel_span(c, &r0, &c0, &r1, &c1);
+  int li, k, last;
+  cmd_geom(w, c, title_h, scale, &g);
+  fill_rect(w->x, g.y0, w->w, w->h - title_h, col_black);
+  last = c->busy ? g.prompt_row - 1 : g.prompt_row;
+  for (li = 0; li <= last; li++) {
+    int r = li == g.prompt_row ? c->n : g.start + li;
+    int len, py = g.y0 + li * g.ih;
+    if (r > c->n || (r == c->n && li != g.prompt_row)) break;
+    len = cmd_row_text(c, r, row, (int)sizeof(row));
+    for (k = 0; k < g.maxc; k++) {
+      /* na linha do prompt, a parte de in[] antes de off nao aparece */
+      int src = (r == c->n && k >= g.plen) ? k + g.off : k;
+      int on = has && (r > r0 || (r == r0 && src >= c0)) && (r < r1 || (r == r1 && src < c1));
+      int px = g.x0 + k * g.cell;
+      char chr = src < len ? row[src] : ' ';
+      if (src >= len && !on) break;
+      if (on) draw_char_scaled(px, py, chr, col_black, col_white, scale);
+      else draw_char_scaled(px, py, chr, col_white, col_black, scale);
+    }
+    if (r == c->n && focus) {
+      int px = g.x0 + (g.plen + c->cur - g.off) * g.cell;
+      fill_rect(px, py, g.cell > 0 ? g.cell : FONT_W, g.ih > 2 ? g.ih - 2 : g.ih, col_white);
+      if (c->cur < c->inlen)
+        draw_char_scaled(px, py, c->in[c->cur], col_black, col_white, scale);
+    }
+  }
 }
 
 static int path_is_command(const char* path) {
@@ -2635,53 +3015,7 @@ static void wm_draw_inner(struct wm_win* w, int focus, int title_h, int scale,
     }
     draw_string_scaled(w->x + 6, w->y + w->h - ch - 2, st->status, col_black, col_win, scale);
   } else if (w->kind == WM_KIND_CMD && w->st) {
-    struct cmd_con* c = (struct cmd_con*)w->st;
-    int ih = ch;
-    int y0 = w->y + title_h;
-    int client_h = w->h - title_h;
-    int vis = client_h / ih;
-    int start, li, k, prompt_row;
-    char row[CMD_COLS];
-    if (vis < 1) vis = 1;
-    fill_rect(w->x, y0, w->w, client_h, col_black);
-    /* Nasce no topo. Desce com o texto. So fica no rodape quando a janela enche. */
-    if (c->n + 1 <= vis) {
-      start = 0;
-      prompt_row = c->n;
-    } else {
-      start = c->n - (vis - 1);
-      prompt_row = vis - 1;
-    }
-    {
-      int cell = FONT_W * scale;
-      int maxc = cell > 0 ? (w->w - 12) / cell : 40;
-      char prompt[48];
-      int plen = 0;
-      int room, off, shown;
-      char clip[CMD_COLS];
-      int py = y0 + prompt_row * ih;
-      drives_prompt(prompt, (int)sizeof(prompt));
-      while (prompt[plen]) plen++;
-      if (maxc < 8) maxc = 8;
-      if (maxc > CMD_COLS - 1) maxc = CMD_COLS - 1;
-      for (li = 0; start + li < c->n && li < prompt_row; li++) {
-        for (k = 0; k < maxc && c->line[start + li][k]; k++) clip[k] = c->line[start + li][k];
-        clip[k] = '\0';
-        draw_string_scaled(w->x + 6, y0 + li * ih, clip, col_white, col_black, scale);
-      }
-      if (c->busy) return;
-      room = maxc - plen;
-      if (room < 1) room = 1;
-      off = c->inlen > room ? c->inlen - room : 0;
-      shown = c->inlen - off;
-      for (k = 0; k < plen && k < CMD_COLS - 1; k++) row[k] = prompt[k];
-      for (k = 0; k < shown && plen + k < CMD_COLS - 1; k++) row[plen + k] = c->in[off + k];
-      row[plen + k] = '\0';
-      draw_string_scaled(w->x + 6, py, row, col_white, col_black, scale);
-      if (focus)
-        fill_rect(w->x + 6 + (plen + k) * cell, py,
-                  cell > 0 ? cell : FONT_W, ih > 2 ? ih - 2 : ih, col_white);
-    }
+    cmd_draw(w, focus, title_h, scale, col_white, col_black);
   } else if (w->kind == WM_KIND_DISP) {
     disp_draw(w, title_h, scale, disp_hot, col_win, col_title, col_white, col_black);
   } else if (w->kind == WM_KIND_FONT) {
@@ -5514,6 +5848,7 @@ static int win_wm_run(void) {
   int drag_oy = 0;
   int prev_left = 0;
   int prev_right = 0;
+  int sel_drag = -1; /* Bloco de notas ou Command em que o botao marca texto */
   int pop_open = 0;
   int pop_x = 0;
   int pop_y = 0;
@@ -5960,6 +6295,27 @@ static int win_wm_run(void) {
             wins[drag].y = h - bar_h - wins[drag].h;
           if (drag_mode != 0 || !dc_track(drag, -1, wins[drag].w, wins[drag].h))
             need_draw = 1;
+        } else if (left && prev_left && sel_drag >= 0 && wins[sel_drag].used) {
+          /* arrastando: a ponta da marcacao segue o mouse */
+          struct wm_win* sw = &wins[sel_drag];
+          if (sw->kind == WM_KIND_NOTE) {
+            int top = title_h + note_menubar_h(ch);
+            int k = note_hit(sw, top, scale, (int)mx, (int)my);
+            if (k != note_caret) {
+              note_caret = k;
+              note_follow_caret(sw, top, scale);
+              need_draw = 1;
+            }
+          } else if (sw->kind == WM_KIND_CMD && sw->st) {
+            struct cmd_con* cc = (struct cmd_con*)sw->st;
+            int r, k;
+            cmd_hit(sw, cc, title_h, scale, (int)mx, (int)my, &r, &k);
+            if (r != cc->br || k != cc->bc) {
+              cc->br = r;
+              cc->bc = k;
+              need_draw = 1;
+            }
+          }
         } else if (left && !prev_left) {
           int handled = 0;
           int icons_on;
@@ -6317,6 +6673,29 @@ static int win_wm_run(void) {
                 drag_mode = 0;
                 drag_ox = (int)mx - wins[hit].x;
                 drag_oy = (int)my - wins[hit].y;
+              } else if (wins[hit].kind == WM_KIND_NOTE && !note_missing &&
+                         wm_pt((int)mx, (int)my, wins[hit].x, wins[hit].y + title_h + mb_h,
+                               wins[hit].w, wins[hit].h - title_h - mb_h)) {
+                /* clicar poe o cursor e comeca a marcar; com Shift estende */
+                int k = note_hit(&wins[hit], title_h + mb_h, scale, (int)mx, (int)my);
+                if (!keymap_shift()) note_anc = k;
+                else if (note_anc < 0) note_anc = note_caret;
+                note_caret = k;
+                sel_drag = hit;
+              } else if (wins[hit].kind == WM_KIND_CMD && wins[hit].st &&
+                         wm_pt((int)mx, (int)my, wins[hit].x, wins[hit].y + title_h,
+                               wins[hit].w, wins[hit].h - title_h)) {
+                struct cmd_con* cc = (struct cmd_con*)wins[hit].st;
+                int r, k;
+                cmd_hit(&wins[hit], cc, title_h, scale, (int)mx, (int)my, &r, &k);
+                if (!(keymap_shift() && cc->sel)) {
+                  cc->ar = r;
+                  cc->ac = k;
+                }
+                cc->br = r;
+                cc->bc = k;
+                cc->sel = 1;
+                sel_drag = hit;
               }
               need_draw = 1;
               handled = 1;
@@ -6331,6 +6710,7 @@ static int win_wm_run(void) {
           g_cap = -1;
           g_drag = -1;
           drag = -1;
+          sel_drag = -1;
           if (dc.on || dc.capture) {
             dc_end();
             need_draw = 1;
@@ -6413,8 +6793,26 @@ static int win_wm_run(void) {
             need_draw = 1;
           }
         } else if (!(sc & 0x80) && focus >= 0 && wins[focus].used && wins[focus].kind == WM_KIND_CMD) {
+          struct cmd_con* cc = (struct cmd_con*)wins[focus].st;
           if (sc == 0x48) cmd_hist(&wins[focus], 1);
           else if (sc == 0x50) cmd_hist(&wins[focus], -1);
+          else if (sc == 0x53) cmd_key(&wins[focus], 0x7f);
+          else if (cc && (sc == 0x4B || sc == 0x4D || sc == 0x47 || sc == 0x4F))
+            cmd_move(cc, sc, keymap_shift());
+          need_draw = 1;
+        } else if (!(sc & 0x80) && focus >= 0 && wins[focus].used && wins[focus].kind == WM_KIND_NOTE) {
+          int top = title_h + note_menubar_h(ch);
+          if (sc == 0x53) {
+            /* Del: apaga a marcacao ou o caractere sob o cursor */
+            if (!note_del_sel() && note_caret < note_len) {
+              note_anc = note_caret + 1;
+              note_del_sel();
+            }
+          } else if (sc == 0x4B || sc == 0x4D || sc == 0x48 || sc == 0x50 ||
+                     sc == 0x47 || sc == 0x4F) {
+            note_move(&wins[focus], scale, sc, keymap_shift());
+          }
+          note_follow_caret(&wins[focus], top, scale);
           need_draw = 1;
         }
         continue;
@@ -6516,6 +6914,53 @@ static int win_wm_run(void) {
           gq_push(&gwins[gui_focus], GUI_EV_KEY, 0, 0, k);
           continue;
         }
+        /* Ctrl+C copia, Ctrl+X recorta, Ctrl+V cola e Ctrl+A marca tudo, no
+         * Command e no Bloco de notas. A area de transferencia e a do kernel,
+         * a mesma do prompt do DOS. */
+        if (kbd_ctrl_down() && focus >= 0 && wins[focus].used &&
+            (wins[focus].kind == WM_KIND_CMD || wins[focus].kind == WM_KIND_NOTE)) {
+          int l = (unsigned char)c | 0x20;
+          if (l == 'c' || l == 'x' || l == 'v' || l == 'a') {
+            if (wins[focus].kind == WM_KIND_CMD && wins[focus].st) {
+              struct cmd_con* cc = (struct cmd_con*)wins[focus].st;
+              if (l == 'c' || l == 'x') cmd_clip_copy(cc);
+              if (l == 'x' && !cc->busy) cmd_del_sel(cc);
+              if (l == 'v') cmd_paste(cc);
+              if (l == 'a' && !cc->busy) {
+                cc->sel = 1;
+                cc->ar = cc->n;
+                cc->ac = cmd_plen();
+                cc->br = cc->n;
+                cc->bc = cc->ac + cc->inlen;
+                cc->cur = cc->inlen;
+              }
+            } else if (wins[focus].kind == WM_KIND_NOTE) {
+              int a, b;
+              if (note_missing) {
+                note_buf[0] = '\0';
+                note_len = 0;
+                note_caret = 0;
+                note_anc = -1;
+                note_missing = 0;
+              }
+              if ((l == 'c' || l == 'x') && note_sel(&a, &b)) clip_set(note_buf + a, b - a);
+              if (l == 'x') note_del_sel();
+              if (l == 'v') {
+                static char t[CLIP_MAX];
+                int n = clip_get(t, (int)sizeof(t));
+                note_del_sel();
+                note_insert(t, n);
+              }
+              if (l == 'a') {
+                note_anc = 0;
+                note_caret = note_len;
+              }
+              note_follow_caret(&wins[focus], title_h + note_menubar_h(ch), scale);
+            }
+            need_draw = 1;
+            continue;
+          }
+        }
         if (focus >= 0 && wins[focus].used && wins[focus].kind == WM_KIND_CMD) {
           if (cmd_key(&wins[focus], c)) {
             if (wins[focus].st) kfree(wins[focus].st);
@@ -6532,26 +6977,25 @@ static int win_wm_run(void) {
         if (note_missing) {
           note_buf[0] = '\0';
           note_len = 0;
+          note_caret = 0;
+          note_anc = -1;
           note_missing = 0;
         }
         if (c == '\b') {
-          if (note_len > 0) {
-            note_len--;
-            note_buf[note_len] = '\0';
-            note_dirty = 1;
-            note_follow_end(&wins[focus], title_h + note_menubar_h(ch), scale);
-            need_draw = 1;
+          /* apaga a marcacao ou o caractere antes do cursor */
+          if (!note_del_sel() && note_caret > 0) {
+            note_anc = note_caret - 1;
+            note_del_sel();
           }
+          note_follow_caret(&wins[focus], title_h + note_menubar_h(ch), scale);
+          need_draw = 1;
           continue;
         }
         if (c == '\n' || c == '\r') c = '\n';
-        if (note_len < (int)sizeof(note_buf) - 1) {
-          note_buf[note_len++] = c;
-          note_buf[note_len] = '\0';
-          note_dirty = 1;
-          note_follow_end(&wins[focus], title_h + note_menubar_h(ch), scale);
-          need_draw = 1;
-        }
+        note_del_sel(); /* digitar troca o que esta marcado */
+        note_insert(&c, 1);
+        note_follow_caret(&wins[focus], title_h + note_menubar_h(ch), scale);
+        need_draw = 1;
       }
     }
   }
