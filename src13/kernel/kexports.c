@@ -8,6 +8,7 @@
 #include "net.h"
 #include "module.h"
 #include "kexports.h"
+#include "clip.h"
 #include "visual.h"
 #include "fbcon.h"
 #include "sched.h"
@@ -474,6 +475,11 @@ static int k_win_key(int ch) { return win_api_key(ch); }
 
 static int k_win_launch(const char* path) { return win_launch(path); }
 
+/* area de transferencia do kernel (a mesma do Ctrl+C/Ctrl+V do WIN e do DOS) */
+static void k_clip_set(const char* s, int n) { clip_set(s, n); }
+
+static int k_clip_get(char* out, int max) { return clip_get(out, max); }
+
 static int k_win_wallpaper(const void* rgba, int w, int h) {
   return win_wall_set((const uint8_t*)rgba, w, h);
 }
@@ -573,6 +579,8 @@ static const struct kexp table[] = {
   EXP(k_win_wallpaper),
   EXP(k_win_key),
   EXP(k_win_launch),
+  EXP(k_clip_set),
+  EXP(k_clip_get),
   EXP(k_ui_menu_pos),
   EXP(k_ui_glass),
   EXP(k_ui_ia),

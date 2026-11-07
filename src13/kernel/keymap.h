@@ -24,5 +24,7 @@ int keymap_ext_char(uint8_t sc);
  * como a tecla E0 de mesmo codigo (seta, Home...). Ligado, keymap_char da o
  * numero. */
 int keymap_kp_nav(uint8_t sc);
+/* 1 enquanto um dos Shift esta apertado (Shift+setas marcam texto). */
+int keymap_shift(void);
 /* Tecla que sobrou de uma combinacao que nao existe (0 = nenhuma). */
 int keymap_pending(void);

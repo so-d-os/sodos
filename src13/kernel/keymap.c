@@ -214,6 +214,8 @@ int keymap_ext_char(uint8_t sc) {
   return 0;
 }
 
+int keymap_shift(void) { return km_shift != 0; }
+
 int keymap_pending(void) {
   int p = km_pending;
   km_pending = 0;

@@ -146,6 +146,10 @@ int k_ui_glass(int on);
 int k_ui_ia(int on);
 /* Pede ao WIN que abra um programa (janela); 0 = pedido aceito. */
 int k_win_launch(const char* path);
+/* Area de transferencia do sistema (Ctrl+C/Ctrl+V do WIN e do DOS).
+ * k_clip_set: n < 0 = ate o '\0'. k_clip_get devolve o tamanho copiado. */
+void k_clip_set(const char* s, int n);
+int k_clip_get(char* out, int max);
 
 /* No cc, __export em uma funcao ou variavel global a coloca na tabela de
  * exports da DLL. No gcc (bootstrap) use link /export:nome ou /exportall. */

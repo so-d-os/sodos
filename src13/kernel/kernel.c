@@ -41,6 +41,7 @@ int format_fat16(uint32_t drive, uint32_t lba_start, uint32_t total_sectors, con
 #include "httpd.h"
 #include "module.h"
 #include "keymap.h"
+#include "clip.h"
 
 const struct executable_entry* find_executable(const char* name) {
   for (int i = 0; i < executable_count; i++) {
@@ -791,22 +792,126 @@ static void replace_line(char* buf, int* len, int* pos, const char* s, int max) 
   *pos = n;
 }
 
+/* Pinta a linha digitada com o trecho [a, b) marcado em video invertido. O
+ * cursor esta em pos, entao a linha comeca pos celulas antes dele. */
+static void paint_sel(int len, int pos, int a, int b) {
+  int base = row * 80 + col - pos;
+  int k;
+  if (shell_out_fn) return;
+  for (k = 0; k < len; k++) {
+    int at = base + k;
+    uint16_t attr = (k >= a && k < b) ? 0x70 : 0x07;
+    if (at < 0 || at >= 80 * 25) continue;
+    VGA[at] = (uint16_t)((VGA[at] & 0xFF) | (attr << 8));
+  }
+  fbcon_sync();
+}
+
+// Apaga buf[a..b) (o trecho marcado); o cursor vai para a
+static void line_cut(char* buf, int* len, int* pos, int a, int b) {
+  int n = b - a;
+  int k;
+  if (n <= 0) return;
+  cursor_back(*pos - a);
+  for (k = a; k + n < *len; k++) buf[k] = buf[k + n];
+  *len -= n;
+  buf[*len] = '\0';
+  *pos = a;
+  redraw_tail(buf, a, *len, n);
+}
+
+// Ctrl+V: cola a area de transferencia no cursor. Quebras de linha viram espaco.
+static void line_paste(char* buf, int* len, int* pos, int max) {
+  static char clip[CLIP_MAX];
+  int n = clip_get(clip, (int)sizeof(clip));
+  int k, m = 0;
+  while (n > 0 && (clip[n - 1] == '\n' || clip[n - 1] == '\r')) n--;
+  for (k = 0; k < n; k++) {
+    char ch = clip[k];
+    if (ch == '\n' || ch == '\t') ch = ' ';
+    if ((unsigned char)ch < 32) continue;
+    clip[m++] = ch;
+  }
+  if (m > max - 1 - *len) m = max - 1 - *len;
+  if (m <= 0) return;
+  for (k = *len - 1; k >= *pos; k--) buf[k + m] = buf[k];
+  for (k = 0; k < m; k++) buf[*pos + k] = clip[k];
+  *len += m;
+  buf[*len] = '\0';
+  redraw_tail(buf, *pos, *len, 0);
+  cursor_fwd(m);
+  *pos += m;
+}
+
 static void read_line(char* buf, int max) {
   int len = 0;
   int pos = 0;
+  int anc = -1; /* inicio da marcacao (Shift+setas); -1 = nada marcado */
   int k;
   buf[0] = '\0';
   history_index = -1;
-  
   for (;;) {
-    int c = get_char();
+    int c;
+    int sa, sb;
+    if (anc > len) anc = -1;
+    sa = anc < 0 ? pos : (anc < pos ? anc : pos);
+    sb = anc < 0 ? pos : (anc < pos ? pos : anc);
+    paint_sel(len, pos, sa, sb);
+    c = get_char();
     if (!c) continue;
     
     if (c == '\r' || c == '\n') {
+      paint_sel(len, pos, 0, 0);
       cursor_fwd(len - pos);
       putc('\n');
       buf[len] = '\0';
       return;
+    }
+
+    /* Ctrl+C copia, Ctrl+X recorta, Ctrl+V cola e Ctrl+A marca tudo. A area
+     * de transferencia e do kernel: a mesma do Command e do Bloco de notas. */
+    if (kbd_ctrl_down() && c < 0x100) {
+      int l = c | 0x20;
+      if (l == 'c' || l == 'x') {
+        if (sb > sa) {
+          clip_set(buf + sa, sb - sa);
+          if (l == 'x') {
+            line_cut(buf, &len, &pos, sa, sb);
+            anc = -1;
+          }
+        }
+        continue;
+      }
+      if (l == 'v') {
+        line_cut(buf, &len, &pos, sa, sb);
+        anc = -1;
+        line_paste(buf, &len, &pos, max);
+        continue;
+      }
+      if (l == 'a') {
+        cursor_fwd(len - pos);
+        pos = len;
+        anc = 0;
+        continue;
+      }
+    }
+
+    /* Shift com seta, Home ou End estende a marcacao; sem Shift ela some. */
+    if (c == KEY_LEFT || c == KEY_RIGHT || c == KEY_HOME || c == KEY_END) {
+      if (!keymap_shift()) anc = -1;
+      else if (anc < 0) anc = pos;
+    } else if (c < 0x100 || c == KEY_DEL || c == KEY_UP || c == KEY_DOWN ||
+               c == KEY_PGUP || c == KEY_PGDN) {
+      /* Del e Backspace apagam o trecho marcado; uma letra o substitui. */
+      if (sb > sa && (c == '\b' || c == 0x7f || c == KEY_DEL)) {
+        line_cut(buf, &len, &pos, sa, sb);
+        anc = -1;
+        history_index = -1;
+        continue;
+      }
+      if (sb > sa && c >= 32 && c < 0x100 && c != 0x7f)
+        line_cut(buf, &len, &pos, sa, sb);
+      anc = -1;
     }
     
     if (c == KEY_UP || c == KEY_PGUP) {
