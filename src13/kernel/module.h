@@ -30,6 +30,20 @@ void mod_dll_free(int handle);
 /* Ultimo erro de carga (texto curto para o usuario). */
 const char* mod_last_error(void);
 
+/* Um modulo carregado, para o TOP. raw/exports/strtab sao os blocos da arena
+ * alta que ele ocupa (dono 0). */
+struct mod_info {
+  char name[32];
+  uint32_t pid;
+  int is_dll;
+  int refs;
+  uint32_t base;
+  uint32_t size;
+  uint32_t blk[3];
+};
+/* i de 0 a MOD_MAX-1; 1 se o slot esta em uso. */
+int mod_get(int i, struct mod_info* out);
+
 /* Lista modulos carregados no console. */
 void mod_list(void);
 

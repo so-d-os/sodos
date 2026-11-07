@@ -751,7 +751,10 @@ static int do_link(const char* out) {
     int g = gfind(opt_entry ? opt_entry : "_start", 1);
     gs[g].referenced = 1;
   }
-  for (i = 0; i < nexp_opt; i++) gs[gfind(opt_exports[i], 1)].referenced = 1;
+  for (i = 0; i < nexp_opt; i++) {
+    int g = gfind(opt_exports[i], 1);
+    gs[g].referenced = 1;
+  }
   do {
     changed = 0;
     for (i = 0; i < nobjs; i++) {
@@ -808,8 +811,12 @@ static int do_link(const char* out) {
     {
       int a = add_sym(0, "__init_array_start", s_init, 0, 1, 0, 0);
       int z = add_sym(0, "__init_array_end", s_init, pos[K_INIT], 1, 0, 0);
-      gs[gfind("__init_array_start", 1)].sym = a;
-      gs[gfind("__init_array_end", 1)].sym = z;
+      /* gfind pode crescer gs: o indice antes, a escrita depois. */
+      int ga = gfind("__init_array_start", 1);
+      int gz;
+      gs[ga].sym = a;
+      gz = gfind("__init_array_end", 1);
+      gs[gz].sym = z;
     }
   }
 

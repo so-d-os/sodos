@@ -644,6 +644,24 @@ void mod_dll_free(int handle) {
   release(id);
 }
 
+int mod_get(int i, struct mod_info* out) {
+  const struct module* m;
+  int k;
+  if (i < 0 || i >= MOD_MAX || !mods[i].used || !out) return 0;
+  m = &mods[i];
+  for (k = 0; k < 31 && m->name[k]; k++) out->name[k] = m->name[k];
+  out->name[k] = 0;
+  out->pid = m->pid;
+  out->is_dll = m->is_dll;
+  out->refs = m->refs;
+  out->base = (uint32_t)(uintptr_t)m->base;
+  out->size = m->size;
+  out->blk[0] = (uint32_t)(uintptr_t)m->raw;
+  out->blk[1] = (uint32_t)(uintptr_t)m->exports;
+  out->blk[2] = (uint32_t)(uintptr_t)m->strtab;
+  return 1;
+}
+
 static void put_hex(uint32_t v) {
   static const char hx[] = "0123456789ABCDEF";
   int i;

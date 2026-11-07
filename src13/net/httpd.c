@@ -504,6 +504,8 @@ void httpd_start(int port) {
   serial_puts("[httpd] escuta 8797\n");
 }
 
+int httpd_port(void) { return listening ? port_num : 0; }
+
 void httpd_poll(void) {
   static char req[8192];
   int n;
@@ -512,5 +514,4 @@ void httpd_poll(void) {
   n = net_srv_take(req, (int)sizeof(req));
   if (n > 0) handle(req);
   poll_lock = 0;
-  (void)port_num;
 }

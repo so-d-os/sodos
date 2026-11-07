@@ -513,3 +513,30 @@ void ufree_owner(uint32_t owner) {
 void um_stats(uint32_t* total, uint32_t* used, uint32_t* free_bytes, uint32_t* largest) {
   arena_stats(&high, total, used, free_bytes, largest);
 }
+
+static void arena_walk(const struct arena* a, int area, mm_walk_fn fn, void* arg) {
+  struct mm_hdr* h;
+  if (!a->ready) return;
+  h = blk_at(a->start);
+  while (range_ok(a, h)) {
+    fn(arg, area, (uint32_t)h, h->size, !h->free, h->free ? 0 : h->owner);
+    h = blk_at((uint32_t)h + h->size);
+  }
+}
+
+void mm_walk(mm_walk_fn fn, void* arg) {
+  uint32_t i;
+  if (!fn) return;
+  arena_walk(&low, 0, fn, arg);
+  arena_walk(&high, 1, fn, arg);
+  for (i = 0; i < hm_count; ++i) {
+    const struct harena* a = &hm_arenas[i];
+    struct hm_hdr* h = (struct hm_hdr*)(uintptr_t)a->start;
+    while (hm_ok(a, h)) {
+      fn(arg, 2, (uint64_t)(uintptr_t)h, h->size, !h->free, 0);
+      h = (struct hm_hdr*)((uint8_t*)h + h->size);
+    }
+  }
+}
+
+uint32_t mm_kernel_end(void) { return kernel_reserved_end(bootinfo_get()); }

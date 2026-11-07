@@ -4,3 +4,5 @@
 
 void httpd_start(int port);
 void httpd_poll(void);
+/* Porta em que o servico escuta, 0 se nao subiu. */
+int httpd_port(void);

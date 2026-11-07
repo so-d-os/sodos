@@ -13,6 +13,8 @@
 #include "fbcon.h"
 #include "sched.h"
 #include "serial.h"
+#include "bootinfo.h"
+#include "httpd.h"
 
 void mod_exit(int code);
 void shell_read_line(char* buf, int max);
@@ -499,6 +501,266 @@ static int k_ui_ia(int on) {
 }
 static int k_gui_dock(const char* title, int w) { return gui_dock_open(title, w); }
 
+/* ---------- TOP: programas, servicos e mapa da memoria ----------
+ * Os blocos de imagem, exports e strings de um modulo tem dono 0; os dados
+ * (malloc e pilha) de um .EXE tem o pid dele. Tamanhos para o programa em KB. */
+#define KP_EXE 1
+#define KP_DLL 2
+#define KP_SYS 3
+#define KP_SVC 4
+
+struct k_proc {
+  char name[32];
+  uint32_t pid;
+  uint32_t kind;
+  uint32_t state;
+  uint32_t base;
+  uint32_t image_kb;
+  uint32_t data_kb;
+  uint32_t refs;
+  uint32_t pad;
+};
+
+#define KM_LIVRE 0
+#define KM_KERNEL 1
+#define KM_EXE 2
+#define KM_DLL 3
+#define KM_DADOS 4
+#define KM_BUFFERS 5
+#define KM_RESERV 6
+#define KM_DONO 7
+#define KM_CATS 8
+#define KM_CELLS_MAX 2048
+#define KM_HDR 16u
+
+static struct mod_info top_mod[MOD_MAX];
+static int top_nmod;
+
+static void top_load_mods(void) {
+  int i;
+  top_nmod = 0;
+  for (i = 0; i < MOD_MAX; i++)
+    if (mod_get(i, &top_mod[top_nmod])) top_nmod++;
+}
+
+/* Modulo dono do bloco (pelo endereco util), ou -1. */
+static int top_block_mod(uint64_t addr) {
+  uint32_t p = (uint32_t)(addr + KM_HDR);
+  int i, k;
+  if (addr + KM_HDR > 0xFFFFFFFFull) return -1;
+  for (i = 0; i < top_nmod; i++)
+    for (k = 0; k < 3; k++)
+      if (top_mod[i].blk[k] == p) return i;
+  return -1;
+}
+
+static int top_exe_of(uint32_t pid) {
+  int i;
+  for (i = 0; i < top_nmod; i++)
+    if (!top_mod[i].is_dll && top_mod[i].pid == pid) return i;
+  return -1;
+}
+
+static uint32_t to_kb(uint64_t b) {
+  b = (b + 1023u) >> 10;
+  return b > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)b;
+}
+
+struct ps_acc {
+  uint64_t image[MOD_MAX];
+  uint64_t data[MOD_MAX];
+  uint64_t klow, buffers, high;
+};
+
+static void ps_walk(void* arg, int area, uint64_t addr, uint64_t size, int used, uint32_t owner) {
+  struct ps_acc* a = (struct ps_acc*)arg;
+  int m;
+  if (!used) return;
+  if (area == 0) { a->klow += size; return; }
+  if (area == 2) { a->high += size; return; }
+  m = top_block_mod(addr);
+  if (m >= 0) { a->image[m] += size; return; }
+  m = owner ? top_exe_of(owner) : -1;
+  if (m >= 0) a->data[m] += size;
+  else a->buffers += size;
+}
+
+static void ps_name(struct k_proc* p, const char* s) {
+  int i;
+  for (i = 0; i < 31 && s[i]; i++) p->name[i] = s[i];
+  for (; i < 32; i++) p->name[i] = 0;
+}
+
+static struct ps_acc ps_tmp;
+
+/* Programas, DLLs, partes do kernel e servicos. Devolve quantos gravou. */
+static int k_ps(struct k_proc* out, int max) {
+  int i, n = 0;
+  uint32_t cur = mod_current_pid();
+  struct k_proc* p;
+  if (!out || max <= 0) return 0;
+  top_load_mods();
+  for (i = 0; i < (int)sizeof(ps_tmp); i++) ((uint8_t*)&ps_tmp)[i] = 0;
+  mm_walk(ps_walk, &ps_tmp);
+  for (i = 0; i < top_nmod && n < max; i++) {
+    const struct mod_info* m = &top_mod[i];
+    p = &out[n++];
+    ps_name(p, m->name);
+    p->kind = m->is_dll ? KP_DLL : KP_EXE;
+    p->pid = m->is_dll ? 0 : m->pid;
+    p->state = m->is_dll ? 'S' : (m->pid == cur ? 'R' : 'E');
+    p->base = m->base;
+    p->image_kb = to_kb(ps_tmp.image[i]);
+    p->data_kb = to_kb(ps_tmp.data[i]);
+    p->refs = (uint32_t)m->refs;
+    p->pad = 0;
+  }
+  if (n < max) {
+    p = &out[n++];
+    ps_name(p, "KERNEL");
+    p->kind = KP_SYS;
+    p->pid = 0;
+    p->state = 'S';
+    p->base = 0x01000000u;
+    p->image_kb = to_kb(mm_kernel_end() - 0x01000000u);
+    p->data_kb = to_kb(ps_tmp.klow);
+    p->refs = 0;
+    p->pad = 0;
+  }
+  if (n < max) {
+    p = &out[n++];
+    ps_name(p, "BUFFERS");
+    p->kind = KP_SYS;
+    p->pid = 0;
+    p->state = 'S';
+    p->base = um_start();
+    p->image_kb = 0;
+    p->data_kb = to_kb(ps_tmp.buffers);
+    p->refs = 0;
+    p->pad = 0;
+  }
+  if (hm_ready() && n < max) {
+    p = &out[n++];
+    ps_name(p, "MEM>4GB");
+    p->kind = KP_SYS;
+    p->pid = 0;
+    p->state = 'S';
+    p->base = 0;
+    p->image_kb = 0;
+    p->data_kb = to_kb(ps_tmp.high);
+    p->refs = 0;
+    p->pad = 0;
+  }
+  if (n < max) {
+    p = &out[n++];
+    ps_name(p, "REDE");
+    p->kind = KP_SVC;
+    p->pid = 0;
+    p->state = net_ready() ? 'A' : 'P';
+    p->base = 0;
+    p->image_kb = p->data_kb = 0;
+    p->refs = 0;
+    p->pad = 0;
+  }
+  if (n < max) {
+    p = &out[n++];
+    ps_name(p, "HTTPD");
+    p->kind = KP_SVC;
+    p->pid = 0;
+    p->state = httpd_port() ? 'A' : 'P';
+    p->base = 0;
+    p->image_kb = p->data_kb = 0;
+    p->refs = (uint32_t)httpd_port();
+    p->pad = 0;
+  }
+  return n;
+}
+
+/* Mapa: cada celula soma os bytes de cada categoria; a coluna KM_CATS guarda
+ * quanto dela o E820 diz que e RAM. */
+static uint64_t map_acc[KM_CELLS_MAX][KM_CATS + 1];
+static uint64_t map_cell;
+static int map_n;
+static uint32_t map_pid;
+
+static void map_add(uint64_t a, uint64_t len, int cat) {
+  uint64_t e = a + len;
+  uint64_t c;
+  if (len == 0 || e < a) return;
+  for (c = a / map_cell; c < (uint64_t)map_n && a < e; c++) {
+    uint64_t ce = (c + 1) * map_cell;
+    uint64_t k = (e < ce ? e : ce) - a;
+    map_acc[c][cat] += k;
+    a += k;
+  }
+}
+
+static void map_walk(void* arg, int area, uint64_t addr, uint64_t size, int used, uint32_t owner) {
+  int cat, m = -1;
+  (void)arg;
+  if (area == 0) cat = KM_KERNEL;
+  else if (!used) cat = KM_LIVRE;
+  else if (area == 2) cat = KM_BUFFERS;
+  else if ((m = top_block_mod(addr)) >= 0) cat = top_mod[m].is_dll ? KM_DLL : KM_EXE;
+  else cat = owner && top_exe_of(owner) >= 0 ? KM_DADOS : KM_BUFFERS;
+  map_add(addr, size, cat);
+  if (map_pid && used && area == 1 &&
+      ((m >= 0 && !top_mod[m].is_dll && top_mod[m].pid == map_pid) || (m < 0 && owner == map_pid)))
+    map_add(addr, size, KM_DONO);
+}
+
+/* kb[celula * KM_CATS + categoria]. *cell_kb = 0 escolhe a menor potencia de
+ * 2 MB que cobre toda a RAM em 'cells'. pid != 0 tambem conta, em KM_DONO, o
+ * que esse programa ocupa. Devolve quantas celulas usou. */
+static int k_memmap(uint32_t* kb, int cells, uint32_t* cell_kb, uint32_t pid) {
+  const struct BootInfo* bi = bootinfo_get();
+  const struct BootMemEntry* map = bootinfo_mem_map(bi);
+  uint64_t span = 0;
+  uint32_t i;
+  int c, k;
+  if (!kb || !cell_kb || cells <= 0) return 0;
+  if (cells > KM_CELLS_MAX) cells = KM_CELLS_MAX;
+  if (map && bi->mem_count) {
+    for (i = 0; i < bi->mem_count; i++)
+      if (map[i].type == BOOTINFO_MEM_USABLE && map[i].base + map[i].length > span)
+        span = map[i].base + map[i].length;
+  }
+  if (span == 0) span = um_end();
+  if (span == 0) return 0;
+  if (*cell_kb) {
+    map_cell = (uint64_t)*cell_kb << 10;
+  } else {
+    map_cell = 0x100000u;
+    while ((span + map_cell - 1) / map_cell > (uint64_t)cells) map_cell <<= 1;
+  }
+  map_n = (int)((span + map_cell - 1) / map_cell);
+  if (map_n > cells) map_n = cells;
+  for (c = 0; c < map_n; c++)
+    for (k = 0; k <= KM_CATS; k++) map_acc[c][k] = 0;
+  if (map && bi->mem_count) {
+    for (i = 0; i < bi->mem_count; i++)
+      if (map[i].type == BOOTINFO_MEM_USABLE) map_add(map[i].base, map[i].length, KM_CATS);
+  } else {
+    map_add(0, span, KM_CATS);
+  }
+  top_load_mods();
+  map_pid = pid;
+  mm_walk(map_walk, 0);
+  for (c = 0; c < map_n; c++) {
+    uint64_t* a = map_acc[c];
+    uint64_t size = map_cell, known = 0, ram = a[KM_CATS];
+    if ((uint64_t)(c + 1) * map_cell > span) size = span - (uint64_t)c * map_cell;
+    if (ram > size) ram = size;
+    for (k = 0; k < KM_RESERV; k++) known += a[k];
+    /* RAM fora das arenas: kernel, area baixa e o que o boot usa. */
+    if (ram > known) a[KM_KERNEL] += ram - known;
+    a[KM_RESERV] = size - ram;
+    for (k = 0; k < KM_CATS; k++) kb[c * KM_CATS + k] = to_kb(a[k]);
+  }
+  *cell_kb = (uint32_t)(map_cell >> 10);
+  return map_n;
+}
+
 struct kexp {
   const char* name;
   void* fn;
@@ -544,6 +806,8 @@ static const struct kexp table[] = {
   EXP(k_realloc),
   EXP(k_msize),
   EXP(k_meminfo),
+  EXP(k_ps),
+  EXP(k_memmap),
   EXP(k_exit),
   EXP(k_exec),
   EXP(k_shell),

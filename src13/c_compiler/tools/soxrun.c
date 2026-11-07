@@ -599,6 +599,54 @@ static void k_meminfo(unsigned* total, unsigned* freeb) {
   if (freeb) *freeb = 128u << 20;
 }
 
+/* TOP: uma maquina inventada de 4 GB (3 GB abaixo de 4 GB, buraco, 1 GB acima). */
+struct k_proc {
+  char name[32];
+  unsigned pid, kind, state, base, image_kb, data_kb, refs, pad;
+};
+static int k_ps(struct k_proc* out, int max) {
+  static const struct k_proc fake[] = {
+    { "MC.EXE", 3, 1, 'E', 0x01800000u, 92, 1100, 1, 0 },
+    { "TOP.EXE", 4, 1, 'R', 0x01A00000u, 40, 1090, 1, 0 },
+    { "LIBC.DLL", 0, 2, 'S', 0x01700000u, 120, 0, 2, 0 },
+    { "KERNEL", 0, 3, 'S', 0x01000000u, 4200, 380, 0, 0 },
+    { "BUFFERS", 0, 3, 'S', 0x02000000u, 0, 24000, 0, 0 },
+    { "MEM>4GB", 0, 3, 'S', 0, 0, 0, 0, 0 },
+    { "REDE", 0, 4, 'A', 0, 0, 0, 0, 0 },
+    { "HTTPD", 0, 4, 'A', 0, 0, 0, 8797, 0 },
+  };
+  int n = (int)(sizeof fake / sizeof fake[0]), i;
+  if (n > max) n = max;
+  for (i = 0; i < n; i++) out[i] = fake[i];
+  return n;
+}
+static int k_memmap(unsigned* kb, int cells, unsigned* cell_kb, unsigned pid) {
+  unsigned long long span = 5ull << 30, cell;
+  int n, c;
+  if (!kb || !cell_kb || cells <= 0) return 0;
+  if (cells > 2048) cells = 2048;
+  cell = *cell_kb ? (unsigned long long)*cell_kb << 10 : 1ull << 20;
+  if (!*cell_kb) while ((span + cell - 1) / cell > (unsigned long long)cells) cell <<= 1;
+  n = (int)((span + cell - 1) / cell);
+  if (n > cells) n = cells;
+  memset(kb, 0, (size_t)n * 8 * 4);
+  for (c = 0; c < n; c++) {
+    unsigned long long a = (unsigned long long)c * cell, e = a + cell;
+    unsigned* k = kb + c * 8;
+    unsigned ck = (unsigned)(cell >> 10);
+    if (a >= 0xC0000000ull && a < 0x100000000ull) k[6] = ck;
+    else if (a < 0x01800000ull) k[1] = ck;
+    else if (a < 0x01A00000ull) { k[2] = ck / 8; k[3] = ck / 8; k[4] = ck / 2; k[0] = ck - k[2] - k[3] - k[4]; }
+    else if (a < 0x03800000ull) { k[5] = ck * 3 / 4; k[0] = ck - k[5]; }
+    else if (a >= 0x20000000ull && a < 0x24000000ull) k[4] = ck;
+    else k[0] = ck;
+    if (pid && a < 0x01A00000ull && e > 0x01800000ull) k[7] = ck / 2;
+    if (pid == 4 && a >= 0x20000000ull && a < 0x24000000ull) k[7] = ck;
+  }
+  *cell_kb = (unsigned)(cell >> 10);
+  return n;
+}
+
 static void k_exit(int code) {
   if (exec_depth <= 0) exit(code);
   exit_code[exec_depth - 1] = code;
@@ -939,7 +987,7 @@ static const struct {
   E(k_fsize), E(k_fload), E(k_fread), E(k_fsave), E(k_flist), E(k_dirlist), E(k_pwd), E(k_chdir),
   E(k_drive), E(k_set_drive), E(k_exe_drive), E(k_dir), E(k_fdelete), E(k_mkdir), E(k_rmdir), E(k_dfree),
   E(k_vput), E(k_cursor), E(k_font_get), E(k_font_set), E(k_font_reset), E(k_blink),
-  E(k_malloc), E(k_free), E(k_realloc), E(k_msize), E(k_meminfo),
+  E(k_malloc), E(k_free), E(k_realloc), E(k_msize), E(k_meminfo), E(k_ps), E(k_memmap),
   E(k_exit), E(k_exec), E(k_shell), E(k_shell_capture), E(k_last_error), E(k_dll_load), E(k_dll_sym), E(k_dll_free),
   E(k_rdtsc), E(k_ms), E(k_date), E(k_time), E(k_random),
   E(k_net_ready), E(k_dns), E(k_tcp_connect), E(k_tcp_send), E(k_tcp_recv), E(k_net_pending), E(k_tcp_close),

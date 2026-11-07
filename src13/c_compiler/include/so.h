@@ -83,6 +83,41 @@ void* k_realloc(void* p, unsigned n);
 unsigned k_msize(void* p);
 void k_meminfo(unsigned* total, unsigned* freeb);
 
+/* TOP: o que ocupa a memoria. Tamanhos em KB. */
+#define KP_EXE 1   /* programa: pid > 0 */
+#define KP_DLL 2   /* refs = quantos a usam */
+#define KP_SYS 3   /* parte do kernel: KERNEL, BUFFERS, MEM>4GB */
+#define KP_SVC 4   /* servico do kernel (REDE, HTTPD: refs = porta) */
+struct k_proc {
+  char name[32];
+  unsigned pid;
+  unsigned kind;
+  unsigned state;     /* 'R' rodando, 'E' esperando outro, 'S' residente, 'A' ativo, 'P' parado */
+  unsigned base;      /* endereco da imagem, 0 se nao ha */
+  unsigned image_kb;  /* imagem (codigo, dados, bss, tabelas) */
+  unsigned data_kb;   /* malloc e pilha; no KERNEL, o heap do kernel */
+  unsigned refs;
+  unsigned pad;
+};
+/* Devolve quantas entradas gravou em out. */
+int k_ps(struct k_proc* out, int max);
+
+/* Mapa da RAM fisica: 'cells' celulas de *cell_kb KB, do endereco 0 ao fim
+ * da ultima regiao de RAM. kb[celula * KM_CATS + categoria] = KB daquela
+ * categoria na celula. *cell_kb = 0 escolhe a menor potencia de 2 MB que
+ * cabe. pid > 0 tambem soma em KM_DONO o que esse programa ocupa.
+ * Devolve quantas celulas preencheu (no maximo 2048). */
+#define KM_LIVRE 0
+#define KM_KERNEL 1    /* imagem e heap do kernel, area baixa, boot */
+#define KM_EXE 2
+#define KM_DLL 3
+#define KM_DADOS 4     /* malloc e pilha dos programas */
+#define KM_BUFFERS 5   /* alocado pelo kernel na memoria alta */
+#define KM_RESERV 6    /* nao e RAM: firmware, buracos, MMIO */
+#define KM_DONO 7
+#define KM_CATS 8
+int k_memmap(unsigned* kb, int cells, unsigned* cell_kb, unsigned pid);
+
 /* processos e DLLs */
 void k_exit(int code);
 int k_exec(const char* path, int argc, char** argv);

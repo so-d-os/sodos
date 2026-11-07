@@ -43,7 +43,7 @@ all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/H
 	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE $(O)/VIDEOCFG.EXE $(O)/IMGBIG.DLL $(O)/AIPANEL.EXE $(O)/MENUCFG.EXE \
 	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
 	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
-	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/COBRA.EXE $(O)/GIT.EXE $(O)/AGENT.EXE $(O)/LLAMA.EXE
+	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/TOP.EXE $(O)/COBRA.EXE $(O)/GIT.EXE $(O)/AGENT.EXE $(O)/LLAMA.EXE
 
 # GUI.DLL (janela canvas do WIN) e o navegador, em varios arquivos
 $(B)/gui_gui.obj: gui/gui.c include/gui.h $(HCC) $(HEADERS) | $(B)
@@ -191,6 +191,11 @@ $(O)/POSIXX.DLL: $(B)/x_posix.o $(O)/LIBCX.DLL $(LINK) $(O)/KERNEL.IMP
 MC_SRC = ../mc/mc.c ../mc/scr.c ../mc/panel.c ../mc/ops.c ../mc/view.c
 $(O)/MC.EXE: $(MC_SRC) ../mc/mc.h $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
 	$(HCC) -o $@ $(MC_SRC)
+
+# TOP.EXE (../top): programas e mapa da memoria no padrao do SPECIAL. BUILD.BAT idem.
+TOP_SRC = ../top/top.c ../top/tela.c ../top/dados.c ../top/procs.c ../top/mapa.c
+$(O)/TOP.EXE: $(TOP_SRC) ../top/top.h $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
+	$(HCC) -o $@ $(TOP_SRC)
 
 # COBRA.EXE (../cobra): jogo da cobrinha em modo texto. BUILD.BAT idem.
 $(O)/COBRA.EXE: ../cobra/cobra.cpp $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL

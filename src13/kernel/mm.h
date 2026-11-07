@@ -35,3 +35,11 @@ void hm_stats(uint64_t* total, uint64_t* used, uint64_t* free_bytes, uint64_t* l
 uint32_t hm_regions(void);
 uint64_t hm_region_start(uint32_t i);
 uint64_t hm_region_end(uint32_t i);
+
+/* Percorre todos os blocos para o TOP. area: 0 = heap do kernel, 1 = arena
+ * alta, 2 = acima de 4 GB. owner so vale para a arena alta. */
+typedef void (*mm_walk_fn)(void* arg, int area, uint64_t addr, uint64_t size, int used,
+                           uint32_t owner);
+void mm_walk(mm_walk_fn fn, void* arg);
+/* Fim da memoria ocupada pela imagem do kernel (com .bss). */
+uint32_t mm_kernel_end(void);
