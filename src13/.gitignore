@@ -60,3 +60,7 @@ libs/**/*.DLL
 # Chave da API do AGENT.EXE (nao versionar)
 AGENT.CFG
 disk-256mb.img
+
+# Dumps e capturas de teste locais
+REGS_LINUX.BIN
+mc-*.png
