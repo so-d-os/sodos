@@ -3,7 +3,8 @@
  * Arquiteturas llama (SmolLM, TinyLlama...) e qwen2. Pesos F32, F16, Q8_0,
  * Q4_0, Q4_1 e Q6_K (o Q4_0 do bartowski poe a saida em Q6_K e algumas
  * ffn_down em Q4_1). Tokenizador BPE do GPT-2 (tokenizer.ggml.model = gpt2)
- * com os pre-tokenizadores do GPT-2/SmolLM e do Qwen2/Llama 3. Um nucleo, SSE2.
+ * com os pre-tokenizadores do GPT-2/SmolLM e do Qwen2/Llama 3. Um nucleo,
+ * SSE2, ou AVX2/FMA quando o CPU tem (-sse forca o SSE2).
  *
  *   llama MODELO.GGU                 chat (ChatML ou DeepSeek-R1)
  *   llama MODELO.GGU -p "pergunta"   uma resposta e sai
@@ -16,6 +17,7 @@
  *         -raw   -p sem template de chat (continua o texto)
  *         -tok "texto"  so mostra os ids dos tokens
  *         -utf8  terminal em UTF-8 (soxrun no Linux); sem ela, CP850
+ *         -sse   nao usa AVX2 mesmo se o CPU tiver
  *
  * O arquivo inteiro fica na memoria; o heap do SODOS e a maior regiao de RAM
  * abaixo de 4 GB (QEMU -m 4096: ~3 GB), entao cabe o DeepSeek-R1-Distill-
@@ -682,6 +684,177 @@ static float dot_f16(const u8* row, const float* x, int n) {
   return s;
 }
 
+/* ---- AVX2/FMA: mesmas contas em 32 bytes; escolhidas em tempo de execucao
+ * (CPUID + XGETBV: o kernel so liga o AVX se o CPU tem).  int8 x int8 pelo
+ * truque do llama.cpp: |a| (sem sinal) x b com o sinal de a, em pmaddubsw. */
+#define AVX2 __attribute__((target("avx2,fma,f16c")))
+typedef char v32qi __attribute__((vector_size(32)));
+typedef short v16hi __attribute__((vector_size(32)));
+typedef unsigned short v16hu __attribute__((vector_size(32)));
+typedef int v8si __attribute__((vector_size(32)));
+typedef float v8sf __attribute__((vector_size(32)));
+static int use_avx2;
+
+static void cpu_detect(void) {
+  unsigned a, b, c, d, lo, hi;
+  __asm__("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+  if ((c & (1u << 27 | 1u << 28 | 1u << 12 | 1u << 29)) != (1u << 27 | 1u << 28 | 1u << 12 | 1u << 29))
+    return;
+  __asm__("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+  if ((lo & 6) != 6) return;
+  __asm__("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(7), "c"(0));
+  if (b & (1u << 5)) use_avx2 = 1;
+}
+
+AVX2 static inline v32qi ld32(const void* p) {
+  v32qi v;
+  CPY(&v, p, 32);
+  return v;
+}
+
+/* 16 bytes de nibbles -> 32 valores: os baixos e depois os altos */
+AVX2 static inline v32qi nib32(const u8* p) {
+  v16qi q = ld16(p);
+  v16qi lo = q & 15, hi = (v16qi)((v8hu)q >> 4) & 15;
+  return __builtin_shufflevector(lo, hi, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+                                 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
+}
+
+/* pares somados de u8*i8, em 16 int16 */
+AVX2 static inline v16hi mul_ss(v32qi a, v32qi b) {
+  return __builtin_ia32_pmaddubsw256(__builtin_ia32_pabsb256(a), __builtin_ia32_psignb256(b, a));
+}
+
+AVX2 static inline v8si sum_hi(v16hi p) {
+  const v16hi one = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
+  return __builtin_ia32_pmaddwd256(p, one);
+}
+
+AVX2 static inline float hsum8(v8sf v) {
+  v4sf a = __builtin_shufflevector(v, v, 0, 1, 2, 3) + __builtin_shufflevector(v, v, 4, 5, 6, 7);
+  return hsum(a);
+}
+
+AVX2 static float dot_q8_0_avx2(const u8* row, int nb) {
+  v8sf acc = { 0 };
+  const i8* xq = g_xq;
+  int b;
+  for (b = 0; b < nb; b++, row += 34, xq += 32) {
+    u16 dh;
+    CPY(&dh, row, 2);
+    v8sf p = __builtin_convertvector(sum_hi(mul_ss(ld32(row + 2), ld32(xq))), v8sf);
+    acc += p * (f16tab[dh] * g_xd[b]);
+  }
+  return hsum8(acc);
+}
+
+AVX2 static float dot_q4_0_avx2(const u8* row, int nb) {
+  v8sf acc = { 0 };
+  const i8* xq = g_xq;
+  int b;
+  for (b = 0; b < nb; b++, row += 18, xq += 32) {
+    u16 dh;
+    CPY(&dh, row, 2);
+    v8sf p = __builtin_convertvector(sum_hi(mul_ss(nib32(row + 2) - 8, ld32(xq))), v8sf);
+    acc += p * (f16tab[dh] * g_xd[b]);
+  }
+  return hsum8(acc);
+}
+
+AVX2 static float dot_q4_1_avx2(const u8* row, int nb) {
+  v8sf acc = { 0 };
+  const i8* xq = g_xq;
+  float mins = 0;
+  int b;
+  for (b = 0; b < nb; b++, row += 20, xq += 32) {
+    u16 dh, mh;
+    CPY(&dh, row, 2);
+    CPY(&mh, row + 2, 2);
+    /* q em 0..15 ja e sem sinal */
+    v16hi p16 = __builtin_ia32_pmaddubsw256(nib32(row + 4), ld32(xq));
+    acc += __builtin_convertvector(sum_hi(p16), v8sf) * (f16tab[dh] * g_xd[b]);
+    mins += f16tab[mh] * g_xs[b];
+  }
+  return hsum8(acc) + mins;
+}
+
+/* Q6_K: cada faixa de 32 valores usa um bloco Q8 da ativacao e duas escalas
+ * (uma por 16), aplicadas no pmaddwd. */
+AVX2 static float dot_q6_k_avx2(const u8* row, int nb) {
+  v8sf acc = { 0 };
+  int b, half, k;
+  for (b = 0; b < nb; b++, row += 210) {
+    const u8 *ql = row, *qh = row + 128;
+    const i8* sc = (const i8*)(row + 192);
+    u16 dh;
+    float d;
+    CPY(&dh, row + 208, 2);
+    d = f16tab[dh];
+    for (half = 0; half < 2; half++, ql += 64, qh += 32, sc += 8) {
+      int base = b * 256 + half * 128;
+      v32qi l0 = ld32(ql), l1 = ld32(ql + 32), h = ld32(qh);
+      v32qi q[4];
+      q[0] = ((l0 & 15) | ((v32qi)((v16hu)h << 4) & 48)) - 32;
+      q[1] = ((l1 & 15) | ((v32qi)((v16hu)h << 2) & 48)) - 32;
+      q[2] = (((v32qi)((v16hu)l0 >> 4) & 15) | (h & 48)) - 32;
+      q[3] = (((v32qi)((v16hu)l1 >> 4) & 15) | ((v32qi)((v16hu)h >> 2) & 48)) - 32;
+      for (k = 0; k < 4; k++) {
+        short s0 = sc[2 * k], s1 = sc[2 * k + 1];
+        v16hi s = { s0, s0, s0, s0, s0, s0, s0, s0, s1, s1, s1, s1, s1, s1, s1, s1 };
+        v8si p = __builtin_ia32_pmaddwd256(mul_ss(q[k], ld32(g_xq + base + 32 * k)), s);
+        acc += __builtin_convertvector(p, v8sf) * (d * g_xd[base / 32 + k]);
+      }
+    }
+  }
+  return hsum8(acc);
+}
+
+AVX2 static float dot_f32_avx2(const u8* row, const float* x, int n) {
+  v8sf acc = { 0 }, a, b;
+  float s = 0, v;
+  int i;
+  for (i = 0; i + 8 <= n; i += 8) {
+    CPY(&a, row + i * 4, 32);
+    CPY(&b, x + i, 32);
+    acc += a * b;
+  }
+  for (; i < n; i++) {
+    CPY(&v, row + i * 4, 4);
+    s += v * x[i];
+  }
+  return hsum8(acc) + s;
+}
+
+AVX2 static float dot_f16_avx2(const u8* row, const float* x, int n) {
+  v8sf acc = { 0 }, b;
+  v8hi h;
+  float s = 0;
+  int i;
+  for (i = 0; i + 8 <= n; i += 8) {
+    CPY(&h, row + i * 2, 16);
+    CPY(&b, x + i, 32);
+    acc += __builtin_ia32_vcvtph2ps256(h) * b;
+  }
+  for (; i < n; i++) {
+    u16 hh;
+    CPY(&hh, row + i * 2, 2);
+    s += f16tab[hh] * x[i];
+  }
+  return hsum8(acc) + s;
+}
+
+AVX2 static void matvec_avx2(float* o, const struct w* w, const float* x, const u8* row, u32 rb) {
+  int r, nb = w->cols / 32;
+  for (r = 0; r < w->rows; r++, row += rb) {
+    if (w->type == T_Q8_0) o[r] = dot_q8_0_avx2(row, nb);
+    else if (w->type == T_Q4_0) o[r] = dot_q4_0_avx2(row, nb);
+    else if (w->type == T_Q4_1) o[r] = dot_q4_1_avx2(row, nb);
+    else if (w->type == T_Q6_K) o[r] = dot_q6_k_avx2(row, w->cols / 256);
+    else if (w->type == T_F16) o[r] = dot_f16_avx2(row, x, w->cols);
+    else o[r] = dot_f32_avx2(row, x, w->cols);
+  }
+}
+
 /* out[r] = W[r] . x */
 static void matvec(float* o, const struct w* w, const float* x) {
   int r, nb = w->cols / 32;
@@ -689,6 +862,10 @@ static void matvec(float* o, const struct w* w, const float* x) {
   const u8* row = w->d;
   tsize(w->type, w->cols, &rb);
   if (w->type != T_F32 && w->type != T_F16) quantize_x(x, w->cols);
+  if (use_avx2) {
+    matvec_avx2(o, w, x, row, rb);
+    return;
+  }
   for (r = 0; r < w->rows; r++, row += rb) {
     if (w->type == T_Q8_0) o[r] = dot_q8_0(row, nb);
     else if (w->type == T_Q4_0) o[r] = dot_q4_0(row, nb);
@@ -1568,7 +1745,7 @@ static float s_atof(const char* s) {
 
 static void usage(void) {
   out("uso: llama MODELO.GGU [-p \"pergunta\"] [-n N] [-t temp] [-c ctx] [-s semente]\n"
-      "                      [-r pen] [-sys \"texto\"] [-raw] [-tok \"texto\"] [-utf8]\n"
+      "                      [-r pen] [-sys \"texto\"] [-raw] [-tok \"texto\"] [-utf8] [-sse]\n"
       "  Roda um LLM GGUF do Hugging Face (llama/qwen2; F16, Q8_0, Q4_0, Q4_1, Q6_K).\n"
       "  Ex.: SmolLM2-135M-Instruct-Q8_0.gguf copiado como SMOL135.GGU,\n"
       "       DeepSeek-R1-Distill-Qwen-1.5B-Q4_0.gguf como DEEPSEEK.GGU (pede 2 GB de RAM)\n");
@@ -1608,7 +1785,7 @@ static int join_quotes(int argc, char** argv) {
 
 int main(int argc, char** argv) {
   const char *model = 0, *prompt = 0, *tokstr = 0;
-  int i, maxn = 256, want_ctx = 0, raw = 0, seeded = 0;
+  int i, maxn = 256, want_ctx = 0, raw = 0, seeded = 0, sse = 0;
   unsigned t0;
   argc = join_quotes(argc, argv);
   for (i = 1; i < argc; i++) {
@@ -1624,6 +1801,7 @@ int main(int argc, char** argv) {
     else if (!strcmp(a, "-r") && more) rep_pen = s_atof(argv[++i]);
     else if (!strcmp(a, "-raw")) raw = 1;
     else if (!strcmp(a, "-utf8")) g_utf8 = 1;
+    else if (!strcmp(a, "-sse")) sse = 1;
     else if (a[0] == '-' || model) usage();
     else model = a;
   }
@@ -1637,6 +1815,7 @@ int main(int argc, char** argv) {
     if (!rng) rng = 1;
   }
   clock_init();
+  if (!sse) cpu_detect();
   for (i = 0; i < 65536; i++) f16tab[i] = h2f((u16)i);
   load_file(model);
   t0 = now_ms();
@@ -1678,7 +1857,7 @@ int main(int argc, char** argv) {
   out_int(n_ctx);
   out(") pronto em ");
   out_f1((now_ms() - t0) / 1000.0);
-  out(" s\n");
+  out(use_avx2 ? " s, AVX2\n" : " s, SSE2\n");
 
   if (prompt) {
     unsigned ms;
