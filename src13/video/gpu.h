@@ -100,6 +100,10 @@ extern int gpu_hwcur;
 void gpu_cursor_set(const uint32_t* argb, int w, int h, int hot_x, int hot_y);
 /* 0 = ok; outro valor: o driver caiu e o quadro volta a CPU. */
 int gpu_cursor_move(int x, int y);
+/* Placa de video no PCI (vendor << 16 | device), seguindo as pontes; 0 se
+ * nao achou. Nome dela no SODOS.CFG (nome=), ou 0. */
+uint32_t gpu_find_display(void);
+const char* gpu_card_name(void);
 /* Para o TOP (k_vram): nome do driver ativo e KB que ele reservou. */
 const char* gpu_name(void);
 uint32_t gpu_mem_kb(void);

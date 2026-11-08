@@ -6067,6 +6067,7 @@ static void win_vt_away(int to) {
   serial_puts("[visual] WIN volta a tela\n");
   if (gfx_gop) {
     fbcon_suspend(1);
+    gfx_gpu_try();
   } else if (gfx_bochs) {
     if (!bochs_program((uint16_t)gfx_w, (uint16_t)gfx_h))
       serial_puts("[visual] modo grafico nao voltou\n");
@@ -7775,6 +7776,8 @@ int win_vram_info(struct k_vram* v) {
   if (!v) return -1;
   for (i = 0; i < (int)sizeof(*v); i++) ((uint8_t*)v)[i] = 0;
   v->lfb = pci_find_display(&v->pci_id);
+  /* a placa pode estar atras de uma ponte (notebook: barramento 4) */
+  if (!v->pci_id) v->pci_id = gpu_find_display();
   if (gfx_gop || (!gfx_session_on && !vga_legacy())) {
     const struct BootInfo* bi = bootinfo_get();
     vram_name(v->dev, "GOP (UEFI)");

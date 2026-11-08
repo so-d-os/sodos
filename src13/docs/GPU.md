@@ -4,7 +4,9 @@ Estado (2026-11): **etapas 1 a 4 feitas**. O kernel acha, carrega, testa,
 suspende e desliga um driver de placa; o `VIRTGPU.DLL` acelera o QEMU com
 `-device virtio-vga` (`make run-virtio`); o kernel diz ao driver quais
 areas mudaram, entao so elas vao para a placa; e a placa desenha o cursor,
-que sai do quadro (medidas abaixo).
+que sai do quadro (medidas abaixo). Para o notebook (Radeon Barcelo) ha o
+`AMDGOP.DLL`, configurado pelo `U:\SODOS.CFG`; ele ainda nao foi testado
+no hardware.
 
 ## Regra principal
 
@@ -46,6 +48,10 @@ fixo fica listado aqui, medido, para nao crescer sem ninguem ver.
 | **Etapa 4 (cursor):** `if (gpu_hwcur)` | 1 teste por desenho do cursor (`cursor_redraw_at`, uma vez por quadro; `cursor_draw`, uma vez por movimento) e 1 por passo de arrasto | `video/visual.c` |
 | Etapa 4: codigo | **928 bytes** no `kernel.bin` (407.112 -> 408.040) | `video/visual.c`, `video/gpu.c` |
 | Etapa 4: variaveis | 16 bytes de BSS (`gpu_hwcur` e alinhamento) | `video/gpu.c` |
+| **Notebook:** `gpu_wanted()` | segue as pontes PCI (no QEMU: so o barramento 0; no notebook: ate o 4); por troca de modo do WIN | `video/gpu.c` |
+| Notebook: `SODOS.CFG` | uma leitura por abertura do WIN (D: e depois U:; o U: so e montado para isso uma vez por boot) | `video/gpu.c` |
+| Notebook: codigo | **7.872 bytes** no `kernel.bin` (408.040 -> 415.912): leitura do `SODOS.CFG`, busca nas pontes e `GPU.LOG` | `video/gpu.c` |
+| Notebook: variaveis | 352 bytes de BSS (ate 4 placas do `SODOS.CFG`); o buffer do `GPU.LOG` (8 KB) so existe com driver para tentar | `video/gpu.c` |
 
 O teste nunca entra em funcoes chamadas por pixel ou por glifo (`put_pixel`,
 `gui_glyph`, `gui_pixels`). Se uma etapa futura quiser acelerar
@@ -301,6 +307,81 @@ O TOP roda numa tela de texto, entao ve o driver suspenso (WIN ao fundo),
 com a memoria que ele reservou. Sem driver, a linha "Driver da placa" mostra
 "sem driver: nada reservado", que e a prova visivel da regra principal.
 
+## SODOS.CFG (placas e drivers)
+
+Arquivo do computador, procurado em `D:\SODOS.CFG` e depois em
+`U:\SODOS.CFG` (o notebook nao tem D:). A secao `[video]` tem uma entrada
+por placa, cada uma comecando em `placa=`:
+
+```
+[video]
+placa=1002:15E7
+nome=AMD Radeon Graphics (Barcelo, Ryzen 7 5825U)
+driver=AMDGOP.DLL
+ativo=1
+```
+
+- `placa=` vendor:device do PCI (no Linux, `lspci -nn`);
+- `nome=` aparece no TOP (aba Video) e no `GPU.LOG`;
+- `driver=` DLL em `X:\SODOS\DRV`, na mesma unidade do `SODOS.CFG`;
+- `ativo=0` deixa a placa com a CPU, mesmo que ela tenha driver.
+
+Uma entrada do `SODOS.CFG` vence a tabela embutida (`VIRTGPU.DLL` para o
+virtio). O kernel le o arquivo a cada abertura do WIN; o TOP o le uma vez.
+
+## GPU.LOG
+
+O notebook nao tem COM1. Sempre que ha driver para tentar, o kernel grava
+`X:\SODOS\GPU.LOG` (na unidade do `SODOS.CFG`, ou D:) com a placa achada
+(id, barramento:dispositivo:funcao, nome), o modo e o framebuffer, o caminho
+do DLL, o que o driver escreveu e cada evento (ativo, suspenso, ativo de
+novo, desativado e o motivo). O arquivo e regravado ao ativar, ao suspender
+(Ctrl+F1, para poder le-lo numa tela do DOS), ao voltar e ao descarregar.
+O buffer (8 KB) so existe enquanto ha driver para tentar.
+
+## AMDGOP.DLL (notebook)
+
+A placa do notebook e a Radeon integrada do Ryzen 7 5825U: **AMD Barcelo,
+PCI 1002:15E7**, no barramento 4 (`04:00.0`), atras de uma ponte. Por isso a
+busca PCI agora segue as pontes.
+
+Ligar o motor da GPU (copia pela SDMA, desenho 2D) exige carregar firmware
+pelo PSP/SMU, que e o grosso do amdgpu do Linux. O `AMDGOP.DLL` nao faz
+isso: e um driver de exibicao sobre o framebuffer que o UEFI (GOP) ja deixou
+na tela (mapeado com write-combining pelo `kernel_entry.asm`). O ganho e
+copiar para a tela so as areas que o kernel diz que mudaram (etapa 3), em vez
+do quadro inteiro. Sem cursor pela placa por enquanto: os registradores do
+cursor do DCN sao o proximo passo possivel, mas um erro ali pode travar a
+tela num hardware real.
+
+O que ele escreve no `GPU.LOG`:
+
+- id, classe/revisao e os seis BARs da placa;
+- tela, endereco e pitch do framebuffer;
+- no `selftest`: escreve e le de volta um padrao no framebuffer, e mede os
+  ciclos de **uma copia do quadro inteiro** (o custo do caminho por CPU);
+- no fim (Esc do WIN): quadros, ciclos por quadro e pixels por quadro, para
+  comparar com a copia inteira.
+
+Teste no QEMU (o QEMU nao emula a Radeon; o `SODOS.CFG` de teste aponta a
+placa Bochs `1234:1111` para o `AMDGOP.DLL`):
+
+| Caminho | Copia do quadro inteiro |
+|---|---|
+| BIOS, `-vga std` (LFB em `0xFD000000`, sem cache) | ~404 milhoes de ciclos (1920x1080) |
+| UEFI (OVMF), `-vga none -device bochs-display`: GOP de verdade, como no notebook | ~2,1 milhoes de ciclos (1280x800) |
+
+No caminho GOP (o do notebook) o driver entrou pelo `SODOS.CFG`, o TOP
+mostrou o nome da placa e "(GOP (UEFI))", e Ctrl+F1/Ctrl+F7 suspendeu e
+retomou o driver (antes so o caminho Bochs retomava o driver na volta).
+
+Para testar no notebook:
+
+1. `make grub` (kernel novo em `/boot/sodos/kernel.elf`; pede sudo);
+2. no pendrive: `U:\SODOS.CFG`, `U:\SODOS\DRV\AMDGOP.DLL`, `U:\TOP.EXE`;
+3. iniciar o SODOS, `win`, usar um pouco, Ctrl+F1 e `top` (aba Video);
+4. sair do WIN com Esc e trazer o `U:\SODOS\GPU.LOG`.
+
 ## Configuracao (`D:\SODOS\VIDEO.CFG`)
 
 ```
@@ -315,6 +396,7 @@ gpudrv=GPUTEST.DLL forca este driver de D:\SODOS\DRV, com ou sem placa na tabela
 | Placa (vendor:device) | DLL | Estado |
 |---|---|---|
 | `1AF4:1050` virtio-gpu | `VIRTGPU.DLL` | funciona no QEMU (`-device virtio-vga`): 2D, tela inteira por quadro |
+| `1002:15E7` AMD Barcelo (pelo `SODOS.CFG`) | `AMDGOP.DLL` | QEMU ok (BIOS e UEFI/GOP, pela placa Bochs); notebook: a testar |
 | nenhuma (so `gpudrv=`) | `GPUTEST.DLL` | teste: copia o back buffer para o LFB pela CPU, reserva 64 KB para aparecer no TOP |
 | nenhuma (so `gpudrv=`) | `GPUFAIL.DLL` | o mesmo, mas `present` falha no 20o quadro |
 
@@ -371,6 +453,7 @@ make run-virtio                 # virtio-gpu: VIRTGPU.DLL entra sozinho
   alteradas (`gfx_dmg_add`, `gfx_gpu_frame`, `cursor_draw`, `dc_present`).
 - `drivers/gputest/gputest.c` — `GPUTEST.DLL` e `GPUFAIL.DLL`.
 - `drivers/virtgpu/virtgpu.c` — `VIRTGPU.DLL`.
+- `drivers/amdgop/amdgop.c` — `AMDGOP.DLL` (notebook).
 - `c_compiler/link/link64.c` — `/dll` e `/export:`.
 - `docs/VIDEO.md` — os modelos de renderizacao por CPU (retro/avancado),
   que continuam valendo com ou sem driver.

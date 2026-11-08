@@ -29,6 +29,53 @@ static const char* const nomes[V_PARTES] = {
 
 static struct k_vram v;
 
+/* nome= da placa no SODOS.CFG (D:\SODOS.CFG ou U:\SODOS.CFG), lido uma vez */
+static char nome_placa[48];
+static int nome_lido;
+
+static unsigned hexd(int c) {
+  if (c >= '0' && c <= '9') return (unsigned)(c - '0');
+  if (c >= 'a' && c <= 'f') return (unsigned)(c - 'a' + 10);
+  if (c >= 'A' && c <= 'F') return (unsigned)(c - 'A' + 10);
+  return 16;
+}
+
+/* "1002:15E7" -> 0x100215E7 */
+static unsigned id_cfg(const char* p) {
+  unsigned id = 0;
+  int d = 0;
+  for (; *p && d < 8; p++) {
+    if (*p == ':' && d == 4) continue;
+    if (hexd(*p) > 15) break;
+    id = id << 4 | hexd(*p);
+    d++;
+  }
+  return d == 8 ? id : 0;
+}
+
+static void le_nome(unsigned pci_id) {
+  static const char* const arqs[2] = { "D:\\SODOS.CFG", "U:\\SODOS.CFG" };
+  char l[96];
+  int i, video = 0;
+  unsigned atual = 0;
+  FILE* f = 0;
+  nome_lido = 1;
+  nome_placa[0] = 0;
+  for (i = 0; i < 2 && !f; i++) f = fopen(arqs[i], "r");
+  if (!f) return;
+  while (fgets(l, sizeof l, f)) {
+    int n = tam(l);
+    while (n > 0 && (l[n - 1] == '\n' || l[n - 1] == '\r' || l[n - 1] == ' ')) l[--n] = 0;
+    if (l[0] == '[') video = !strcmp(l, "[video]");
+    else if (video && !strncmp(l, "placa=", 6)) atual = id_cfg(l + 6);
+    else if (video && atual == pci_id && !strncmp(l, "nome=", 5)) {
+      strncpy(nome_placa, l + 5, sizeof nome_placa - 1);
+      nome_placa[sizeof nome_placa - 1] = 0;
+    }
+  }
+  fclose(f);
+}
+
 static int cor_parte(int p) {
   switch (p) {
   case V_FRENTE: return COR(AZUL, AMARELO);
@@ -56,7 +103,11 @@ static void partes(unsigned* kb) {
 static void cabeca(void) {
   char buf[96], a[16];
   int r = VR + 1;
-  if (v.pci_id)
+  if (v.pci_id && !nome_lido) le_nome(v.pci_id);
+  if (v.pci_id && nome_placa[0])
+    sprintf(buf, "Placa   %s (%s)    PCI %04X:%04X", nome_placa, v.dev, v.pci_id >> 16,
+            v.pci_id & 0xFFFFu);
+  else if (v.pci_id)
     sprintf(buf, "Placa   %s    PCI %04X:%04X    LFB %08X", v.dev, v.pci_id >> 16,
             v.pci_id & 0xFFFFu, v.lfb);
   else
