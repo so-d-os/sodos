@@ -20,6 +20,44 @@
 static const struct gpu_kapi* k;
 static struct gpu_mode m;
 
+/* ---------------------------------------------------------------------------
+ * DCN 2.1 (Renoir/Barcelo): registradores no BAR5, endereco em bytes =
+ * (base do segmento + registrador) * 4. Offsets de dcn_2_1_0_offset.h do
+ * Linux; o DCN usa o segmento 2 (DCN_BASE__INST0_SEG2 = 0x34C0).
+ * Etapa A do cursor da placa: so LER e registrar no GPU.LOG.
+ * ------------------------------------------------------------------------- */
+#define AMD_BARCELO 0x100215E7u
+#define DCN_SEG2 0x34C0u
+#define PIPE_HUBP 0xDCu                /* passo entre HUBP0, HUBP1, ... */
+#define PIPE_CNVC 0x16Bu               /* passo entre CNVC_CUR0, CUR1, ... */
+#define R_DCN_VM_FB_LOCATION_BASE 0x0493u
+#define R_DCN_VM_FB_LOCATION_TOP 0x0494u
+#define R_DCN_VM_FB_OFFSET 0x0495u
+#define R_DCN_VM_AGP_BOT 0x0496u
+#define R_DCN_VM_AGP_TOP 0x0497u
+#define R_DCN_VM_AGP_BASE 0x0498u
+#define R_HUBP_DCHUBP_CNTL 0x05F3u
+#define R_HUBPREQ_SURFACE_PITCH 0x0607u
+#define R_HUBPREQ_PRIMARY_ADDR 0x060Au
+#define R_HUBPREQ_PRIMARY_ADDR_HI 0x060Bu
+#define R_HUBPREQ_CURSOR_SETTINGS 0x065Eu
+#define R_CURSOR_CONTROL 0x0678u
+#define R_CURSOR_ADDR 0x0679u
+#define R_CURSOR_ADDR_HI 0x067Au
+#define R_CURSOR_SIZE 0x067Bu
+#define R_CURSOR_POSITION 0x067Cu
+#define R_CURSOR_HOT_SPOT 0x067Du
+#define R_CURSOR_DST_OFFSET 0x067Fu
+#define R_CNVC_CUR_CONTROL 0x0CE0u
+#define R_CNVC_CUR_COLOR0 0x0CE1u
+#define R_CNVC_CUR_COLOR1 0x0CE2u
+
+static volatile uint8_t* mmio;   /* BAR5 */
+
+static uint32_t dcn_r(uint32_t reg) {
+  return *(volatile uint32_t*)(mmio + (DCN_SEG2 + reg) * 4u);
+}
+
 /* medidas */
 static uint32_t quadros;
 static uint64_t ciclos, pixels;
@@ -47,6 +85,45 @@ static void copia(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
   }
 }
 
+/* So leitura: o estado do DCN que o firmware (GOP) deixou. */
+static void dcn_diag(void) {
+  uint32_t bar5 = k->pci_read32(m.pci_bus, m.pci_dev, m.pci_fun, 0x24), p;
+  /* BAR5 de memoria e 32 bits (no notebook: 0xFCC00000) */
+  if ((bar5 & 1u) || ((bar5 >> 1) & 3u) == 2u || (bar5 & ~0xFu) == 0) {
+    log_kv("[amdgop] BAR5 inesperado ", bar5);
+    k->log(", DCN nao lido\n");
+    return;
+  }
+  mmio = (volatile uint8_t*)(uintptr_t)(bar5 & ~0xFu);
+  log_kv("[amdgop] dcn fb_base ", dcn_r(R_DCN_VM_FB_LOCATION_BASE));
+  log_kv(" fb_top ", dcn_r(R_DCN_VM_FB_LOCATION_TOP));
+  log_kv(" fb_offset ", dcn_r(R_DCN_VM_FB_OFFSET));
+  log_kv("\n[amdgop] dcn agp_bot ", dcn_r(R_DCN_VM_AGP_BOT));
+  log_kv(" agp_top ", dcn_r(R_DCN_VM_AGP_TOP));
+  log_kv(" agp_base ", dcn_r(R_DCN_VM_AGP_BASE));
+  k->log("\n");
+  for (p = 0; p < 4; p++) {
+    uint32_t h = p * PIPE_HUBP, c = p * PIPE_CNVC;
+    log_kv("[amdgop] pipe ", p);
+    log_kv(" hubp_cntl ", dcn_r(R_HUBP_DCHUBP_CNTL + h));
+    log_kv(" surf ", dcn_r(R_HUBPREQ_PRIMARY_ADDR_HI + h));
+    log_kv(":", dcn_r(R_HUBPREQ_PRIMARY_ADDR + h));
+    log_kv(" pitch ", dcn_r(R_HUBPREQ_SURFACE_PITCH + h));
+    log_kv("\n[amdgop]   cur_ctl ", dcn_r(R_CURSOR_CONTROL + h));
+    log_kv(" cur_addr ", dcn_r(R_CURSOR_ADDR_HI + h));
+    log_kv(":", dcn_r(R_CURSOR_ADDR + h));
+    log_kv(" size ", dcn_r(R_CURSOR_SIZE + h));
+    log_kv(" pos ", dcn_r(R_CURSOR_POSITION + h));
+    log_kv(" hot ", dcn_r(R_CURSOR_HOT_SPOT + h));
+    log_kv(" dst ", dcn_r(R_CURSOR_DST_OFFSET + h));
+    log_kv(" settings ", dcn_r(R_HUBPREQ_CURSOR_SETTINGS + h));
+    log_kv("\n[amdgop]   cnvc_cur ", dcn_r(R_CNVC_CUR_CONTROL + c));
+    log_kv(" color0 ", dcn_r(R_CNVC_CUR_COLOR0 + c));
+    log_kv(" color1 ", dcn_r(R_CNVC_CUR_COLOR1 + c));
+    k->log("\n");
+  }
+}
+
 static int a_init(const struct gpu_kapi* kapi, const struct gpu_mode* mode) {
   uint32_t b;
   k = kapi;
@@ -65,6 +142,7 @@ static int a_init(const struct gpu_kapi* kapi, const struct gpu_mode* mode) {
   log_kv(" fb ", (uint32_t)(uintptr_t)m.fb);
   log_kv(" pitch ", m.fb_pitch);
   k->log("\n");
+  if (m.pci_id == AMD_BARCELO) dcn_diag();
   return 0;
 }
 
