@@ -133,6 +133,15 @@ static void unload(const struct gpu_drv* d) {
   mem_bytes = 0;
 }
 
+/* O kernel nao sabe a placa; quem achou foi gpu_wanted(). */
+static void with_pci(struct gpu_mode* mm, const struct gpu_mode* m) {
+  *mm = *m;
+  mm->pci_id = pci_id;
+  mm->pci_bus = 0;
+  mm->pci_dev = pci_dev;
+  mm->pci_fun = 0;
+}
+
 static void say(const char* a, const char* b) {
   serial_puts("[gpu] ");
   serial_puts(a);
@@ -170,11 +179,7 @@ int gpu_start(const struct gpu_mode* m) {
     unload(0);
     return -1;
   }
-  mm = *m;
-  mm.pci_id = pci_id;
-  mm.pci_bus = 0;
-  mm.pci_dev = pci_dev;
-  mm.pci_fun = 0;
+  with_pci(&mm, m);
   if (d->init(&kapi, &mm) != 0) {
     say("init falhou: ", d->name);
     unload(d);
@@ -222,9 +227,11 @@ void gpu_suspend(void) {
 
 int gpu_resume(const struct gpu_mode* m) {
   const struct gpu_drv* d = parked;
-  if (!d) return -1;
+  struct gpu_mode mm;
+  if (!d || !m) return -1;
   parked = 0;
-  if (d->resume(m) != 0) {
+  with_pci(&mm, m);
+  if (d->resume(&mm) != 0) {
     say("desativado: ", "resume falhou");
     unload(d);
     return -1;

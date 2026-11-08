@@ -1,9 +1,9 @@
 # Driver de placa de video (aceleracao grafica)
 
-Estado (2026-11): **etapa 1 feita** — o kernel sabe achar, carregar, testar,
-suspender e desligar um driver de placa. Ainda nao ha driver de placa real;
-o `GPUTEST.DLL` e um driver de teste que copia pela CPU. A etapa 2 e o
-`VIRTGPU.DLL` (virtio-gpu do QEMU).
+Estado (2026-11): **etapas 1 e 2 feitas**. O kernel acha, carrega, testa,
+suspende e desliga um driver de placa, e o `VIRTGPU.DLL` acelera o QEMU com
+`-device virtio-vga` (`make run-virtio`): o quadro sai pela placa em cerca de
+1/200 do tempo do caminho por CPU (medida abaixo).
 
 ## Regra principal
 
@@ -156,7 +156,7 @@ RAM (`gfx_for_gpu`) antes de chamar o driver, e volta a escolha de sempre se
 o driver nao entrar. Sem back buffer em RAM (`gfx_ram_ok()` falhou), o driver
 nao e carregado. `gfx_frame_begin` nao muda.
 
-No **virtio-gpu 2D** (QEMU `-device virtio-vga`, etapa 2) isso vira:
+No **virtio-gpu 2D** (QEMU `-device virtio-vga`, `drivers/virtgpu/virtgpu.c`):
 
 | Plano do renderizador | Comando virtio-gpu |
 |---|---|
@@ -173,6 +173,34 @@ trabalho que no caminho atual.
 
 O `virtio-vga` tambem responde ao Bochs VBE, entao, se o driver falhar, o
 caminho atual continua funcionando na mesma VM.
+
+Detalhes do `VIRTGPU.DLL`:
+
+- virtio 1.0 moderno: acha as capabilities PCI `0x09` (comum e notificacao)
+  no BAR2 (no QEMU, `0xFE800000`, abaixo de 4 GB; BAR acima de 4 GB e
+  recusado porque o kernel so mapeia ate 4 GB);
+- negocia so `VIRTIO_F_VERSION_1` (sem virgl, sem EDID); uma fila (controlq)
+  de 16 entradas, em polling, timeout de 1 s;
+- `init`: recurso 2D `B8G8R8X8` do tamanho da tela, `ATTACH_BACKING` com o
+  `gfx_back` (contiguo) e `SET_SCANOUT`; `selftest`: `GET_DISPLAY_INFO`;
+- `present`: `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` numa notificacao so;
+- `suspend`: reset do dispositivo (a parte VGA volta a mostrar o texto);
+  `resume`: liga de novo e remonta a tela, reaproveitando a memoria;
+- reserva 6 KB (fila + pedidos), que o TOP mostra.
+
+Medida (QEMU 1920x1080 com KVM, contador de ciclos em volta do fim do
+quadro, instrumentacao temporaria fora do commit):
+
+| Caminho | Ciclos por quadro |
+|---|---|
+| CPU: `gfx_copy_back()` para o LFB Bochs | ~400 milhoes |
+| `VIRTGPU.DLL`: `present` | ~1,8 milhao |
+
+O caminho por CPU e tao caro no QEMU porque copia 8 MB para o LFB, e no
+boot BIOS o `kernel_entry.asm` mapeia o LFB em `0xE0000000`/`0xFD000000`
+com `0x9B` (PWT|PCD): sem cache, cada escrita vai sozinha. Mapear como
+write-combining aceleraria o caminho por CPU, mas e mudanca no caminho por
+CPU e fica de fora daqui.
 
 ## Ver no TOP (aba Video)
 
@@ -208,7 +236,7 @@ gpudrv=GPUTEST.DLL forca este driver de D:\SODOS\DRV, com ou sem placa na tabela
 
 | Placa (vendor:device) | DLL | Estado |
 |---|---|---|
-| `1AF4:1050` virtio-gpu | `VIRTGPU.DLL` | etapa 2, a fazer (hoje: "nao achei" no log e segue pela CPU) |
+| `1AF4:1050` virtio-gpu | `VIRTGPU.DLL` | funciona no QEMU (`-device virtio-vga`): 2D, tela inteira por quadro |
 | nenhuma (so `gpudrv=`) | `GPUTEST.DLL` | teste: copia o back buffer para o LFB pela CPU, reserva 64 KB para aparecer no TOP |
 | nenhuma (so `gpudrv=`) | `GPUFAIL.DLL` | o mesmo, mas `present` falha no 20o quadro |
 
@@ -221,7 +249,7 @@ Fontes em `drivers/<nome>/`; `make -C c_compiler drivers` gera
 |---|---|---|
 | 0 | Este documento | feito |
 | 1 | `video/gpu.h` + `video/gpu.c`: tabela PCI, carga, `selftest`, suspender/voltar, desativacao segura, `gpu=0`/`gpudrv=`; `link64 /dll /export:`; `GPUTEST`/`GPUFAIL` | feito |
-| 2 | `VIRTGPU.DLL`: virtio PCI moderno, fila de controle, `present` da tela inteira | a fazer |
+| 2 | `VIRTGPU.DLL`: virtio PCI moderno, fila de controle, `present` da tela inteira | feito |
 | 3 | `present` so das areas alteradas (`GPU_CAP_DAMAGE`) | a fazer |
 | 4 | Cursor por hardware (`GPU_CAP_CURSOR`) | a fazer |
 | 5 | Operacoes na placa (`FILL`/`BLIT`), so se medido e registrado na tabela de custo | em aberto |
@@ -244,15 +272,15 @@ DOS com Ctrl+F1, abrindo o TOP na aba Video e voltando com Ctrl+F7:
 | `gpudrv=GPUTEST.DLL` | ativo, suspenso, ativo de novo | desktop normal; TOP: driver parado, 64 KB |
 | `gpudrv=GPUFAIL.DLL` | ativo, `desativado: present falhou` | desktop segue pela CPU; nao tenta de novo no Ctrl+F7 |
 | `-device virtio-vga`, sem `VIRTGPU.DLL` | `1AF41050 -> ...VIRTGPU.DLL`, `nao carregou` | desktop pelo Bochs VBE, como antes |
+| `-device virtio-vga` com `VIRTGPU.DLL` | ativo, suspenso, ativo de novo; `fim do WIN` no Esc | desktop pela placa; TOP: "virtio-gpu (parado com o WIN ao fundo)", 6 KB; texto volta no Ctrl+F1 e no Esc; reabre no Ctrl+F7 |
 | `gpudrv=` + `gpu=0` | nenhuma linha | igual a antes |
 
 Para repetir, ponha a chave no `VIDEO.CFG` do `disk.img` (com `mcopy`) e:
 
 ```
-make run                        # sem placa na tabela
+make run                        # sem placa na tabela: tudo pela CPU
+make run-virtio                 # virtio-gpu: VIRTGPU.DLL entra sozinho
 ```
-
-Para o virtio, troque `-vga std` por `-device virtio-vga` na linha do QEMU.
 
 ## Arquivos
 
@@ -261,6 +289,7 @@ Para o virtio, troque `-vga std` por `-device virtio-vga` na linha do QEMU.
 - `video/visual.c` — `gfx_gpu_try()`, o teste em `gfx_frame_end`, `gfx_for_gpu`
   em `gfx_buf_init`, chaves `gpu` no `win_load_cfg`, `k_vram`.
 - `drivers/gputest/gputest.c` — `GPUTEST.DLL` e `GPUFAIL.DLL`.
+- `drivers/virtgpu/virtgpu.c` — `VIRTGPU.DLL`.
 - `c_compiler/link/link64.c` — `/dll` e `/export:`.
 - `docs/VIDEO.md` — os modelos de renderizacao por CPU (retro/avancado),
   que continuam valendo com ou sem driver.

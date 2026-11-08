@@ -365,6 +365,14 @@ run: os.img disk.img disk2.img
 	  -drive format=raw,file=disk.img,if=ide,index=1 \
 	  -drive format=raw,file=disk2.img,if=ide,index=2
 
+# Placa virtio-gpu (docs/GPU.md): o WIN usa D:\SODOS\DRV\VIRTGPU.DLL.
+# Sem o DLL, a mesma placa responde como Bochs VBE e tudo segue pela CPU.
+run-virtio: os.img disk.img disk2.img
+	$(QEMU) -device virtio-vga -netdev user,id=n0,hostfwd=tcp::8797-:8797 -device ne2k_pci,netdev=n0 -boot order=c \
+	  -drive format=raw,file=os.img,if=ide,index=0 \
+	  -drive format=raw,file=disk.img,if=ide,index=1 \
+	  -drive format=raw,file=disk2.img,if=ide,index=2
+
 # O QEMU GTK pode manter o zoom antigo quando o guest muda de resolucao em
 # fullscreen (texto 720x400 -> win 1920x1080).  Este alvo inicia em fullscreen
 # com zoom-to-fit=off: a tela do guest fica 1:1 (em um monitor 1080p, 1920x1080

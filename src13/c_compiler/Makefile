@@ -247,7 +247,8 @@ hello64: $(O)/HELLO64.EXE
 # disk-files levar a D:\SODOS\DRV (e nao a raiz do D:).
 DRV = $(O)/DRV
 DRVCC = gcc -m64 -O2 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -mno-red-zone \
-	-mno-sse -mno-mmx -mcmodel=large -fno-asynchronous-unwind-tables -I../video
+	-mno-sse -mno-mmx -mcmodel=large -fno-asynchronous-unwind-tables \
+	-fno-tree-loop-distribute-patterns -I../video
 
 $(DRV):
 	mkdir -p $@
@@ -262,7 +263,12 @@ $(DRV)/GPUTEST.DLL: $(B)/drv_gputest.o $(LINK64) | $(DRV)
 $(DRV)/GPUFAIL.DLL: $(B)/drv_gpufail.o $(LINK64) | $(DRV)
 	$(LINK64) /dll /export:gpu_driver /out:$@ $(B)/drv_gpufail.o
 
-drivers: $(DRV)/GPUTEST.DLL $(DRV)/GPUFAIL.DLL
+$(B)/drv_virtgpu.o: ../drivers/virtgpu/virtgpu.c ../video/gpu.h | $(B)
+	$(DRVCC) -c $< -o $@
+$(DRV)/VIRTGPU.DLL: $(B)/drv_virtgpu.o $(LINK64) | $(DRV)
+	$(LINK64) /dll /export:gpu_driver /out:$@ $(B)/drv_virtgpu.o
+
+drivers: $(DRV)/GPUTEST.DLL $(DRV)/GPUFAIL.DLL $(DRV)/VIRTGPU.DLL
 
 # LIBCX64 estatica: mesma libc, compilada -m64, ligada no HELLO64C.
 LIBC64_SRC = string ctype stdlib stdio printf scanf fpconv math time misc wchar setjmp64 ctors64
