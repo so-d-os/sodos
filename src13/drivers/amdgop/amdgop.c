@@ -53,9 +53,17 @@ static struct gpu_mode m;
 #define R_CNVC_CUR_COLOR1 0x0CE2u
 
 static volatile uint8_t* mmio;   /* BAR5 */
+/* pipe que mostra a tela (superficie != 0 e pitch == largura); -1 = nenhum */
+static int tela_pipe = -1;
+static uint64_t surf_gpu;        /* endereco GPU do framebuffer GOP */
+static uint64_t fb_lo, fb_hi;    /* faixa da memoria de video vista pelo DCN */
 
 static uint32_t dcn_r(uint32_t reg) {
   return *(volatile uint32_t*)(mmio + (DCN_SEG2 + reg) * 4u);
+}
+
+static void dcn_w(uint32_t reg, uint32_t v) {
+  *(volatile uint32_t*)(mmio + (DCN_SEG2 + reg) * 4u) = v;
 }
 
 /* medidas */
@@ -95,6 +103,9 @@ static void dcn_diag(void) {
     return;
   }
   mmio = (volatile uint8_t*)(uintptr_t)(bar5 & ~0xFu);
+  fb_lo = (uint64_t)(dcn_r(R_DCN_VM_FB_LOCATION_BASE) & 0xFFFFFFu) << 24;
+  fb_hi = (uint64_t)(dcn_r(R_DCN_VM_FB_LOCATION_TOP) & 0xFFFFFFu) << 24 | 0xFFFFFFu;
+  tela_pipe = -1;
   log_kv("[amdgop] dcn fb_base ", dcn_r(R_DCN_VM_FB_LOCATION_BASE));
   log_kv(" fb_top ", dcn_r(R_DCN_VM_FB_LOCATION_TOP));
   log_kv(" fb_offset ", dcn_r(R_DCN_VM_FB_OFFSET));
@@ -104,6 +115,11 @@ static void dcn_diag(void) {
   k->log("\n");
   for (p = 0; p < 4; p++) {
     uint32_t h = p * PIPE_HUBP, c = p * PIPE_CNVC;
+    uint64_t surf = (uint64_t)dcn_r(R_HUBPREQ_PRIMARY_ADDR_HI + h) << 32 | dcn_r(R_HUBPREQ_PRIMARY_ADDR + h);
+    if (tela_pipe < 0 && surf && dcn_r(R_HUBPREQ_SURFACE_PITCH + h) == m.w) {
+      tela_pipe = (int)p;
+      surf_gpu = surf;
+    }
     log_kv("[amdgop] pipe ", p);
     log_kv(" hubp_cntl ", dcn_r(R_HUBP_DCHUBP_CNTL + h));
     log_kv(" surf ", dcn_r(R_HUBPREQ_PRIMARY_ADDR_HI + h));
@@ -199,8 +215,102 @@ static int a_present(const struct gpu_rect* r, int n) {
   return 0;
 }
 
-/* GOP: no modo texto o fbcon escreve no mesmo framebuffer; nada a parar. */
-static int a_suspend(void) { return 0; }
+#ifdef AMD_CURSOR
+/* ---------------------------------------------------------------------------
+ * Etapa B: cursor do DCN no pipe da tela (AMDCUR.DLL, -DAMD_CURSOR).
+ * Sequencia de hubp2_cursor_set_attributes, hubp1_cursor_set_position e
+ * dpp2_set_cursor_attributes do amdgpu (Linux 6.12). A imagem 64x64 ARGB
+ * fica 16 MB adiante do inicio da VRAM (fora do framebuffer GOP); os 16 KB
+ * que estavam la sao guardados e devolvidos no fim.
+ * ------------------------------------------------------------------------- */
+#define CUR_LADO 64u
+#define CUR_VRAM_OFF 0x01000000u
+#define CUR_BYTES (CUR_LADO * CUR_LADO * 4u)
+#define CUR_MODE_PREMULT 2u   /* CURSOR_MODE_COLOR_PRE_MULTIPLIED_ALPHA */
+#define CUR_LPC_8 3u          /* CURSOR_LINE_PER_CHUNK_8: largura 33..64 */
+#define CUR_PITCH_64 0u
+
+static uint32_t* cur_salvo;   /* o que havia na VRAM onde a imagem fica */
+static int cur_ligado;
+
+static uint32_t hreg(uint32_t r) { return r + (uint32_t)tela_pipe * PIPE_HUBP; }
+static uint32_t creg(uint32_t r) { return r + (uint32_t)tela_pipe * PIPE_CNVC; }
+
+static void cur_desliga(void) {
+  if (!cur_ligado || tela_pipe < 0) return;
+  dcn_w(hreg(R_CURSOR_CONTROL), dcn_r(hreg(R_CURSOR_CONTROL)) & ~1u);
+  dcn_w(creg(R_CNVC_CUR_CONTROL), dcn_r(creg(R_CNVC_CUR_CONTROL)) & ~1u);
+  cur_ligado = 0;
+}
+
+static int a_cursor_set(const uint32_t* argb, int w, int h, int hot_x, int hot_y) {
+  volatile uint32_t* img = (volatile uint32_t*)(m.fb + CUR_VRAM_OFF);
+  uint64_t addr = surf_gpu + CUR_VRAM_OFF;
+  uint32_t i, x, y, v;
+  if (tela_pipe < 0 || !mmio || !argb || w < 1 || h < 1 || w > (int)CUR_LADO || h > (int)CUR_LADO) {
+    k->log("[amdcur] sem pipe da tela: cursor fica com a CPU\n");
+    return -1;
+  }
+  if (addr + CUR_BYTES - 1u > fb_hi || addr < fb_lo || surf_gpu < fb_lo) {
+    log_kv("[amdcur] endereco fora da VRAM do DCN ", (uint32_t)(addr >> 32));
+    log_kv(":", (uint32_t)addr);
+    k->log("\n");
+    return -1;
+  }
+  if (!cur_salvo) {
+    cur_salvo = (uint32_t*)k->alloc(CUR_BYTES, 64);
+    if (!cur_salvo) return -1;
+    for (i = 0; i < CUR_LADO * CUR_LADO; i++) cur_salvo[i] = img[i];
+  }
+  for (y = 0; y < CUR_LADO; y++)
+    for (x = 0; x < CUR_LADO; x++)
+      img[y * CUR_LADO + x] = (int)x < w && (int)y < h ? argb[y * (uint32_t)w + x] : 0u;
+  cur_desliga();
+  dcn_w(hreg(R_CURSOR_ADDR_HI), (uint32_t)(addr >> 32));
+  dcn_w(hreg(R_CURSOR_ADDR), (uint32_t)addr);
+  dcn_w(hreg(R_CURSOR_SIZE), CUR_LADO << 16 | CUR_LADO);
+  v = dcn_r(hreg(R_CURSOR_CONTROL));
+  v &= ~(1u | 1u << 4 | 7u << 8 | 3u << 16 | 0x1Fu << 24);   /* ENABLE 2X MODE PITCH LPC */
+  v |= CUR_MODE_PREMULT << 8 | CUR_PITCH_64 << 16 | CUR_LPC_8 << 24;
+  dcn_w(hreg(R_CURSOR_CONTROL), v);
+  dcn_w(hreg(R_HUBPREQ_CURSOR_SETTINGS), 3u << 8);           /* CHUNK_HDL_ADJUST 3 */
+  v = dcn_r(creg(R_CNVC_CUR_CONTROL));
+  v &= ~(1u | 1u << 1 | 1u << 3 | 7u << 4);                  /* ENABLE EXP ROM MODE */
+  v |= CUR_MODE_PREMULT << 4;
+  dcn_w(creg(R_CNVC_CUR_CONTROL), v);
+  dcn_w(hreg(R_CURSOR_HOT_SPOT), (uint32_t)hot_x << 16 | (uint32_t)hot_y);
+  dcn_w(hreg(R_CURSOR_DST_OFFSET), 0);
+  /* liga: HUBP e DPP */
+  dcn_w(hreg(R_CURSOR_CONTROL), dcn_r(hreg(R_CURSOR_CONTROL)) | 1u);
+  dcn_w(creg(R_CNVC_CUR_CONTROL), dcn_r(creg(R_CNVC_CUR_CONTROL)) | 1u);
+  cur_ligado = 1;
+  log_kv("[amdcur] pipe ", (uint32_t)tela_pipe);
+  log_kv(" imagem gpu ", (uint32_t)(addr >> 32));
+  log_kv(":", (uint32_t)addr);
+  log_kv(" cur_ctl ", dcn_r(hreg(R_CURSOR_CONTROL)));
+  log_kv(" cnvc ", dcn_r(creg(R_CNVC_CUR_CONTROL)));
+  log_kv(" size ", dcn_r(hreg(R_CURSOR_SIZE)));
+  k->log("\n");
+  return 0;
+}
+
+static int a_cursor_move(int x, int y) {
+  if (!cur_ligado) return -1;
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  dcn_w(hreg(R_CURSOR_POSITION), (uint32_t)x << 16 | (uint32_t)y);
+  return 0;
+}
+#endif
+
+/* GOP: no modo texto o fbcon escreve no mesmo framebuffer; nada a parar.
+ * Com cursor da placa, ele e desligado (o resume liga de novo). */
+static int a_suspend(void) {
+#ifdef AMD_CURSOR
+  cur_desliga();
+#endif
+  return 0;
+}
 
 static int a_resume(const struct gpu_mode* mode) {
   if (!mode || !mode->fb || !mode->back) return -1;
@@ -210,6 +320,16 @@ static int a_resume(const struct gpu_mode* mode) {
 
 static void a_fini(void) {
   if (!k) return;
+#ifdef AMD_CURSOR
+  cur_desliga();
+  if (cur_salvo) {
+    volatile uint32_t* img = (volatile uint32_t*)(m.fb + CUR_VRAM_OFF);
+    uint32_t i;
+    for (i = 0; i < CUR_LADO * CUR_LADO; i++) img[i] = cur_salvo[i];
+    k->free(cur_salvo);
+    cur_salvo = 0;
+  }
+#endif
   log_kv("[amdgop] fim: quadros ", quadros);
   if (quadros) {
     log_kv(" ciclos/quadro ", (uint32_t)(ciclos / quadros));
@@ -222,16 +342,26 @@ static void a_fini(void) {
 
 static const struct gpu_drv drv = {
   GPU_ABI,
+#ifdef AMD_CURSOR
+  "amdcur (Radeon, GOP, cursor DCN)",
+  GPU_CAP_PRESENT | GPU_CAP_DAMAGE | GPU_CAP_CURSOR,
+#else
   "amdgop (Radeon, GOP)",
   GPU_CAP_PRESENT | GPU_CAP_DAMAGE,
+#endif
   a_init,
   a_selftest,
   a_present,
   a_fini,
   a_suspend,
   a_resume,
+#ifdef AMD_CURSOR
+  a_cursor_set,
+  a_cursor_move,
+#else
   0,
   0,
+#endif
 };
 
 const struct gpu_drv* gpu_driver(void) { return &drv; }

@@ -273,7 +273,12 @@ $(B)/drv_amdgop.o: ../drivers/amdgop/amdgop.c ../video/gpu.h | $(B)
 $(DRV)/AMDGOP.DLL: $(B)/drv_amdgop.o $(LINK64) | $(DRV)
 	$(LINK64) /dll /export:gpu_driver /out:$@ $(B)/drv_amdgop.o
 
-drivers: $(DRV)/GPUTEST.DLL $(DRV)/GPUFAIL.DLL $(DRV)/VIRTGPU.DLL $(DRV)/AMDGOP.DLL
+$(B)/drv_amdcur.o: ../drivers/amdgop/amdgop.c ../video/gpu.h | $(B)
+	$(DRVCC) -DAMD_CURSOR -c $< -o $@
+$(DRV)/AMDCUR.DLL: $(B)/drv_amdcur.o $(LINK64) | $(DRV)
+	$(LINK64) /dll /export:gpu_driver /out:$@ $(B)/drv_amdcur.o
+
+drivers: $(DRV)/GPUTEST.DLL $(DRV)/GPUFAIL.DLL $(DRV)/VIRTGPU.DLL $(DRV)/AMDGOP.DLL $(DRV)/AMDCUR.DLL
 
 # LIBCX64 estatica: mesma libc, compilada -m64, ligada no HELLO64C.
 LIBC64_SRC = string ctype stdlib stdio printf scanf fpconv math time misc wchar setjmp64 ctors64

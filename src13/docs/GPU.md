@@ -414,6 +414,47 @@ O que ele diz:
   inteiros: **8,1 vezes menos** que o caminho por CPU;
 - 10 idas e voltas com Ctrl+F1/Ctrl+F7 sem erro, e saida limpa no Esc.
 
+### Cursor pelo DCN (AMDCUR.DLL)
+
+A Barcelo usa o DCN 2.1 (o mesmo da Renoir no Linux, `CHIP_RENOIR`).
+Registradores no BAR5 (`0xFCC00000`), em `(0x34C0 + registrador) * 4`,
+offsets de `dcn_2_1_0_offset.h` do Linux 6.12.
+
+**Etapa A (so leitura, 2026-11-08).** O `AMDGOP.DLL` le e registra o estado
+que o firmware deixou:
+
+```
+[amdgop] dcn fb_base 0000F400 fb_top 0000F41F fb_offset 00000810
+[amdgop] pipe 00000000 hubp_cntl 000E0000 surf 000000F4:00000000 pitch 00000780
+[amdgop]   cur_ctl 01000000 cur_addr 00000000:00000000 size 00000000 ...
+[amdgop]   cnvc_cur 00000084
+[amdgop] pipe 00000001..3 surf 00000000:00000000 pitch 00000000
+```
+
+- o DCN ve a VRAM em `0xF4_0000_0000`..`0xF4_1FFF_FFFF` (512 MB);
+- o **pipe 0** mostra a tela: superficie em `0xF4_0000_0000` (o inicio da
+  VRAM, que a CPU ve em `0xD0000000`), pitch 1920; os pipes 1-3 estao vazios;
+- o cursor esta desligado em todos os pipes.
+
+**Etapa B (`AMDCUR.DLL`, `-DAMD_CURSOR`).** O mesmo fonte do `AMDGOP.DLL`
+com `GPU_CAP_CURSOR`, seguindo `hubp2_cursor_set_attributes`,
+`hubp1_cursor_set_position` e `dpp2_set_cursor_attributes`:
+
+- so usa o pipe cuja superficie nao e 0 e cujo pitch e a largura da tela;
+  sem ele, recusa o cursor e a CPU continua desenhando (testado no QEMU);
+- imagem 64x64 ARGB pre-multiplicado 16 MB adiante do inicio da VRAM (CPU
+  `fb + 0x01000000`, GPU `superficie + 0x01000000`, conferido dentro de
+  `fb_base`..`fb_top`); os 16 KB que estavam la sao guardados e devolvidos
+  no fim;
+- HUBP: endereco, `CURSOR_SIZE` 64x64, `CURSOR_CONTROL` modo 2, pitch 64,
+  8 linhas por bloco; `CURSOR_SETTINGS` ajuste 3; DPP: `CUR0_MODE` 2; liga
+  os dois; `cursor_move` so escreve `CURSOR_POSITION`;
+- suspender (Ctrl+F1) e sair desligam o cursor;
+- escolhido pelo `SODOS.CFG` (`driver=AMDCUR.DLL`); voltar para
+  `driver=AMDGOP.DLL` tira o cursor da placa sem mexer em mais nada.
+
+Estado: aguardando o primeiro boot no notebook.
+
 ## Configuracao (`D:\SODOS\VIDEO.CFG`)
 
 ```
