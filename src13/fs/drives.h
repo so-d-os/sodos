@@ -7,6 +7,13 @@
 #define DRV_PATH     260
 
 void drives_init(void);
+/* Unidade e pastas atuais: cada tela do DOS (vt.c) tem as suas. */
+struct drives_state {
+  char letter;
+  char dir[26][DRV_PATH];
+};
+void drives_state_save(struct drives_state* s);
+void drives_state_load(const struct drives_state* s);
 char drives_current(void);
 int drives_set_current(char letter);
 int drives_is_mounted(char letter);

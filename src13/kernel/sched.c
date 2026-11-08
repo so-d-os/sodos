@@ -11,6 +11,10 @@ void sched_set_idle(void (*fn)(void)) {
   idle_fn = fn;
 }
 
+void (*sched_get_idle(void))(void) { return idle_fn; }
+
+int sched_in_yield(void) { return in_yield; }
+
 int sched_post(int (*fn)(void*), void* arg) {
   int i;
   if (!fn) return -1;

@@ -42,6 +42,7 @@ int format_fat16(uint32_t drive, uint32_t lba_start, uint32_t total_sectors, con
 #include "module.h"
 #include "keymap.h"
 #include "clip.h"
+#include "vt.h"
 
 const struct executable_entry* find_executable(const char* name) {
   for (int i = 0; i < executable_count; i++) {
@@ -278,8 +279,9 @@ void vga_put_at(int r, int c, unsigned char ch) {
   VGA[r * 80 + c] = (uint16_t)(uint8_t)ch | (uint16_t)(0x07u << 8);
 }
 
-void update_cursor(void) {
-  int pos = row * 80 + col;
+/* Cursor do hardware em (r, c), seja qual for a tarefa (vt.c). */
+void con_cursor_at(int r, int c) {
+  int pos = r * 80 + c;
   if (fbcon_active()) {
     fbcon_cursor(pos);
     return;
@@ -288,6 +290,12 @@ void update_cursor(void) {
   outb(0x3D5, (unsigned char)(pos & 0xFF));
   outb(0x3D4, 0x0E);
   outb(0x3D5, (unsigned char)((pos >> 8) & 0xFF));
+}
+
+/* Ao fundo, a tela e uma copia: o cursor de verdade e de outra tela. */
+void update_cursor(void) {
+  if (vt_bg()) return;
+  con_cursor_at(row, col);
 }
 
 /* Posiciona cursor em (r, c) para atualizar área fixa na tela */
@@ -323,7 +331,26 @@ static int (*shell_exec_fn)(const char* path, int argc, char** argv);
 
 void shell_set_exec(int (*fn)(const char* path, int argc, char** argv)) { shell_exec_fn = fn; }
 
+static int pipe_on;
+
+void con_state_save(struct con_state* s) {
+  s->row = row;
+  s->col = col;
+  s->out = shell_out_fn;
+  s->exec = shell_exec_fn;
+  s->pipe_on = pipe_on;
+}
+
+void con_state_load(const struct con_state* s) {
+  row = s->row;
+  col = s->col;
+  shell_out_fn = s->out;
+  shell_exec_fn = s->exec;
+  pipe_on = s->pipe_on;
+}
+
 void putc(char c) {
+  vt_out_tick();
   if (shell_out_fn) {
     shell_out_fn(c);
     return;
@@ -443,7 +470,7 @@ static void break_fire(void) {
 
 void con_break_poll(void) {
   unsigned char st;
-  if (!break_applies()) return;
+  if (!break_applies() || vt_bg()) return;
   /* Para no primeiro byte do mouse: ele nao e nosso. */
   while (((st = inb(0x64)) & 1) && !(st & 0x20)) {
     unsigned char sc = inb(0x60);
@@ -487,13 +514,26 @@ static int get_key(int wait) {
   /* Polling puro. Sem hlt e sem IRQ0: o timer no vetor 8 (antes do remap)
    * caia no handler de #DF e o iret executava lixo em 0x9FC00 (#UD). */
   for (;;) {
+    /* O teclado e da tela visivel. Ao fundo, cede a vez. */
+    if (vt_bg()) {
+      vt_yield(wait);
+      if (!wait) return 0;
+      continue;
+    }
     net_poll();
     if (!kb_read(&sc)) {
       if (!wait) return 0;
+      vt_idle();
       continue;
     }
     break_fire();
     if (sc == 0xFA || sc == 0xFE) {
+      if (!wait) return 0;
+      continue;
+    }
+    /* Ctrl+F1..F5 trocam de tela; Ctrl+F7 vai ao WIN. */
+    if (kbd_ctrl_down() && vt_hotkey(sc) >= 0) {
+      vt_select(vt_hotkey(sc));
       if (!wait) return 0;
       continue;
     }
@@ -1210,8 +1250,8 @@ static int exec_line(char* line, int history);
 static char* pipe_buf;
 static uint32_t pipe_len;
 static uint32_t pipe_pos;
-static int pipe_on;
 static int pipe_full;
+static int pipe_busy;   /* pipe_buf e um so para as telas */
 
 static void pipe_out(char c) {
   if (c == '\f') return;   /* cls nao vai para o pipe */
@@ -1243,11 +1283,16 @@ static int exec_pipe(char* left, char* right) {
     puts_k("pipe: so um | por linha\n");
     return 1;
   }
+  if (pipe_busy) {
+    puts_k("pipe: em uso em outra tela\n");
+    return 1;
+  }
   if (!pipe_buf) pipe_buf = (char*)umalloc_owned(PIPE_MAX, 0);
   if (!pipe_buf) {
     puts_k("pipe: sem memoria\n");
     return 1;
   }
+  pipe_busy = 1;
   pipe_len = 0;
   pipe_pos = 0;
   pipe_full = 0;
@@ -1258,6 +1303,7 @@ static int exec_pipe(char* left, char* right) {
   pipe_on = 1;
   rc = exec_line(right, 0);
   pipe_on = 0;
+  pipe_busy = 0;
   return rc;
 }
 
@@ -1438,10 +1484,16 @@ void kmain(const struct BootInfo* bi) {
       mod_exec(path, 0, 0);
   }
 
-  puts_k("OS Ready.\n");
+  puts_k("OS Ready. Ctrl+F1..F5: telas do DOS, Ctrl+F7: WIN.\n");
   /* Unico trafego serial depois do boot ate ao visual: shell nao usa COM1 (só VGA). */
   serial_puts("[kernel] shell ready — mais linhas na serial apos o comando 'visual'\n");
 
+  vt_init();
+  shell_loop();
+}
+
+/* O prompt. Cada tela (vt.c) roda o seu. */
+void shell_loop(void) {
   char line[256];
 
   for (;;) {

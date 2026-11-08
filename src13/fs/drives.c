@@ -183,6 +183,20 @@ char drives_current(void) {
   return cur_letter;
 }
 
+void drives_state_save(struct drives_state* s) {
+  int i, k;
+  s->letter = cur_letter;
+  for (i = 0; i < 26; i++)
+    for (k = 0; k < (int)sizeof(cur_dir[0]); k++) s->dir[i][k] = cur_dir[i][k];
+}
+
+void drives_state_load(const struct drives_state* s) {
+  int i, k;
+  cur_letter = s->letter;
+  for (i = 0; i < 26; i++)
+    for (k = 0; k < (int)sizeof(cur_dir[0]); k++) cur_dir[i][k] = s->dir[i][k];
+}
+
 int drives_set_current(char letter) {
   char L = norm_letter(letter);
   int i = letter_idx(L);

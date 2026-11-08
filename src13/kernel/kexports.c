@@ -15,6 +15,7 @@
 #include "serial.h"
 #include "bootinfo.h"
 #include "httpd.h"
+#include "vt.h"
 
 void mod_exit(int code);
 void shell_read_line(char* buf, int max);
@@ -22,6 +23,7 @@ void shell_read_line(char* buf, int max);
 static void (*con_hook)(char c);
 
 void kexp_set_console_hook(void (*hook)(char c)) { con_hook = hook; }
+void (*kexp_get_console_hook(void))(char c) { return con_hook; }
 
 /* ---------- console ---------- */
 /* Cada chamada de console e um ponto de Ctrl+C (con_break_poll). */
@@ -181,14 +183,14 @@ static int k_font_get(int ch, uint8_t* glyph) { return vga_font_get(ch, glyph); 
 
 static int k_font_set(int ch, const uint8_t* glyph) {
   int rc;
-  if (!text_screen_ok()) return -1;
+  if (!text_screen_ok() || vt_bg()) return -1;
   rc = vga_font_set(ch, glyph);
   if (rc == 0 && !font_pid) font_pid = mod_current_pid();
   return rc;
 }
 
 static void k_font_reset(void) {
-  if (!text_screen_ok()) return;
+  if (!text_screen_ok() || vt_bg()) return;
   vga_font_reset();
   font_pid = 0;
 }
@@ -197,7 +199,7 @@ static void k_font_reset(void) {
 static uint32_t blink_pid;
 
 static int k_blink(int on) {
-  if (!text_screen_ok()) return -1;
+  if (!text_screen_ok() || vt_bg()) return -1;
   vga_text_blink(on);
   blink_pid = on ? 0 : mod_current_pid();
   return 0;
@@ -207,8 +209,31 @@ static int k_blink(int on) {
 static int cur_hidden;
 static uint8_t cur_start;
 
+int kexp_cursor_hidden(void) { return cur_hidden; }
+
+/* Tela entrando: o modo texto pode ter voltado com o cursor aceso. */
+void kexp_cursor_apply(int hidden) {
+  if (!fbcon_active() && vga_legacy()) {
+    uint8_t v;
+    shell_outb(0x3D4, 0x0A);
+    v = shell_inb(0x3D5);
+    if (!hidden) {
+      shell_outb(0x3D5, (uint8_t)(v & (uint8_t)~0x20));
+    } else {
+      cur_start = (uint8_t)(v & (uint8_t)~0x20);
+      shell_outb(0x3D5, (uint8_t)(v | 0x20));
+    }
+  }
+  cur_hidden = hidden;
+}
+
 static void k_cursor(int row, int col) {
   if (!text_screen_ok()) return;
+  /* Ao fundo, o cursor de verdade e de outra tela: so a posicao muda. */
+  if (vt_bg()) {
+    if (row >= 0 && row < 25 && col >= 0 && col < 80) goto_xy(row, col);
+    return;
+  }
   if (row < 0 || row >= 25 || col < 0 || col >= 80) {
     if (fbcon_active()) {
       fbcon_cursor(-1);
@@ -436,12 +461,13 @@ static void k_tcp_close(void) {
 
 void kexp_release_pid(uint32_t pid) {
   if (!pid) return;
+  /* Ao fundo, a fonte e o piscar na tela sao de outra tela: nao mexe. */
   if (font_pid == pid) {
-    vga_font_reset();
+    if (!vt_bg()) vga_font_reset();
     font_pid = 0;
   }
   if (blink_pid == pid) {
-    vga_text_blink(1);
+    if (!vt_bg()) vga_text_blink(1);
     blink_pid = 0;
   }
   if (tcp_pid != pid) return;

@@ -9,5 +9,7 @@ int cmd_help(int argc, char** argv) {
     puts_k(commands[i].name);
     puts_k("\n");
   }
+  puts_k("Ctrl+F1..F5: telas do DOS (cada uma guarda o seu programa)\n");
+  puts_k("Ctrl+F7: WIN\n");
   return 0;
 }

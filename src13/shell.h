@@ -45,6 +45,10 @@ static inline int name_eq(const char* a, const char* b) {
   return a[i] == '\0' && b[i] == '\0';
 }
 void update_cursor(void);
+/* Cursor do hardware em (r, c), mesmo de uma tela ao fundo (vt.c). */
+void con_cursor_at(int r, int c);
+/* O prompt do DOS; nao volta. */
+void shell_loop(void);
 void goto_xy(int r, int c);
 void clear_line_from_cursor(void);
 void pause(void);

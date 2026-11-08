@@ -16,6 +16,7 @@ int vga_font_set(int ch, const uint8_t* glyph);
 void vga_font_reset(void);
 /* 0: bit 7 do atributo vira fundo claro em vez de piscar. 1: volta a piscar. */
 void vga_text_blink(int on);
+int vga_text_blink_get(void);
 /* Forca modo texto 80x25 para que panic/exception seja visivel (ex.: em isr_dispatch). */
 void vga_force_text_mode(void);
 

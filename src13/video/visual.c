@@ -22,6 +22,7 @@
 #include "bootinfo.h"
 #include "fbcon.h"
 #include "xhci.h"
+#include "vt.h"
 #include "c_compiler/sox.h"
 
 static inline void outl(uint16_t port, uint32_t v) {
@@ -1180,7 +1181,8 @@ void mouse_api_pos(int* x, int* y) {
 }
 
 int win_screen_size(int* w, int* h) {
-  if (!gfx_live || !gfx_w || !gfx_h) return 0;
+  /* Uma tela do DOS rodando ao fundo do WIN nao esta no WIN. */
+  if (!gfx_live || !gfx_w || !gfx_h || vt_bg()) return 0;
   if (w) *w = (int)gfx_w;
   if (h) *h = (int)gfx_h;
   return 1;
@@ -1212,8 +1214,13 @@ static void vga_font_load(int ch) {
 
 /* Modo do controlador de atributos, como em vga_mode_text. O fbcon sempre usa
  * o fundo claro: nada a fazer no UEFI. */
+static int text_blink = 1;
+
+int vga_text_blink_get(void) { return text_blink; }
+
 void vga_text_blink(int on) {
   if (!vga_legacy() || gfx_live) return;
+  text_blink = on ? 1 : 0;
   (void)inb(0x3DA);
   outb(0x3C0, 0x30);
   outb(0x3C0, on ? 0x0C : 0x04);
@@ -3409,7 +3416,7 @@ int gui_open(const char* title) {
   uint32_t bytes;
   int i, n = 0, slot = -1;
   if (!gui_ensure()) return -2;
-  if (!gui_allowed || gfx_w == 0) return -1;
+  if (!gui_allowed || !gfx_live || vt_bg() || gfx_w == 0) return -1;
   if (task_cur >= 0 && gtasks[task_cur].gid >= 0 && gwins[gtasks[task_cur].gid].open) {
     gui_ix = gtasks[task_cur].gid;
     gui_title(title);
@@ -5836,6 +5843,50 @@ static void chrome_bind(struct wm_win* wins, int* focus, int* menu, int* cfg, in
 }
 
 /* 0 = voltar ao DOS. 1 = aplicar outra resolucao e redesenhar o desktop. */
+/* Ctrl+F1..F5 no WIN: a tela volta ao modo texto da tela do DOS pedida.
+ * O WIN fica parado ate alguem voltar a ele (Ctrl+F7); ai o modo grafico
+ * e reprogramado e o quadro inteiro e desenhado de novo. */
+static void win_vt_away(int to) {
+  serial_puts("[visual] WIN sai para a tela de texto\n");
+  cursor_restore();
+  gfx_live = 0;
+  if (gfx_gop) {
+    fbcon_suspend(0);
+  } else {
+    if (gfx_bochs) {
+      bochs_vbe_write(VBE_DISPI_INDEX_X_OFFSET, 0);
+      bochs_vbe_write(VBE_DISPI_INDEX_Y_OFFSET, 0);
+      bochs_vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+    }
+    vga_mode_text();
+    vga_dac_restore_std16();
+  }
+
+  vt_select(to);
+
+  serial_puts("[visual] WIN volta a tela\n");
+  if (gfx_gop) {
+    fbcon_suspend(1);
+  } else if (gfx_bochs) {
+    if (!bochs_program((uint16_t)gfx_w, (uint16_t)gfx_h))
+      serial_puts("[visual] modo grafico nao voltou\n");
+    gfx_buf_init();
+  } else {
+    vga_mode13h();
+    set_palette_color(0, 0, 0, 0);
+    set_palette_color(1, 0, 0, 42);
+    set_palette_color(2, 0, 42, 0);
+    set_palette_color(3, 0, 32, 32);
+    set_palette_color(7, 42, 42, 42);
+    set_palette_color(8, 21, 21, 21);
+    set_palette_color(14, 63, 63, 0);
+    set_palette_color(15, 63, 63, 63);
+  }
+  gfx_live = 1;
+  cursor_saved = 0;
+  win_api_dirty = 1;
+}
+
 static int win_wm_run(void) {
   struct wm_win wins[WM_MAX];
   int focus = 0;
@@ -6154,6 +6205,7 @@ static int win_wm_run(void) {
       int from_abs = 0;
       int kind = input_poll(packet, &pkt_idx, &scb, &from_abs);
       if (kind < 0) {
+        vt_idle();   /* as telas do DOS ao fundo andam */
         __asm__ volatile ("pause");
         continue;
       }
@@ -6765,6 +6817,16 @@ static int win_wm_run(void) {
     {
       uint8_t sc = data;
       int kp = 0; /* Enter e / do teclado numerico: seguem como tecla comum */
+      /* Ctrl+F1..F5: telas do DOS. Ctrl+F7 e esta. */
+      if (!(sc & 0x80) && !kbd_e0 && kbd_ctrl_down() && vt_hotkey(sc) >= 0) {
+        if (vt_hotkey(sc) != VT_WIN) {
+          win_vt_away(vt_hotkey(sc));
+          pkt_idx = 0;
+          shift_on = 0;
+          need_draw = 1;
+        }
+        continue;
+      }
       if (keymap_kp_nav(sc)) kbd_e0 = 1; /* NumLock desligado: vira seta, Home... */
       if (kbd_e0 && !(sc & 0x80)) kp = keymap_ext_char(sc);
       if (kbd_e0 && !kp) {
