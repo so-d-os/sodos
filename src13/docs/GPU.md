@@ -5,8 +5,8 @@ suspende e desliga um driver de placa; o `VIRTGPU.DLL` acelera o QEMU com
 `-device virtio-vga` (`make run-virtio`); o kernel diz ao driver quais
 areas mudaram, entao so elas vao para a placa; e a placa desenha o cursor,
 que sai do quadro (medidas abaixo). Para o notebook (Radeon Barcelo) ha o
-`AMDGOP.DLL`, configurado pelo `U:\SODOS.CFG`; ele ainda nao foi testado
-no hardware.
+`AMDGOP.DLL`, configurado pelo `U:\SODOS.CFG`, que ja rodou no hardware
+(2026-11-08): copia por quadro 8 vezes menor que a do quadro inteiro.
 
 ## Regra principal
 
@@ -382,6 +382,38 @@ Para testar no notebook:
 3. iniciar o SODOS, `win`, usar um pouco, Ctrl+F1 e `top` (aba Video);
 4. sair do WIN com Esc e trazer o `U:\SODOS\GPU.LOG`.
 
+### Primeiro boot no notebook (2026-11-08)
+
+O `GPU.LOG` do primeiro boot:
+
+```
+[gpu] placa 100215E7 em 00040000 (AMD Radeon Graphics (Barcelo, Ryzen 7 5825U)), SODOS.CFG em U:
+[gpu] modo 00000780x000004B0 fb D0000000 pitch 00001E00
+[gpu] -> U:\SODOS\DRV\AMDGOP.DLL
+[amdgop] pci 100215E7 classe/rev 030000C1
+[amdgop] BARs D000000C 00000000 E000000C 00000000 0000D001 FCC00000
+[amdgop] copia do quadro inteiro: ciclos 002F34C4
+[gpu] ativo: amdgop (Radeon, GOP)
+[gpu] suspenso / ativo de novo  (10 vezes)
+[gpu] desativado: fim do WIN
+[amdgop] fim: quadros 00001934 ciclos/quadro 0005D829 pixels/quadro 0003BFFB
+```
+
+O que ele diz:
+
+- a busca pelas pontes achou a placa em `04:00.0`, e o `SODOS.CFG` do U:
+  escolheu o driver;
+- tela de 1920x1200; o framebuffer GOP (`0xD0000000`) e o BAR0 da placa
+  (abertura da VRAM, 64 bits, prefetch); BAR2 `0xE0000000` (doorbells),
+  BAR4 portas `0xD000`, BAR5 `0xFCC00000` (registradores, onde ficaria o
+  cursor do DCN);
+- **copia do quadro inteiro: 3.093.700 ciclos** (~1,5 ms a 2 GHz, ~6 GB/s
+  com write-combining), que e o custo de cada quadro pelo caminho por CPU;
+- **com o driver: 383.017 ciclos por quadro** (~0,19 ms) e 245.755 pixels
+  por quadro (10,7% da tela), na media de 6.452 quadros, contando os quadros
+  inteiros: **8,1 vezes menos** que o caminho por CPU;
+- 10 idas e voltas com Ctrl+F1/Ctrl+F7 sem erro, e saida limpa no Esc.
+
 ## Configuracao (`D:\SODOS\VIDEO.CFG`)
 
 ```
@@ -396,7 +428,7 @@ gpudrv=GPUTEST.DLL forca este driver de D:\SODOS\DRV, com ou sem placa na tabela
 | Placa (vendor:device) | DLL | Estado |
 |---|---|---|
 | `1AF4:1050` virtio-gpu | `VIRTGPU.DLL` | funciona no QEMU (`-device virtio-vga`): 2D, tela inteira por quadro |
-| `1002:15E7` AMD Barcelo (pelo `SODOS.CFG`) | `AMDGOP.DLL` | QEMU ok (BIOS e UEFI/GOP, pela placa Bochs); notebook: a testar |
+| `1002:15E7` AMD Barcelo (pelo `SODOS.CFG`) | `AMDGOP.DLL` | funciona no notebook (1920x1200, GOP): 8,1x menos ciclos por quadro |
 | nenhuma (so `gpudrv=`) | `GPUTEST.DLL` | teste: copia o back buffer para o LFB pela CPU, reserva 64 KB para aparecer no TOP |
 | nenhuma (so `gpudrv=`) | `GPUFAIL.DLL` | o mesmo, mas `present` falha no 20o quadro |
 
