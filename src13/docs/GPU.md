@@ -1,9 +1,10 @@
 # Driver de placa de video (aceleracao grafica)
 
-Estado (2026-11): **etapas 1, 2 e 3 feitas**. O kernel acha, carrega, testa,
+Estado (2026-11): **etapas 1 a 4 feitas**. O kernel acha, carrega, testa,
 suspende e desliga um driver de placa; o `VIRTGPU.DLL` acelera o QEMU com
-`-device virtio-vga` (`make run-virtio`); e o kernel diz ao driver quais
-areas mudaram, entao so elas vao para a placa (medidas abaixo).
+`-device virtio-vga` (`make run-virtio`); o kernel diz ao driver quais
+areas mudaram, entao so elas vao para a placa; e a placa desenha o cursor,
+que sai do quadro (medidas abaixo).
 
 ## Regra principal
 
@@ -42,6 +43,9 @@ fixo fica listado aqui, medido, para nao crescer sem ninguem ver.
 | Etapa 3: `need_draw` 2 | `win_api_dirty |= 2` no lugar de `= 1` (mesmo custo); 2 comparacoes quando ha `win_api_dirty`; 1 atribuicao por quadro (`gfx_frame_dmg`) | laco do WIN |
 | Etapa 3: codigo | **1.088 bytes** no `kernel.bin` (406.024 -> 407.112) | `video/visual.c` |
 | Etapa 3: variaveis | 192 bytes de BSS (lista de 10 areas, cursor mostrado) | `video/visual.c` |
+| **Etapa 4 (cursor):** `if (gpu_hwcur)` | 1 teste por desenho do cursor (`cursor_redraw_at`, uma vez por quadro; `cursor_draw`, uma vez por movimento) e 1 por passo de arrasto | `video/visual.c` |
+| Etapa 4: codigo | **928 bytes** no `kernel.bin` (407.112 -> 408.040) | `video/visual.c`, `video/gpu.c` |
+| Etapa 4: variaveis | 16 bytes de BSS (`gpu_hwcur` e alinhamento) | `video/gpu.c` |
 
 O teste nunca entra em funcoes chamadas por pixel ou por glifo (`put_pixel`,
 `gui_glyph`, `gui_pixels`). Se uma etapa futura quiser acelerar
@@ -129,6 +133,8 @@ struct gpu_drv {
   void (*fini)(void);
   int (*suspend)(void);                       /* opcional */
   int (*resume)(const struct gpu_mode* m);    /* opcional */
+  int (*cursor_set)(const uint32_t* argb, int w, int h, int hot_x, int hot_y);  /* GPU_CAP_CURSOR */
+  int (*cursor_move)(int x, int y);                                            /* GPU_CAP_CURSOR */
 };
 
 const struct gpu_drv* gpu_driver(void);   /* unico simbolo exportado */
@@ -191,7 +197,12 @@ Detalhes do `VIRTGPU.DLL`:
   `resume`: liga de novo e remonta a tela, reaproveitando a memoria;
 - `present`: um `TRANSFER_TO_HOST_2D` por area (com o `offset` da area no
   back buffer) e um `RESOURCE_FLUSH` com a uniao; fila de 64 entradas;
-- reserva 6 KB (fila + pedidos), que o TOP mostra;
+- cursor: segunda fila (cursorq, indice 1); `cursor_set` cria o recurso 2
+  (64x64 `B8G8R8A8`, uma vez por reset), copia a imagem e manda
+  `UPDATE_CURSOR`; `cursor_move` manda `MOVE_CURSOR`. Sem a segunda fila o
+  driver funciona e o cursor fica com a CPU;
+- reserva cerca de 29 KB (duas filas, pedidos e a imagem do cursor), que o
+  TOP mostra;
 - `-DVG_MEDIR` liga a medida (ciclos e pixels por apresentacao no log).
 
 Medida (QEMU 1920x1080 com KVM, contador de ciclos em volta do fim do
@@ -249,6 +260,26 @@ cada quadro com uma copia do anterior (8 MB a mais, blocos de 64x32). Mandou
 40 vezes menos pixels, mas custou **mais** que a tela inteira (~1,95 a
 2,4 milhoes de ciclos), porque comparar le 16 MB por quadro. Foi descartado.
 
+## Cursor pela placa (etapa 4)
+
+Com `GPU_CAP_CURSOR`, logo depois de o driver entrar (e de novo depois de
+cada `resume`), o kernel monta a seta (`cur_row`, na escala da tela: 22x34 em
+1920x1080) em ARGB e chama `cursor_set`. Se o driver aceitar, `gpu_hwcur`
+vira 1 e:
+
+- `cursor_redraw_at` e `cursor_draw` so mandam a posicao (`cursor_move`) e
+  nao desenham nada no quadro; `cursor_saved` fica 0, entao nao ha o que
+  restaurar;
+- o arrasto (`dc_present`) monta a imagem sem a seta e move o cursor da placa;
+- as areas da etapa 3 deixam de incluir as caixas do cursor: mover o mouse
+  nao manda pixel nenhum, so um comando de 56 bytes.
+
+Se `cursor_move` falhar, o driver e desligado como em qualquer erro, o quadro
+volta pela CPU e o proximo quadro inteiro ja desenha a seta por software.
+
+O `/win/printscreen` (e o `screendump` do QEMU) le o quadro, entao **nao
+mostra o cursor** quando ele esta na placa.
+
 ## Ver no TOP (aba Video)
 
 O `TOP.EXE` tem a aba **Video** (F3 ou Tab ate ela), que le `k_vram`
@@ -298,7 +329,7 @@ Fontes em `drivers/<nome>/`; `make -C c_compiler drivers` gera
 | 1 | `video/gpu.h` + `video/gpu.c`: tabela PCI, carga, `selftest`, suspender/voltar, desativacao segura, `gpu=0`/`gpudrv=`; `link64 /dll /export:`; `GPUTEST`/`GPUFAIL` | feito |
 | 2 | `VIRTGPU.DLL`: virtio PCI moderno, fila de controle, `present` da tela inteira | feito |
 | 3 | `present` so das areas alteradas (`GPU_CAP_DAMAGE`), areas vindas do kernel | feito |
-| 4 | Cursor por hardware (`GPU_CAP_CURSOR`) | a fazer |
+| 4 | Cursor por hardware (`GPU_CAP_CURSOR`) | feito |
 | 5 | Operacoes na placa (`FILL`/`BLIT`), so se medido e registrado na tabela de custo | em aberto |
 
 Fora do escopo por enquanto: virtio-gpu 3D (virgl), VMware SVGA, amdgpu
@@ -321,6 +352,7 @@ DOS com Ctrl+F1, abrindo o TOP na aba Video e voltando com Ctrl+F7:
 | `-device virtio-vga`, sem `VIRTGPU.DLL` | `1AF41050 -> ...VIRTGPU.DLL`, `nao carregou` | desktop pelo Bochs VBE, como antes |
 | `-device virtio-vga` com `VIRTGPU.DLL` | ativo, suspenso, ativo de novo; `fim do WIN` no Esc | desktop pela placa; TOP: "virtio-gpu (parado com o WIN ao fundo)", 6 KB; texto volta no Ctrl+F1 e no Esc; reabre no Ctrl+F7 |
 | virtio x `-vga std`, mouse PS/2: mover o cursor, digitar no painel de IA, arrastar o Gerenciador | (etapa 3) | as duas telas iguais (so muda onde o cursor parou e o relogio); sem rastro do cursor; a janela arrastada fica no lugar |
+| virtio com cursor pela placa, `-trace virtio_gpu_update_cursor` | `cursor pela placa`; de novo depois do Ctrl+F7 | o trace segue o caminho do mouse (0,0 -> ~400,240 -> ~720,320 -> barra de titulo -> arrasto ate ~630,194); o quadro nao tem a seta; o arrasto funciona; com `-vga std` a seta continua no quadro |
 | `gpudrv=` + `gpu=0` | nenhuma linha | igual a antes |
 
 Para repetir, ponha a chave no `VIDEO.CFG` do `disk.img` (com `mcopy`) e:

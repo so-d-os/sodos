@@ -58,10 +58,15 @@ struct vq_desc {
 #define CMD_RESOURCE_FLUSH 0x0104u
 #define CMD_TRANSFER_TO_HOST_2D 0x0105u
 #define CMD_RESOURCE_ATTACH_BACKING 0x0106u
+#define CMD_UPDATE_CURSOR 0x0300u
+#define CMD_MOVE_CURSOR 0x0301u
 #define RESP_OK_NODATA 0x1100u
 #define RESP_OK_DISPLAY_INFO 0x1101u
+#define FMT_B8G8R8A8 1u   /* cursor: palavra 0xAARRGGBB */
 #define FMT_B8G8R8X8 2u   /* bytes B,G,R,X: o mesmo do LFB Bochs e de gfx_back */
 #define RES_ID 1u
+#define RES_CURSOR 2u
+#define CUR_LADO 64u      /* a placa usa imagem de cursor 64x64 */
 
 struct hdr {
   uint32_t type, flags;
@@ -105,17 +110,32 @@ struct c_flush {
   uint32_t id, pad;
 };
 
+struct c_cursor {
+  struct hdr h;
+  uint32_t scanout, x, y, pad;
+  uint32_t id, hot_x, hot_y, pad2;
+};
+
 /* ---------- estado ---------- */
 static const struct gpu_kapi* k;
 static struct gpu_mode m;
 static volatile uint8_t* common;
-static volatile uint8_t* notify;   /* ja somado o notify_off da fila 0 */
-static uint8_t* ring;              /* desc + avail + used, uma pagina */
-static struct vq_desc* desc;
-static volatile uint16_t* avail;   /* flags, idx, ring[VQ_N] */
-static volatile uint16_t* used;    /* flags, idx, {id u32, len u32}[VQ_N] */
-static uint16_t qn, avail_idx, used_seen;
+
+/* Uma fila virtio em uma pagina: desc (0), avail (1024), used (2048). */
+struct fila {
+  struct vq_desc* desc;
+  volatile uint16_t* avail;   /* flags, idx, ring[VQ_N] */
+  volatile uint16_t* used;    /* flags, idx, {id u32, len u32}[VQ_N] */
+  volatile uint8_t* notify;   /* ja somado o notify_off da fila */
+  uint16_t index, qn, avail_idx, used_seen;
+};
+static struct fila ctl;            /* controlq (0) */
+static struct fila cur;            /* cursorq (1) */
+static uint8_t* ring;              /* duas paginas: ctl e cur */
 static uint8_t* buf;               /* pedidos e respostas */
+static uint32_t* cur_img;          /* imagem do cursor, CUR_LADO x CUR_LADO */
+static int cur_res_ok;             /* recurso do cursor criado desde o ultimo reset */
+static int cur_x, cur_y, cur_hx, cur_hy;
 static uint32_t quadros;
 
 /* buf: N_SLOT pedidos de 64 bytes, cada um com a resposta de 64 logo depois;
@@ -124,7 +144,8 @@ static uint32_t quadros;
 #define SLOT_REQ(i) ((i) * 128u)
 #define SLOT_RSP(i) ((i) * 128u + 64u)
 #define BUF_BIG (N_SLOT * 128u)
-#define BUF_SIZE (BUF_BIG + 512u)
+#define BUF_CUR (BUF_BIG + 512u)   /* pedido da fila do cursor */
+#define BUF_SIZE (BUF_CUR + 64u)
 
 /* Areas alteradas (GPU_CAP_DAMAGE) vem do kernel; mais que MAX_RECTS vira
  * um retangulo so (a uniao). */
@@ -195,24 +216,27 @@ static int acha_caps(uint32_t* notify_mult, uintptr_t* notify_base) {
 }
 
 /* Espera o dispositivo devolver 'quantos' pedidos. */
-static int espera(uint16_t quantos) {
+static int espera_em(struct fila* q, uint16_t quantos) {
   uint32_t t0 = k->ms();
-  uint16_t alvo = (uint16_t)(used_seen + quantos);
+  uint16_t alvo = (uint16_t)(q->used_seen + quantos);
   for (;;) {
     barreira();
-    if ((uint16_t)(used[1] - alvo) < 0x8000u) break;
+    if ((uint16_t)(q->used[1] - alvo) < 0x8000u) break;
     if (k->ms() - t0 > 1000u) {
       erro("timeout na fila");
       return -1;
     }
     __asm__ volatile ("pause");
   }
-  used_seen = alvo;
+  q->used_seen = alvo;
   return 0;
 }
 
+static int espera(uint16_t quantos) { return espera_em(&ctl, quantos); }
+
 /* Poe o pedido (req, rlen) + resposta na fila, a partir do descritor d. */
 static void poe_r(uint16_t d, uint32_t req, uint32_t rlen, uint32_t rsp, uint32_t rsplen) {
+  struct vq_desc* desc = ctl.desc;
   desc[d].addr = (uint64_t)(uintptr_t)(buf + req);
   desc[d].len = rlen;
   desc[d].flags = D_NEXT;
@@ -222,19 +246,36 @@ static void poe_r(uint16_t d, uint32_t req, uint32_t rlen, uint32_t rsp, uint32_
   desc[d + 1].flags = D_WRITE;
   desc[d + 1].next = 0;
   zera(buf + rsp, rsplen);
-  avail[2 + (avail_idx % qn)] = d;
-  avail_idx++;
+  ctl.avail[2 + (ctl.avail_idx % ctl.qn)] = d;
+  ctl.avail_idx++;
 }
 
 static void poe(uint16_t d, uint32_t req, uint32_t rlen, uint32_t rsp) {
   poe_r(d, req, rlen, rsp, 64);
 }
 
-static void manda(void) {
+static void manda_em(struct fila* q) {
   barreira();
-  avail[1] = avail_idx;
+  q->avail[1] = q->avail_idx;
   barreira();
-  w16(notify, 0, 0);
+  w16(q->notify, 0, q->index);
+}
+
+static void manda(void) { manda_em(&ctl); }
+
+/* Fila do cursor: um descritor so, sem resposta (o dispositivo so devolve). */
+static int cursor_cmd(const struct c_cursor* c) {
+  const uint8_t* s = (const uint8_t*)c;
+  uint32_t i;
+  for (i = 0; i < sizeof *c; i++) buf[BUF_CUR + i] = s[i];
+  cur.desc[0].addr = (uint64_t)(uintptr_t)(buf + BUF_CUR);
+  cur.desc[0].len = sizeof *c;
+  cur.desc[0].flags = 0;
+  cur.desc[0].next = 0;
+  cur.avail[2 + (cur.avail_idx % cur.qn)] = 0;
+  cur.avail_idx++;
+  manda_em(&cur);
+  return espera_em(&cur, 1);
 }
 
 static int resp_ok(uint32_t rsp, uint32_t esperado) {
@@ -257,11 +298,31 @@ static int cmd(const void* req, uint32_t len, uint32_t esperado) {
   return resp_ok(BUF_BIG, esperado);
 }
 
-/* Reset + negociacao + fila 0. Reaproveita ring/buf se ja existem. */
+static int liga_fila(struct fila* q, uint16_t idx, uint8_t* mem, uintptr_t nbase, uint32_t mult) {
+  uint16_t qmax;
+  w16(common, C_QSEL, idx);
+  qmax = r16(common, C_QSIZE);
+  if (qmax == 0) return -1;
+  q->index = idx;
+  q->qn = qmax < VQ_N ? qmax : (uint16_t)VQ_N;
+  w16(common, C_QSIZE, q->qn);
+  zera(mem, 4096);
+  q->desc = (struct vq_desc*)mem;
+  q->avail = (volatile uint16_t*)(mem + 1024);
+  q->used = (volatile uint16_t*)(mem + 2048);
+  q->avail_idx = q->used_seen = 0;
+  w64(common, C_QDESC, (uint64_t)(uintptr_t)q->desc);
+  w64(common, C_QDRIVER, (uint64_t)(uintptr_t)q->avail);
+  w64(common, C_QDEVICE, (uint64_t)(uintptr_t)q->used);
+  q->notify = (volatile uint8_t*)(nbase + (uintptr_t)r16(common, C_QNOFF) * mult);
+  w16(common, C_QENABLE, 1);
+  return 0;
+}
+
+/* Reset + negociacao + filas 0 e 1. Reaproveita ring/buf se ja existem. */
 static int liga(void) {
   uint32_t mult = 0, t0;
   uintptr_t nbase;
-  uint16_t qmax, noff;
   if (acha_caps(&mult, &nbase) != 0) {
     erro("capabilities virtio nao achadas");
     return -1;
@@ -291,29 +352,17 @@ static int liga(void) {
     erro("features recusadas");
     return -1;
   }
-  if (r16(common, C_NUMQ) < 1) return -1;
-  w16(common, C_QSEL, 0);
-  qmax = r16(common, C_QSIZE);
-  if (qmax == 0) return -1;
-  qn = qmax < VQ_N ? qmax : (uint16_t)VQ_N;
-  w16(common, C_QSIZE, qn);
-  if (!ring) ring = (uint8_t*)k->alloc(4096, 4096);
+  if (!ring) ring = (uint8_t*)k->alloc(8192, 4096);
   if (!buf) buf = (uint8_t*)k->alloc(BUF_SIZE, 64);
   if (!ring || !buf) {
     erro("sem memoria");
     return -1;
   }
-  zera(ring, 4096);
-  desc = (struct vq_desc*)ring;
-  avail = (volatile uint16_t*)(ring + 1024);
-  used = (volatile uint16_t*)(ring + 2048);
-  avail_idx = used_seen = 0;
-  w64(common, C_QDESC, (uint64_t)(uintptr_t)desc);
-  w64(common, C_QDRIVER, (uint64_t)(uintptr_t)avail);
-  w64(common, C_QDEVICE, (uint64_t)(uintptr_t)used);
-  noff = r16(common, C_QNOFF);
-  notify = (volatile uint8_t*)(nbase + (uintptr_t)noff * mult);
-  w16(common, C_QENABLE, 1);
+  if (liga_fila(&ctl, 0, ring, nbase, mult) != 0) return -1;
+  /* sem fila de cursor o driver ainda serve; so o cursor fica com a CPU */
+  cur.qn = 0;
+  if (r16(common, C_NUMQ) >= 2) liga_fila(&cur, 1, ring + 4096, nbase, mult);
+  cur_res_ok = 0;
   w8(common, C_STATUS, ST_ACK | ST_DRIVER | ST_FEATURES_OK | ST_DRIVER_OK);
   return 0;
 }
@@ -365,6 +414,67 @@ static int v_init(const struct gpu_kapi* kapi, const struct gpu_mode* mode) {
   k->log_hex(m.h);
   k->log(" em recurso 2D\n");
   return 0;
+}
+
+/* Imagem do cursor num recurso 64x64 e UPDATE_CURSOR na fila do cursor. */
+static int v_cursor_set(const uint32_t* argb, int w, int h, int hot_x, int hot_y) {
+  struct c_transfer t;
+  struct c_cursor c;
+  int x, y;
+  if (!cur.qn || !argb || w < 1 || h < 1 || w > (int)CUR_LADO || h > (int)CUR_LADO) return -1;
+  if (!cur_img) cur_img = (uint32_t*)k->alloc(CUR_LADO * CUR_LADO * 4u, 64);
+  if (!cur_img) return -1;
+  for (y = 0; y < (int)CUR_LADO; y++)
+    for (x = 0; x < (int)CUR_LADO; x++)
+      cur_img[y * CUR_LADO + x] = x < w && y < h ? argb[y * w + x] : 0u;
+  if (!cur_res_ok) {
+    struct c_create cc;
+    struct c_attach ca;
+    zera(&cc, sizeof cc);
+    cc.h.type = CMD_RESOURCE_CREATE_2D;
+    cc.id = RES_CURSOR;
+    cc.format = FMT_B8G8R8A8;
+    cc.width = cc.height = CUR_LADO;
+    if (cmd(&cc, sizeof cc, RESP_OK_NODATA) != 0) return -1;
+    zera(&ca, sizeof ca);
+    ca.h.type = CMD_RESOURCE_ATTACH_BACKING;
+    ca.id = RES_CURSOR;
+    ca.n = 1;
+    ca.addr = (uint64_t)(uintptr_t)cur_img;
+    ca.len = CUR_LADO * CUR_LADO * 4u;
+    if (cmd(&ca, sizeof ca, RESP_OK_NODATA) != 0) return -1;
+    cur_res_ok = 1;
+  }
+  zera(&t, sizeof t);
+  t.h.type = CMD_TRANSFER_TO_HOST_2D;
+  t.r.w = t.r.h = CUR_LADO;
+  t.id = RES_CURSOR;
+  if (cmd(&t, sizeof t, RESP_OK_NODATA) != 0) return -1;
+  cur_hx = hot_x;
+  cur_hy = hot_y;
+  zera(&c, sizeof c);
+  c.h.type = CMD_UPDATE_CURSOR;
+  c.x = (uint32_t)cur_x;
+  c.y = (uint32_t)cur_y;
+  c.id = RES_CURSOR;
+  c.hot_x = (uint32_t)hot_x;
+  c.hot_y = (uint32_t)hot_y;
+  return cursor_cmd(&c);
+}
+
+static int v_cursor_move(int x, int y) {
+  struct c_cursor c;
+  if (!cur.qn || !cur_res_ok) return -1;
+  cur_x = x < 0 ? 0 : x;
+  cur_y = y < 0 ? 0 : y;
+  zera(&c, sizeof c);
+  c.h.type = CMD_MOVE_CURSOR;
+  c.x = (uint32_t)cur_x;
+  c.y = (uint32_t)cur_y;
+  c.id = RES_CURSOR;
+  c.hot_x = (uint32_t)cur_hx;
+  c.hot_y = (uint32_t)cur_hy;
+  return cursor_cmd(&c);
 }
 
 /* GET_DISPLAY_INFO prova que a fila anda; o primeiro present vem depois. */
@@ -459,7 +569,7 @@ static int present(const struct gpu_rect* rr, int nn) {
     if (x + w > (int32_t)m.w) w = (int32_t)m.w - x;
     if (y + h > (int32_t)m.h) h = (int32_t)m.h - y;
     if (w <= 0 || h <= 0) continue;
-    if (n == (int)MAX_RECTS || 2 * (n + 2) > (int)qn) {
+    if (n == (int)MAX_RECTS || 2 * (n + 2) > (int)ctl.qn) {
       /* demais: a uniao de tudo num retangulo so */
       uint32_t x1 = (uint32_t)(x + w), y1 = (uint32_t)(y + h);
       int j;
@@ -521,21 +631,25 @@ static void v_fini(void) {
     k->log("\n");
     k->free(ring);
     k->free(buf);
+    k->free(cur_img);
   }
   ring = buf = 0;
+  cur_img = 0;
   common = 0;
 }
 
 static const struct gpu_drv drv = {
   GPU_ABI,
   "virtio-gpu",
-  GPU_CAP_PRESENT | GPU_CAP_DAMAGE,
+  GPU_CAP_PRESENT | GPU_CAP_DAMAGE | GPU_CAP_CURSOR,
   v_init,
   v_selftest,
   v_present,
   v_fini,
   v_suspend,
   v_resume,
+  v_cursor_set,
+  v_cursor_move,
 };
 
 const struct gpu_drv* gpu_driver(void) { return &drv; }

@@ -963,6 +963,8 @@ static void gfx_frame_end(void) {
 /* Na troca de modo do WIN: se ha placa com driver (ou gpudrv= no
  * VIDEO.CFG), monta o quadro em RAM e tenta o driver. Se nao der, volta a
  * escolha de sempre. Sem placa conhecida, so gpu_wanted() roda. */
+static void gfx_hwcur_on(void);   /* com o cursor, mais abaixo */
+
 static void gfx_gpu_try(void) {
   struct gpu_mode m;
   int volta = gpu_suspended();
@@ -980,7 +982,10 @@ static void gfx_gpu_try(void) {
     m.fb = gfx_lfb;
     m.fb_pitch = gfx_pitch_bytes;
     m.pci_id = m.pci_bus = m.pci_dev = m.pci_fun = 0;
-    if (volta ? gpu_resume(&m) == 0 : gpu_start(&m) == 0) return;
+    if (volta ? gpu_resume(&m) == 0 : gpu_start(&m) == 0) {
+      gfx_hwcur_on();
+      return;
+    }
   } else {
     serial_puts("[gpu] sem quadro em RAM: driver nao entra\n");
     gpu_stop("sem quadro em RAM");
@@ -1144,8 +1149,15 @@ static void cursor_restore(void) {
 /* Apaga o cursor na ultima posicao (repoe cursor_under) e desenha-o em (mx,my).
  * Para o rato: restore + redesenho. Para teclado: chamar cursor_restore ANTES de
  * desenhar texto na zona do cursor; depois so cursor_redraw_at (sem restore no inicio). */
+static void gfx_hwcur_move(int x, int y);   /* abaixo */
+
 static void cursor_redraw_at(int mx, int my, uint32_t cursor_color) {
   int scale = cur_scale();
+  /* cursor da placa (docs/GPU.md, etapa 4): fica fora do quadro */
+  if (gpu_hwcur) {
+    gfx_hwcur_move(mx, my);
+    return;
+  }
   int bw = CUR_W * scale;
   int bh = CUR_H * scale;
   int k = 0;
@@ -1254,8 +1266,49 @@ static void gfx_gpu_frame(void) {
   gfx_gpu_show(r, n);
 }
 
+/* definidas mais abaixo (posicao do mouse e pedido de redesenho do WIN) */
+static int32_t sys_mx, sys_my;
+static int win_api_dirty;
+
+/* Cursor da placa: so a posicao. Se o driver cair, o quadro volta a CPU e o
+ * proximo quadro inteiro ja desenha o cursor por software. */
+static void gfx_hwcur_move(int x, int y) {
+  if (gpu_cursor_move(x, y) != 0) {
+    gfx_copy_back();
+    gfx_offscreen = 0;
+    win_api_dirty = 1;
+  }
+}
+
+/* Entrega a seta (cur_row, na escala da tela) ao driver, se ele tem cursor. */
+static void gfx_hwcur_on(void) {
+  int scale = cur_scale(), w = CUR_W * scale, h = CUR_H * scale, x, y;
+  uint32_t* img;
+  if (!gpu_drv || !(gpu_drv->caps & GPU_CAP_CURSOR) || w > 64 || h > 64) return;
+  img = (uint32_t*)umalloc_owned((uint32_t)(w * h) * 4u, 0);
+  if (!img) return;
+  for (y = 0; y < h; y++)
+    for (x = 0; x < w; x++) {
+      char c = cur_row[y / scale][x / scale];
+      img[y * w + x] = c == 'W' ? 0xFFFFFFFFu : c == 'B' ? 0xFF000000u : 0u;
+    }
+  gpu_cursor_set(img, w, h, 0, 0);
+  ufree(img);
+  if (gpu_hwcur) {
+    /* a seta saiu do quadro: o proximo quadro inteiro vem sem ela */
+    cursor_saved = 0;
+    gfx_cur_shown.w = gfx_cur_shown.h = 0;
+    gfx_hwcur_move((int)sys_mx, (int)sys_my);
+    win_api_dirty = 1;
+  }
+}
+
 static void cursor_draw(int mx, int my, uint32_t cursor_color) {
   struct gpu_rect r[2];
+  if (gpu_hwcur) {
+    gfx_hwcur_move(mx, my);
+    return;
+  }
   cursor_restore();
   cursor_redraw_at(mx, my, cursor_color);
   /* com driver o cursor foi para o back buffer: mostra so as duas caixas */
@@ -5343,6 +5396,7 @@ static void dc_present(int x, int y, int cx, int cy) {
   uint32_t black = pix32(PIXA(0, 0, 0)), white = pix32(PIXA(255, 255, 255));
   volatile uint8_t* base = gfx_lfb + gfx_front_y * gfx_pitch_bytes;
   uint32_t pitch = gfx_pitch_bytes;
+  int cur_rows = gpu_hwcur ? 0 : chh;   /* cursor da placa: nao entra na imagem */
   int r;
   dc_grow(&x0, &y0, &x1, &y1, dc.x, dc.y, dc.w, dc.h);
   dc_grow(&x0, &y0, &x1, &y1, dc.cx, dc.cy, cw, chh);
@@ -5370,7 +5424,7 @@ static void dc_present(int x, int y, int cx, int cy) {
     int in_win = r >= y && r < y + dc.h && wx0 < wx1;
     const uint32_t* src = in_win ? dc.win + (r - y) * dc.w : 0;
     int corner = in_win && r - y < UI_RADIUS;
-    int in_cur = r >= cy && r < cy + chh;
+    int in_cur = r >= cy && r < cy + cur_rows;
     if (!in_cur && !corner) {
       /* Caso comum: cada pedaco vai direto, sem copia intermediaria. */
       if (!in_win) {
@@ -5411,9 +5465,10 @@ static void dc_present(int x, int y, int cx, int cy) {
     d.h = y1 - y0;
     gfx_cur_shown.x = cx;
     gfx_cur_shown.y = cy;
-    gfx_cur_shown.w = cw;
-    gfx_cur_shown.h = chh;
+    gfx_cur_shown.w = cur_rows ? cw : 0;
+    gfx_cur_shown.h = cur_rows;
     gfx_gpu_show(&d, 1);
+    if (gpu_hwcur) gfx_hwcur_move(cx, cy);
   }
 }
 

@@ -56,6 +56,10 @@ struct gpu_drv {
    * Sem elas o kernel usa fini e, na volta, carrega de novo. */
   int (*suspend)(void);
   int (*resume)(const struct gpu_mode* m);
+  /* Opcionais, com GPU_CAP_CURSOR: cursor desenhado pela placa por cima do
+   * quadro. argb: w*h palavras 0xAARRGGBB (w, h <= 64); hot = ponta da seta. */
+  int (*cursor_set)(const uint32_t* argb, int w, int h, int hot_x, int hot_y);
+  int (*cursor_move)(int x, int y);
 };
 
 /* Unico simbolo que o DLL exporta. */
@@ -89,6 +93,13 @@ int gpu_suspended(void);
  * essas areas (ja recortadas na tela). 0 = ok; outro valor: o driver ja foi
  * desligado e quem chamou tem que mostrar o quadro pela CPU. */
 int gpu_present(const struct gpu_rect* rects, int n);
+/* 1 = a placa desenha o cursor: o kernel nao o poe no quadro e so manda a
+ * posicao. Volta a 0 quando o driver para. */
+extern int gpu_hwcur;
+/* Entrega a imagem do cursor; liga gpu_hwcur se o driver aceitar. */
+void gpu_cursor_set(const uint32_t* argb, int w, int h, int hot_x, int hot_y);
+/* 0 = ok; outro valor: o driver caiu e o quadro volta a CPU. */
+int gpu_cursor_move(int x, int y);
 /* Para o TOP (k_vram): nome do driver ativo e KB que ele reservou. */
 const char* gpu_name(void);
 uint32_t gpu_mem_kb(void);

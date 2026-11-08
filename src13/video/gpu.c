@@ -13,6 +13,7 @@
 #include "net.h"
 
 const struct gpu_drv* gpu_drv;
+int gpu_hwcur;
 
 /* vendor << 16 | device -> DLL. So placas com driver escrito entram aqui. */
 static const struct {
@@ -201,6 +202,7 @@ void gpu_stop(const char* why) {
   if (!d) return;
   /* zera antes: nada mais passa pelo driver, nem se fini falhar */
   gpu_drv = 0;
+  gpu_hwcur = 0;
   parked = 0;
   say("desativado: ", why);
   unload(d);
@@ -216,6 +218,7 @@ void gpu_suspend(void) {
   const struct gpu_drv* d = gpu_drv;
   if (!d) return;
   gpu_drv = 0;
+  gpu_hwcur = 0;   /* o resume entrega a imagem de novo */
   if (!d->suspend || !d->resume || d->suspend() != 0) {
     say("desativado: ", "tela de texto");
     unload(d);
@@ -251,6 +254,25 @@ int gpu_present(const struct gpu_rect* rects, int n) {
   }
   if (gpu_drv->present(rects, n) == 0) return 0;
   gpu_stop("present falhou");
+  return -1;
+}
+
+void gpu_cursor_set(const uint32_t* argb, int w, int h, int hot_x, int hot_y) {
+  const struct gpu_drv* d = gpu_drv;
+  gpu_hwcur = 0;
+  if (!d || !(d->caps & GPU_CAP_CURSOR) || !d->cursor_set || !d->cursor_move || !argb) return;
+  if (d->cursor_set(argb, w, h, hot_x, hot_y) != 0) {
+    say("cursor da placa recusado: ", d->name);
+    return;
+  }
+  gpu_hwcur = 1;
+  say("cursor pela placa: ", d->name);
+}
+
+int gpu_cursor_move(int x, int y) {
+  if (!gpu_hwcur || !gpu_drv) return -1;
+  if (gpu_drv->cursor_move(x, y) == 0) return 0;
+  gpu_stop("cursor falhou");
   return -1;
 }
 
