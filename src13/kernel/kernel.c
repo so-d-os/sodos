@@ -1107,17 +1107,26 @@ void uint32_to_string(uint32_t n, char* str, int max_len) {
 }
 
 // very simple tokenizer (modest limits)
-/* O ultimo argv leva o resto da linha, com os espacos: nada se perde. */
+/* O ultimo argv leva o resto da linha, com os espacos: nada se perde.
+ * "nome com espacos" vira um argv sem as aspas (menos no echo, que as mostra). */
 static int tokenize(char* line, char** argv, int maxargv) {
   int argc = 0;
+  int quotes = 1;
   char* p = line;
   while (*p && argc < maxargv) {
     while (*p == ' ') ++p;
     if (!*p) break;
+    if (*p == '"' && quotes && argc + 1 < maxargv) {
+      argv[argc++] = ++p;
+      while (*p && *p != '"') ++p;
+      if (*p == '"') *p++ = '\0';
+      continue;
+    }
     argv[argc++] = p;
     if (argc == maxargv) break;
     while (*p && *p != ' ') ++p;
     if (*p == ' ') *p++ = '\0';
+    if (argc == 1 && !stricmp(argv[0], "echo")) quotes = 0;
   }
   return argc;
 }
@@ -1154,7 +1163,7 @@ static int ends_ci(const char* s, const char* suf) {
 /* Roda BAT.EXE com o script em argv. O desktop, se estiver capturando
  * programas, recebe o EXE e devolve 1; senao o script roda e espera. */
 static int launch_bat(const char* script, int argc, char** argv) {
-  char exe[64];
+  char exe[DRV_PATH];
   char* nav[18];
   int i, n, rc;
   if (mod_find_exe("BAT", exe, (int)sizeof(exe)) != 0) {
@@ -1292,7 +1301,7 @@ static int exec_line(char* line, int history) {
       return commands[i].fn(argc, argv);
   }
   if (ends_ci(argv[0], ".BAT") || ends_ci(argv[0], ".CMD")) {
-    char bpath[64];
+    char bpath[DRV_PATH];
     if (mod_find_batch(argv[0], bpath, (int)sizeof(bpath)) != 0) {
       puts_k("Bad command or file name\n");
       return 1;
@@ -1300,12 +1309,12 @@ static int exec_line(char* line, int history) {
     return launch_bat(bpath, argc, argv);
   }
   {
-    char path[64];
+    char path[DRV_PATH];
     if (mod_find_exe(argv[0], path, sizeof(path)) == 0)
       return finish_exe(path, argc, argv);
   }
   {
-    char bpath[64];
+    char bpath[DRV_PATH];
     if (mod_find_batch(argv[0], bpath, (int)sizeof(bpath)) == 0)
       return launch_bat(bpath, argc, argv);
   }
@@ -1424,7 +1433,7 @@ void kmain(const struct BootInfo* bi) {
   keyb_load_cfg();
   net_demo();
   {
-    char path[64];
+    char path[DRV_PATH];
     if (mod_find_exe("HTTPD.EXE", path, (int)sizeof(path)) == 0)
       mod_exec(path, 0, 0);
   }

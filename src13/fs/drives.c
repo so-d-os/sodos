@@ -19,6 +19,7 @@ extern int fat_mkdir(const char* path);
 extern int fat_rmdir(const char* path);
 extern int fat_file_size(const char* filename);
 extern int fat_dir_items(const char* path, struct dir_item* out, int max);
+extern int fat_long_name(const char* path, char* out, int max);
 extern int fat_delete(const char* path);
 extern int fat_mkdir(const char* path);
 extern int fat_rmdir(const char* path);
@@ -36,7 +37,7 @@ static int drv_kind[26];
 static uint32_t drv_ata[26];
 static char cur_letter = 'C';
 /* Pasta atual de cada unidade, sem a letra e sem barra no inicio. */
-static char cur_dir[26][48];
+static char cur_dir[26][DRV_PATH];
 static uint32_t drv_lba[26];   /* inicio da particao FAT */
 /* fat.c guarda um FAT por vez: a unidade dele agora (-1 = nenhuma valida). */
 static int fat_cur = -1;
@@ -275,35 +276,31 @@ void drives_print_status(void) {
   }
 }
 
-/* Junta . e .. . No maximo 8 componentes de 12 caracteres. */
+/* Junta . e .. no proprio s. Nomes de qualquer tamanho, ate 32 niveis. */
 static void path_norm(char* s, int max) {
-  char comp[8][13];
+  int start[32];
   int n = 0;
   int pos = 0;
   int i = 0;
-  int k;
   if (!s || max < 2) return;
-  while (n < 8) {
-    char one[13];
-    int m = 0;
+  for (;;) {
+    int b, m, k;
     while (s[pos] == '\\' || s[pos] == '/') pos++;
     if (!s[pos]) break;
-    while (s[pos] && s[pos] != '\\' && s[pos] != '/' && m < 12) one[m++] = s[pos++];
+    b = pos;
     while (s[pos] && s[pos] != '\\' && s[pos] != '/') pos++;
-    one[m] = 0;
-    if (m == 1 && one[0] == '.') continue;
-    if (m == 2 && one[0] == '.' && one[1] == '.') {
-      if (n > 0) n--;
+    m = pos - b;
+    if (m == 1 && s[b] == '.') continue;
+    if (m == 2 && s[b] == '.' && s[b + 1] == '.') {
+      if (n > 0) i = start[--n];
+      if (i > 0) i--;   /* a barra antes do nome tirado */
       continue;
     }
-    for (k = 0; k < m; k++) comp[n][k] = one[k];
-    comp[n][m] = 0;
-    n++;
-  }
-  for (k = 0; k < n; k++) {
-    int j;
-    if (k && i < max - 1) s[i++] = '\\';
-    for (j = 0; comp[k][j] && i < max - 1; j++) s[i++] = comp[k][j];
+    if (n >= 32) break;
+    if (i > 0) s[i++] = '\\';
+    start[n++] = i;
+    /* i <= b: escreve no mesmo lugar ou antes do que ainda vai ler */
+    for (k = 0; k < m; k++) s[i++] = s[b + k];
   }
   s[i] = 0;
 }
@@ -349,7 +346,7 @@ void path_parse(const char* path, char* letter_out, char* name_out, int name_max
 
 char path_letter(const char* path) {
   char L;
-  char name[64];
+  char name[DRV_PATH];
   path_parse(path, &L, name, sizeof(name));
   return L;
 }
@@ -403,7 +400,7 @@ static int d_write(const char* name, const char* data, int size) {
 
 int file_read_at(const char* path, uint32_t offset, char* buf, int len) {
   char L;
-  char name[64];
+  char name[DRV_PATH];
   int idx;
   if (!path || !buf || len < 1) return -1;
   path_parse(path, &L, name, sizeof(name));
@@ -449,7 +446,7 @@ int file_read_at(const char* path, uint32_t offset, char* buf, int len) {
 
 int file_load(const char* path, char* buf, int max_size) {
   char L;
-  char name[64];
+  char name[DRV_PATH];
   int idx;
   int n;
   if (!path || !buf || max_size < 2) return -1;
@@ -498,7 +495,7 @@ int file_load(const char* path, char* buf, int max_size) {
 
 int file_size(const char* path) {
   char L;
-  char name[64];
+  char name[DRV_PATH];
   int idx;
   if (!path) return -1;
   path_parse(path, &L, name, sizeof(name));
@@ -521,7 +518,7 @@ int file_size(const char* path) {
 
 int file_save(const char* path, const char* data, int size) {
   char L;
-  char name[64];
+  char name[DRV_PATH];
   int idx;
   if (!path || !data) return -1;
   if (size < 0) size = 0;
@@ -585,10 +582,10 @@ void drives_prompt(char* out, int max) {
 
 int drives_chdir(const char* spec) {
   char L;
-  char name[48];
+  char name[DRV_PATH];
   int idx;
   if (!spec || !spec[0]) {
-    char pwd[64];
+    char pwd[DRV_PATH + 4];
     drives_pwd(pwd, (int)sizeof(pwd));
     puts_k(pwd);
     puts_k("\n");
@@ -617,7 +614,7 @@ int drives_chdir(const char* spec) {
 
 int file_list(const char* path, char* out, int max) {
   char L;
-  char name[64];
+  char name[DRV_PATH];
   int idx;
   int pos = 0;
   if (!out || max < 2) return -1;
@@ -656,6 +653,12 @@ static void print_where(char L, const char* name) {
 
 static char up_char(char c) {
   return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+}
+
+static int has_tilde(const char* s) {
+  for (; s && *s; s++)
+    if (*s == '~') return 1;
+  return 0;
 }
 
 static int has_wild(const char* s) {
@@ -755,15 +758,16 @@ static int dir_collect(int idx, char L, const char* name, struct dir_item* it, i
   return n;
 }
 
-static void dir_line(const struct dir_item* e) {
-  put_pad(e->name, 13);
-  if (e->dir) puts_k("        <DIR>");
-  else put_num(e->size, 13);
+/* Data, hora, tamanho e o nome no fim (nome longo de qualquer tamanho).
+ * Na FAT o apelido 8.3 (NOME~1.EXT) vira o nome longo inteiro. */
+static void dir_line(const struct dir_item* e, int idx, const char* folder) {
+  char full[DRV_PATH];
+  char lname[FAT_NAME_MAX];
+  const char* show = e->name;
   /* Sem dia ou mes e data que o sistema nao gravou: fica em branco. */
   if ((e->date & 31u) && ((e->date >> 5) & 15u) && ((e->date >> 5) & 15u) <= 12u) {
     unsigned d = e->date, t = e->time;
     unsigned y = 1980u + (d >> 9);
-    puts_k("  ");
     put_2(d & 31u);
     putc('/');
     put_2((d >> 5) & 15u);
@@ -774,7 +778,25 @@ static void dir_line(const struct dir_item* e) {
     put_2(t >> 11);
     putc(':');
     put_2((t >> 5) & 63u);
+  } else {
+    put_pad("", 16);
   }
+  if (e->dir) puts_k("    <DIR>         ");
+  else {
+    put_num(e->size, 17);
+    putc(' ');
+  }
+  if (drv_kind[idx] == DRV_FAT && has_tilde(e->name)) {
+    int k = 0;
+    if (folder[0]) {
+      copy_str(full, (int)sizeof(full) - 33, folder);
+      k = str_len(full);
+      full[k++] = '\\';
+    }
+    copy_str(full + k, (int)sizeof(full) - k, e->name);
+    if (fat_long_name(full, lname, (int)sizeof(lname)) == 0) show = lname;
+  }
+  puts_k(show);
   putc('\n');
 }
 
@@ -850,7 +872,7 @@ static int dir_walk(int idx, char L, const char* name, const char* pat, int flag
     if (cnt == 0) puts_k((flags & DIR_DIRS) ? "(nenhuma pasta)\n" : "(nenhum arquivo)\n");
     else if (flags & DIR_WIDE) dir_wide(it, sel, cnt);
     else
-      for (i = 0; i < cnt; i++) dir_line(&it[sel[i]]);
+      for (i = 0; i < cnt; i++) dir_line(&it[sel[i]], idx, name);
     put_num(files, 10);
     puts_k(" arquivo(s) ");
     put_num(bytes, 15);
@@ -863,7 +885,7 @@ static int dir_walk(int idx, char L, const char* name, const char* pat, int flag
   tot->bytes += bytes;
   if ((flags & DIR_SUB) && depth < DIR_DEPTH_MAX) {
     for (i = 0; i < n; i++) {
-      char sub[64];
+      char sub[DRV_PATH];
       int k = 0, j = 0;
       if (!it[i].dir) continue;
       while (name[j] && k < (int)sizeof(sub) - 2) sub[k++] = name[j++];
@@ -879,10 +901,10 @@ static int dir_walk(int idx, char L, const char* name, const char* pat, int flag
 }
 
 void drives_dir(const char* spec, int flags) {
-  char dspec[64];
+  char dspec[DRV_PATH];
   char pat[32];
   char L;
-  char name[64];
+  char name[DRV_PATH];
   int idx;
   int cut = -1;
   int i;
@@ -962,11 +984,11 @@ static int d_delete(const char* name) {
  * -1 nao achou, -2 pasta/unidade invalida, -3 e pasta, -4 somente leitura,
  * -5 a unidade nao deixa apagar. */
 int drives_del(const char* spec) {
-  char dspec[64];
+  char dspec[DRV_PATH];
   char pat[32];
   char L;
-  char name[64];
-  char full[96];
+  char name[DRV_PATH];
+  char full[DRV_PATH];
   struct dir_item* it;
   int idx, n, i, k, cut = -1, done = 0, rc;
   if (!spec || !spec[0]) return -2;
@@ -999,7 +1021,7 @@ int drives_del(const char* spec) {
     if (it[i].dir || !dir_match(pat, it[i].name)) continue;
     k = 0;
     if (name[0]) {
-      copy_str(full, (int)sizeof(full) - 14, name);
+      copy_str(full, (int)sizeof(full) - 33, name);
       k = str_len(full);
       full[k++] = '\\';
     }
@@ -1019,7 +1041,7 @@ int drives_del(const char* spec) {
 /* Itens da pasta path (com tamanho e data). -1 se nao e pasta. */
 int drives_items(const char* path, struct dir_item* out, int max) {
   char L;
-  char name[64];
+  char name[DRV_PATH];
   int idx;
   path_parse(path, &L, name, (int)sizeof(name));
   idx = letter_idx(L);
@@ -1027,10 +1049,29 @@ int drives_items(const char* path, struct dir_item* out, int max) {
   return dir_collect(idx, L, name, out, max);
 }
 
+int drives_long_name(const char* path, char* out, int max) {
+  char L;
+  char name[DRV_PATH];
+  int idx;
+  if (!out || max < 2) return -1;
+  path_parse(path, &L, name, (int)sizeof(name));
+  idx = letter_idx(L);
+  if (!name[0] || idx < 0 || !drv_ready(idx)) return -1;
+  if (drv_kind[idx] == DRV_FAT) return fat_long_name(name, out, max);
+  {
+    int s = -1;
+    int i;
+    for (i = 0; name[i]; i++)
+      if (name[i] == '\\') s = i;
+    copy_str(out, max, name + s + 1);
+  }
+  return file_size(path) >= 0 ? 0 : -1;
+}
+
 /* md/rd: os codigos de fat_mkdir/fat_rmdir; -5 se nao e disco FAT. */
 static int dir_op(const char* path, int make) {
   char L;
-  char name[64];
+  char name[DRV_PATH];
   int idx;
   path_parse(path, &L, name, (int)sizeof(name));
   idx = letter_idx(L);
@@ -1174,16 +1215,18 @@ static int enum_one_dir(char out[][48], int n, int max, const char* dir) {
     rel[pre] = '\0';
   }
   while (tmp[pos] && n < max) {
-    char name[16];
+    char name[32];
     char full[46];
     int k = 0;
     int i;
     int j;
-    while (tmp[pos] && tmp[pos] != '\n' && k < 15)
+    while (tmp[pos] && tmp[pos] != '\n' && k < 31)
       name[k++] = tmp[pos++];
     name[k] = '\0';
     if (tmp[pos] == '\n') pos++;
     if (!k || name[k - 1] == '\\') continue;
+    /* Nome cortado nao abre: quem nao cabe fica de fora. */
+    if (pre + k > 44) continue;
     i = 0;
     for (j = 0; j < pre && i < 44; j++) full[i++] = rel[j];
     for (j = 0; name[j] && i < 44; j++) full[i++] = name[j];

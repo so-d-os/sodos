@@ -44,6 +44,25 @@ struct fat_dir_entry {
   uint32_t size;
 } __attribute__((packed));
 
+/* Pedaco de nome longo (VFAT): 13 caracteres UCS-2 por entrada, antes da
+ * entrada 8.3. A primeira no disco tem ord | 0x40 e e o fim do nome. */
+struct fat_lfn_entry {
+  uint8_t  ord;
+  uint16_t n1[5];
+  uint8_t  attributes;   /* 0x0F */
+  uint8_t  type;
+  uint8_t  sum;          /* soma do nome 8.3 */
+  uint16_t n2[6];
+  uint16_t cluster;      /* 0 */
+  uint16_t n3[2];
+} __attribute__((packed));
+
+#define LFN_CHARS 13
+#define LFN_ORD_MAX 20   /* 20 * 13 = 260 >= 255 */
+/* reserved[0] do 8.3 (NT): nome ou extensao em minusculas, sem LFN. */
+#define NT_LOW_BASE 0x08
+#define NT_LOW_EXT  0x10
+
 /* Em 10 MB (0x100000-0x9FFFFF e a tela em memoria do visual.c): a FAT16 de um
  * disco de 100 MB passa de 100 KB. FAT ate 256 KB, raiz ate 64 KB.
  * O disco so le/escreve abaixo de 1 MB, por isso tudo passa por fat_bounce. */
@@ -238,13 +257,21 @@ static uint32_t cluster_count(void) {
                    root_dir_sectors)) / sectors_per_cluster;
 }
 
-// Converte nome 8.3 para string normal
+static char low_ascii(char c) {
+  return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+}
+
+// Converte nome 8.3 para string normal (com as minusculas do NT)
 static void fat_name_to_string(const struct fat_dir_entry* entry, char* output) {
   int i = 0;
+  uint8_t nt = entry->reserved[0];
   // Nome
   for (int j = 0; j < 8; j++) {
     if (entry->name[j] != ' ') {
-      output[i++] = entry->name[j];
+      char c = entry->name[j];
+      /* 0x05 no disco e 0xE5 de verdade no primeiro caractere */
+      if (j == 0 && (unsigned char)c == 0x05) c = (char)0xE5;
+      output[i++] = (nt & NT_LOW_BASE) ? low_ascii(c) : c;
     }
   }
   // Extensão
@@ -252,11 +279,62 @@ static void fat_name_to_string(const struct fat_dir_entry* entry, char* output) 
     output[i++] = '.';
     for (int j = 0; j < 3; j++) {
       if (entry->ext[j] != ' ') {
-        output[i++] = entry->ext[j];
+        output[i++] = (nt & NT_LOW_EXT) ? low_ascii(entry->ext[j]) : entry->ext[j];
       }
     }
   }
   output[i] = '\0';
+}
+
+/* O sistema escreve em CP850; o LFN guarda Unicode. Metade de cima do CP850. */
+static const uint16_t cp850_hi[128] = {
+  0x00C7, 0x00FC, 0x00E9, 0x00E2, 0x00E4, 0x00E0, 0x00E5, 0x00E7,
+  0x00EA, 0x00EB, 0x00E8, 0x00EF, 0x00EE, 0x00EC, 0x00C4, 0x00C5,
+  0x00C9, 0x00E6, 0x00C6, 0x00F4, 0x00F6, 0x00F2, 0x00FB, 0x00F9,
+  0x00FF, 0x00D6, 0x00DC, 0x00F8, 0x00A3, 0x00D8, 0x00D7, 0x0192,
+  0x00E1, 0x00ED, 0x00F3, 0x00FA, 0x00F1, 0x00D1, 0x00AA, 0x00BA,
+  0x00BF, 0x00AE, 0x00AC, 0x00BD, 0x00BC, 0x00A1, 0x00AB, 0x00BB,
+  0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0x00C1, 0x00C2, 0x00C0,
+  0x00A9, 0x2563, 0x2551, 0x2557, 0x255D, 0x00A2, 0x00A5, 0x2510,
+  0x2514, 0x2534, 0x252C, 0x251C, 0x2500, 0x253C, 0x00E3, 0x00C3,
+  0x255A, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256C, 0x00A4,
+  0x00F0, 0x00D0, 0x00CA, 0x00CB, 0x00C8, 0x0131, 0x00CD, 0x00CE,
+  0x00CF, 0x2518, 0x250C, 0x2588, 0x2584, 0x00A6, 0x00CC, 0x2580,
+  0x00D3, 0x00DF, 0x00D4, 0x00D2, 0x00F5, 0x00D5, 0x00B5, 0x00FE,
+  0x00DE, 0x00DA, 0x00DB, 0x00D9, 0x00FD, 0x00DD, 0x00AF, 0x00B4,
+  0x00AD, 0x00B1, 0x2017, 0x00BE, 0x00B6, 0x00A7, 0x00F7, 0x00B8,
+  0x00B0, 0x00A8, 0x00B7, 0x00B9, 0x00B3, 0x00B2, 0x25A0, 0x00A0,
+};
+
+static uint16_t oem_to_uni(unsigned char c) {
+  return c < 0x80 ? c : cp850_hi[c - 0x80];
+}
+
+/* Fora do CP850 vira '_'. */
+static char uni_to_oem(uint16_t u) {
+  int i;
+  if (u < 0x80) return (char)u;
+  for (i = 0; i < 128; i++)
+    if (cp850_hi[i] == u) return (char)(0x80 + i);
+  return '_';
+}
+
+/* Maiuscula do Latin-1, para comparar nomes sem caixa (ç = Ç). */
+static uint16_t uni_fold(uint16_t u) {
+  if (u >= 'a' && u <= 'z') return (uint16_t)(u - 32);
+  if (u >= 0xE0 && u <= 0xFE && u != 0xF7) return (uint16_t)(u - 32);
+  if (u == 0xFF) return 0x178;
+  return u;
+}
+
+static int name_eq_fold(const char* a, const char* b) {
+  while (*a && *b) {
+    if (uni_fold(oem_to_uni((unsigned char)*a)) != uni_fold(oem_to_uni((unsigned char)*b)))
+      return 0;
+    a++;
+    b++;
+  }
+  return *a == *b;
 }
 
 // Converte string para nome 8.3
@@ -384,16 +462,20 @@ static int cluster_end(uint16_t c) {
   return 0;
 }
 
+/* 1 leu um nome, 0 acabou, -1 nome maior que max - 1. */
 static int next_comp(const char* path, int* pos, char* out, int max) {
   int i = 0;
+  int too_long = 0;
   if (!path || max < 2) return 0;
   while (path[*pos] == '\\' || path[*pos] == '/') (*pos)++;
   if (!path[*pos]) return 0;
   while (path[*pos] && path[*pos] != '\\' && path[*pos] != '/') {
     if (i < max - 1) out[i++] = path[*pos];
+    else too_long = 1;
     (*pos)++;
   }
   out[i] = 0;
+  if (too_long) return -1;
   return i > 0;
 }
 
@@ -450,42 +532,134 @@ static int dir_flush(struct dir_view* v) {
   return off == (uint32_t)v->bytes ? 0 : -1;
 }
 
-static struct fat_dir_entry* dir_find(struct dir_view* v, const char* filename, int want_dir) {
-  char search_name[8];
-  char search_ext[3];
+static uint8_t sum11(const uint8_t* p) {
+  uint8_t s = 0;
   int i;
-  string_to_fat_name(filename, search_name, search_ext);
-  for (i = 0; i < v->count; i++) {
-    unsigned char n0 = (unsigned char)v->ents[i].name[0];
-    unsigned char attr;
-    int match = 1;
-    int j;
+  for (i = 0; i < 11; i++) s = (uint8_t)(((s & 1u) << 7) + (s >> 1) + p[i]);
+  return s;
+}
+
+static uint16_t lfn_char(const struct fat_lfn_entry* l, int k) {
+  if (k < 5) return l->n1[k];
+  if (k < 11) return l->n2[k - 5];
+  return l->n3[k - 11];
+}
+
+static void lfn_set(struct fat_lfn_entry* l, int k, uint16_t u) {
+  if (k < 5) l->n1[k] = u;
+  else if (k < 11) l->n2[k - 5] = u;
+  else l->n3[k - 11] = u;
+}
+
+/* Poe em name a parte de l (ordem ord); *len encurta no 0 que fecha o nome. */
+static void lfn_take(const struct fat_lfn_entry* l, int ord, char* name, int* len) {
+  int base = (ord - 1) * LFN_CHARS;
+  int k;
+  for (k = 0; k < LFN_CHARS; k++) {
+    uint16_t u = lfn_char(l, k);
+    if (u == 0) {
+      if (base + k < *len) *len = base + k;
+      return;
+    }
+    if (base + k < FAT_NAME_MAX - 1) name[base + k] = uni_to_oem(u);
+  }
+}
+
+/* Proxima entrada de arquivo ou pasta a partir de *i (pula as apagadas, o
+ * rotulo e os pedacos LFN). name (FAT_NAME_MAX) recebe o nome longo, ou o
+ * 8.3 sem LFN valido; *first e a primeira entrada do nome. 0 no fim. */
+static struct fat_dir_entry* dir_next(struct dir_view* v, int* i, char* name, int* first) {
+  int need = 0;     /* proxima ordem LFN esperada */
+  int done = 0;     /* nome longo completo */
+  int len = 0;
+  int start = 0;
+  uint8_t sum = 0;
+  for (; *i < v->count; (*i)++) {
+    struct fat_dir_entry* e = &v->ents[*i];
+    unsigned char n0 = (unsigned char)e->name[0];
     if (n0 == 0x00) break;
-    if (n0 == 0xE5) continue;
-    attr = v->ents[i].attributes;
-    if ((attr & 0x0F) == 0x0F) continue;
-    if (attr & 0x08) continue;
-    if (want_dir) {
-      if ((attr & 0x10) == 0) continue;
-    } else if (attr & 0x10) {
+    if (n0 == 0xE5) {
+      need = done = 0;
       continue;
     }
-    for (j = 0; j < 8; j++) {
-      if (v->ents[i].name[j] != search_name[j]) {
-        match = 0;
-        break;
+    if ((e->attributes & 0x3F) == 0x0F) {
+      const struct fat_lfn_entry* l = (const struct fat_lfn_entry*)e;
+      int ord = l->ord & 0x1F;
+      if (l->ord & 0x40) {
+        if (ord < 1 || ord > LFN_ORD_MAX) {
+          need = done = 0;
+          continue;
+        }
+        need = ord;
+        sum = l->sum;
+        start = *i;
+        len = ord * LFN_CHARS;
+        if (len > FAT_NAME_MAX - 1) len = FAT_NAME_MAX - 1;
+      } else if (!need || ord != need || l->sum != sum) {
+        need = done = 0;
+        continue;
       }
+      lfn_take(l, ord, name, &len);
+      need--;
+      done = need == 0;
+      continue;
     }
-    if (!match) continue;
-    for (j = 0; j < 3; j++) {
-      if (v->ents[i].ext[j] != search_ext[j]) {
-        match = 0;
-        break;
-      }
+    if (e->attributes & 0x08) {
+      need = done = 0;
+      continue;
     }
-    if (match) return &v->ents[i];
+    if (done && len > 0 && sum11((const uint8_t*)e->name) == sum) {
+      name[len] = 0;
+      if (first) *first = start;
+    } else {
+      fat_name_to_string(e, name);
+      if (first) *first = *i;
+    }
+    (*i)++;
+    return e;
   }
   return 0;
+}
+
+/* Nome longo da ultima entrada achada por dir_find. */
+static char found_name[FAT_NAME_MAX];
+
+/* Pelo nome longo ou pelo 8.3, sem caixa. *first = primeira entrada (LFN). */
+static struct fat_dir_entry* dir_find(struct dir_view* v, const char* filename, int want_dir,
+                                      int* first) {
+  char sn[13];
+  int i = 0;
+  int f;
+  struct fat_dir_entry* e;
+  while ((e = dir_next(v, &i, found_name, &f)) != 0) {
+    int is_dir = (e->attributes & 0x10) != 0;
+    if (want_dir != is_dir) continue;
+    if (!name_eq_fold(found_name, filename)) {
+      fat_name_to_string(e, sn);
+      if (!name_eq_fold(sn, filename)) continue;
+    }
+    if (first) *first = f;
+    return e;
+  }
+  return 0;
+}
+
+/* Para os programas (32 bytes): o nome longo se couber, senao o 8.3. */
+static void item_name(const struct fat_dir_entry* e, const char* lname, char* out) {
+  int n = 0;
+  while (lname[n]) n++;
+  if (n > 31) {
+    fat_name_to_string(e, out);
+    return;
+  }
+  for (n = 0; lname[n]; n++) out[n] = lname[n];
+  out[n] = 0;
+}
+
+/* Apaga o nome: as entradas LFN de first ate e, e a propria e. */
+static void dir_unlink(struct dir_view* v, int first, struct fat_dir_entry* e) {
+  int i;
+  for (i = first; i <= (int)(e - v->ents); i++) v->ents[i].name[0] = (char)0xE5;
 }
 
 static int dir_grow(struct dir_view* v) {
@@ -524,18 +698,191 @@ static int dir_grow(struct dir_view* v) {
   return 0;
 }
 
-static struct fat_dir_entry* dir_slot(struct dir_view* v) {
-  int i;
-  for (i = 0; i < v->count; i++) {
-    unsigned char n0 = (unsigned char)v->ents[i].name[0];
-    if (n0 == 0x00 || n0 == 0xE5) return &v->ents[i];
-  }
-  if (dir_grow(v) != 0) return 0;
-  for (i = 0; i < v->count; i++) {
-    unsigned char n0 = (unsigned char)v->ents[i].name[0];
-    if (n0 == 0x00 || n0 == 0xE5) return &v->ents[i];
+/* n entradas livres seguidas; cresce a pasta se faltar. */
+static struct fat_dir_entry* dir_slots(struct dir_view* v, int n) {
+  int tries;
+  for (tries = 0; tries < 4; tries++) {
+    int i;
+    int run = 0;
+    for (i = 0; i < v->count; i++) {
+      unsigned char n0 = (unsigned char)v->ents[i].name[0];
+      if (n0 == 0x00 || n0 == 0xE5) {
+        if (++run == n) return &v->ents[i - n + 1];
+      } else {
+        run = 0;
+      }
+    }
+    if (dir_grow(v) != 0) return 0;
   }
   return 0;
+}
+
+static int short_bad(unsigned char c) {
+  if (c <= 0x20 || c >= 0x80) return 1;
+  return c == '"' || c == '*' || c == '+' || c == ',' || c == '.' || c == '/' ||
+         c == ':' || c == ';' || c == '<' || c == '=' || c == '>' || c == '?' ||
+         c == '[' || c == '\\' || c == ']' || c == '|';
+}
+
+static int long_bad(unsigned char c) {
+  return c < 0x20 || c == '"' || c == '*' || c == '/' || c == ':' || c == '<' ||
+         c == '>' || c == '?' || c == '\\' || c == '|';
+}
+
+/* 1 se name cabe em 8.3 sem LFN: cada parte toda maiuscula ou toda
+ * minuscula. *nt recebe as minusculas (NT_LOW_*), como o Windows grava. */
+static int short_fits(const char* name, uint8_t* nt) {
+  int up[2] = {0, 0};
+  int low[2] = {0, 0};
+  int part = 0;
+  int n = 0;
+  int i;
+  *nt = 0;
+  for (i = 0; name[i]; i++) {
+    unsigned char c = (unsigned char)name[i];
+    if (c == '.') {
+      if (part || n == 0) return 0;
+      part = 1;
+      n = 0;
+      continue;
+    }
+    if (short_bad(c)) return 0;
+    if (++n > (part ? 3 : 8)) return 0;
+    if (c >= 'a' && c <= 'z') low[part] = 1;
+    if (c >= 'A' && c <= 'Z') up[part] = 1;
+  }
+  if (n == 0) return 0;
+  if ((up[0] && low[0]) || (up[1] && low[1])) return 0;
+  if (low[0]) *nt |= NT_LOW_BASE;
+  if (low[1]) *nt |= NT_LOW_EXT;
+  return 1;
+}
+
+static int short_taken(struct dir_view* v, const char* n11) {
+  int i;
+  for (i = 0; i < v->count; i++) {
+    const char* p = v->ents[i].name;
+    unsigned char n0 = (unsigned char)p[0];
+    int j;
+    if (n0 == 0x00) break;
+    if (n0 == 0xE5 || (v->ents[i].attributes & 0x0F) == 0x0F) continue;
+    for (j = 0; j < 11 && p[j] == n11[j]; j++) {
+    }
+    if (j == 11) return 1;
+  }
+  return 0;
+}
+
+static char up_short(unsigned char c) {
+  if (short_bad(c)) return '_';
+  return (c >= 'a' && c <= 'z') ? (char)(c - 32) : (char)c;
+}
+
+/* Apelido 8.3 de um nome longo: "Relatorio final.txt" -> RELATO~1.TXT,
+ * com o primeiro numero livre na pasta. */
+static int make_alias(struct dir_view* v, const char* lname, char* n11) {
+  char base[8];
+  char ext[3];
+  int bn = 0;
+  int en = 0;
+  int dot = -1;
+  int i;
+  uint32_t num;
+  for (i = 0; lname[i]; i++)
+    if (lname[i] == '.') dot = i;
+  if (dot == 0) dot = -1;   /* ".config" fica sem extensao */
+  for (i = 0; lname[i] && (dot < 0 || i < dot) && bn < 8; i++) {
+    unsigned char c = (unsigned char)lname[i];
+    if (c == ' ' || c == '.') continue;
+    base[bn++] = up_short(c);
+  }
+  if (dot > 0)
+    for (i = dot + 1; lname[i] && en < 3; i++) {
+      unsigned char c = (unsigned char)lname[i];
+      if (c == ' ') continue;
+      ext[en++] = up_short(c);
+    }
+  if (bn == 0) base[bn++] = '_';
+  for (num = 1; num < 1000000u; num++) {
+    char d[7];
+    int dn = 0;
+    int keep;
+    int k;
+    uint32_t x = num;
+    do {
+      d[dn++] = (char)('0' + x % 10u);
+      x /= 10u;
+    } while (x);
+    keep = 7 - dn;
+    if (keep > bn) keep = bn;
+    for (k = 0; k < 11; k++) n11[k] = ' ';
+    for (k = 0; k < keep; k++) n11[k] = base[k];
+    n11[keep] = '~';
+    for (k = 0; k < dn; k++) n11[keep + 1 + k] = d[dn - 1 - k];
+    for (k = 0; k < en; k++) n11[8 + k] = ext[k];
+    if (!short_taken(v, n11)) return 0;
+  }
+  return -1;
+}
+
+/* Entrada nova para name em v: so 8.3 quando cabe, senao LFN + apelido.
+ * Devolve a entrada 8.3 zerada, com nome e atributo; 0 sem lugar ou nome
+ * invalido. Espacos e pontos do fim caem, como no Windows. */
+static struct fat_dir_entry* dir_new_entry(struct dir_view* v, const char* name, uint8_t attr) {
+  static char clean[FAT_NAME_MAX];
+  char n11[11];
+  uint8_t nt;
+  int len = 0;
+  int cnt;
+  int i;
+  int k;
+  struct fat_dir_entry* e;
+  while (name[len] && len < FAT_NAME_MAX - 1) {
+    clean[len] = name[len];
+    len++;
+  }
+  if (name[len]) return 0;
+  while (len > 0 && (clean[len - 1] == ' ' || clean[len - 1] == '.')) len--;
+  clean[len] = 0;
+  if (len == 0) return 0;
+  for (i = 0; i < len; i++)
+    if (long_bad((unsigned char)clean[i])) return 0;
+  if (short_fits(clean, &nt)) {
+    e = dir_slots(v, 1);
+    if (!e) return 0;
+    mem_zero(e, 32);
+    string_to_fat_name(clean, e->name, e->ext);
+    e->reserved[0] = nt;
+    e->attributes = attr;
+    return e;
+  }
+  if (make_alias(v, clean, n11) != 0) return 0;
+  cnt = (len + LFN_CHARS - 1) / LFN_CHARS;
+  e = dir_slots(v, cnt + 1);
+  if (!e) return 0;
+  /* No disco o pedaco do fim vem primeiro. */
+  for (k = 0; k < cnt; k++) {
+    struct fat_lfn_entry* l = (struct fat_lfn_entry*)&e[k];
+    int ord = cnt - k;
+    int base = (ord - 1) * LFN_CHARS;
+    mem_zero(l, 32);
+    l->ord = (uint8_t)(ord | (k == 0 ? 0x40 : 0));
+    l->attributes = 0x0F;
+    l->sum = sum11((const uint8_t*)n11);
+    for (i = 0; i < LFN_CHARS; i++) {
+      int p = base + i;
+      uint16_t u = 0xFFFF;
+      if (p < len) u = oem_to_uni((unsigned char)clean[p]);
+      else if (p == len) u = 0;
+      lfn_set(l, i, u);
+    }
+  }
+  e += cnt;
+  mem_zero(e, 32);
+  for (i = 0; i < 8; i++) e->name[i] = n11[i];
+  for (i = 0; i < 3; i++) e->ext[i] = n11[8 + i];
+  e->attributes = attr;
+  return e;
 }
 
 static void put_dot(struct fat_dir_entry* e, int dots, uint16_t cluster) {
@@ -570,21 +917,21 @@ static int format_new_dir(uint16_t self, uint16_t parent_cluster) {
 static int mkdir_in(struct dir_view* parent, const char* name, uint16_t* outc) {
   struct fat_dir_entry* e;
   uint16_t c;
-  uint16_t parent_cluster;
   if (fat_type != 16) return -1;
-  e = dir_slot(parent);
-  if (!e) return -2;
   c = find_free_cluster();
   if (!c) return -3;
   write_fat16_cluster(c, 0xFFFF);
-  parent_cluster = parent->cluster;
-  if (format_new_dir(c, parent_cluster) != 0) {
+  if (format_new_dir(c, parent->cluster) != 0) {
     free_chain(c);
     return -1;
   }
-  mem_zero(e, 32);
-  string_to_fat_name(name, e->name, e->ext);
-  e->attributes = 0x10;
+  /* Depois do cluster: a pasta pode crescer e pegar outro. */
+  e = dir_new_entry(parent, name, 0x10);
+  if (!e) {
+    free_chain(c);
+    flush_fat();
+    return -2;
+  }
   e->cluster = c;
   e->size = 0;
   e->date = 0x4A00;
@@ -595,46 +942,44 @@ static int mkdir_in(struct dir_view* parent, const char* name, uint16_t* outc) {
   return 0;
 }
 
-/* parent fica com o diretorio que contem o arquivo. create cria as pastas. */
+/* parent fica com o diretorio que contem o arquivo e leaf (FAT_NAME_MAX)
+ * com o ultimo nome. create cria as pastas do meio. */
 static int open_parent(const char* path, struct dir_view* parent, char* leaf, int create) {
-  char comps[8][13];
-  int n = 0;
+  static char next[FAT_NAME_MAX];
   int pos = 0;
-  int i;
-  uint16_t cluster = 0;
-  char extra[4];
-  int p2;
+  int depth = 0;
   if (!path || !path[0]) return -1;
-  while (n < 8 && next_comp(path, &pos, comps[n], 13)) n++;
-  p2 = pos;
-  if (n < 1 || next_comp(path, &p2, extra, 4)) return -1;
-  for (i = 0; comps[n - 1][i] && i < 12; i++) leaf[i] = comps[n - 1][i];
-  leaf[i] = 0;
+  if (next_comp(path, &pos, leaf, FAT_NAME_MAX) != 1) return -1;
   if (dir_load(0, parent) != 0) return -1;
-  for (i = 0; i < n - 1; i++) {
-    struct fat_dir_entry* e = dir_find(parent, comps[i], 1);
+  for (;;) {
+    int rc = next_comp(path, &pos, next, FAT_NAME_MAX);
+    struct fat_dir_entry* e;
     uint16_t child;
+    int k;
+    if (rc < 0) return -1;
+    if (rc == 0) return 0;
+    if (++depth > 32) return -1;
+    e = dir_find(parent, leaf, 1, 0);
     if (!e) {
       if (!create) return -1;
-      if (mkdir_in(parent, comps[i], &child) != 0) return -1;
+      if (mkdir_in(parent, leaf, &child) != 0) return -1;
     } else {
       child = e->cluster;
       if (child < 2) return -1;
     }
-    cluster = child;
-    if (dir_load(cluster, parent) != 0) return -1;
+    if (dir_load(child, parent) != 0) return -1;
+    for (k = 0; next[k]; k++) leaf[k] = next[k];
+    leaf[k] = 0;
   }
-  (void)cluster;
-  return 0;
 }
 
 static int lookup_file(const char* filename, uint16_t* cluster, uint32_t* size) {
   struct dir_view parent;
-  char leaf[13];
+  char leaf[FAT_NAME_MAX];
   struct fat_dir_entry* e;
   if (fat_type == 0) return -1;
   if (open_parent(filename, &parent, leaf, 0) != 0) return -1;
-  e = dir_find(&parent, leaf, 0);
+  e = dir_find(&parent, leaf, 0, 0);
   if (!e) return -1;
   *cluster = e->cluster;
   *size = e->size;
@@ -788,11 +1133,11 @@ static int entry_dot(const struct fat_dir_entry* e) {
 
 static int dir_at(const char* path, struct dir_view* v) {
   struct dir_view parent;
-  char leaf[13];
+  char leaf[FAT_NAME_MAX];
   struct fat_dir_entry* e;
   if (!path || !path[0]) return dir_load(0, v);
   if (open_parent(path, &parent, leaf, 0) != 0) return -1;
-  e = dir_find(&parent, leaf, 1);
+  e = dir_find(&parent, leaf, 1, 0);
   if (!e || e->cluster < 2) return -1;
   return dir_load(e->cluster, v);
 }
@@ -808,12 +1153,12 @@ int fat_is_dir(const char* path) {
 /* 0 criou, 1 ja existia, -1 falhou. Cria as pastas do meio. */
 int fat_mkdir(const char* path) {
   struct dir_view parent;
-  char leaf[13];
+  char leaf[FAT_NAME_MAX];
   uint16_t c;
   if (fat_type != 16 || !path || !path[0]) return -1;
   if (open_parent(path, &parent, leaf, 1) != 0) return -1;
-  if (dir_find(&parent, leaf, 1)) return 1;
-  if (dir_find(&parent, leaf, 0)) return -1;
+  if (dir_find(&parent, leaf, 1, 0)) return 1;
+  if (dir_find(&parent, leaf, 0, 0)) return -1;
   if (mkdir_in(&parent, leaf, &c) != 0) return -1;
   return 0;
 }
@@ -822,16 +1167,17 @@ int fat_mkdir(const char* path) {
 int fat_rmdir(const char* path) {
   struct dir_view parent;
   struct dir_view child;
-  char leaf[13];
+  char leaf[FAT_NAME_MAX];
   struct fat_dir_entry* e;
   uint16_t cluster;
   uint16_t parent_cluster;
+  int first;
   int i;
   if (fat_type != 16 || !path || !path[0]) return -1;
   if (open_parent(path, &parent, leaf, 0) != 0) return -1;
   if (leaf[0] == '.' && (leaf[1] == 0 || (leaf[1] == '.' && leaf[2] == 0))) return -1;
-  e = dir_find(&parent, leaf, 1);
-  if (!e) return dir_find(&parent, leaf, 0) ? -3 : -1;
+  e = dir_find(&parent, leaf, 1, 0);
+  if (!e) return dir_find(&parent, leaf, 0, 0) ? -3 : -1;
   cluster = e->cluster;
   parent_cluster = parent.cluster;
   if (cluster < 2) return -1;
@@ -848,9 +1194,9 @@ int fat_rmdir(const char* path) {
     return -2;
   }
   if (dir_load(parent_cluster, &parent) != 0) return -1;
-  e = dir_find(&parent, leaf, 1);
+  e = dir_find(&parent, leaf, 1, &first);
   if (!e) return -1;
-  e->name[0] = (char)0xE5;
+  dir_unlink(&parent, first, e);
   if (dir_flush(&parent) != 0) return -1;
   free_chain(cluster);
   flush_fat();
@@ -861,52 +1207,43 @@ int fat_rmdir(const char* path) {
  * Marca tambem as entradas de nome longo (LFN) que vem antes. */
 int fat_delete(const char* path) {
   struct dir_view parent;
-  char leaf[13];
+  char leaf[FAT_NAME_MAX];
   struct fat_dir_entry* e;
   uint16_t cluster;
-  int i;
+  int first;
   if (fat_type != 16 || !path || !path[0]) return -1;
   if (open_parent(path, &parent, leaf, 0) != 0) return -1;
-  e = dir_find(&parent, leaf, 0);
-  if (!e) return dir_find(&parent, leaf, 1) ? -3 : -1;
+  e = dir_find(&parent, leaf, 0, &first);
+  if (!e) return dir_find(&parent, leaf, 1, 0) ? -3 : -1;
   if (e->attributes & 0x01) return -4;
   cluster = e->cluster;
-  for (i = (int)(e - parent.ents) - 1; i >= 0; i--) {
-    if ((parent.ents[i].attributes & 0x0F) != 0x0F) break;
-    if ((unsigned char)parent.ents[i].name[0] == 0xE5) break;
-    parent.ents[i].name[0] = (char)0xE5;
-  }
-  e->name[0] = (char)0xE5;
+  dir_unlink(&parent, first, e);
   if (dir_flush(&parent) != 0) return -1;
   if (cluster >= 2) free_chain(cluster);
   flush_fat();
   return 0;
 }
 
-/* Linhas "NOME" ou "NOME\\" se for pasta. path vazio lista a raiz. -1 se nao e pasta. */
+/* Linhas "NOME" ou "NOME\\" se for pasta. path vazio lista a raiz. -1 se nao e pasta.
+ * Nome longo de ate 31 caracteres; mais que isso vem o 8.3 (readdir e k_dirent). */
 int fat_list_dir(const char* path, char* output, int max_output) {
+  static char lname[FAT_NAME_MAX];
   struct dir_view v;
+  struct fat_dir_entry* e;
   int pos = 0;
-  int i;
+  int i = 0;
   if (!output || max_output < 2) return -1;
   output[0] = 0;
   if (fat_type == 0) return -1;
   if (dir_at(path, &v) != 0) return -1;
-  for (i = 0; i < v.count && pos < max_output - 16; i++) {
-    unsigned char n0 = (unsigned char)v.ents[i].name[0];
-    unsigned char attr;
-    char name[13];
+  while (pos < max_output - 36 && (e = dir_next(&v, &i, lname, 0)) != 0) {
+    char name[32];
     int j;
-    if (n0 == 0x00) break;
-    if (n0 == 0xE5) continue;
-    attr = v.ents[i].attributes;
-    if ((attr & 0x0F) == 0x0F) continue;
-    if (attr & 0x08) continue;
-    if (entry_dot(&v.ents[i])) continue;
-    fat_name_to_string(&v.ents[i], name);
+    if (entry_dot(e)) continue;
+    item_name(e, lname, name);
     if (!name[0]) continue;
     for (j = 0; name[j] && pos < max_output - 3; j++) output[pos++] = name[j];
-    if (attr & 0x10) output[pos++] = '\\';
+    if (e->attributes & 0x10) output[pos++] = '\\';
     output[pos++] = '\n';
   }
   output[pos] = 0;
@@ -915,29 +1252,37 @@ int fat_list_dir(const char* path, char* output, int max_output) {
 
 /* Como fat_list_dir, mas com tamanho e data. Quantas copiou; -1 se nao e pasta. */
 int fat_dir_items(const char* path, struct dir_item* out, int max) {
+  static char lname[FAT_NAME_MAX];
   struct dir_view v;
+  struct fat_dir_entry* e;
   int n = 0;
-  int i;
+  int i = 0;
   if (!out || max <= 0 || fat_type == 0) return -1;
   if (dir_at(path, &v) != 0) return -1;
-  for (i = 0; i < v.count && n < max; i++) {
-    unsigned char n0 = (unsigned char)v.ents[i].name[0];
-    unsigned char attr;
-    if (n0 == 0x00) break;
-    if (n0 == 0xE5) continue;
-    attr = v.ents[i].attributes;
-    if ((attr & 0x0F) == 0x0F) continue;
-    if (attr & 0x08) continue;
-    if (entry_dot(&v.ents[i])) continue;
-    fat_name_to_string(&v.ents[i], out[n].name);
+  while (n < max && (e = dir_next(&v, &i, lname, 0)) != 0) {
+    if (entry_dot(e)) continue;
+    item_name(e, lname, out[n].name);
     if (!out[n].name[0]) continue;
-    out[n].dir = (attr & 0x10) ? 1 : 0;
-    out[n].size = out[n].dir ? 0 : v.ents[i].size;
-    out[n].date = v.ents[i].date;
-    out[n].time = v.ents[i].time;
+    out[n].dir = (e->attributes & 0x10) ? 1 : 0;
+    out[n].size = out[n].dir ? 0 : e->size;
+    out[n].date = e->date;
+    out[n].time = e->time;
     n++;
   }
   return n;
+}
+
+/* Nome longo inteiro do ultimo nome de path (arquivo ou pasta). */
+int fat_long_name(const char* path, char* out, int max) {
+  struct dir_view parent;
+  char leaf[FAT_NAME_MAX];
+  int i;
+  if (fat_type == 0 || !out || max < 2) return -1;
+  if (open_parent(path, &parent, leaf, 0) != 0) return -1;
+  if (!dir_find(&parent, leaf, 0, 0) && !dir_find(&parent, leaf, 1, 0)) return -1;
+  for (i = 0; found_name[i] && i < max - 1; i++) out[i] = found_name[i];
+  out[i] = 0;
+  return 0;
 }
 
 // Lista arquivos do diretório raiz
@@ -1027,20 +1372,18 @@ static void flush_root_dir(void) {
 /* Grava na raiz ou em pastas ("temp\\net\\ARQ.EXT" cria temp e net). */
 int fat_write_file(const char* filename, const void* data, uint32_t size) {
   struct dir_view parent;
-  char leaf[13];
+  char leaf[FAT_NAME_MAX];
   struct fat_dir_entry* entry;
   int rc;
   if (fat_type != 16) return -1;
   if (sectors_per_cluster == 0 || bytes_per_sector == 0) return -1;
   if (!filename || (!data && size)) return -1;
   if (open_parent(filename, &parent, leaf, 1) != 0) return -1;
-  entry = dir_find(&parent, leaf, 0);
+  entry = dir_find(&parent, leaf, 0, 0);
   if (!entry) {
-    entry = dir_slot(&parent);
+    if (dir_find(&parent, leaf, 1, 0)) return -1;   /* ja e uma pasta */
+    entry = dir_new_entry(&parent, leaf, 0x20);
     if (!entry) return -2;
-    mem_zero(entry, 32);
-    string_to_fat_name(leaf, entry->name, entry->ext);
-    entry->attributes = 0x20;
   } else {
     free_chain(entry->cluster);
     entry->cluster = 0;

@@ -299,7 +299,7 @@ static int k_shell_capture(char* line, char* out, int max, int* len) {
 }
 
 static int k_exec(const char* path, int argc, char** argv) {
-  char full[64];
+  char full[DRV_PATH];
   char* wide[32];
   uint32_t* narrow = (uint32_t*)argv;
   int n, i;

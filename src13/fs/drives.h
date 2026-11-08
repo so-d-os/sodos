@@ -2,6 +2,10 @@
 #pragma once
 #include <stdint.h>
 
+/* Nome longo (LFN) do FAT: ate 255 caracteres; caminho inteiro sem a letra. */
+#define FAT_NAME_MAX 256
+#define DRV_PATH     260
+
 void drives_init(void);
 char drives_current(void);
 int drives_set_current(char letter);
@@ -47,7 +51,9 @@ int drives_rmdir(const char* path);
 /* Espaco em KB de uma unidade FAT. -1 se nao for. */
 int drives_space(char letter, uint32_t* total_kb, uint32_t* free_kb);
 
-/* Uma entrada de pasta. date/time no formato FAT (0 = sem data). */
+/* Uma entrada de pasta. date/time no formato FAT (0 = sem data).
+ * name e o nome longo quando cabe; senao o apelido 8.3 (NOME~1.EXT), que
+ * tambem abre o arquivo. E o k_dirent dos programas: nao muda de tamanho. */
 struct dir_item {
   char name[32];
   uint32_t size;
@@ -57,6 +63,8 @@ struct dir_item {
 };
 /* Itens de uma pasta ("U:\\SRC"). Quantos; -1 se nao e pasta. */
 int drives_items(const char* path, struct dir_item* out, int max);
+/* Nome longo inteiro de path (o ultimo nome). 0 achou; -1 nao. */
+int drives_long_name(const char* path, char* out, int max);
 void drives_list(char letter);
 int drives_names(char letter, char out[][32], int max);
 char path_letter(const char* path);

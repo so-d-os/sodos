@@ -159,7 +159,7 @@ static int locate(const char* name, char pref, char* out, int max) {
 }
 
 int mod_find_exe(const char* name, char* out, int max) {
-  char tmp[64];
+  char tmp[DRV_PATH];
   if (!name || !name[0]) return -1;
   if (locate(name, 0, out, max) == 0) {
     char b[32];
@@ -183,7 +183,7 @@ static int ends_ci(const char* s, const char* suf) {
 }
 
 int mod_find_batch(const char* name, char* out, int max) {
-  char tmp[64];
+  char tmp[DRV_PATH];
   if (!name || !name[0]) return -1;
   if (ends_ci(name, ".BAT") || ends_ci(name, ".CMD"))
     return locate(name, 0, out, max);
@@ -286,7 +286,7 @@ static int resolve_imports(int id, const struct sox_import* imp, uint32_t n, con
 }
 
 static int load(const char* req, int want_dll) {
-  char path[64];
+  char path[DRV_PATH];
   char bname[32];
   int fsz;
   uint8_t* file;

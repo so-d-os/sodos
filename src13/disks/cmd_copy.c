@@ -24,9 +24,9 @@ static int name_len(const char* s) {
 int cmd_copy(int argc, char** argv) {
   char src_letter;
   char dst_letter;
-  char src_name[64];
-  char dst_name[64];
-  char dest_path[80];
+  char src_name[DRV_PATH];
+  char dst_name[DRV_PATH];
+  char dest_path[DRV_PATH + 4];
   struct dir_item probe;
   char* buf;
   int n;
