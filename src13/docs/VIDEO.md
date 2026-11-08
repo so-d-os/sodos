@@ -70,6 +70,13 @@ O FAT do SODOS le apenas nomes curtos: a pasta de papeis de parede e
 `D:\SODOS\WALLS` (nao `WALLPAPERS`, que viraria `WALLPA~1` e nao seria
 encontrada). As imagens tambem precisam caber em 8.3 (`WALL1.PNG`).
 
+## Driver de placa
+
+Tudo acima e desenho por CPU, e continua sendo o padrao. O driver de placa
+(virtio-gpu primeiro) e opcional, vem como `.DLL` e so entra se a placa
+existir e passar no teste; sem ele, nada deste documento muda. Veja
+[GPU.md](GPU.md).
+
 ## Arquivos
 
 - `video/visual.c` — `gfx_quality`, `gfx_desk_clear()`, `gui_pixels()` com
