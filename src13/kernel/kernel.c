@@ -43,6 +43,7 @@ int format_fat16(uint32_t drive, uint32_t lba_start, uint32_t total_sectors, con
 #include "keymap.h"
 #include "clip.h"
 #include "vt.h"
+#include "kexports.h"
 
 const struct executable_entry* find_executable(const char* name) {
   for (int i = 0; i < executable_count; i++) {
@@ -682,107 +683,198 @@ static int starts_with(const char* name, const char* prefix) {
   return 1;
 }
 
-static int add_hit(char hits[][32], int nh, int max, const char* name) {
+/* Tab: candidatos do ultimo token. dir=1 e pasta (mostra e completa com \). */
+#define TAB_ITEMS 512
+#define TAB_HITS  128
+struct tab_hit {
+  char name[32];
+  uint8_t dir;
+};
+
+static int add_hit(struct tab_hit* hits, int nh, const char* name, int dir) {
   int i;
   int k = 0;
-  if (!name || !name[0] || nh >= max) return nh;
+  if (!name || !name[0] || nh >= TAB_HITS) return nh;
   for (i = 0; i < nh; i++) {
-    if (name_eq(hits[i], name)) return nh;
+    if (name_eq(hits[i].name, name)) return nh;
   }
   while (name[k] && k < 31) {
-    hits[nh][k] = name[k];
+    hits[nh].name[k] = name[k];
     k++;
   }
-  hits[nh][k] = '\0';
+  hits[nh].name[k] = '\0';
+  hits[nh].dir = (uint8_t)dir;
   return nh + 1;
 }
 
-/* Completa o ultimo token. Um unico arquivo vira o nome inteiro. */
+static int hit_less(const struct tab_hit* a, const struct tab_hit* b) {
+  int k = 0;
+  if (a->dir != b->dir) return a->dir > b->dir;   /* pastas primeiro */
+  while (a->name[k] && fold_ch((unsigned char)a->name[k]) ==
+                       fold_ch((unsigned char)b->name[k]))
+    k++;
+  return fold_ch((unsigned char)a->name[k]) < fold_ch((unsigned char)b->name[k]);
+}
+
+/* A lista em colunas, como o dir /w, e o prompt com a linha de novo. */
+static void tab_show(const struct tab_hit* hits, int nh, const char* buf, int len) {
+  int w = 0, cols, k, c;
+  for (k = 0; k < nh; k++) {
+    int n = 0;
+    while (hits[k].name[n]) n++;
+    if (hits[k].dir) n++;
+    if (n > w) w = n;
+  }
+  w += 2;
+  cols = 80 / w;
+  if (cols < 1) cols = 1;
+  putc('\n');
+  for (k = 0; k < nh; k++) {
+    int n = 0;
+    puts_k(hits[k].name);
+    while (hits[k].name[n]) n++;
+    if (hits[k].dir) {
+      putc('\\');
+      n++;
+    }
+    if ((k + 1) % cols == 0 || k + 1 == nh) putc('\n');
+    else for (c = n; c < w; c++) putc(' ');
+  }
+  if (nh >= TAB_HITS) puts_k("  ...\n");
+  {
+    char prompt[64];
+    drives_prompt(prompt, (int)sizeof(prompt));
+    puts_k(prompt);
+  }
+  for (k = 0; k < len; k++) putc(buf[k]);
+}
+
+/* Completa o ultimo token: comando, arquivo ou pasta, com caminho e unidade
+ * (cd src\Pa<Tab>, D:<Tab>, U:\SRC\<Tab>). Depois de cd, md e rd so as
+ * pastas. Um nome so entra inteiro (pasta com \ no fim, para o proximo
+ * Tab descer nela); varios completam a parte comum ou mostram a lista.
+ * Nome com espaco ganha aspas. */
 static void complete_line(char* buf, int* io_i, int max) {
-  char names[24][32];
-  char hits[16][32];
-  char prefix[32];
+  struct dir_item* items;
+  struct tab_hit* hits;
+  char dirpart[DRV_PATH];
+  char rep[DRV_PATH + 40];
+  const char* prefix;
+  const char* word;
   int i = *io_i;
-  int tok = i;
-  int name_at;
-  int nnames;
+  int tok = 0;
+  int quoted = 0;
+  int qopen;
+  int wlen, cut, plen;
+  int dirs_only = 0;
   int nh = 0;
-  int k;
-  int typed;
-  int clen;
-  int first;
-  char letter;
-  while (tok > 0 && buf[tok - 1] != ' ') tok--;
-  name_at = tok;
-  letter = drives_current();
-  if (buf[name_at] && buf[name_at + 1] == ':') {
-    letter = buf[name_at];
-    name_at += 2;
-    if (buf[name_at] == '\\' || buf[name_at] == '/') name_at++;
+  int n, k, j, clen, r;
+  for (k = 0; k < i; k++) {
+    if (buf[k] == '"') quoted = !quoted;
+    else if (buf[k] == ' ' && !quoted) tok = k + 1;
   }
-  typed = i - name_at;
-  if (typed < 0) typed = 0;
-  if (typed > 31) typed = 31;
-  for (k = 0; k < typed; k++) prefix[k] = buf[name_at + k];
-  prefix[typed] = '\0';
-  first = (tok == 0 && name_at == tok);
-  if (first) {
-    for (k = 0; k < cmd_count; k++) {
-      if (starts_with(commands[k].name, prefix))
-        nh = add_hit(hits, nh, 16, commands[k].name);
+  qopen = buf[tok] == '"';
+  word = buf + tok + qopen;
+  wlen = i - (tok + qopen);
+  if (wlen < 0) return;
+  cut = -1;
+  for (k = 0; k < wlen; k++)
+    if (word[k] == '\\' || word[k] == '/' || word[k] == ':') cut = k;
+  if (cut + 1 >= (int)sizeof(dirpart)) return;
+  for (k = 0; k <= cut; k++) dirpart[k] = word[k];
+  dirpart[cut + 1] = '\0';
+  prefix = word + cut + 1;
+  plen = wlen - cut - 1;
+  if (plen > 31) return;
+  if (tok > 0) {
+    static const char* const dcmds[] = { "cd", "chdir", "md", "mkdir", "rd", "rmdir" };
+    char cmd[8];
+    int m = 0;
+    while (buf[m] && buf[m] != ' ' && m < (int)sizeof(cmd) - 1) {
+      cmd[m] = buf[m];
+      m++;
     }
-    for (k = 0; k < executable_count; k++) {
-      if (starts_with(executables[k].name, prefix))
-        nh = add_hit(hits, nh, 16, executables[k].name);
+    cmd[m] = '\0';
+    for (k = 0; k < (int)(sizeof(dcmds) / sizeof(dcmds[0])); k++)
+      if (buf[m] == ' ' && name_eq(cmd, dcmds[k])) dirs_only = 1;
+  }
+
+  items = (struct dir_item*)kmalloc(TAB_ITEMS * (uint32_t)sizeof(struct dir_item));
+  hits = (struct tab_hit*)kmalloc(TAB_HITS * (uint32_t)sizeof(struct tab_hit));
+  if (!items || !hits) goto out;
+  {
+    /* prefix aponta para buf: compara com uma copia */
+    char pre[32];
+    for (k = 0; k < plen; k++) pre[k] = prefix[k];
+    pre[plen] = '\0';
+    if (tok == 0 && cut < 0 && !qopen) {
+      for (k = 0; k < cmd_count; k++)
+        if (starts_with(commands[k].name, pre))
+          nh = add_hit(hits, nh, commands[k].name, 0);
+      for (k = 0; k < executable_count; k++)
+        if (starts_with(executables[k].name, pre))
+          nh = add_hit(hits, nh, executables[k].name, 0);
+    }
+    n = drives_items(dirpart, items, TAB_ITEMS);
+    for (k = 0; k < n; k++) {
+      const char* nm = items[k].name;
+      if (nm[0] == '.' && (!nm[1] || (nm[1] == '.' && !nm[2]))) continue;
+      if (dirs_only && !items[k].dir) continue;
+      if (starts_with(nm, pre)) nh = add_hit(hits, nh, nm, items[k].dir);
     }
   }
-  nnames = drives_names(letter, names, 24);
-  for (k = 0; k < nnames; k++) {
-    if (starts_with(names[k], prefix))
-      nh = add_hit(hits, nh, 16, names[k]);
-  }
-  if (nh == 0) return;
+  if (nh == 0) goto out;
+
+  /* parte comum a todos */
   clen = 0;
-  while (hits[0][clen]) {
-    int same = 1;
-    unsigned char a = fold_ch((unsigned char)hits[0][clen]);
-    for (k = 1; k < nh; k++) {
-      if (fold_ch((unsigned char)hits[k][clen]) != a) {
-        same = 0;
-        break;
-      }
-    }
-    if (!same) break;
+  for (;;) {
+    unsigned char a = fold_ch((unsigned char)hits[0].name[clen]);
+    if (!a) break;
+    for (k = 1; k < nh; k++)
+      if (fold_ch((unsigned char)hits[k].name[clen]) != a) break;
+    if (k < nh) break;
     clen++;
   }
-  if (nh > 1 && clen == typed) {
-    putc('\n');
-    for (k = 0; k < nh; k++) {
-      puts_k("  ");
-      puts_k(hits[k]);
-      puts_k("\n");
+  if (nh > 1 && clen <= plen) {
+    for (k = 1; k < nh; k++) {       /* ordena: poucos, insercao basta */
+      struct tab_hit t = hits[k];
+      for (j = k; j > 0 && hit_less(&t, &hits[j - 1]); j--) hits[j] = hits[j - 1];
+      hits[j] = t;
     }
-    {
-      char prompt[64];
-      drives_prompt(prompt, (int)sizeof(prompt));
-      puts_k(prompt);
-    }
-    for (k = 0; k < i; k++) putc(buf[k]);
-    return;
+    tab_show(hits, nh, buf, i);
+    goto out;
   }
-  if (name_at + clen >= max) clen = max - 1 - name_at;
-  if (clen < 0) return;
-  while (i > name_at) {
+
+  /* Monta o token novo: [aspas] pasta digitada + nome + (\ | aspas) */
+  {
+    int q = qopen;
+    for (k = 0; k < clen; k++)
+      if (hits[0].name[k] == ' ') q = 1;
+    r = 0;
+    if (q) rep[r++] = '"';
+    for (k = 0; k <= cut; k++) rep[r++] = dirpart[k];
+    for (k = 0; k < clen; k++) rep[r++] = hits[0].name[k];
+    if (nh == 1) {
+      if (hits[0].dir) rep[r++] = '\\';
+      else if (q) rep[r++] = '"';
+    }
+    rep[r] = '\0';
+  }
+  if (tok + r >= max) goto out;
+  while (i > tok) {
     i--;
     putc('\b');
   }
-  for (k = 0; k < clen; k++) {
-    buf[name_at + k] = hits[0][k];
-    putc(buf[name_at + k]);
+  for (k = 0; k < r; k++) {
+    buf[tok + k] = rep[k];
+    putc(rep[k]);
   }
-  i = name_at + clen;
+  i = tok + r;
   buf[i] = '\0';
   *io_i = i;
+out:
+  if (items) kfree(items);
+  if (hits) kfree(hits);
 }
 
 // Move o cursor sem apagar (a linha digitada pode quebrar para a linha de baixo)
@@ -1307,6 +1399,96 @@ static int exec_pipe(char* left, char* right) {
   return rc;
 }
 
+/* Redirecao: "dir > lista.txt" grava a saida no arquivo; ">>" acrescenta
+ * no fim; "> nul" joga fora. A saida vai para redir_buf (umalloc, na
+ * primeira vez) e o arquivo e gravado de uma vez no fim. */
+#define REDIR_MAX (256u * 1024u)
+static char* redir_buf;
+static uint32_t redir_len;
+static int redir_full;
+static int redir_busy;  /* redir_buf e um so para as telas */
+
+static void redir_out(char c) {
+  if (c == '\f') return;
+  if (redir_len < REDIR_MAX) redir_buf[redir_len++] = c;
+  else redir_full = 1;
+}
+
+/* '>' fora de aspas, ou 0 */
+static char* find_redir(char* line) {
+  int quoted = 0;
+  for (; *line; line++) {
+    if (*line == '"') quoted = !quoted;
+    else if (*line == '>' && !quoted) return line;
+  }
+  return 0;
+}
+
+static int exec_redir(char* line, char* gt) {
+  void (*prev)(char) = shell_out_fn;
+  int (*prev_exec)(const char*, int, char**) = shell_exec_fn;
+  void (*hook)(char) = kexp_get_console_hook();
+  char name[DRV_PATH];
+  int append = 0;
+  int discard;
+  int n = 0;
+  int rc;
+  *gt++ = '\0';
+  if (*gt == '>') {
+    append = 1;
+    gt++;
+  }
+  while (*gt == ' ') gt++;
+  if (*gt == '"') {
+    gt++;
+    while (*gt && *gt != '"' && n < (int)sizeof(name) - 1) name[n++] = *gt++;
+    if (*gt == '"') gt++;
+  } else {
+    while (*gt && *gt != ' ' && n < (int)sizeof(name) - 1) name[n++] = *gt++;
+  }
+  name[n] = '\0';
+  while (*gt == ' ') gt++;
+  if (!name[0] || *gt) {
+    puts_k(name[0] ? "redirecao: so um arquivo depois de >\n"
+                   : "redirecao: falta o nome do arquivo depois de >\n");
+    return 1;
+  }
+  discard = name_eq(name, "nul");
+  if (redir_busy) {
+    puts_k("redirecao: em uso em outra tela\n");
+    return 1;
+  }
+  if (!redir_buf) redir_buf = (char*)umalloc_owned(REDIR_MAX + 1u, 0);
+  if (!redir_buf) {
+    puts_k("redirecao: sem memoria\n");
+    return 1;
+  }
+  redir_busy = 1;
+  redir_len = 0;
+  redir_full = 0;
+  if (append && !discard) {
+    int had = file_load(name, redir_buf, (int)REDIR_MAX + 1);
+    if (had > 0) redir_len = (uint32_t)had;
+  }
+  /* Tudo pelo putc: no WIN o .EXE nao abre janela e nao usa a hook. */
+  kexp_set_console_hook(0);
+  shell_exec_fn = 0;
+  shell_out_fn = redir_out;
+  rc = exec_line(line, 0);
+  shell_out_fn = prev;
+  shell_exec_fn = prev_exec;
+  kexp_set_console_hook(hook);
+  if (redir_full) puts_k("redirecao: saida cortada em 256 KB\n");
+  if (!discard && file_save(name, redir_buf, (int)redir_len) < 0) {
+    puts_k("redirecao: nao gravou ");
+    puts_k(name);
+    puts_k("\n");
+    rc = 1;
+  }
+  redir_busy = 0;
+  return rc;
+}
+
 static int exec_line(char* line, int history) {
   char raw[256];
   char* argv[31]; /* o loader passa ate 31 */
@@ -1329,6 +1511,10 @@ static int exec_line(char* line, int history) {
       *bar = '\0';
       return exec_pipe(line, bar + 1);
     }
+  }
+  {
+    char* gt = find_redir(line);
+    if (gt) return exec_redir(line, gt);
   }
   argc = tokenize(line, argv, 31);
   if (argc == 0) return 0;

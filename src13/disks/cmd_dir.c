@@ -1,10 +1,41 @@
 #include "shell.h"
 #include "drives.h"
+#include "kexports.h"
+#include "reboot.h"
+
+/* dir /p: para a cada tela cheia. A saida passa por page_out, que manda o
+ * caractere para a saida de antes e conta as linhas (80 colunas). */
+#define PAGE_LINES 24
+static void (*page_prev)(char c);
+static int page_lines, page_col, page_quit;
+
+static void page_out(char c) {
+  static const char msg[] = "Pressione uma tecla para continuar . . .";
+  int k;
+  if (page_quit) return;
+  shell_set_out(page_prev);
+  putc(c);
+  if (c == '\n' || ++page_col >= 80) {
+    page_col = 0;
+    page_lines++;
+  }
+  if (page_lines >= PAGE_LINES) {
+    puts_k(msg);
+    do k = shell_get_char(); while (k == 0);
+    if (kbd_break_take() || k == 27) page_quit = 1;
+    putc('\r');
+    for (k = 0; msg[k]; k++) putc(' ');
+    putc('\r');
+    page_lines = 0;
+  }
+  shell_set_out(page_out);
+}
 
 /* dir [unidade:][pasta\][padrao] [/s] [/w] [/d] */
 int cmd_dir(int argc, char** argv) {
   const char* spec = "";
   int flags = 0;
+  int paged = 0;
   int i, j;
   for (i = 1; i < argc; i++) {
     if (argv[i][0] != '/') {
@@ -17,15 +48,27 @@ int cmd_dir(int argc, char** argv) {
       if (c == 's' || c == 'S') flags |= DIR_SUB;
       else if (c == 'w' || c == 'W') flags |= DIR_WIDE;
       else if (c == 'd' || c == 'D') flags |= DIR_DIRS;
+      else if (c == 'p' || c == 'P') paged = 1;
       else {
-        puts_k("Uso: dir [pasta\\][*.ext] [/s] [/w] [/d]\n");
+        puts_k("Uso: dir [pasta\\][*.ext] [/s] [/w] [/d] [/p]\n");
         puts_k("  /s  inclui as subpastas\n");
         puts_k("  /w  lista larga, em linhas\n");
         puts_k("  /d  so as pastas\n");
+        puts_k("  /p  para a cada tela cheia\n");
         puts_k("  * e ? valem no nome: dir *.exe   dir ???.txt\n");
         return 1;
       }
     }
+  }
+  page_prev = shell_get_out();
+  /* So na tela (ou na janela do WIN); redirecao e pipe nao param. */
+  if (paged && (!page_prev || page_prev == kexp_get_console_hook())) {
+    page_lines = 1;   /* a linha do comando */
+    page_col = page_quit = 0;
+    shell_set_out(page_out);
+    drives_dir(spec, flags);
+    shell_set_out(page_prev);
+    return 0;
   }
   drives_dir(spec, flags);
   return 0;
