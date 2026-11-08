@@ -453,7 +453,23 @@ com `GPU_CAP_CURSOR`, seguindo `hubp2_cursor_set_attributes`,
 - escolhido pelo `SODOS.CFG` (`driver=AMDCUR.DLL`); voltar para
   `driver=AMDGOP.DLL` tira o cursor da placa sem mexer em mais nada.
 
-Estado: aguardando o primeiro boot no notebook.
+**Primeiro boot com o `AMDCUR.DLL` (2026-11-08): o cursor apareceu e segue
+o mouse.** O `GPU.LOG`:
+
+```
+[amdcur] pipe 00000000 imagem gpu 000000F4:01000000 cur_ctl 03000201 cnvc 000100A5 size 00400040
+[gpu] cursor pela placa: amdcur (Radeon, GOP, cursor DCN)
+[gpu] desativado: fim do WIN
+[amdgop] fim: quadros 00000004 ...
+```
+
+- `cur_ctl 03000201`: ligado, modo 2, pitch 64, 8 linhas por bloco, como
+  programado; `cnvc 000100A5`: ligado, modo 2 (o bit 16 e o
+  `CUR0_UPDATE_PENDING`, a troca acontece no proximo quadro da tela);
+- so 4 quadros na sessao inteira: mover o mouse ja nao gera quadro nenhum
+  (so escreve `CURSOR_POSITION`), e os 4 sao os redesenhos completos;
+- falta exercitar Ctrl+F1/Ctrl+F7 com o cursor da placa (nao houve nesta
+  sessao).
 
 ## Configuracao (`D:\SODOS\VIDEO.CFG`)
 
