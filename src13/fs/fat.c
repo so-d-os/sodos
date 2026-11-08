@@ -3,6 +3,7 @@
 #include "disk.h"
 #include "sched.h"
 #include "drives.h"
+#include "kexports.h"
 
 // Estrutura do Boot Sector FAT
 struct fat_boot_sector {
@@ -885,6 +886,31 @@ static struct fat_dir_entry* dir_new_entry(struct dir_view* v, const char* name,
   return e;
 }
 
+/* Data e hora do relogio (RTC, como o relogio do WIN) no formato FAT:
+ * modificacao e, com create, tambem a criacao (reserved[3..6]). Com o RTC
+ * sem data fica 0, que o dir mostra em branco. */
+static void fat_stamp(struct fat_dir_entry* e, int create) {
+  int d = rtc_date();
+  int t = rtc_time();
+  uint16_t fd = 0, ft = 0;
+  if (d > 19800000 && d < 21080000) {
+    fd = (uint16_t)(((d / 10000 - 1980) << 9) | ((d / 100 % 100) << 5) | (d % 100));
+    if (t >= 0)
+      ft = (uint16_t)(((t / 10000) << 11) | ((t / 100 % 100) << 5) | (t % 100 / 2));
+  }
+  e->date = fd;
+  e->time = ft;
+  if (create) {
+    e->reserved[1] = (uint8_t)(t >= 0 && (t % 2) ? 100 : 0);
+    e->reserved[2] = (uint8_t)ft;
+    e->reserved[3] = (uint8_t)(ft >> 8);
+    e->reserved[4] = (uint8_t)fd;
+    e->reserved[5] = (uint8_t)(fd >> 8);
+  }
+  e->reserved[6] = (uint8_t)fd;   /* ultimo acesso */
+  e->reserved[7] = (uint8_t)(fd >> 8);
+}
+
 static void put_dot(struct fat_dir_entry* e, int dots, uint16_t cluster) {
   int i;
   mem_zero(e, 32);
@@ -934,8 +960,7 @@ static int mkdir_in(struct dir_view* parent, const char* name, uint16_t* outc) {
   }
   e->cluster = c;
   e->size = 0;
-  e->date = 0x4A00;
-  e->time = 0x8000;
+  fat_stamp(e, 1);
   if (dir_flush(parent) != 0) return -1;
   flush_fat();
   *outc = c;
@@ -1027,8 +1052,7 @@ static int write_chain(struct fat_dir_entry* entry, const void* data, uint32_t s
   }
   if (prev_cluster != 0) write_fat16_cluster(prev_cluster, 0xFFFF);
   entry->size = size;
-  entry->date = 0x4A00;
-  entry->time = 0x8000;
+  fat_stamp(entry, 0);
   return 0;
 }
 
@@ -1384,6 +1408,7 @@ int fat_write_file(const char* filename, const void* data, uint32_t size) {
     if (dir_find(&parent, leaf, 1, 0)) return -1;   /* ja e uma pasta */
     entry = dir_new_entry(&parent, leaf, 0x20);
     if (!entry) return -2;
+    fat_stamp(entry, 1);
   } else {
     free_chain(entry->cluster);
     entry->cluster = 0;
