@@ -1,9 +1,9 @@
 # Driver de placa de video (aceleracao grafica)
 
-Estado (2026-11): **etapas 1 e 2 feitas**. O kernel acha, carrega, testa,
-suspende e desliga um driver de placa, e o `VIRTGPU.DLL` acelera o QEMU com
-`-device virtio-vga` (`make run-virtio`): o quadro sai pela placa em cerca de
-1/200 do tempo do caminho por CPU (medida abaixo).
+Estado (2026-11): **etapas 1, 2 e 3 feitas**. O kernel acha, carrega, testa,
+suspende e desliga um driver de placa; o `VIRTGPU.DLL` acelera o QEMU com
+`-device virtio-vga` (`make run-virtio`); e o kernel diz ao driver quais
+areas mudaram, entao so elas vao para a placa (medidas abaixo).
 
 ## Regra principal
 
@@ -36,8 +36,12 @@ fixo fica listado aqui, medido, para nao crescer sem ninguem ver.
 | `gfx_gpu_try()` | por troca de modo do WIN: `gpu_wanted()` le o PCI (ate 64 leituras de configuracao) e compara com a tabela | `gfx_session_run`, volta do Ctrl+F7 |
 | `gpu_suspend()` / `gpu_close()` | 1 chamada que volta na hora, ao sair do WIN ou ir para uma tela do DOS | `win_vt_away`, fim do WIN |
 | `gpu_cfg_line()` | as linhas `gpu...` do `VIDEO.CFG`, que o WIN ja le | `win_load_cfg` |
-| Codigo e textos de `gpu.c` + chamadas | **3.456 bytes** no `kernel.bin` (402.472 -> 405.928) | `video/gpu.c` |
-| Variaveis | 72 bytes de BSS (`gpu_drv`, estado do carregador, `gfx_for_gpu`); couberam no alinhamento, o BSS total nao mudou | `video/gpu.c`, `video/visual.c` |
+| Codigo e textos de `gpu.c` + chamadas (etapas 1 e 2) | **3.552 bytes** no `kernel.bin` (402.472 -> 406.024) | `video/gpu.c` |
+| Variaveis (etapas 1 e 2) | 72 bytes de BSS (`gpu_drv`, estado do carregador, `gfx_for_gpu`); couberam no alinhamento | `video/gpu.c`, `video/visual.c` |
+| **Etapa 3 (areas):** `if (gpu_drv)` | 1 teste por `gui_present` de programa, 1 por movimento do cursor fora de quadro, 2 por passo de arrasto | `gui_present`, `cursor_draw`, `dc_present` |
+| Etapa 3: `need_draw` 2 | `win_api_dirty |= 2` no lugar de `= 1` (mesmo custo); 2 comparacoes quando ha `win_api_dirty`; 1 atribuicao por quadro (`gfx_frame_dmg`) | laco do WIN |
+| Etapa 3: codigo | **1.088 bytes** no `kernel.bin` (406.024 -> 407.112) | `video/visual.c` |
+| Etapa 3: variaveis | 192 bytes de BSS (lista de 10 areas, cursor mostrado) | `video/visual.c` |
 
 O teste nunca entra em funcoes chamadas por pixel ou por glifo (`put_pixel`,
 `gui_glyph`, `gui_pixels`). Se uma etapa futura quiser acelerar
@@ -121,7 +125,7 @@ struct gpu_drv {
   uint32_t caps;               /* GPU_CAP_PRESENT obrigatorio */
   int (*init)(const struct gpu_kapi* k, const struct gpu_mode* m);
   int (*selftest)(void);
-  int (*present)(const struct gpu_rect* rects, int n);   /* rects = 0: tela toda */
+  int (*present)(const struct gpu_rect* rects, int n);   /* rects = 0: tela toda; areas so com GPU_CAP_DAMAGE */
   void (*fini)(void);
   int (*suspend)(void);                       /* opcional */
   int (*resume)(const struct gpu_mode* m);    /* opcional */
@@ -183,10 +187,12 @@ Detalhes do `VIRTGPU.DLL`:
   de 16 entradas, em polling, timeout de 1 s;
 - `init`: recurso 2D `B8G8R8X8` do tamanho da tela, `ATTACH_BACKING` com o
   `gfx_back` (contiguo) e `SET_SCANOUT`; `selftest`: `GET_DISPLAY_INFO`;
-- `present`: `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` numa notificacao so;
 - `suspend`: reset do dispositivo (a parte VGA volta a mostrar o texto);
   `resume`: liga de novo e remonta a tela, reaproveitando a memoria;
-- reserva 6 KB (fila + pedidos), que o TOP mostra.
+- `present`: um `TRANSFER_TO_HOST_2D` por area (com o `offset` da area no
+  back buffer) e um `RESOURCE_FLUSH` com a uniao; fila de 64 entradas;
+- reserva 6 KB (fila + pedidos), que o TOP mostra;
+- `-DVG_MEDIR` liga a medida (ciclos e pixels por apresentacao no log).
 
 Medida (QEMU 1920x1080 com KVM, contador de ciclos em volta do fim do
 quadro, instrumentacao temporaria fora do commit):
@@ -201,6 +207,47 @@ boot BIOS o `kernel_entry.asm` mapeia o LFB em `0xE0000000`/`0xFD000000`
 com `0x9B` (PWT|PCD): sem cache, cada escrita vai sozinha. Mapear como
 write-combining aceleraria o caminho por CPU, mas e mudanca no caminho por
 CPU e fica de fora daqui.
+
+## Areas alteradas (etapa 3)
+
+O WIN redesenha o quadro inteiro (`need_draw`) e nao guarda o que mudou.
+Por isso as areas so vem de onde o kernel ja sabe exatamente o retangulo; o
+resto continua sendo a tela inteira:
+
+| De onde | Area | Como |
+|---|---|---|
+| Cursor movido fora de quadro (`cursor_draw`) | caixa velha + caixa nova | apresenta na hora |
+| Arrasto de janela (`dc_present`) | o retangulo que ele ja calcula | apresenta na hora |
+| Programa atualizando a propria janela (`gui_present` vindo de um programa) | a janela (titulo + conteudo) | `win_api_dirty = 2` vira `need_draw = 2`; o quadro inteiro e redesenhado na RAM, mas so a janela (mais as duas posicoes do cursor) vai para a placa |
+| Qualquer outro pedido de redesenho (`need_draw = 1`, 52 lugares) | tela inteira | como antes |
+
+Regras que mantem isso certo:
+
+- qualquer `win_api_dirty = 1` ou `need_draw = 1` no mesmo quadro vence o 2:
+  na duvida, vai a tela inteira;
+- mais de 10 areas num quadro tambem vira a tela inteira; o driver junta
+  mais de 12 numa so;
+- com driver, `gfx_offscreen` fica 1 entre os quadros: o back buffer e a
+  tela, e o que se desenha fora de quadro vai para ele. Sem isso o cursor e o
+  arrasto escreviam no LFB, que o virtio nao mostra (o cursor ficava parado
+  na tela ate o proximo quadro inteiro; defeito da etapa 2, corrigido aqui).
+
+Sem driver nada disso roda: `gfx_dmg_add` so e chamado depois de
+`if (gpu_drv)`, e o LFB continua sendo escrito como antes.
+
+Medida (QEMU 1920x1080 com KVM, driver compilado com `-DVG_MEDIR`, media de
+64 apresentacoes movendo o cursor, digitando no painel de IA e com alguns
+quadros inteiros no meio):
+
+| Etapa | Ciclos por apresentacao | Pixels por apresentacao |
+|---|---|---|
+| 2: tela inteira | ~1,7 milhao | 2.073.600 |
+| 3: areas do kernel | ~213 mil a ~318 mil | ~112 mil a ~204 mil |
+
+Antes disso foi tentado descobrir as areas **dentro do driver**, comparando
+cada quadro com uma copia do anterior (8 MB a mais, blocos de 64x32). Mandou
+40 vezes menos pixels, mas custou **mais** que a tela inteira (~1,95 a
+2,4 milhoes de ciclos), porque comparar le 16 MB por quadro. Foi descartado.
 
 ## Ver no TOP (aba Video)
 
@@ -250,7 +297,7 @@ Fontes em `drivers/<nome>/`; `make -C c_compiler drivers` gera
 | 0 | Este documento | feito |
 | 1 | `video/gpu.h` + `video/gpu.c`: tabela PCI, carga, `selftest`, suspender/voltar, desativacao segura, `gpu=0`/`gpudrv=`; `link64 /dll /export:`; `GPUTEST`/`GPUFAIL` | feito |
 | 2 | `VIRTGPU.DLL`: virtio PCI moderno, fila de controle, `present` da tela inteira | feito |
-| 3 | `present` so das areas alteradas (`GPU_CAP_DAMAGE`) | a fazer |
+| 3 | `present` so das areas alteradas (`GPU_CAP_DAMAGE`), areas vindas do kernel | feito |
 | 4 | Cursor por hardware (`GPU_CAP_CURSOR`) | a fazer |
 | 5 | Operacoes na placa (`FILL`/`BLIT`), so se medido e registrado na tabela de custo | em aberto |
 
@@ -273,6 +320,7 @@ DOS com Ctrl+F1, abrindo o TOP na aba Video e voltando com Ctrl+F7:
 | `gpudrv=GPUFAIL.DLL` | ativo, `desativado: present falhou` | desktop segue pela CPU; nao tenta de novo no Ctrl+F7 |
 | `-device virtio-vga`, sem `VIRTGPU.DLL` | `1AF41050 -> ...VIRTGPU.DLL`, `nao carregou` | desktop pelo Bochs VBE, como antes |
 | `-device virtio-vga` com `VIRTGPU.DLL` | ativo, suspenso, ativo de novo; `fim do WIN` no Esc | desktop pela placa; TOP: "virtio-gpu (parado com o WIN ao fundo)", 6 KB; texto volta no Ctrl+F1 e no Esc; reabre no Ctrl+F7 |
+| virtio x `-vga std`, mouse PS/2: mover o cursor, digitar no painel de IA, arrastar o Gerenciador | (etapa 3) | as duas telas iguais (so muda onde o cursor parou e o relogio); sem rastro do cursor; a janela arrastada fica no lugar |
 | `gpudrv=` + `gpu=0` | nenhuma linha | igual a antes |
 
 Para repetir, ponha a chave no `VIDEO.CFG` do `disk.img` (com `mcopy`) e:
@@ -287,7 +335,8 @@ make run-virtio                 # virtio-gpu: VIRTGPU.DLL entra sozinho
 - `video/gpu.h` — contrato com o driver e o que `visual.c` chama.
 - `video/gpu.c` — tabela PCI, carregador, `kapi`, suspender/voltar, desligar.
 - `video/visual.c` — `gfx_gpu_try()`, o teste em `gfx_frame_end`, `gfx_for_gpu`
-  em `gfx_buf_init`, chaves `gpu` no `win_load_cfg`, `k_vram`.
+  em `gfx_buf_init`, chaves `gpu` no `win_load_cfg`, `k_vram`; areas
+  alteradas (`gfx_dmg_add`, `gfx_gpu_frame`, `cursor_draw`, `dc_present`).
 - `drivers/gputest/gputest.c` — `GPUTEST.DLL` e `GPUFAIL.DLL`.
 - `drivers/virtgpu/virtgpu.c` — `VIRTGPU.DLL`.
 - `c_compiler/link/link64.c` — `/dll` e `/export:`.

@@ -3,8 +3,8 @@
  * virtio-vga, PCI 1af4:1050), so 2D. Contrato em docs/GPU.md.
  *
  * O back buffer do kernel (gfx_back, contiguo em RAM) vira a memoria do
- * recurso 2D da placa. present = TRANSFER_TO_HOST_2D + RESOURCE_FLUSH: quem
- * copia o quadro e o QEMU, nao a CPU do SODOS.
+ * recurso 2D da placa. present = um TRANSFER_TO_HOST_2D por area alterada
+ * (o kernel diz quais) + um RESOURCE_FLUSH: quem copia e o QEMU.
  *
  * Virtio 1.0 moderno pela PCI (capabilities 0x09), uma fila (controlq) em
  * polling, sem interrupcao. Toda espera tem timeout (k->ms).
@@ -40,7 +40,7 @@
 #define C_QDRIVER 0x28
 #define C_QDEVICE 0x30
 
-#define VQ_N 16u
+#define VQ_N 64u
 #define D_NEXT 1u
 #define D_WRITE 2u
 
@@ -118,11 +118,17 @@ static uint16_t qn, avail_idx, used_seen;
 static uint8_t* buf;               /* pedidos e respostas */
 static uint32_t quadros;
 
-#define BUF_REQ0 0
-#define BUF_RSP0 512
-#define BUF_REQ1 1024
-#define BUF_RSP1 1536
-#define BUF_SIZE 2048
+/* buf: N_SLOT pedidos de 64 bytes, cada um com a resposta de 64 logo depois;
+ * no fim, uma resposta grande para GET_DISPLAY_INFO (408 bytes). */
+#define N_SLOT 32u
+#define SLOT_REQ(i) ((i) * 128u)
+#define SLOT_RSP(i) ((i) * 128u + 64u)
+#define BUF_BIG (N_SLOT * 128u)
+#define BUF_SIZE (BUF_BIG + 512u)
+
+/* Areas alteradas (GPU_CAP_DAMAGE) vem do kernel; mais que MAX_RECTS vira
+ * um retangulo so (a uniao). */
+#define MAX_RECTS 12u
 
 static void barreira(void) { __asm__ volatile ("lock; addl $0,(%%rsp)" : : : "memory"); }
 
@@ -206,18 +212,22 @@ static int espera(uint16_t quantos) {
 }
 
 /* Poe o pedido (req, rlen) + resposta na fila, a partir do descritor d. */
-static void poe(uint16_t d, uint32_t req, uint32_t rlen, uint32_t rsp) {
+static void poe_r(uint16_t d, uint32_t req, uint32_t rlen, uint32_t rsp, uint32_t rsplen) {
   desc[d].addr = (uint64_t)(uintptr_t)(buf + req);
   desc[d].len = rlen;
   desc[d].flags = D_NEXT;
   desc[d].next = (uint16_t)(d + 1);
   desc[d + 1].addr = (uint64_t)(uintptr_t)(buf + rsp);
-  desc[d + 1].len = 64;
+  desc[d + 1].len = rsplen;
   desc[d + 1].flags = D_WRITE;
   desc[d + 1].next = 0;
-  zera(buf + rsp, 64);
+  zera(buf + rsp, rsplen);
   avail[2 + (avail_idx % qn)] = d;
   avail_idx++;
+}
+
+static void poe(uint16_t d, uint32_t req, uint32_t rlen, uint32_t rsp) {
+  poe_r(d, req, rlen, rsp, 64);
 }
 
 static void manda(void) {
@@ -240,11 +250,11 @@ static int resp_ok(uint32_t rsp, uint32_t esperado) {
 static int cmd(const void* req, uint32_t len, uint32_t esperado) {
   const uint8_t* s = (const uint8_t*)req;
   uint32_t i;
-  for (i = 0; i < len; i++) buf[BUF_REQ0 + i] = s[i];
-  poe(0, BUF_REQ0, len, BUF_RSP0);
+  for (i = 0; i < len; i++) buf[SLOT_REQ(0) + i] = s[i];
+  poe_r(0, SLOT_REQ(0), len, BUF_BIG, 512);
   manda();
   if (espera(1) != 0) return -1;
-  return resp_ok(BUF_RSP0, esperado);
+  return resp_ok(BUF_BIG, esperado);
 }
 
 /* Reset + negociacao + fila 0. Reaproveita ring/buf se ja existem. */
@@ -365,27 +375,124 @@ static int v_selftest(void) {
   return cmd(&h, sizeof h, RESP_OK_DISPLAY_INFO);
 }
 
-static int v_present(const struct gpu_rect* r, int n) {
-  struct c_transfer* t = (struct c_transfer*)(buf + BUF_REQ0);
-  struct c_flush* f = (struct c_flush*)(buf + BUF_REQ1);
-  (void)r;
-  (void)n;
-  zera(t, sizeof *t);
-  t->h.type = CMD_TRANSFER_TO_HOST_2D;
-  t->r.w = m.w;
-  t->r.h = m.h;
-  t->id = RES_ID;
+/* Um TRANSFER por retangulo e um FLUSH com a uniao, numa notificacao so. */
+static int manda_rects(const struct rect* r, int n) {
+  struct c_flush* f;
+  uint32_t x0 = m.w, y0 = m.h, x1 = 0, y1 = 0;
+  int i;
+  for (i = 0; i < n; i++) {
+    struct c_transfer* t = (struct c_transfer*)(buf + SLOT_REQ((uint32_t)i));
+    zera(t, sizeof *t);
+    t->h.type = CMD_TRANSFER_TO_HOST_2D;
+    t->r = r[i];
+    t->offset = (uint64_t)r[i].y * m.pitch + (uint64_t)r[i].x * 4u;
+    t->id = RES_ID;
+    poe((uint16_t)(i * 2), SLOT_REQ((uint32_t)i), sizeof *t, SLOT_RSP((uint32_t)i));
+    if (r[i].x < x0) x0 = r[i].x;
+    if (r[i].y < y0) y0 = r[i].y;
+    if (r[i].x + r[i].w > x1) x1 = r[i].x + r[i].w;
+    if (r[i].y + r[i].h > y1) y1 = r[i].y + r[i].h;
+  }
+  f = (struct c_flush*)(buf + SLOT_REQ((uint32_t)n));
   zera(f, sizeof *f);
   f->h.type = CMD_RESOURCE_FLUSH;
-  f->r.w = m.w;
-  f->r.h = m.h;
+  f->r.x = x0;
+  f->r.y = y0;
+  f->r.w = x1 - x0;
+  f->r.h = y1 - y0;
   f->id = RES_ID;
-  /* os dois na mesma notificacao; a fila processa em ordem */
-  poe(0, BUF_REQ0, sizeof *t, BUF_RSP0);
-  poe(2, BUF_REQ1, sizeof *f, BUF_RSP1);
+  poe((uint16_t)(n * 2), SLOT_REQ((uint32_t)n), sizeof *f, SLOT_RSP((uint32_t)n));
   manda();
-  if (espera(2) != 0) return -1;
-  if (resp_ok(BUF_RSP0, RESP_OK_NODATA) != 0 || resp_ok(BUF_RSP1, RESP_OK_NODATA) != 0) return -1;
+  if (espera((uint16_t)(n + 1)) != 0) return -1;
+  for (i = 0; i <= n; i++)
+    if (resp_ok(SLOT_RSP((uint32_t)i), RESP_OK_NODATA) != 0) return -1;
+  return 0;
+}
+
+#ifdef VG_MEDIR
+/* -DVG_MEDIR: ciclos medios do present a cada 64 quadros, no log serial. */
+static uint64_t med_soma;
+static uint32_t med_n, med_px;
+static uint64_t tsc(void) {
+  uint32_t lo, hi;
+  __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+  return (uint64_t)hi << 32 | lo;
+}
+#endif
+
+static int present(const struct gpu_rect* rr, int nn);
+
+static int v_present(const struct gpu_rect* rr, int nn) {
+#ifdef VG_MEDIR
+  uint64_t t0 = tsc();
+  int rc = present(rr, nn);
+  med_soma += tsc() - t0;
+  if (++med_n == 64) {
+    k->log("[virtgpu] ciclos/quadro ");
+    k->log_hex((uint32_t)(med_soma / 64u));
+    k->log(" pixels/quadro ");
+    k->log_hex(med_px / 64u);
+    k->log("\n");
+    med_soma = 0;
+    med_n = med_px = 0;
+  }
+  return rc;
+#else
+  return present(rr, nn);
+#endif
+}
+
+static int present(const struct gpu_rect* rr, int nn) {
+  struct rect r[MAX_RECTS];
+  int n = 0, i;
+  /* recorta na tela; o kernel ja recorta, mas o driver nao confia */
+  for (i = 0; rr && i < nn; i++) {
+    int32_t x = rr[i].x, y = rr[i].y, w = rr[i].w, h = rr[i].h;
+    if (x < 0) {
+      w += x;
+      x = 0;
+    }
+    if (y < 0) {
+      h += y;
+      y = 0;
+    }
+    if (x + w > (int32_t)m.w) w = (int32_t)m.w - x;
+    if (y + h > (int32_t)m.h) h = (int32_t)m.h - y;
+    if (w <= 0 || h <= 0) continue;
+    if (n == (int)MAX_RECTS || 2 * (n + 2) > (int)qn) {
+      /* demais: a uniao de tudo num retangulo so */
+      uint32_t x1 = (uint32_t)(x + w), y1 = (uint32_t)(y + h);
+      int j;
+      for (j = 0; j < n; j++) {
+        if (r[j].x < (uint32_t)x) x = (int32_t)r[j].x;
+        if (r[j].y < (uint32_t)y) y = (int32_t)r[j].y;
+        if (r[j].x + r[j].w > x1) x1 = r[j].x + r[j].w;
+        if (r[j].y + r[j].h > y1) y1 = r[j].y + r[j].h;
+      }
+      r[0].x = (uint32_t)x;
+      r[0].y = (uint32_t)y;
+      r[0].w = x1 - (uint32_t)x;
+      r[0].h = y1 - (uint32_t)y;
+      n = 1;
+      continue;
+    }
+    r[n].x = (uint32_t)x;
+    r[n].y = (uint32_t)y;
+    r[n].w = (uint32_t)w;
+    r[n].h = (uint32_t)h;
+    n++;
+  }
+  if (n == 0) {
+    /* sem areas (ou todas fora da tela): a tela inteira */
+    r[0].x = r[0].y = 0;
+    r[0].w = m.w;
+    r[0].h = m.h;
+    n = 1;
+  }
+  if (manda_rects(r, n) != 0) return -1;
+#ifdef VG_MEDIR
+  for (i = 0; i < n; i++) med_px += r[i].w * r[i].h;
+#endif
   quadros++;
   return 0;
 }
@@ -422,7 +529,7 @@ static void v_fini(void) {
 static const struct gpu_drv drv = {
   GPU_ABI,
   "virtio-gpu",
-  GPU_CAP_PRESENT,
+  GPU_CAP_PRESENT | GPU_CAP_DAMAGE,
   v_init,
   v_selftest,
   v_present,

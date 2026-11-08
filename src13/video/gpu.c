@@ -243,9 +243,13 @@ int gpu_resume(const struct gpu_mode* m) {
 
 int gpu_suspended(void) { return parked != 0; }
 
-int gpu_present(void) {
+int gpu_present(const struct gpu_rect* rects, int n) {
   if (!gpu_drv) return -1;
-  if (gpu_drv->present(0, 0) == 0) return 0;
+  if (n <= 0 || !(gpu_drv->caps & GPU_CAP_DAMAGE)) {
+    rects = 0;
+    n = 0;
+  }
+  if (gpu_drv->present(rects, n) == 0) return 0;
   gpu_stop("present falhou");
   return -1;
 }

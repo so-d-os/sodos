@@ -940,6 +940,8 @@ static void gfx_frame_begin(void) {
   }
 }
 
+static void gfx_gpu_frame(void);   /* abaixo, depois do cursor */
+
 static void gfx_frame_end(void) {
   if (gfx_dbuf) {
     bochs_vbe_write(VBE_DISPI_INDEX_Y_OFFSET, (uint16_t)gfx_draw_y0);
@@ -949,8 +951,8 @@ static void gfx_frame_end(void) {
   }
   if (gfx_offscreen) {
     /* driver de placa: o unico teste dele por quadro (docs/GPU.md) */
-    if (gpu_drv && gpu_present() == 0) {
-      gfx_offscreen = 0;
+    if (gpu_drv) {
+      gfx_gpu_frame();
       return;
     }
     gfx_copy_back();
@@ -1180,9 +1182,89 @@ static void cursor_redraw_at(int mx, int my, uint32_t cursor_color) {
   cursor_saved = 1;
 }
 
+/* ---------------------------------------------------------------------------
+ * Areas alteradas para o driver de placa (docs/GPU.md, etapa 3). So sao
+ * gravadas com driver ativo; sem ele nada aqui roda alem dos testes listados
+ * na tabela de custo. Com driver, gfx_offscreen fica 1 entre os quadros: o
+ * back buffer e a tela, e o que se desenha fora de um quadro (cursor,
+ * arrasto) vai para ele e e apresentado so naquele retangulo.
+ * ------------------------------------------------------------------------- */
+#define GFX_DMG_MAX 10
+static struct gpu_rect gfx_dmg[GFX_DMG_MAX];
+static int gfx_dmg_n, gfx_dmg_over;
+/* 1 = o quadro em montagem so mudou nas areas de gfx_dmg (need_draw == 2) */
+static int gfx_frame_dmg;
+/* cursor na tela pela ultima apresentacao */
+static struct gpu_rect gfx_cur_shown;
+
+static void gfx_dmg_add(int x, int y, int w, int h) {
+  if (x < 0) {
+    w += x;
+    x = 0;
+  }
+  if (y < 0) {
+    h += y;
+    y = 0;
+  }
+  if (x + w > (int)gfx_w) w = (int)gfx_w - x;
+  if (y + h > (int)gfx_h) h = (int)gfx_h - y;
+  if (w <= 0 || h <= 0) return;
+  if (gfx_dmg_n >= GFX_DMG_MAX) {
+    gfx_dmg_over = 1;
+    return;
+  }
+  gfx_dmg[gfx_dmg_n].x = x;
+  gfx_dmg[gfx_dmg_n].y = y;
+  gfx_dmg[gfx_dmg_n].w = w;
+  gfx_dmg[gfx_dmg_n].h = h;
+  gfx_dmg_n++;
+}
+
+/* Mostra o back buffer pela placa; se o driver cair, pela CPU. */
+static void gfx_gpu_show(const struct gpu_rect* r, int n) {
+  if (gpu_present(r, n) != 0) {
+    gfx_copy_back();
+    gfx_offscreen = 0;
+  }
+}
+
+static void gfx_cur_mark(void) {
+  gfx_cur_shown.x = old_mx;
+  gfx_cur_shown.y = old_my;
+  gfx_cur_shown.w = cursor_saved ? cur_bw : 0;
+  gfx_cur_shown.h = cursor_saved ? cur_bh : 0;
+}
+
+static void gfx_gpu_frame(void) {
+  const struct gpu_rect* r = 0;
+  int n = 0;
+  if (gfx_frame_dmg && !gfx_dmg_over && gfx_dmg_n > 0) {
+    /* o quadro redesenha o cursor onde o mouse esta: as duas posicoes */
+    gfx_dmg_add(gfx_cur_shown.x, gfx_cur_shown.y, gfx_cur_shown.w, gfx_cur_shown.h);
+    if (cursor_saved) gfx_dmg_add(old_mx, old_my, cur_bw, cur_bh);
+    if (!gfx_dmg_over) {
+      r = gfx_dmg;
+      n = gfx_dmg_n;
+    }
+  }
+  gfx_cur_mark();
+  gfx_dmg_n = 0;
+  gfx_dmg_over = 0;
+  gfx_frame_dmg = 0;
+  gfx_gpu_show(r, n);
+}
+
 static void cursor_draw(int mx, int my, uint32_t cursor_color) {
+  struct gpu_rect r[2];
   cursor_restore();
   cursor_redraw_at(mx, my, cursor_color);
+  /* com driver o cursor foi para o back buffer: mostra so as duas caixas */
+  if (gpu_drv && gfx_offscreen) {
+    r[0] = gfx_cur_shown;
+    gfx_cur_mark();
+    r[1] = gfx_cur_shown;
+    gfx_gpu_show(r[0].w > 0 ? r : r + 1, r[0].w > 0 ? 2 : 1);
+  }
 }
 
 /* Uma so posicao para o desktop e para a janela canvas (navegador). */
@@ -3736,7 +3818,9 @@ void gui_present(void) {
   uint32_t title_bg = gui_col(0x000080), white = gui_col(0xFFFFFF), btn = gui_col(0xC0C0C0);
   uint32_t edge = gui_col(0x000000);
   if (host_on && task_cur >= 0) {
-    win_api_dirty = 1;
+    /* 2 = so o conteudo desta janela mudou; qualquer outro "= 1" vence */
+    win_api_dirty |= 2;
+    if (gpu_drv) gfx_dmg_add(gui.ox, gui.oy, gui.cw, gui.title_h + gui.ch);
     return;
   }
   if (!gui.open || gui_painting) return;
@@ -5257,6 +5341,8 @@ static void dc_present(int x, int y, int cx, int cy) {
   int wx0 = x < 0 ? 0 : x;
   int wx1 = x + dc.w > (int)gfx_w ? (int)gfx_w : x + dc.w;
   uint32_t black = pix32(PIXA(0, 0, 0)), white = pix32(PIXA(255, 255, 255));
+  volatile uint8_t* base = gfx_lfb + gfx_front_y * gfx_pitch_bytes;
+  uint32_t pitch = gfx_pitch_bytes;
   int r;
   dc_grow(&x0, &y0, &x1, &y1, dc.x, dc.y, dc.w, dc.h);
   dc_grow(&x0, &y0, &x1, &y1, dc.cx, dc.cy, cw, chh);
@@ -5272,11 +5358,15 @@ static void dc_present(int x, int y, int cx, int cy) {
   dc.cx = cx;
   dc.cy = cy;
   if (x0 >= x1 || y0 >= y1) return;
+  /* com driver a tela e o back buffer; sem ele, a pagina visivel do LFB */
+  if (gpu_drv && gfx_offscreen) {
+    base = gfx_back;
+    pitch = gfx_w * 4u;
+  }
 
   for (r = y0; r < y1; r++) {
     const uint32_t* bg = dc.bg + (uint32_t)r * gfx_w;
-    volatile uint32_t* out =
-        (volatile uint32_t*)(gfx_lfb + ((uint32_t)r + gfx_front_y) * gfx_pitch_bytes);
+    volatile uint32_t* out = (volatile uint32_t*)(base + (uint32_t)r * pitch);
     int in_win = r >= y && r < y + dc.h && wx0 < wx1;
     const uint32_t* src = in_win ? dc.win + (r - y) * dc.w : 0;
     int corner = in_win && r - y < UI_RADIUS;
@@ -5312,6 +5402,18 @@ static void dc_present(int x, int y, int cx, int cy) {
       }
     }
     dc_copy(out + x0, dc.line + x0, (uint32_t)(x1 - x0));
+  }
+  if (gpu_drv && gfx_offscreen) {
+    struct gpu_rect d;
+    d.x = x0;
+    d.y = y0;
+    d.w = x1 - x0;
+    d.h = y1 - y0;
+    gfx_cur_shown.x = cx;
+    gfx_cur_shown.y = cy;
+    gfx_cur_shown.w = cw;
+    gfx_cur_shown.h = chh;
+    gfx_gpu_show(&d, 1);
   }
 }
 
@@ -6034,8 +6136,9 @@ static int win_wm_run(void) {
     }
     if (task_pick() >= 0) tasks_pump();
     if (win_api_dirty) {
+      /* 2: so janelas de programa mudaram; vira need_draw 2 se nada mais pediu */
+      need_draw = win_api_dirty == 2 && need_draw != 1 ? 2 : 1;
       win_api_dirty = 0;
-      need_draw = 1;
     }
     if (chrome_leave) {
       int leave = chrome_leave;
@@ -6080,6 +6183,7 @@ static int win_wm_run(void) {
       struct start_menu gm;
       int mi;
       start_menu_geom(&gm, w, h, bar_h, menu_w, menu_item_h, scale);
+      gfx_frame_dmg = need_draw == 2;
       gfx_frame_begin();
       cursor_saved = 0;
       gfx_desk_clear();
@@ -7577,6 +7681,7 @@ gfx_session_leave:
   gfx_live = 0;
   gfx_session_on = 0;
   gpu_close();
+  gfx_offscreen = 0;   /* com driver ele ficava 1 entre os quadros */
   pic_mask_all();
 
   cursor_restore();

@@ -85,9 +85,10 @@ void gpu_suspend(void);
 int gpu_resume(const struct gpu_mode* m);
 /* 1 se ha driver carregado, parado com o WIN ao fundo. */
 int gpu_suspended(void);
-/* Apresenta o quadro. 0 = ok; outro valor: o driver ja foi desligado e
- * quem chamou tem que mostrar o quadro pela CPU. */
-int gpu_present(void);
+/* Apresenta o back buffer. rects = 0 (ou n = 0): a tela inteira; senao so
+ * essas areas (ja recortadas na tela). 0 = ok; outro valor: o driver ja foi
+ * desligado e quem chamou tem que mostrar o quadro pela CPU. */
+int gpu_present(const struct gpu_rect* rects, int n);
 /* Para o TOP (k_vram): nome do driver ativo e KB que ele reservou. */
 const char* gpu_name(void);
 uint32_t gpu_mem_kb(void);
