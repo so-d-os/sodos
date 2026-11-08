@@ -1,8 +1,9 @@
 # Driver de placa de video (aceleracao grafica)
 
-Estado: **em projeto** (2026-11). Nada deste documento esta implementado
-ainda; ele e o contrato que o codigo vai seguir. Quando uma etapa for feita,
-a secao "Etapas" passa a dizer o que ja existe.
+Estado (2026-11): **etapa 1 feita** — o kernel sabe achar, carregar, testar,
+suspender e desligar um driver de placa. Ainda nao ha driver de placa real;
+o `GPUTEST.DLL` e um driver de teste que copia pela CPU. A etapa 2 e o
+`VIRTGPU.DLL` (virtio-gpu do QEMU).
 
 ## Regra principal
 
@@ -25,16 +26,18 @@ Na pratica:
 
 ## O que o kernel ganha (opcao A)
 
-Esta e a escolha feita: um ponteiro testado uma vez por quadro. E o unico
-custo fixo, e fica listado aqui para nao crescer sem ninguem ver.
+Esta e a escolha feita: um ponteiro testado uma vez por quadro. Todo custo
+fixo fica listado aqui, medido, para nao crescer sem ninguem ver.
 
 | Item | Custo sem driver | Onde |
 |---|---|---|
-| `gpu_drv` (ponteiro para a tabela do driver) | 8 bytes de BSS | `video/gpu.c` |
-| Teste `if (gpu_drv)` | 1 comparacao por quadro, em `gfx_frame_end` | `video/visual.c` |
-| `gpu_probe()` no boot | compara vendor/device com uma tabela curta; aproveita a varredura PCI que o modo grafico ja faz (`pci_find_display_bar0`) | `video/gpu.c` |
-| Teste em `gfx_buf_init()` (pular a pagina dupla se ha placa na tabela) | 1 comparacao por troca de modo, nunca por quadro | `video/visual.c` |
-| Codigo do carregador (`gpu.c`) | algumas centenas de bytes no `kernel.bin` | `video/gpu.c` |
+| Teste `if (gpu_drv)` | 1 comparacao por quadro, so quando o quadro foi montado em RAM | `gfx_frame_end` |
+| Teste `!gfx_for_gpu` | 1 comparacao por troca de modo | `gfx_buf_init` |
+| `gfx_gpu_try()` | por troca de modo do WIN: `gpu_wanted()` le o PCI (ate 64 leituras de configuracao) e compara com a tabela | `gfx_session_run`, volta do Ctrl+F7 |
+| `gpu_suspend()` / `gpu_close()` | 1 chamada que volta na hora, ao sair do WIN ou ir para uma tela do DOS | `win_vt_away`, fim do WIN |
+| `gpu_cfg_line()` | as linhas `gpu...` do `VIDEO.CFG`, que o WIN ja le | `win_load_cfg` |
+| Codigo e textos de `gpu.c` + chamadas | **3.456 bytes** no `kernel.bin` (402.472 -> 405.928) | `video/gpu.c` |
+| Variaveis | 72 bytes de BSS (`gpu_drv`, estado do carregador, `gfx_for_gpu`); couberam no alinhamento, o BSS total nao mudou | `video/gpu.c`, `video/visual.c` |
 
 O teste nunca entra em funcoes chamadas por pixel ou por glifo (`put_pixel`,
 `gui_glyph`, `gui_pixels`). Se uma etapa futura quiser acelerar
@@ -50,33 +53,36 @@ funcoes expostos ao driver). Fica registrada caso a opcao A um dia pese.
 ## Ciclo de vida
 
 ```
-boot / entrar no WIN
+WIN abre (ou volta com Ctrl+F7)
   |
-  gpu_probe(): vendor:device do PCI esta na tabela?
-  |-- nao -> fim. gpu_drv = 0, nada carregado.
+  win_load_cfg(): gpu=0? gpudrv=?
+  gfx_gpu_try()
   |
-  mod_dll_load("D:\SODOS\DRV\<nome>.DLL")
-  |-- falhou (arquivo ausente, formato, import) -> log serial, fim.
+  gpu_wanted(): placa de video no PCI esta na tabela (ou gpudrv=)?
+  |-- nao, ou gpu=0, ou ja falhou neste WIN -> fim. gpu_drv = 0.
   |
-  drv->init(&gpu_kapi, &modo)        driver liga a placa, aloca o que precisa
-  |-- erro -> drv->fini(), mod_dll_free(), fim.
+  quadro em pagina dupla? remonta em RAM (gfx_for_gpu)
   |
-  drv->selftest()                    um quadro de teste vai ate a tela
-  |-- erro -> drv->fini(), mod_dll_free(), fim.
+  mod_dll_load("D:\SODOS\DRV\<nome>.DLL"), simbolo gpu_driver
+  |-- falhou (arquivo, formato, ABI) -> log, quadro como antes, fim.
+  |
+  drv->init(&kapi, &modo)            driver liga a placa, aloca o que precisa
+  drv->selftest()                    prova que a placa responde
+  |-- erro -> drv->fini(), mod_dll_free(), quadro como antes, fim.
   |
   gpu_drv = drv                      so aqui o kernel passa a usar o driver
 ```
 
-Durante o uso, qualquer erro devolvido pelo driver (`present` falhou,
-fila travou, timeout) faz o kernel:
+| Evento | O que acontece |
+|---|---|
+| Cada quadro | `gfx_frame_end` chama `gpu_present()` em vez de `gfx_copy_back()` |
+| `present` devolve erro | `gpu_drv = 0` primeiro, o mesmo quadro sai por `gfx_copy_back()`, `fini` + `mod_dll_free` |
+| Ctrl+F1..F5 (WIN ao fundo) | `suspend()`: o driver devolve a tela ao modo texto e guarda o que reservou. Sem `suspend`, e descarregado |
+| Ctrl+F7 (WIN volta) | `resume(modo)` com o modo reprogramado; se falhar, descarrega e fica na CPU |
+| Fim do WIN | `fini` + `mod_dll_free` |
 
-1. zerar `gpu_drv` **antes** de qualquer outra coisa;
-2. refazer o mesmo quadro pelo caminho por CPU (`gfx_copy_back`), para a
-   tela nao ficar preta;
-3. chamar `drv->fini()` e `mod_dll_free()`;
-4. registrar o motivo no log serial (`[gpu] desativado: ...`).
-
-Depois disso o sistema esta exatamente no estado "sem driver".
+Um driver que falhou nao e tentado de novo ate o WIN abrir outra vez
+(evita ler o disco a cada Ctrl+F7 com um driver quebrado).
 
 O DLL e carregado no contexto do kernel (`cur_pid == 0`), entao nao e
 liberado quando um programa termina (`module.c` so libera DLLs ligadas a um
@@ -84,91 +90,73 @@ pid).
 
 ## Interface kernel <-> driver
 
-Rascunho; os nomes podem mudar na etapa 1, mas a forma e esta.
+Em `video/gpu.h`, usado pelo kernel e pelo fonte do driver.
 `abi` permite ao kernel recusar um driver compilado para outra versao.
 
 ```c
-/* video/gpu.h */
 #define GPU_ABI 1
 
-/* O que o kernel oferece ao driver. Nada de libc: so isto. */
-struct gpu_kapi {
+struct gpu_kapi {              /* o que o kernel oferece; nada de libc */
   int abi;
   void (*log)(const char* s);
-  uint32_t (*pci_read32)(uint8_t bus, uint8_t dev, uint8_t fun, uint8_t off);
-  void (*pci_write32)(uint8_t bus, uint8_t dev, uint8_t fun, uint8_t off, uint32_t v);
-  void* (*alloc)(uint32_t bytes, uint32_t align);   /* memoria fisica = virtual */
+  void (*log_hex)(uint32_t v);
+  uint32_t (*pci_read32)(uint32_t bus, uint32_t dev, uint32_t fun, uint32_t off);
+  void (*pci_write32)(uint32_t bus, uint32_t dev, uint32_t fun, uint32_t off, uint32_t v);
+  void* (*alloc)(uint32_t bytes, uint32_t align);   /* fisico = virtual */
   void (*free)(void* p);
   uint32_t (*ms)(void);                             /* relogio para timeouts */
 };
 
-/* Modo e superficie de trabalho que o kernel ja usa hoje. */
-struct gpu_mode {
-  uint32_t w, h;
-  uint32_t pitch;      /* bytes por linha do back buffer */
-  void* back;          /* back buffer em RAM (gfx_back) */
+struct gpu_mode {              /* placa achada e quadro que o kernel usa */
+  uint32_t w, h, pitch;
+  void* back;                  /* back buffer em RAM (gfx_back), 32 bpp */
+  volatile uint8_t* fb;        /* framebuffer linear */
+  uint32_t fb_pitch;
+  uint32_t pci_id, pci_bus, pci_dev, pci_fun;
 };
-
-struct gpu_rect { int32_t x, y, w, h; };
-
-#define GPU_CAP_PRESENT  1u   /* apresenta o back buffer (obrigatorio) */
-#define GPU_CAP_DAMAGE   2u   /* aceita so as areas alteradas */
-#define GPU_CAP_CURSOR   4u   /* cursor por hardware */
-#define GPU_CAP_FILL     8u   /* reservado: preenchimento na placa */
-#define GPU_CAP_BLIT    16u   /* reservado: copia na placa */
 
 struct gpu_drv {
   int abi;
   const char* name;
-  uint32_t caps;
+  uint32_t caps;               /* GPU_CAP_PRESENT obrigatorio */
   int (*init)(const struct gpu_kapi* k, const struct gpu_mode* m);
   int (*selftest)(void);
-  /* 0 = ok. rects = NULL apresenta a tela inteira. */
-  int (*present)(const struct gpu_rect* rects, int n);
+  int (*present)(const struct gpu_rect* rects, int n);   /* rects = 0: tela toda */
   void (*fini)(void);
+  int (*suspend)(void);                       /* opcional */
+  int (*resume)(const struct gpu_mode* m);    /* opcional */
 };
 
-/* Unico simbolo que o DLL exporta. */
-const struct gpu_drv* gpu_driver(void);
+const struct gpu_drv* gpu_driver(void);   /* unico simbolo exportado */
 ```
+
+Tudo que o driver pede por `kapi.alloc` e contado e aparece no TOP.
 
 Regras para o DLL, porque ele roda no contexto do kernel:
 
-- formato SOX2 (ABI LP64, a mesma do kernel), compilado com
-  `-mno-sse -mno-red-zone` (o kernel nao salva SSE e as interrupcoes usam a
-  mesma pilha);
+- formato SOX2 (ABI LP64, a mesma do kernel), ligado com
+  `link64 /dll /export:gpu_driver`;
+- compilado com `gcc -m64 -mno-sse -mno-mmx -mno-red-zone -mcmodel=large
+  -ffreestanding` (o kernel nao salva SSE e as interrupcoes usam a mesma
+  pilha); regra `DRVCC` em `c_compiler/Makefile`;
 - sem libc e sem `k_*` de programa: so o que vem em `gpu_kapi`;
 - nao pode bloquear sem timeout. Toda espera usa `k->ms()` e devolve erro.
 
-## Como o primeiro driver se encaixa no quadro atual
+## Como o driver se encaixa no quadro
 
-Hoje `gfx_buf_init()` escolhe entre dois jeitos de montar o quadro:
+`gfx_buf_init()` escolhe entre dois jeitos de montar o quadro:
 
 - **pagina dupla Bochs** (`gfx_dbuf`): desenha direto na outra metade da VRAM
-  e troca o `Y_OFFSET`. E a preferida quando a VRAM tem altura virtual 2*h,
-  o que acontece no QEMU com `-vga std`;
+  e troca o `Y_OFFSET`, quando a VRAM tem altura virtual 2*h;
 - **back buffer em RAM** (`gfx_back`, em `GFX_BACK_PHYS`): desenha na RAM e
   `gfx_copy_back()` copia o quadro inteiro para o framebuffer.
 
-O driver usa o back buffer em RAM como memoria da placa, entao precisa dele.
-Com driver ativo:
+O driver usa o back buffer em RAM, entao `gfx_gpu_try()` remonta o quadro em
+RAM (`gfx_for_gpu`) antes de chamar o driver, e volta a escolha de sempre se
+o driver nao entrar. Sem back buffer em RAM (`gfx_ram_ok()` falhou), o driver
+nao e carregado. `gfx_frame_begin` nao muda.
 
-- `gfx_frame_begin` nao muda nem ganha teste: ja desenha em `gfx_back`;
-- `gfx_frame_end` chama `gpu_drv->present(...)` em vez de `gfx_copy_back()`.
-
-Ordem no boot do modo grafico:
-
-1. `gpu_probe()` roda **antes** de `gfx_buf_init()`. Se a placa estiver na
-   tabela, `gfx_buf_init()` pula a pagina dupla e monta o back buffer em RAM.
-   Sem placa na tabela, `gfx_buf_init()` faz a mesma escolha de hoje.
-2. Se a carga, o `init` ou o `selftest` falharem, `gfx_buf_init()` roda de
-   novo e volta a escolha de hoje (pagina dupla, se houver).
-3. Sem back buffer em RAM (`gfx_ram_ok()` falhou), o driver nao e carregado.
-
-Esse pulo da pagina dupla e um teste a mais em `gfx_buf_init()`, que roda so
-na troca de modo, nunca por quadro; esta na tabela de custo acima.
-
-No **virtio-gpu 2D** (QEMU `-device virtio-vga`) isso vira:
+No **virtio-gpu 2D** (QEMU `-device virtio-vga`, etapa 2) isso vira:
 
 | Plano do renderizador | Comando virtio-gpu |
 |---|---|
@@ -192,9 +180,9 @@ O `TOP.EXE` tem a aba **Video** (F3 ou Tab ate ela), que le `k_vram`
 (`struct k_vram` em `so.h`; no kernel, `win_vram_info()` em `video/visual.c`):
 
 - placa (Bochs VBE, GOP ou VGA), id PCI e endereco do framebuffer;
-- driver da placa ativo, ou "nenhum: a CPU desenha tudo";
-- modo e estado: texto, WIN na tela ou WIN ao fundo (atras de uma tela do
-  DOS, Ctrl+F1, quando o modo grafico continua ocupando memoria);
+- driver: "nenhum: a CPU desenha tudo", "X (ativo)" ou
+  "X (parado com o WIN ao fundo)";
+- modo e estado: texto, WIN na tela ou WIN ao fundo;
 - a VRAM num quadro, como o mapa da RAM: tela visivel, segunda pagina
   (pagina dupla Bochs), texto e fonte, livre;
 - a RAM comum gasta por causa do video: back buffer, papel de parede,
@@ -203,27 +191,36 @@ O `TOP.EXE` tem a aba **Video** (F3 ou Tab ate ela), que le `k_vram`
 `k_vram` so le o estado que ja existe; nao reprograma a placa. No GOP a placa
 so informa o quadro visivel, entao o total da VRAM e o tamanho desse quadro.
 
-Obrigacao do driver (etapa 1 em diante): quando ativo, o kernel preenche
-`drv` com o nome dele e `gpu_kb` com a memoria que ele reservou (pedida por
-`gpu_kapi.alloc`). Sem driver os dois ficam vazios, e a linha "Driver da
-placa" do TOP mostra "sem driver: nada reservado", que e a prova visivel da
-regra principal.
+O TOP roda numa tela de texto, entao ve o driver suspenso (WIN ao fundo),
+com a memoria que ele reservou. Sem driver, a linha "Driver da placa" mostra
+"sem driver: nada reservado", que e a prova visivel da regra principal.
 
-
-`D:\SODOS\VIDEO.CFG` ganha a chave:
+## Configuracao (`D:\SODOS\VIDEO.CFG`)
 
 ```
-gpu=0      nunca carrega driver (o padrao continua sendo tentar)
+gpu=0              nunca carrega driver (diagnostico, driver que se comporta mal)
+gpudrv=GPUTEST.DLL forca este driver de D:\SODOS\DRV, com ou sem placa na tabela
 ```
 
-Serve para diagnostico e para maquinas onde o driver se comporta mal.
+`gpudrv=` existe para testar o carregador; uso normal nao precisa dele.
+
+## Drivers
+
+| Placa (vendor:device) | DLL | Estado |
+|---|---|---|
+| `1AF4:1050` virtio-gpu | `VIRTGPU.DLL` | etapa 2, a fazer (hoje: "nao achei" no log e segue pela CPU) |
+| nenhuma (so `gpudrv=`) | `GPUTEST.DLL` | teste: copia o back buffer para o LFB pela CPU, reserva 64 KB para aparecer no TOP |
+| nenhuma (so `gpudrv=`) | `GPUFAIL.DLL` | o mesmo, mas `present` falha no 20o quadro |
+
+Fontes em `drivers/<nome>/`; `make -C c_compiler drivers` gera
+`c_compiler/out/DRV/*.DLL` e `make disk-files` copia para `D:\SODOS\DRV`.
 
 ## Etapas
 
 | # | Etapa | Estado |
 |---|---|---|
 | 0 | Este documento | feito |
-| 1 | `video/gpu.h` + `video/gpu.c`: tabela PCI, carga, `selftest`, desativacao segura, `gpu=0`; os testes em `gfx_buf_init` e `gfx_frame_end` | a fazer |
+| 1 | `video/gpu.h` + `video/gpu.c`: tabela PCI, carga, `selftest`, suspender/voltar, desativacao segura, `gpu=0`/`gpudrv=`; `link64 /dll /export:`; `GPUTEST`/`GPUFAIL` | feito |
 | 2 | `VIRTGPU.DLL`: virtio PCI moderno, fila de controle, `present` da tela inteira | a fazer |
 | 3 | `present` so das areas alteradas (`GPU_CAP_DAMAGE`) | a fazer |
 | 4 | Cursor por hardware (`GPU_CAP_CURSOR`) | a fazer |
@@ -238,27 +235,32 @@ entra se for pedida.
 
 ## Testar
 
-Planejado para a etapa 2:
+Testes feitos no QEMU (KVM, 1920x1080), entrando no WIN, indo a uma tela do
+DOS com Ctrl+F1, abrindo o TOP na aba Video e voltando com Ctrl+F7:
+
+| Cenario | Log serial (`[gpu]`) | Resultado |
+|---|---|---|
+| `-vga std`, sem chave | nenhuma linha | igual a antes |
+| `gpudrv=GPUTEST.DLL` | ativo, suspenso, ativo de novo | desktop normal; TOP: driver parado, 64 KB |
+| `gpudrv=GPUFAIL.DLL` | ativo, `desativado: present falhou` | desktop segue pela CPU; nao tenta de novo no Ctrl+F7 |
+| `-device virtio-vga`, sem `VIRTGPU.DLL` | `1AF41050 -> ...VIRTGPU.DLL`, `nao carregou` | desktop pelo Bochs VBE, como antes |
+| `gpudrv=` + `gpu=0` | nenhuma linha | igual a antes |
+
+Para repetir, ponha a chave no `VIDEO.CFG` do `disk.img` (com `mcopy`) e:
 
 ```
-make run-virtio    # QEMU com -device virtio-vga em vez de -vga std
-make run           # sem a placa: tem que se comportar como antes
+make run                        # sem placa na tabela
 ```
 
-No log serial (`qemu_serial.log`):
+Para o virtio, troque `-vga std` por `-device virtio-vga` na linha do QEMU.
 
-```
-[gpu] 1af4:1050 -> D:\SODOS\DRV\VIRTGPU.DLL
-[gpu] virtio-gpu ativo 1920x1080
-```
+## Arquivos
 
-ou, sem a placa, nenhuma linha `[gpu]` alem de, no maximo,
-`[gpu] nenhum driver`.
-
-## Arquivos (planejados)
-
-- `video/gpu.h`, `video/gpu.c` — interface, carregador e desativacao.
-- `video/visual.c` — os testes de `gpu_drv` em `gfx_buf_init` e `gfx_frame_end`.
-- `drivers/virtgpu/` — fonte do `VIRTGPU.DLL`.
+- `video/gpu.h` — contrato com o driver e o que `visual.c` chama.
+- `video/gpu.c` — tabela PCI, carregador, `kapi`, suspender/voltar, desligar.
+- `video/visual.c` — `gfx_gpu_try()`, o teste em `gfx_frame_end`, `gfx_for_gpu`
+  em `gfx_buf_init`, chaves `gpu` no `win_load_cfg`, `k_vram`.
+- `drivers/gputest/gputest.c` — `GPUTEST.DLL` e `GPUFAIL.DLL`.
+- `c_compiler/link/link64.c` — `/dll` e `/export:`.
 - `docs/VIDEO.md` — os modelos de renderizacao por CPU (retro/avancado),
   que continuam valendo com ou sem driver.

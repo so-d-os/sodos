@@ -383,9 +383,9 @@ HELLO um dois
 - A interface foi desenhada em 1024×768 e é escalada; em telas altas a fonte e o cursor usam escala 2.
 - Para trocar: menu Iniciar → **Configurações** → **Tela**, ou a janela **Configurações de tela**. A troca reinicia o desktop e fecha as janelas abertas. **Padrão** volta ao modo automático.
 
-### Driver de placa de vídeo (em projeto)
+### Driver de placa de vídeo (em construção)
 
-O desenho por CPU continua sendo o padrão. Um driver de placa (o primeiro será o **virtio-gpu** do QEMU) vem como `.DLL` separado em `D:\SODOS\DRV\`, carregado só quando a placa existe, inicializa e passa num quadro de teste. Sem driver ativo, o sistema não gasta memória nem processamento a mais: o kernel ganha só um ponteiro (8 bytes), testado uma vez por quadro e uma vez na troca de modo. Qualquer erro do driver o desativa e devolve a tela ao caminho por CPU. `gpu=0` no `VIDEO.CFG` desliga a tentativa. O contrato, a interface e as etapas estão em [`src13/docs/GPU.md`](src13/docs/GPU.md).
+O desenho por CPU continua sendo o padrão. Um driver de placa (o primeiro será o **virtio-gpu** do QEMU) vem como `.DLL` separado em `D:\SODOS\DRV\`, carregado só quando a placa existe, inicializa e passa num quadro de teste. Sem driver ativo, o sistema não gasta memória nem processamento a mais: o kernel ganha só um ponteiro (8 bytes), testado uma vez por quadro e uma vez na troca de modo. Qualquer erro do driver o desativa e devolve a tela ao caminho por CPU. `gpu=0` no `VIDEO.CFG` desliga a tentativa. O carregador já existe (`video/gpu.c`, com um driver de teste `GPUTEST.DLL`); o driver virtio-gpu é a próxima etapa. A aba **Video** do `TOP` mostra a placa, a VRAM e o que o vídeo ocupa. O contrato, a interface e as etapas estão em [`src13/docs/GPU.md`](src13/docs/GPU.md).
 
 ### Barra e menu
 

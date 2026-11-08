@@ -62,8 +62,10 @@ static void cabeca(void) {
   else
     sprintf(buf, "Placa   %s    sem placa de video no PCI", v.dev);
   textow(r, VC + 3, buf, VW - 6, C_FORTE);
-  if (v.drv[0])
-    sprintf(buf, "Driver  %s (aceleracao ligada)", v.drv);
+  if (v.drv[0] && v.state == 2)
+    sprintf(buf, "Driver  %s (parado com o WIN ao fundo)", v.drv);
+  else if (v.drv[0])
+    sprintf(buf, "Driver  %s (ativo)", v.drv);
   else
     strcpy(buf, "Driver  nenhum: a CPU desenha tudo (veja docs\\GPU.md)");
   textow(r + 1, VC + 3, buf, VW - 6, C_JANELA);

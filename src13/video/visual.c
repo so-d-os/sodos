@@ -23,6 +23,7 @@
 #include "fbcon.h"
 #include "xhci.h"
 #include "vt.h"
+#include "gpu.h"
 #include "c_compiler/sox.h"
 
 static inline void outl(uint16_t port, uint32_t v) {
@@ -185,6 +186,9 @@ static uint32_t gfx_front_y;
 static int gfx_dbuf;
 static int gfx_offscreen;
 static uint8_t* gfx_back;
+/* 1 so enquanto gfx_gpu_try() remonta o quadro para um driver de placa:
+ * o driver usa o back buffer em RAM, entao a pagina dupla fica de fora. */
+static int gfx_for_gpu;
 
 static void set_palette_color(uint8_t index, uint8_t r, uint8_t g, uint8_t b) {
   outb(0x3C8, index);
@@ -905,7 +909,7 @@ static void gfx_buf_init(void) {
   gfx_offscreen = 0;
   gfx_dbuf = 0;
   gfx_back = 0;
-  if (gfx_bochs && !gfx_gop) {
+  if (gfx_bochs && !gfx_gop && !gfx_for_gpu) {
     uint32_t vram = 0;
     uint32_t frame = gfx_w * gfx_h * 4u;
     uint16_t vh = bochs_vbe_read(VBE_DISPI_INDEX_VIRT_HEIGHT);
@@ -944,9 +948,42 @@ static void gfx_frame_end(void) {
     return;
   }
   if (gfx_offscreen) {
+    /* driver de placa: o unico teste dele por quadro (docs/GPU.md) */
+    if (gpu_drv && gpu_present() == 0) {
+      gfx_offscreen = 0;
+      return;
+    }
     gfx_copy_back();
     gfx_offscreen = 0;
   }
+}
+
+/* Na troca de modo do WIN: se ha placa com driver (ou gpudrv= no
+ * VIDEO.CFG), monta o quadro em RAM e tenta o driver. Se nao der, volta a
+ * escolha de sempre. Sem placa conhecida, so gpu_wanted() roda. */
+static void gfx_gpu_try(void) {
+  struct gpu_mode m;
+  int volta = gpu_suspended();
+  if (!gfx_bochs || (!volta && !gpu_wanted())) return;
+  if (gfx_dbuf || !gfx_back) {
+    gfx_for_gpu = 1;
+    gfx_buf_init();
+    gfx_for_gpu = 0;
+  }
+  if (gfx_back) {
+    m.w = gfx_w;
+    m.h = gfx_h;
+    m.pitch = gfx_w * 4u;
+    m.back = gfx_back;
+    m.fb = gfx_lfb;
+    m.fb_pitch = gfx_pitch_bytes;
+    m.pci_id = m.pci_bus = m.pci_dev = m.pci_fun = 0;
+    if (volta ? gpu_resume(&m) == 0 : gpu_start(&m) == 0) return;
+  } else {
+    serial_puts("[gpu] sem quadro em RAM: driver nao entra\n");
+    gpu_stop("sem quadro em RAM");
+  }
+  gfx_buf_init();
 }
 
 static const uint8_t* glyph16(unsigned char c) {
@@ -5855,6 +5892,7 @@ static void win_vt_away(int to) {
   serial_puts("[visual] WIN sai para a tela de texto\n");
   cursor_restore();
   gfx_live = 0;
+  gpu_suspend();
   if (gfx_gop) {
     fbcon_suspend(0);
   } else {
@@ -5876,6 +5914,7 @@ static void win_vt_away(int to) {
     if (!bochs_program((uint16_t)gfx_w, (uint16_t)gfx_h))
       serial_puts("[visual] modo grafico nao voltou\n");
     gfx_buf_init();
+    gfx_gpu_try();
   } else {
     vga_mode13h();
     set_palette_color(0, 0, 0, 0);
@@ -7220,6 +7259,7 @@ static void win_load_cfg(void) {
   static char cfg[256];
   int n, i, mode = 0, wall = 0;
   uint32_t bg = 0;
+  gpu_cfg_line(0, 0);
   n = file_load("D:\\SODOS\\VIDEO.CFG", cfg, (int)sizeof(cfg) - 1);
   if (n <= 0) return;
   cfg[n] = 0;
@@ -7247,6 +7287,8 @@ static void win_load_cfg(void) {
     } else if (k + 3 <= j && cfg[k] == 'i' && cfg[k + 1] == 'a' && cfg[k + 2] == '=') {
       ui_ia = cfg[k + 3] == '1';
       if (ui_ia) ui_ia_launch = 1;
+    } else if (k + 4 <= j && cfg[k] == 'g' && cfg[k + 1] == 'p' && cfg[k + 2] == 'u') {
+      gpu_cfg_line(cfg + k, j - k);
     }
     while (j < n && (cfg[j] == '\n' || cfg[j] == '\r')) j++;
     i = j;
@@ -7328,7 +7370,10 @@ gfx_restart:
   gfx_buf_init();
   gfx_live = 1;
   gfx_session_on = 1;
-  if (session == GFX_SESSION_WIN) win_load_cfg();
+  if (session == GFX_SESSION_WIN) {
+    win_load_cfg();
+    gfx_gpu_try();
+  }
   fbcon_suspend(1);
   font_cell_w = FONT_W;
   font_cell_h = vga_bios_font_ok ? FONT_H : 8;
@@ -7531,6 +7576,7 @@ gfx_restart:
 gfx_session_leave:
   gfx_live = 0;
   gfx_session_on = 0;
+  gpu_close();
   pic_mask_all();
 
   cursor_restore();
@@ -7583,6 +7629,10 @@ int win_vram_info(struct k_vram* v) {
   } else {
     vram_name(v->dev, "VGA");
     v->vram_kb = 256;
+  }
+  if (gpu_name()) {
+    vram_name(v->drv, gpu_name());
+    v->gpu_kb = gpu_mem_kb();
   }
   if (!gfx_session_on) {
     v->state = 0;

@@ -383,9 +383,9 @@ HELLO um dois
 - The UI was designed for 1024×768 and is scaled; on tall screens the font and cursor use scale 2.
 - To change: Start menu → **Settings** → **Display**, or the **Display settings** window. The change restarts the desktop and closes the open windows. **Default** returns to automatic mode.
 
-### Graphics card driver (planned)
+### Graphics card driver (in progress)
 
-CPU drawing stays the default. A graphics card driver (the first one will be QEMU's **virtio-gpu**) comes as a separate `.DLL` in `D:\SODOS\DRV\`, loaded only when the card exists, initializes and passes a test frame. Without an active driver the system spends no extra memory or processing: the kernel gains only one pointer (8 bytes), tested once per frame and once per mode change. Any driver error disables it and hands the screen back to the CPU path. `gpu=0` in `VIDEO.CFG` turns the attempt off. The contract, interface and stages are in [`src13/docs/GPU.md`](src13/docs/GPU.md) (in Portuguese).
+CPU drawing stays the default. A graphics card driver (the first one will be QEMU's **virtio-gpu**) comes as a separate `.DLL` in `D:\SODOS\DRV\`, loaded only when the card exists, initializes and passes a test frame. Without an active driver the system spends no extra memory or processing: the kernel gains only one pointer (8 bytes), tested once per frame and once per mode change. Any driver error disables it and hands the screen back to the CPU path. `gpu=0` in `VIDEO.CFG` turns the attempt off. The loader exists (`video/gpu.c`, with a test driver `GPUTEST.DLL`); the virtio-gpu driver is the next stage. The `TOP` **Video** tab shows the card, VRAM and what graphics uses. The contract, interface and stages are in [`src13/docs/GPU.md`](src13/docs/GPU.md) (in Portuguese).
 
 ### Taskbar and menu
 
