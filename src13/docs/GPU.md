@@ -186,7 +186,29 @@ trabalho que no caminho atual.
 O `virtio-vga` tambem responde ao Bochs VBE, entao, se o driver falhar, o
 caminho atual continua funcionando na mesma VM.
 
-## Desligar a mao
+## Ver no TOP (aba Video)
+
+O `TOP.EXE` tem a aba **Video** (F3 ou Tab ate ela), que le `k_vram`
+(`struct k_vram` em `so.h`; no kernel, `win_vram_info()` em `video/visual.c`):
+
+- placa (Bochs VBE, GOP ou VGA), id PCI e endereco do framebuffer;
+- driver da placa ativo, ou "nenhum: a CPU desenha tudo";
+- modo e estado: texto, WIN na tela ou WIN ao fundo (atras de uma tela do
+  DOS, Ctrl+F1, quando o modo grafico continua ocupando memoria);
+- a VRAM num quadro, como o mapa da RAM: tela visivel, segunda pagina
+  (pagina dupla Bochs), texto e fonte, livre;
+- a RAM comum gasta por causa do video: back buffer, papel de parede,
+  superficies das janelas e memoria do driver da placa.
+
+`k_vram` so le o estado que ja existe; nao reprograma a placa. No GOP a placa
+so informa o quadro visivel, entao o total da VRAM e o tamanho desse quadro.
+
+Obrigacao do driver (etapa 1 em diante): quando ativo, o kernel preenche
+`drv` com o nome dele e `gpu_kb` com a memoria que ele reservou (pedida por
+`gpu_kapi.alloc`). Sem driver os dois ficam vazios, e a linha "Driver da
+placa" do TOP mostra "sem driver: nada reservado", que e a prova visivel da
+regra principal.
+
 
 `D:\SODOS\VIDEO.CFG` ganha a chave:
 

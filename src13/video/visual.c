@@ -49,8 +49,9 @@ static void pci_cfg_write32(uint8_t bus, uint8_t dev, uint8_t fun, uint8_t off, 
   outl(0xCFC, val);
 }
 
-/* BAR0 memoria do primeiro dispositivo classe Display (PCI class 0x03) */
-static uint32_t pci_find_display_bar0(void) {
+/* BAR0 memoria do primeiro dispositivo classe Display (PCI class 0x03).
+ * id (se nao for NULL) recebe vendor << 16 | device. */
+static uint32_t pci_find_display(uint32_t* id) {
   for (uint8_t dev = 0; dev < 32; dev++) {
     uint32_t vid = pci_cfg_read32(0, dev, 0, 0);
     if (vid == 0xFFFFFFFFu) continue;
@@ -59,6 +60,7 @@ static uint32_t pci_find_display_bar0(void) {
     uint32_t bar0 = pci_cfg_read32(0, dev, 0, 0x10);
     if (bar0 == 0 || bar0 == 0xFFFFFFFFu) continue;
     if (bar0 & 1u) continue;
+    if (id) *id = (vid & 0xFFFFu) << 16 | vid >> 16;
     return bar0 & ~0xFu;
   }
   return 0;
@@ -167,6 +169,9 @@ static int gfx_bochs;
 /* 1 = o LFB e o framebuffer GOP do UEFI: sem registros Bochs, sem troca de modo */
 static int gfx_gop;
 static int gfx_live;
+/* 1 do inicio ao fim de uma sessao grafica, mesmo atras de uma tela do DOS
+ * (gfx_live fica 0 nesse caso). So o TOP le, por win_vram_info. */
+static int gfx_session_on;
 static uint32_t gfx_w;
 static uint32_t gfx_h;
 static uint32_t gfx_pitch_bytes;
@@ -456,7 +461,7 @@ static int bochs_bind_lfb(void) {
   int j;
   cand[nc++] = BOCHS_LFB_PHYS;
   {
-    uint32_t bar = pci_find_display_bar0();
+    uint32_t bar = pci_find_display(0);
     if (bar && bar != BOCHS_LFB_PHYS) cand[nc++] = bar;
   }
   cand[nc++] = 0xFD000000u;
@@ -7322,6 +7327,7 @@ gfx_restart:
 
   gfx_buf_init();
   gfx_live = 1;
+  gfx_session_on = 1;
   if (session == GFX_SESSION_WIN) win_load_cfg();
   fbcon_suspend(1);
   font_cell_w = FONT_W;
@@ -7524,6 +7530,7 @@ gfx_restart:
 
 gfx_session_leave:
   gfx_live = 0;
+  gfx_session_on = 0;
   pic_mask_all();
 
   cursor_restore();
@@ -7546,4 +7553,73 @@ void visual_run(void) {
 
 void win_run(void) {
   gfx_session_run(GFX_SESSION_WIN);
+}
+
+static void vram_name(char* d, const char* s) {
+  int i;
+  for (i = 0; i < 23 && s[i]; i++) d[i] = s[i];
+  for (; i < 24; i++) d[i] = 0;
+}
+
+/* Para o TOP: a placa, a memoria de video e o que o modo grafico ocupa.
+ * Le so o estado que ja existe; nao reprograma nada. */
+int win_vram_info(struct k_vram* v) {
+  uint32_t vram = 0, frame, n = 0, kb = 0;
+  int i;
+  if (!v) return -1;
+  for (i = 0; i < (int)sizeof(*v); i++) ((uint8_t*)v)[i] = 0;
+  v->lfb = pci_find_display(&v->pci_id);
+  if (gfx_gop || (!gfx_session_on && !vga_legacy())) {
+    const struct BootInfo* bi = bootinfo_get();
+    vram_name(v->dev, "GOP (UEFI)");
+    if (bi && bi->fb_addr) {
+      v->lfb = (uint32_t)bi->fb_addr;
+      /* o GOP so conta o quadro visivel; o resto da placa nao aparece */
+      v->vram_kb = (uint32_t)(((uint64_t)bi->fb_pitch * bi->fb_height + 1023u) >> 10);
+    }
+  } else if (bochs_present()) {
+    vram_name(v->dev, "Bochs VBE");
+    if (bochs_vram_bytes(&vram)) v->vram_kb = vram >> 10;
+  } else {
+    vram_name(v->dev, "VGA");
+    v->vram_kb = 256;
+  }
+  if (!gfx_session_on) {
+    v->state = 0;
+    /* tela de texto 80x25 (4 KB) + fonte no plano 2 (8 KB); no GOP o fbcon
+     * desenha o texto no proprio framebuffer */
+    if (vga_legacy()) {
+      v->w = 80;
+      v->h = 25;
+      v->bpp = 4;
+      v->pitch = 160;
+      v->text_kb = 12;
+    } else {
+      v->front_kb = v->vram_kb;
+    }
+    return 0;
+  }
+  v->state = gfx_live ? 1 : 2;
+  v->w = gfx_w;
+  v->h = gfx_h;
+  v->bpp = gfx_bochs ? 32 : 8;
+  v->pitch = gfx_bochs ? gfx_pitch_bytes : FB13_W;
+  frame = gfx_bochs ? gfx_pitch_bytes * gfx_h : FB13_W * FB13_H;
+  v->front_kb = (frame + 1023u) >> 10;
+  if (gfx_dbuf) v->page2_kb = v->front_kb;
+  if (gfx_back) {
+    v->back_addr = (uint32_t)(uintptr_t)gfx_back;
+    v->back_kb = (gfx_w * gfx_h * (gfx_bochs ? 4u : 1u) + 1023u) >> 10;
+  }
+  if (desk_wall) v->wall_kb = (gfx_w * gfx_h * 4u + 1023u) >> 10;
+  if (gwins) {
+    for (i = 0; i < GUI_MAX; i++) {
+      if (!gwins[i].open || !gwins[i].pix) continue;
+      n++;
+      kb += ((uint32_t)gwins[i].cw * (uint32_t)gwins[i].ch * 4u + 1023u) >> 10;
+    }
+  }
+  v->win_n = n;
+  v->win_kb = kb;
+  return 0;
 }

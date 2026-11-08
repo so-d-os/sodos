@@ -89,3 +89,28 @@ int win_launch(const char* path);
 int win_windows(char* out, int max);
 /* Fecha a janela com esse titulo. 0 = fechou. */
 int win_close(const char* name);
+
+/* TOP: placa de video, VRAM e o que o modo grafico ocupa (k_vram).
+ * Mesmo layout de struct k_vram em c_compiler/include/so.h. Tamanhos em KB. */
+struct k_vram {
+  char dev[24];        /* "Bochs VBE", "GOP (UEFI)", "VGA" */
+  char drv[24];        /* driver da placa ativo; "" = desenho por CPU */
+  uint32_t pci_id;     /* vendor << 16 | device; 0 = nao achou */
+  uint32_t lfb;        /* endereco fisico do framebuffer (BAR0) */
+  uint32_t vram_kb;    /* memoria da placa; 0 = desconhecida */
+  uint32_t state;      /* 0 modo texto, 1 WIN na tela, 2 WIN atras de uma tela do DOS */
+  uint32_t w, h, bpp, pitch;   /* no modo texto: 80, 25, 4, 160 */
+  /* na VRAM */
+  uint32_t front_kb;   /* quadro visivel */
+  uint32_t page2_kb;   /* segunda pagina (pagina dupla Bochs) */
+  uint32_t text_kb;    /* tela de texto e fonte VGA */
+  /* na RAM, por causa do modo grafico */
+  uint32_t back_kb;    /* back buffer */
+  uint32_t back_addr;
+  uint32_t wall_kb;    /* papel de parede ja escalado */
+  uint32_t win_kb;     /* superficies das janelas dos programas */
+  uint32_t win_n;
+  uint32_t gpu_kb;     /* memoria do driver da placa (docs/GPU.md); 0 sem driver */
+  uint32_t pad[3];
+};
+int win_vram_info(struct k_vram* v);

@@ -118,6 +118,28 @@ int k_ps(struct k_proc* out, int max);
 #define KM_CATS 8
 int k_memmap(unsigned* kb, int cells, unsigned* cell_kb, unsigned pid);
 
+/* Placa de video e VRAM. Tamanhos em KB. Devolve 0. */
+struct k_vram {
+  char dev[24];        /* "Bochs VBE", "GOP (UEFI)", "VGA" */
+  char drv[24];        /* driver da placa ativo; "" = desenho por CPU */
+  unsigned pci_id;     /* vendor << 16 | device; 0 = nao achou */
+  unsigned lfb;        /* endereco fisico do framebuffer */
+  unsigned vram_kb;    /* memoria da placa; 0 = desconhecida */
+  unsigned state;      /* 0 modo texto, 1 WIN na tela, 2 WIN atras de uma tela do DOS */
+  unsigned w, h, bpp, pitch;   /* no modo texto: 80, 25, 4, 160 */
+  unsigned front_kb;   /* VRAM: quadro visivel */
+  unsigned page2_kb;   /* VRAM: segunda pagina (pagina dupla) */
+  unsigned text_kb;    /* VRAM: tela de texto e fonte */
+  unsigned back_kb;    /* RAM: back buffer */
+  unsigned back_addr;
+  unsigned wall_kb;    /* RAM: papel de parede escalado */
+  unsigned win_kb;     /* RAM: superficies das janelas */
+  unsigned win_n;
+  unsigned gpu_kb;     /* memoria do driver da placa; 0 sem driver */
+  unsigned pad[3];
+};
+int k_vram(struct k_vram* v);
+
 /* processos e DLLs */
 void k_exit(int code);
 int k_exec(const char* path, int argc, char** argv);

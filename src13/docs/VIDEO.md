@@ -77,6 +77,9 @@ Tudo acima e desenho por CPU, e continua sendo o padrao. O driver de placa
 existir e passar no teste; sem ele, nada deste documento muda. Veja
 [GPU.md](GPU.md).
 
+Para ver quanto o video ocupa (VRAM da placa e RAM do modo grafico): `TOP`,
+aba **Video** (F3 ou Tab).
+
 ## Arquivos
 
 - `video/visual.c` — `gfx_quality`, `gfx_desk_clear()`, `gui_pixels()` com

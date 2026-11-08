@@ -1,6 +1,6 @@
 /* mapa.c - Segunda tela: a RAM toda num quadro, como o mapa do Doutor de
  * Disco e do desfragmentador. Cada caractere vale mapa_cel_kb; cheio onde o
- * sistema ou os programas ocupam, ponto onde esta livre. */
+ * sistema ou os programas ocupam, ponto onde esta livre. F3 vai para o video. */
 #include "top.h"
 
 #define MR 1           /* janela */
@@ -14,7 +14,7 @@
 #define ATUALIZA 2000
 
 static const char* const rotulos[10] = {
-  "Ajuda", "", "Procs", "Destaq", "Atualiz", "", "", "", "", "Sair"
+  "Ajuda", "", "Video", "Destaq", "Atualiz", "", "", "", "", "Sair"
 };
 
 static const char* const nomes[KM_CATS] = {
@@ -181,7 +181,7 @@ static void ajuda(void) {
         "Riscado: nao e RAM (firmware, video, buraco abaixo de 4 GB).\n"
         "\n"
         "Setas andam no mapa   F4 ou + destaca um programa\n"
-        "F3 ou Tab volta       F5 atualiza   F10 ou ESC sai");
+        "F3 ou Tab: video      F5 atualiza   F10 ou ESC sai");
 }
 
 int tela_mapa(unsigned* destaque) {
@@ -213,7 +213,7 @@ int tela_mapa(unsigned* destaque) {
       le();
     } else if (k == K_F(1) || k == '?') {
       ajuda();
-    } else if (k == K_F(3) || k == K_TAB || k == 'p' || k == 'P') {
+    } else if (k == K_F(3) || k == K_TAB || k == 'v' || k == 'V') {
       *destaque = dono;
       return 1;
     } else if (k == K_F(10) || k == K_ESC || k == K_EOF || k == 'q' || k == 'Q') {
