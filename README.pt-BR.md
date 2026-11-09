@@ -329,7 +329,10 @@ Não há Ctrl (Ctrl+C não interrompe um comando); a única combinação é `Ctr
 | `md pasta` | Cria pasta (só FAT16) |
 | `rd pasta` | Remove pasta vazia (só FAT16) |
 | `del arquivo` / `erase arquivo` | Apaga um arquivo (FAT16, ou `D:` na RAM). `*` e `?` apagam todos que casam (`del *.tmp`, `del u:\temp\*.log`); `del *.*` pergunta antes |
-| `type arquivo` / `cat arquivo` | Mostra o arquivo inteiro, de qualquer unidade. Texto UTF-8 (feito no Linux) aparece com acentos |
+| `type arquivo` / `cat arquivo` | Mostra o arquivo inteiro, de qualquer unidade. Texto UTF-8 (feito no Linux) aparece com acentos. Vários arquivos e `*`/`?` (`type a.txt *.bat`): cada um vem depois do nome, como o `TYPE` do cmd |
+| `find [/V] [/C] [/N] [/I] "texto" [arquivo ...]` | `FIND` do MS-DOS: linhas com (ou, com `/V`, sem) o texto; `/C` conta, `/N` numera, `/I` ignora maiúsculas. Arquivos aceitam `*`/`?`; sem arquivo lê o pipe (`dir \| find "EXE"`). `find /c /v "" x.txt` conta as linhas. Código de saída 0 achou, 1 não achou, 2 erro |
+| `grep ...` | O mesmo que `find`; também aceita `-v -c -n -i` |
+| `tail [/n] [arquivo ...]` | Últimas `n` linhas (10 sem nada), como o `TAIL` do Resource Kit; também `-n`, `/N n`, `/N:n`. Sem arquivo lê o pipe (`dir \| tail /5`) |
 | `more arquivo` | Mostra uma tela por vez: `Espaço` próxima tela, `Enter` próxima linha, `q`/`Esc`/`Ctrl+C` sai |
 | `cmd \| more` | Pipe: a saída do comando da esquerda vai para o da direita (`type x.txt \| more`, `dir /s \| more`, `help \| more`). Um `\|` por linha; um `.EXE` à direita lê o pipe como entrada |
 | `keyb [br\|us]` | Layout do teclado: `br` ABNT2 (padrão: `ç`, acentos ´, crase, ~, ^ e ¨, AltGr) ou `us`. Fica em `KEYB.CFG` no `D:` (ou `U:`) e vale no boot |

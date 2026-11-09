@@ -1642,6 +1642,9 @@ void kmain(const struct BootInfo* bi) {
   register_builtin("del", cmd_del);
   register_builtin("erase", cmd_del);
   register_builtin("cat", cmd_cat);
+  register_builtin("find", cmd_find);
+  register_builtin("grep", cmd_grep);
+  register_builtin("tail", cmd_tail);
   register_builtin("fdisk", cmd_fdisk);
   register_builtin("format", cmd_format);
   register_builtin("copy", cmd_copy);

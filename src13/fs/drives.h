@@ -68,6 +68,12 @@ struct dir_item {
   uint16_t time;
   uint8_t dir;
 };
+/* Arquivos que casam com spec (* e ? no ultimo nome), um por vez em fn:
+ * path completo e shown (pasta como foi escrita + nome achado). Sem * e ?
+ * fn recebe spec como esta. Quantos; -1 nenhum, -2 pasta/unidade invalida.
+ * fn devolvendo nao zero para. Usado por type, cat, find, grep e tail. */
+typedef int (*drives_glob_fn)(const char* path, const char* shown, void* ctx);
+int drives_glob(const char* spec, drives_glob_fn fn, void* ctx);
 /* Itens de uma pasta ("U:\\SRC"). Quantos; -1 se nao e pasta. */
 int drives_items(const char* path, struct dir_item* out, int max);
 /* Nome longo inteiro de path (o ultimo nome). 0 achou; -1 nao. */

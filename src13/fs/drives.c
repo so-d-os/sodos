@@ -1052,6 +1052,59 @@ int drives_del(const char* spec) {
   return done > 0 ? done : -1;
 }
 
+/* Cada arquivo que casa com spec (* e ? no ultimo nome) vai para fn com o
+ * caminho completo e o nome como foi escrito (pasta de spec + nome achado).
+ * Sem * e ? fn recebe spec como esta, exista ou nao. Devolve quantos;
+ * -1 nenhum, -2 pasta/unidade invalida. fn devolvendo nao zero para. */
+int drives_glob(const char* spec, drives_glob_fn fn, void* ctx) {
+  char pat[32];
+  char L;
+  char name[DRV_PATH];
+  char full[DRV_PATH];
+  char shown[DRV_PATH];
+  struct dir_item* it;
+  int idx, n, i, k, cut = -1, done = 0;
+  if (!spec || !spec[0]) return -2;
+  for (i = 0; spec[i]; i++)
+    if (spec[i] == '\\' || spec[i] == '/' || spec[i] == ':') cut = i;
+  if (!has_wild(spec + cut + 1)) {
+    fn(spec, spec, ctx);
+    return 1;
+  }
+  copy_str(pat, (int)sizeof(pat), spec + cut + 1);
+  for (i = 0; i <= cut && i < (int)sizeof(shown) - 1; i++) shown[i] = spec[i];
+  shown[i] = 0;
+  path_parse(shown, &L, name, (int)sizeof(name));
+  idx = letter_idx(L);
+  if (idx < 0 || !drv_ready(idx)) return -2;
+  it = (struct dir_item*)kmalloc(DIR_ITEMS_MAX * (uint32_t)sizeof(struct dir_item));
+  if (!it) return -2;
+  n = dir_collect(idx, L, name, it, DIR_ITEMS_MAX);
+  if (n < 0) {
+    kfree(it);
+    return -2;
+  }
+  for (i = 0; i < n; i++) {
+    if (it[i].dir || !dir_match(pat, it[i].name)) continue;
+    full[0] = L;
+    full[1] = ':';
+    full[2] = '\\';
+    k = 3;
+    if (name[0]) {
+      copy_str(full + 3, (int)sizeof(full) - 36, name);
+      k = str_len(full);
+      full[k++] = '\\';
+    }
+    copy_str(full + k, (int)sizeof(full) - k, it[i].name);
+    k = cut + 1;
+    copy_str(shown + k, (int)sizeof(shown) - k, it[i].name);
+    done++;
+    if (fn(full, shown, ctx)) break;
+  }
+  kfree(it);
+  return done > 0 ? done : -1;
+}
+
 /* Itens da pasta path (com tamanho e data). -1 se nao e pasta. */
 int drives_items(const char* path, struct dir_item* out, int max) {
   char L;
