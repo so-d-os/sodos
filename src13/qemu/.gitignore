@@ -1,0 +1,6 @@
+# build/  - saida do meson/ninja (fora do git)
+# vendor/ - arvore do QEMU e ferramentas baixadas por setup.sh (fora do git)
+build/
+vendor/*
+!vendor/.gitkeep
+*.log

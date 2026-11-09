@@ -1,0 +1,18 @@
+SODOS: deixa somar um arquivo de maquina do meson ao cross file gerado.
+
+O alvo x86_64-sodos usa o mesmo host_os (linux) e a mesma CPU do WSL, entao o
+meson acha que roda os executaveis de teste; o arquivo extra diz que nao
+(needs_exe_wrapper = true).
+
+--- a/configure
++++ b/configure
+@@ -1957,6 +1957,9 @@
+   if test -f "$source_path/configs/meson/$host_os.txt"; then
+     meson_add_machine_file $source_path/configs/meson/$host_os.txt
+   fi
++  if test -n "$QEMU_EXTRA_MACHINE_FILE"; then
++    meson_add_machine_file "$QEMU_EXTRA_MACHINE_FILE"
++  fi
+ 
+   rm -rf meson-private meson-info meson-logs
+ 
