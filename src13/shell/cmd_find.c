@@ -99,7 +99,7 @@ static void find_src(const char* shown) {
       text_put(f_line, n);
       text_put("\n", 1);
     }
-    if (kbd_break_take()) {
+    if (shell_break()) {
       f_stop = 1;
       break;
     }

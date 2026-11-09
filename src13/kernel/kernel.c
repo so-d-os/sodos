@@ -356,7 +356,20 @@ void con_state_load(const struct con_state* s) {
   pipe_on = s->pipe_on;
 }
 
+/* Ctrl+C nos comandos do prompt (dir, type, ...): eles nao chamam o teclado,
+ * entao o putc olha a porta de vez em quando. Depois do ^C a saida e
+ * descartada e shell_break() diz 1 ate o comando voltar. */
+extern uint32_t mod_depth;
+static int brk_depth;   /* comandos internos rodando (pipe e > aninham) */
+static int brk_hit;
+static int brk_in;
+static unsigned brk_tick;
+
 void putc(char c) {
+  if (brk_depth && !mod_depth) {
+    if (!brk_in && (++brk_tick & 63) == 0) shell_break();
+    if (brk_hit) return;
+  }
   vt_out_tick();
   if (shell_out_fn) {
     shell_out_fn(c);
@@ -460,7 +473,6 @@ void clear_screen(void) {
 #define KB_PEND 32
 static unsigned char kb_pend[KB_PEND];
 static int kb_head, kb_tail;
-extern uint32_t mod_depth;
 void mod_exit(int code);
 
 static int break_applies(void) {
@@ -488,6 +500,54 @@ void con_break_poll(void) {
     }
   }
   break_fire();
+}
+
+int shell_break(void) {
+  unsigned char st;
+  if (brk_hit) return 1;
+  if (!brk_depth || mod_depth || brk_in) return 0;
+  brk_in = 1;
+  if (!vt_bg()) {
+    /* Como con_break_poll: o resto fica para get_char (digitar adiante). */
+    while (((st = inb(0x64)) & 1) && !(st & 0x20)) {
+      unsigned char sc = inb(0x60);
+      kbd_watch(sc);
+      if (((kb_head + 1) % KB_PEND) != kb_tail) {
+        kb_pend[kb_head] = sc;
+        kb_head = (kb_head + 1) % KB_PEND;
+      }
+    }
+  }
+  if (kbd_break_take()) {
+    kb_head = kb_tail = 0;
+    serial_puts("[break] Ctrl+C (comando)\n");
+    puts_k("^C\n");
+    brk_hit = 1;
+  }
+  brk_in = 0;
+  return brk_hit;
+}
+
+/* Roda um comando interno com Ctrl+C valendo. */
+static int run_builtin(int (*fn)(int, char**), int argc, char** argv) {
+  int rc;
+  if (brk_depth++ == 0) {
+    brk_hit = 0;
+    kbd_break_take();   /* Ctrl+C antigo nao para o novo */
+    kbd_break_arm(1);
+  }
+  rc = fn(argc, argv);
+  if (--brk_depth == 0) {
+    kbd_break_arm(0);
+    kbd_break_take();
+    if (brk_hit) {
+      rc = 1;
+      brk_hit = 0;
+    }
+    /* No WIN a janela le a porta direto: tecla guardada aqui ficaria velha. */
+    if (win_screen_size(0, 0)) kb_head = kb_tail = 0;
+  }
+  return rc;
 }
 
 /* Proximo scancode: primeiro os guardados, depois a porta. 0 se nao ha. */
@@ -1538,7 +1598,7 @@ static int exec_line(char* line, int history) {
   }
   for (i = 0; i < cmd_count; ++i) {
     if (!stricmp(argv[0], commands[i].name))
-      return commands[i].fn(argc, argv);
+      return run_builtin(commands[i].fn, argc, argv);
   }
   if (ends_ci(argv[0], ".BAT") || ends_ci(argv[0], ".CMD")) {
     char bpath[DRV_PATH];

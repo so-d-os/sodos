@@ -22,7 +22,7 @@ static void page_out(char c) {
   if (page_lines >= PAGE_LINES) {
     puts_k(msg);
     do k = shell_get_char(); while (k == 0);
-    if (kbd_break_take() || k == 27) page_quit = 1;
+    if (shell_break() || k == 27) page_quit = 1;
     putc('\r');
     for (k = 0; msg[k]; k++) putc(' ');
     putc('\r');

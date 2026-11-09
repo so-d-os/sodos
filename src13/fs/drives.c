@@ -852,6 +852,7 @@ static int dir_walk(int idx, char L, const char* name, const char* pat, int flag
   int* sel;
   int n, i, cnt = 0;
   uint32_t files = 0, dirs = 0, bytes = 0;
+  if (shell_break()) return 0;
   it = (struct dir_item*)kmalloc(DIR_ITEMS_MAX * (uint32_t)sizeof(struct dir_item));
   sel = (int*)kmalloc(DIR_ITEMS_MAX * (uint32_t)sizeof(int));
   if (!it || !sel) {
@@ -902,6 +903,7 @@ static int dir_walk(int idx, char L, const char* name, const char* pat, int flag
       char sub[DRV_PATH];
       int k = 0, j = 0;
       if (!it[i].dir) continue;
+      if (shell_break()) break;
       while (name[j] && k < (int)sizeof(sub) - 2) sub[k++] = name[j++];
       if (k) sub[k++] = '\\';
       for (j = 0; it[i].name[j] && k < (int)sizeof(sub) - 1; j++) sub[k++] = it[i].name[j];

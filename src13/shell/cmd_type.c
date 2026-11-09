@@ -16,7 +16,7 @@ static int type_one(const char* path, const char* shown, void* ctx) {
     puts_k("\n\n");
   }
   if (text_file(path, 0)) type_err = 1;
-  return kbd_break_take();
+  return shell_break();
 }
 
 static int has_wild(const char* s) {

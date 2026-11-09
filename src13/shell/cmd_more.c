@@ -57,7 +57,7 @@ static void page_wait(void) {
   puts_k(prompt);
   for (;;) {
     c = shell_get_char();
-    if (kbd_break_take()) c = 'q';
+    if (shell_break()) c = 'q';
     if (c == ' ') {
       t_lines = 0;
       break;

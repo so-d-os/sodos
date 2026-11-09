@@ -60,7 +60,7 @@ static void tail_src(const char* shown) {
     if (n <= 0) break;
     off += (uint32_t)n;
     text_put(t_buf, n);
-    if (kbd_break_take()) {
+    if (shell_break()) {
       t_stop = 1;
       break;
     }
