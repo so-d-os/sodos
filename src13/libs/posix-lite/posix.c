@@ -241,8 +241,19 @@ __export uid_t geteuid(void) { return 0; }
 __export gid_t getgid(void) { return 0; }
 __export gid_t getegid(void) { return 0; }
 
+#if defined(__GNUC__) && defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+extern void sodos_sleep_ms(unsigned ms) __attribute__((weak));
+#endif
+
 __export int usleep(unsigned us) {
   unsigned start = k_ms(), ms = us / 1000;
+#if defined(__GNUC__) && defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+  /* LP64: a espera ocupada prenderia as threads cooperativas da libsodos. */
+  if (sodos_sleep_ms) {
+    sodos_sleep_ms(ms);
+    return 0;
+  }
+#endif
   while (k_ms() - start < ms) {}
   return 0;
 }
@@ -535,13 +546,46 @@ __export ssize_t read(int fd, void* buf, size_t n) {
   return (ssize_t)n;
 }
 
+/* Em modo raw (programa de terminal, ex.: QEMU com -serial stdio) a saida
+ * traz sequencias ANSI que o console do SODOS nao interpreta. Tira as
+ * sequencias ESC [ ... e ESC x; "ESC [ 2 J" limpa a tela. */
+static int ansi_st;          /* 0 texto, 1 depois do ESC, 2 dentro do CSI */
+static char ansi_arg[16];
+static int ansi_n;
+
+static void con_write_ansi(const char* s, size_t n) {
+  size_t i, run = 0;
+  for (i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (ansi_st == 0) {
+      if (c != 27) {
+        run++;
+        continue;
+      }
+      if (run) k_write(s + i - run, (int)run);
+      run = 0;
+      ansi_st = 1;
+    } else if (ansi_st == 1) {
+      ansi_st = c == '[' ? 2 : 0;
+      ansi_n = 0;
+    } else if (c >= 0x40 && c <= 0x7e) {
+      if (c == 'J' && ansi_n == 1 && ansi_arg[0] == '2') k_clear();
+      ansi_st = 0;
+    } else if (ansi_n < (int)sizeof(ansi_arg)) {
+      ansi_arg[ansi_n++] = (char)c;
+    }
+  }
+  if (run) k_write(s + n - run, (int)run);
+}
+
 __export ssize_t write(int fd, const void* buf, size_t n) {
   if (PIPE_FD(fd)) return sodos_pipe_write(fd, buf, n);
   struct fd_ent* e;
   char* nb;
   int need;
   if (fd == 1 || fd == 2) {
-    k_write((const char*)buf, (int)n);
+    if (__so_stdin_raw) con_write_ansi((const char*)buf, n);
+    else k_write((const char*)buf, (int)n);
     return (ssize_t)n;
   }
   if (fd < 3 || fd >= FD_MAX || !fds[fd].used) {

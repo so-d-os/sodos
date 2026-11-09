@@ -17,7 +17,62 @@ Alvo: `qemu-system-i386` com TCG, compilado pelo toolchain LP64 do SODOS
 | **Q2** | compilar e ligar o QEMU inteiro; `QEMU.EXE --version` no SODOS | **feito (2026-11-09)** |
 | **Q3** | bootar um kernel multiboot mínimo pela serial (`-M isapc`) | **feito (2026-11-09)** |
 | **Q4a** | `-serial stdio` no console do SODOS (saída e teclado); QEMU no `make disk-files` (`D:\UTILS\QEMU`) | **feito (2026-11-09)** |
-| Q4b | backend de tela `ui/sodos.c` numa janela do SODOS; bootar um sistema de verdade | — |
+| **Q4b** | bootar um sistema de verdade: FreeDOS 1.3 (disquete) com tela e teclado pela serial | **feito (2026-11-09)** |
+| Q4c | backend de tela `ui/sodos.c` numa janela do SODOS | — |
+
+## Q4b: resultado
+
+O **FreeDOS 1.3** boota no QEMU dentro do SODOS e chega ao `A:\>` em menos
+de 40 s na VM de teste; `dir`, `ver`, `mem`, `type`... respondem no console:
+
+```
+D:\UTILS\QEMU> dos
+SeaBIOS (version rel-1.16.3-0-ga6ed6b701f0a-prebuilt.qemu.org)
+Booting from Floppy...
+FreeDOS kernel 2043 (build 2043 OEM:0xfd) [compiled May 13 2021]
+FreeCom version 0.85a - WATCOMC - XMS_Swap [Jul 10 2021 19:28:06]
+FreeDOS 1.3 no QEMU dentro do SODOS (tela e teclado pela serial).
+A:\>mem
+Conventional          639K       137K       502K
+Extended (XMS)     15,360K    15,360K         0K
+```
+
+Sem backend de tela, a tela vai pela serial: o SeaBIOS tem o **sercon**, que,
+com a porta da COM1 em `etc/sercon-port` (fw_cfg, `SERCON.BIN` = `0x3F8`), manda
+a tela de texto do BIOS (int 10h) para a serial e lê o teclado de lá (int 16h).
+Tudo que o DOS escreve pelo BIOS aparece; programas que escrevem direto na
+memória de vídeo (B800h), não. O aviso `externally provided fw_cfg item names
+should be prefixed with "opt/"` é esperado (o SeaBIOS lê esse nome exato).
+
+O disquete (`scripts/make-freedos.sh`, 1,44 MB) sai do `x86BOOT.img` oficial da
+FD13-FloppyEdition, sem o menu de idioma e sem o instalador; o
+`make disk-files` grava `FREEDOS.IMG`, `SERCON.BIN` e `DOS.BAT` em
+`D:\UTILS\QEMU`. `-drive` usa `file.driver=file` explícito: senão o QEMU lê
+`D:\...` como o protocolo `D:`.
+
+O que precisou mudar (quatro deles valem para todo programa LP64):
+
+1. **Disquete** (`sodos/devices/i386-sodos.mak`): `CONFIG_FDC_ISA=y`. O PC só
+   faz `imply`, e com `--without-default-devices` não entrava.
+2. **vCPU em laço sem E/S** (`patches/0002`, `translator.c` e `cpu-exec.c`): o
+   `yield()` do SeaBIOS espera a IRQ num laço só de saltos diretos, que rodava
+   para sempre em TBs encadeados. Agora cada TB desconta 64 da parte baixa do
+   `icount_decr` (sem uso fora do icount) e, a cada ~1000 TBs, sai para o
+   `cpu_exec_loop`, que cede a vez.
+3. **Mutex sem fila furada** (`sodos_sync.c`): o `unlock` passa o mutex direto
+   ao primeiro da fila. Antes a vCPU soltava e pegava a BQL de novo antes do
+   laço principal (acordado) rodar; o timer do disquete atrasava 10 s e o
+   SeaBIOS desistia ("could not read the boot disk").
+4. **`poll` cede a vez** passada a fatia de ~10 ms mesmo com fd pronto
+   (`sodos_poll.c`): o `aio_poll` aninhado da leitura do disquete via sempre o
+   pipe do notificador pronto e nunca deixava o worker do thread pool rodar.
+   A fatia agora conta desde a última troca de thread (`sodos_thread.c`).
+5. **Sono**: `clock_nanosleep` respeita `TIMER_ABSTIME` (antes dormia o
+   uptime inteiro) e `nanosleep`/`usleep` LP64 dormem cooperativos em vez de
+   espera ocupada, que prendia todas as threads.
+6. **ANSI no console** (`posix.c`): em modo raw, o `write` em 1/2 tira as
+   sequências `ESC [ ...` que o console do SODOS não interpreta;
+   `ESC [ 2 J` limpa a tela.
 
 ## Q4a: resultado
 
@@ -31,6 +86,7 @@ os guests de teste e três `.BAT` (`sodos/disk/`):
 | `D:\UTILS\QEMU\HELLO.BAT` | guest escreve pela serial no console e sai (código 33), ~4 s |
 | `D:\UTILS\QEMU\ECO.BAT` | guest interativo: o que você digita volta em maiúsculas; `q` sai |
 | `D:\UTILS\QEMU\SERIAL.BAT arq.elf` | boota um kernel multiboot com a serial no console |
+| `D:\UTILS\QEMU\DOS.BAT` | FreeDOS 1.3 (Q4b) |
 
 Ctrl+C encerra o QEMU (regra do kernel para programas de console). Ainda não
 há tela: só aparece o que o guest escreve na COM1.
@@ -200,19 +256,21 @@ que o meson recusa, até o configure passar. O `host_os` é `linux`: o driver
 mantém `__linux__` ao compilar (como no Firefox) e a libsodos imita a ABI
 Linux. O backend do TCG é o nativo x86-64, como o JIT do SpiderMonkey.
 
-## Q4b: próximos passos
+## Q4c: próximos passos
 
 1. Backend de tela `ui/sodos.c` (DisplayChangeListener) numa janela do WIN,
-   com o pixman portado; teclado/mouse da janela para o guest.
-2. Bootar um sistema de verdade (FreeDOS ou o próprio SODOS) de uma imagem
-   de disco pequena.
+   com o pixman portado; teclado/mouse da janela para o guest. Com ele o
+   FreeDOS mostra também o que escreve direto na memória de vídeo (EDIT...).
+2. Disco rígido IDE com um sistema maior (FreeDOS instalado, Linux pequeno
+   com `console=ttyS0`).
 
 ## Riscos conhecidos
 
 - **Threads cooperativas** (o M1b, preempção, segue pendente): funcionam para
-  o guest de teste (vCPU, RCU e laço principal se revezam). A vCPU cede a vez
-  a cada ~10 ms quando acessa dispositivo ou faz salto indireto; um laço
-  puramente de cálculo, só com saltos diretos, ainda atrasa o laço principal.
+  o FreeDOS (vCPU, RCU, worker de E/S e laço principal se revezam). A vCPU
+  cede a vez a cada ~10 ms: em E/S, em salto indireto e a cada ~1000 TBs.
+  O Firefox usa a mesma libsodos (mutex FIFO, `poll` e sono novos) e não foi
+  retestado nesta etapa.
 - **Memória**: o kernel mapeia 256 MiB em identidade; guest de 16–32 MB.
 - **Velocidade**: o SODOS costuma rodar no QEMU, então é emulação aninhada.
 
@@ -261,16 +319,17 @@ em `build/`.
 | `scripts/vm.sh`, `scripts/test.sh` | VM de teste (com `mon`, o monitor de fora) e testes de `sodos/tests` |
 | `scripts/run-guest.sh` | Q3: copia QEMU, firmware e guest para o D: e roda |
 | `scripts/vm-stack.sh` | backtrace heurístico do programa travado na VM de teste |
-| `scripts/copy-qemu-disk.sh` | chamado pelo `make disk-files`: QEMU, firmware, guests e `.BAT` em `D:\UTILS\QEMU` |
+| `scripts/copy-qemu-disk.sh` | chamado pelo `make disk-files`: QEMU, firmware, guests, FreeDOS e `.BAT` em `D:\UTILS\QEMU` |
+| `scripts/make-freedos.sh` | disquete FreeDOS 1.3 que boota no `A:\>` e o `SERCON.BIN` (baixa a FD13-FloppyEdition, SHA-256 em `vendor/SHA256SUMS`) |
 | `sodos/devices/i386-sodos.mak` | dispositivos do `qemu-system-i386` (`isapc`) |
 | `sodos/guest/` | guests de teste multiboot (`hello.S`, `eco.S`, `hello.ld`, `build.sh`) |
-| `sodos/disk/` | `.BAT` que vão para `D:\UTILS\QEMU` (`HELLO`, `ECO`, `SERIAL`) |
+| `sodos/disk/` | `.BAT` que vão para `D:\UTILS\QEMU` (`HELLO`, `ECO`, `SERIAL`, `DOS`) |
 | `sodos/cross-sodos.ini` | propriedades do meson para o alvo (`needs_exe_wrapper`, glib) |
 | `sodos/meson-cross.ini` | cross file das libs (compilador, pkg-config, host) |
 | `sodos/sysroot/` | libs portadas: `.pc`, headers e `.a` (gerados, fora do git) |
 | `sodos/tests/` | `ztest.c`, `ctxtest.c`, `cotest.c`, `gtest.c`, `elfread.c` |
 | `patches/0001-*` | deixa o configure do QEMU somar o `cross-sodos.ini` |
-| `patches/0002-*` | vCPU do TCG cede a vez a cada ~10 ms (threads cooperativas) |
+| `patches/0002-*` | vCPU do TCG cede a vez a cada ~10 ms: E/S, salto indireto e contagem de TBs (threads cooperativas) |
 | `patches/glib-2.76.6/` | glib sem futex e sem gobject/gio |
 
 ## Mudanças no toolchain

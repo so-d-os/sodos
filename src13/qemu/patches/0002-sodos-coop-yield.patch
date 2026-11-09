@@ -1,10 +1,11 @@
 SODOS: a vCPU do TCG cede a vez periodicamente (threads cooperativas, sem
-preempcao no kernel). Sem isto, um guest em laco de espera (in/out na serial)
-prende o laco principal e o -serial stdio nunca le o teclado.
+preempcao no kernel). Sem isto, um guest em laco de espera (in/out na serial
+ou o yield() do SeaBIOS, so com saltos diretos) prende o laco principal: o
+-serial stdio nao le o teclado e os timers (PIT, disquete) nao disparam.
 
 diff -ru a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
---- a/accel/tcg/cpu-exec.c	2026-11-09 13:40:43.911670005 -0300
-+++ b/accel/tcg/cpu-exec.c	2026-11-09 13:40:43.922503671 -0300
+--- a/accel/tcg/cpu-exec.c	2026-11-09 15:05:05.605038370 -0300
++++ b/accel/tcg/cpu-exec.c	2026-11-09 15:05:06.005039074 -0300
 @@ -402,6 +402,11 @@
  {
      CPUState *cpu = env_cpu(env);
@@ -17,7 +18,20 @@ diff -ru a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
      vaddr pc;
      uint64_t cs_base;
      uint32_t flags, cflags;
-@@ -964,6 +969,9 @@
+@@ -923,6 +928,12 @@
+         return;
+     }
+ 
++#ifdef __SODOS__
++    /* SODOS: saida da contagem de TBs (translator.c), nao do icount. */
++    if (!icount_enabled()) {
++        return;
++    }
++#endif
+     /* Instruction counter expired.  */
+     assert(icount_enabled());
+ #ifndef CONFIG_USER_ONLY
+@@ -964,6 +975,9 @@
              uint64_t cs_base;
              uint32_t flags, cflags;
  
@@ -27,9 +41,37 @@ diff -ru a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
              cpu_get_tb_cpu_state(cpu_env(cpu), &pc, &cs_base, &flags);
  
              /*
+diff -ru a/accel/tcg/translator.c b/accel/tcg/translator.c
+--- a/accel/tcg/translator.c	2026-11-09 15:05:11.595035180 -0300
++++ b/accel/tcg/translator.c	2026-11-09 15:05:11.985035789 -0300
+@@ -61,6 +61,24 @@
+         icount_start_insn = tcg_last_op();
+     }
+ 
++#ifdef __SODOS__
++    /*
++     * SODOS: sem preempcao, um laco do guest so com saltos diretos (ex.: o
++     * yield() do SeaBIOS esperando IRQ) roda em TBs encadeados para sempre e
++     * o laco principal nunca volta a rodar. Cada TB desconta 64 da parte
++     * baixa do icount_decr (sem uso fora do icount); quando ela passa de
++     * zero, o u32 fica negativo e o TB sai para o cpu_exec_loop, que cede a
++     * vez (sodos_coop_yield): uma saida a cada ~1000 TBs. O store vem antes
++     * do teste para a proxima volta recomecar a contagem.
++     */
++    if (!(cflags & CF_USE_ICOUNT) && !(cflags & CF_NOIRQ)) {
++        tcg_gen_subi_i32(count, count, 64);
++        tcg_gen_st16_i32(count, tcg_env,
++                         offsetof(ArchCPU, parent_obj.neg.icount_decr.u16.low)
++                         - offsetof(ArchCPU, env));
++    }
++#endif
++
+     /*
+      * Emit the check against icount_decr.u32 to see if we should exit
+      * unless we suppress the check with CF_NOIRQ. If we are using
 diff -ru a/include/qemu/osdep.h b/include/qemu/osdep.h
---- a/include/qemu/osdep.h	2026-11-09 13:40:43.900836340 -0300
-+++ b/include/qemu/osdep.h	2026-11-09 13:40:43.911670005 -0300
+--- a/include/qemu/osdep.h	2026-11-09 15:04:59.675039227 -0300
++++ b/include/qemu/osdep.h	2026-11-09 15:05:00.015039045 -0300
 @@ -52,6 +52,20 @@
  
  #include "qemu/compiler.h"
@@ -52,8 +94,8 @@ diff -ru a/include/qemu/osdep.h b/include/qemu/osdep.h
   * stdlib.h unless we define these macros before first inclusion of
   * that system header.
 diff -ru a/system/memory.c b/system/memory.c
---- a/system/memory.c	2026-11-09 13:40:43.922503671 -0300
-+++ b/system/memory.c	2026-11-09 13:40:43.933337337 -0300
+--- a/system/memory.c	2026-11-09 15:05:12.005035819 -0300
++++ b/system/memory.c	2026-11-09 15:05:18.005035110 -0300
 @@ -1478,6 +1478,14 @@
      unsigned size = memop_size(op);
      MemTxResult r;

@@ -305,9 +305,20 @@ int timespec_get(struct timespec* ts, int base) {
   return base;
 }
 
+#if __SIZEOF_POINTER__ == 8
+/* libsodos (threads cooperativas): dormir de verdade deixa as outras rodarem. */
+extern void sodos_sleep_ms(unsigned ms) __attribute__((weak));
+#endif
+
 int nanosleep(const struct timespec* req, struct timespec* rem) {
   unsigned start = k_ms();
   unsigned want = (unsigned)req->tv_sec * 1000u + (unsigned)(req->tv_nsec / 1000000L);
+#if __SIZEOF_POINTER__ == 8
+  if (sodos_sleep_ms) {
+    sodos_sleep_ms(want);
+    want = 0;
+  }
+#endif
   while (k_ms() - start < want) {}
   if (rem) {
     rem->tv_sec = 0;

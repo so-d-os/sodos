@@ -11,3 +11,5 @@ CONFIG_ISA_DEBUG=y
 CONFIG_TEST_DEVICES=y
 # VGA ISA para o Q4 (tela); no Q3 roda com -display none.
 CONFIG_VGA_ISA=y
+# Controlador de disquete ISA (o PC so faz "imply"): FreeDOS em -fda / if=floppy.
+CONFIG_FDC_ISA=y

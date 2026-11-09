@@ -73,6 +73,14 @@ static void q_push(void** head, void** tail, void* t) {
 
 /* ---------- mutex ---------- */
 
+/* Solta o mutex: com fila, passa direto para o primeiro (FIFO). */
+static void mutex_handoff(pthread_mutex_t* m) {
+  struct sodos_thread* t = m->wait_head ? thread_q_pop(&m->wait_head, &m->wait_tail) : NULL;
+  m->owner = t;
+  m->count = t ? 1 : 0;
+  if (t) sodos__wake(t);
+}
+
 int pthread_mutex_init(pthread_mutex_t* m, const pthread_mutexattr_t* attr) {
   if (!m) return EINVAL;
   memset(m, 0, sizeof(*m));
@@ -97,12 +105,18 @@ int pthread_mutex_lock(pthread_mutex_t* m) {
     m->count++;
     return 0;
   }
-  while (m->owner) {
+  /* Quem estava na fila recebe o mutex do unlock (handoff): ao acordar ja e
+   * o dono. Sem isso, a thread que soltou pega de novo antes da acordada
+   * rodar (a vCPU do QEMU com a BQL) e a da fila morre de fome. */
+  while (m->owner != self) {
+    if (!m->owner) {
+      m->owner = self;
+      m->count = 1;
+      break;
+    }
     sodos__block(&m->wait_head, &m->wait_tail);
     self = sodos__self();
   }
-  m->owner = self;
-  m->count = 1;
   return 0;
 }
 
@@ -127,11 +141,7 @@ int pthread_mutex_unlock(pthread_mutex_t* m) {
   self = sodos__self();
   if (m->owner != self) return EPERM;
   if (--m->count > 0) return 0;
-  m->owner = NULL;
-  if (m->wait_head) {
-    struct sodos_thread* t = thread_q_pop(&m->wait_head, &m->wait_tail);
-    sodos__wake(t);
-  }
+  mutex_handoff(m);
   return 0;
 }
 
@@ -159,12 +169,8 @@ int pthread_mutexattr_gettype(const pthread_mutexattr_t* a, int* type) {
 
 static void cond_release_mutex(pthread_mutex_t* m, int* saved) {
   *saved = m->count;
-  m->owner = NULL;
   m->count = 0;
-  if (m->wait_head) {
-    struct sodos_thread* t = thread_q_pop(&m->wait_head, &m->wait_tail);
-    sodos__wake(t);
-  }
+  mutex_handoff(m);
 }
 
 static void cond_reacquire(pthread_mutex_t* m, int saved) {
