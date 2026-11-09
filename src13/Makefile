@@ -566,6 +566,8 @@ disk-files: disk.img
 	@# AGENT.CFG tem a chave da API: fica fora do git, vai so para o disco
 	@if [ -f AGENT.CFG ]; then mcopy -o -i $(DISK)@@512 AGENT.CFG ::/AGENT.CFG || exit 1; fi
 	@sh firefox/sodos/scripts/copy-firefox-disk.sh $(DISK)
+	@# QEMU (qemu/): QEMU.EXE, firmware, guests de teste e .BAT em D:\UTILS\QEMU
+	@sh qemu/scripts/copy-qemu-disk.sh $(DISK)
 	@mdir -i $(DISK)@@512 -w ::/
 	@sh tools/usb-docs.sh
 

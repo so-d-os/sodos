@@ -424,9 +424,49 @@ long syscall(long number, ...) {
 long syscall(long number, ...) { (void)number; errno = ENOSYS; return -1; }
 #endif
 
-struct termios;
-int tcgetattr(int fd, struct termios* t) { (void)fd; (void)t; return -1; }
-int tcsetattr(int fd, int act, const struct termios* t) { (void)fd; (void)act; (void)t; return -1; }
+/* Console como terminal: 0, 1 e 2 sao o console do SODOS. Comeca "cooked"
+ * (linha a linha, com eco: k_readline). Sem ICANON no fd 0, o read(0) da
+ * posix-lite passa a ler tecla a tecla, sem esperar (k_trygetc), e o poll
+ * enxerga o fd 0. E o que o QEMU faz com -serial stdio / -nographic. */
+#include <termios.h>
+int __so_stdin_raw;
+static struct termios so_tty;
+static int so_tty_init;
+
+int tcgetattr(int fd, struct termios* t) {
+  if (fd < 0 || fd > 2 || !t) {
+    errno = ENOTTY;
+    return -1;
+  }
+  if (!so_tty_init) {
+    memset(&so_tty, 0, sizeof so_tty);
+    so_tty.c_iflag = ICRNL;
+    so_tty.c_oflag = OPOST | ONLCR;
+    so_tty.c_cflag = CS8 | CREAD | B38400;
+    so_tty.c_lflag = ISIG | ICANON | ECHO;
+    so_tty.c_cc[VINTR] = 3;
+    so_tty.c_cc[VERASE] = 8;
+    so_tty.c_cc[VEOF] = 26;
+    so_tty.c_cc[VMIN] = 1;
+    so_tty.c_ispeed = so_tty.c_ospeed = B38400;
+    so_tty_init = 1;
+  }
+  memcpy(t, &so_tty, sizeof *t);
+  return 0;
+}
+
+int tcsetattr(int fd, int act, const struct termios* t) {
+  struct termios cur;
+  (void)act;
+  if (tcgetattr(fd, &cur) < 0) return -1;
+  if (!t) {
+    errno = EINVAL;
+    return -1;
+  }
+  memcpy(&so_tty, t, sizeof so_tty);
+  __so_stdin_raw = !(t->c_lflag & ICANON);
+  return 0;
+}
 
 char* basename(char* path) {
   char* p = path; char* r = path;

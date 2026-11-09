@@ -16,7 +16,50 @@ Alvo: `qemu-system-i386` com TCG, compilado pelo toolchain LP64 do SODOS
 | **Q1** | portar glib, zlib e ucontext (`makecontext`/`swapcontext`); configure com as libs reais | **feito (2026-11-09)** |
 | **Q2** | compilar e ligar o QEMU inteiro; `QEMU.EXE --version` no SODOS | **feito (2026-11-09)** |
 | **Q3** | bootar um kernel multiboot mínimo pela serial (`-M isapc`) | **feito (2026-11-09)** |
-| Q4 | backend de tela `ui/sodos.c` numa janela do SODOS; serial no console (`-serial stdio`) | — |
+| **Q4a** | `-serial stdio` no console do SODOS (saída e teclado); QEMU no `make disk-files` (`D:\UTILS\QEMU`) | **feito (2026-11-09)** |
+| Q4b | backend de tela `ui/sodos.c` numa janela do SODOS; bootar um sistema de verdade | — |
+
+## Q4a: resultado
+
+O `make disk-files` (raiz do `src13`) agora grava o QEMU em `D:\UTILS\QEMU`
+(`scripts/copy-qemu-disk.sh`; sem build do QEMU ele só avisa): `QEMU.EXE`, o
+firmware (`bios.bin`, `vgabios*.bin`, `multiboot*.bin`, `linuxboot*.bin`...),
+os guests de teste e três `.BAT` (`sodos/disk/`):
+
+| No SODOS | O que faz |
+|---|---|
+| `D:\UTILS\QEMU\HELLO.BAT` | guest escreve pela serial no console e sai (código 33), ~4 s |
+| `D:\UTILS\QEMU\ECO.BAT` | guest interativo: o que você digita volta em maiúsculas; `q` sai |
+| `D:\UTILS\QEMU\SERIAL.BAT arq.elf` | boota um kernel multiboot com a serial no console |
+
+Ctrl+C encerra o QEMU (regra do kernel para programas de console). Ainda não
+há tela: só aparece o que o guest escreve na COM1.
+
+```
+D:\UTILS\QEMU> eco
+Eco do guest i386 (QEMU dentro do SODOS).
+Digite: o guest devolve em maiusculas. q sai.
+> OLA SODOS
+> XYZ
+Tchau.
+```
+
+O que precisou mudar:
+
+1. **Console como terminal** (`c_compiler/lib/misc.c`): `tcgetattr`/`tcsetattr`
+   nos fds 0–2 funcionam (antes falhavam). Sem `ICANON` no fd 0, o `read(0)`
+   da posix-lite lê tecla a tecla pelo `k_trygetc`, sem esperar a linha, e
+   converte Enter em CR, Backspace em DEL e setas em `ESC [ A..D`.
+2. **`poll` com o console** (`firefox/sodos/port/sodos_poll.c`): fd 0 dá
+   `POLLIN` quando há tecla (em modo raw) e fds 1/2 dão `POLLOUT`. Antes eram
+   `POLLNVAL`, e o QEMU caía num `read(0)` que bloqueava no kernel.
+3. **vCPU cooperativa** (`patches/0002-sodos-coop-yield.patch` e
+   `sodos_coop_due`/`sodos_coop_yield` na libsodos): o kernel não preempta, e
+   um guest em laço de espera (`in` na serial) roda em TBs encadeados que
+   nunca voltam ao `cpu_exec_loop`. Agora, a cada ~10 ms, o acesso a
+   dispositivo (`memory_region_dispatch_*`) e o `lookup_tb_ptr` dos saltos
+   indiretos pedem a saída do TB, e o `cpu_exec_loop` (fora da BQL) cede a
+   vez ao laço principal, que lê o teclado e roda os timers.
 
 ## Q3: resultado
 
@@ -70,9 +113,7 @@ registers`, `x/...`); `scripts/vm-stack.sh` lista as palavras da pilha da
 thread atual que caem dentro do `QEMU.EXE` (um backtrace heurístico, com o
 ELF guardado por `SODOS_KEEP_ELF=1`).
 
-Ainda não funciona: `-serial stdio` (e `-nographic`) trava, porque o `poll`
-da libsodos não conhece o fd 0 do console e a leitura do teclado bloqueia no
-kernel.
+No Q3, `-serial stdio` ainda travava; resolvido no Q4a.
 
 ## Q2: resultado
 
@@ -159,20 +200,19 @@ que o meson recusa, até o configure passar. O `host_os` é `linux`: o driver
 mantém `__linux__` ao compilar (como no Firefox) e a libsodos imita a ABI
 Linux. O backend do TCG é o nativo x86-64, como o JIT do SpiderMonkey.
 
-## Q4: próximos passos
+## Q4b: próximos passos
 
-1. `poll` da libsodos com o fd 0 (console) e leitura sem bloquear, para
-   `-serial stdio`/`-nographic` (saída do guest direto no console do SODOS).
-2. Backend de tela `ui/sodos.c` (DisplayChangeListener) numa janela do WIN,
+1. Backend de tela `ui/sodos.c` (DisplayChangeListener) numa janela do WIN,
    com o pixman portado; teclado/mouse da janela para o guest.
-3. Bootar um sistema de verdade (FreeDOS ou o próprio SODOS) de uma imagem
+2. Bootar um sistema de verdade (FreeDOS ou o próprio SODOS) de uma imagem
    de disco pequena.
 
 ## Riscos conhecidos
 
 - **Threads cooperativas** (o M1b, preempção, segue pendente): funcionam para
-  o guest de teste (vCPU, RCU e laço principal se revezam). Um guest que fica
-  muito tempo sem E/S pode atrasar o laço principal.
+  o guest de teste (vCPU, RCU e laço principal se revezam). A vCPU cede a vez
+  a cada ~10 ms quando acessa dispositivo ou faz salto indireto; um laço
+  puramente de cálculo, só com saltos diretos, ainda atrasa o laço principal.
 - **Memória**: o kernel mapeia 256 MiB em identidade; guest de 16–32 MB.
 - **Velocidade**: o SODOS costuma rodar no QEMU, então é emulação aninhada.
 
@@ -186,11 +226,12 @@ sh scripts/build-glib.sh       # glib -> sodos/sysroot
 sh scripts/fetch-uapi.sh       # headers UAPI do Linux -> sodos/sysroot/include-uapi
 sh scripts/test.sh             # ZTEST/CTXTEST/GTEST na VM de teste
 sh scripts/configure-qemu.sh
-sh scripts/build-qemu.sh qemu-system-i386
+sh scripts/build-qemu.sh       # alvo padrão: qemu-system-i386
 sh scripts/vm.sh put ~/sodos-build/qemu-9.2.0/qemu-system-i386 QEMU.EXE
 sh scripts/vm.sh start
 sh scripts/vm.sh exec 'D:\QEMU.EXE --version'
 sh scripts/run-guest.sh        # Q3: guest multiboot no QEMU dentro do SODOS
+sh scripts/copy-qemu-disk.sh ~/sodos-build/vm/disk.img   # Q4a: D:\UTILS\QEMU na VM
 sh scripts/vm.sh stop
 ```
 
@@ -220,13 +261,16 @@ em `build/`.
 | `scripts/vm.sh`, `scripts/test.sh` | VM de teste (com `mon`, o monitor de fora) e testes de `sodos/tests` |
 | `scripts/run-guest.sh` | Q3: copia QEMU, firmware e guest para o D: e roda |
 | `scripts/vm-stack.sh` | backtrace heurístico do programa travado na VM de teste |
+| `scripts/copy-qemu-disk.sh` | chamado pelo `make disk-files`: QEMU, firmware, guests e `.BAT` em `D:\UTILS\QEMU` |
 | `sodos/devices/i386-sodos.mak` | dispositivos do `qemu-system-i386` (`isapc`) |
-| `sodos/guest/` | guest de teste multiboot (`hello.S`, `hello.ld`, `build.sh`) |
+| `sodos/guest/` | guests de teste multiboot (`hello.S`, `eco.S`, `hello.ld`, `build.sh`) |
+| `sodos/disk/` | `.BAT` que vão para `D:\UTILS\QEMU` (`HELLO`, `ECO`, `SERIAL`) |
 | `sodos/cross-sodos.ini` | propriedades do meson para o alvo (`needs_exe_wrapper`, glib) |
 | `sodos/meson-cross.ini` | cross file das libs (compilador, pkg-config, host) |
 | `sodos/sysroot/` | libs portadas: `.pc`, headers e `.a` (gerados, fora do git) |
 | `sodos/tests/` | `ztest.c`, `ctxtest.c`, `cotest.c`, `gtest.c`, `elfread.c` |
 | `patches/0001-*` | deixa o configure do QEMU somar o `cross-sodos.ini` |
+| `patches/0002-*` | vCPU do TCG cede a vez a cada ~10 ms (threads cooperativas) |
 | `patches/glib-2.76.6/` | glib sem futex e sem gobject/gio |
 
 ## Mudanças no toolchain

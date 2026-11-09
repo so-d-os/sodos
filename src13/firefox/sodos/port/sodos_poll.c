@@ -1,6 +1,6 @@
 /* sodos_poll.c - poll(2) cooperativo.
  *
- * So o handle de sodos_net entra; fds de arquivo dao POLLNVAL (o POSIXX nao
+ * Entram o handle de sodos_net, pipes e o console (0-2); arquivos dao POLLNVAL (o POSIXX nao
  * compartilha a tabela). O poll cede a CPU em fatias curtas, entao outras
  * threads e o desktop continuam rodando enquanto ele espera.
  */
@@ -17,6 +17,9 @@ extern short sodos_pipe_poll(int fd, short events);
 #define sodos_pipe_is(fd) 0
 #define sodos_pipe_poll(fd, events) 0
 #endif
+
+extern int __so_stdin_raw;           /* c_compiler/lib/misc.c */
+extern int sodos_stdin_ready(void);   /* libs/posix-lite/posix.c */
 
 int poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
   uint64_t start = sodos_now_ms();
@@ -41,6 +44,11 @@ int poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
           else if (pending < 0) ev |= POLLHUP;
           if (fds[i].events & POLLOUT) ev |= POLLOUT;
         }
+      } else if (fd <= 2 && !sodos_pipe_is(fd)) {
+        /* Console: le sempre; fd 0 so tem dado em modo raw (termios). */
+        if ((fds[i].events & POLLOUT) && fd > 0) ev |= POLLOUT;
+        if ((fds[i].events & POLLIN) && fd == 0 && __so_stdin_raw && sodos_stdin_ready() > 0)
+          ev |= POLLIN;
       } else if (sodos_pipe_is(fd)) {
         ev = sodos_pipe_poll(fd, fds[i].events);
       } else {
