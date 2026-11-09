@@ -9,6 +9,7 @@
 #   sh scripts/vm.sh put ARQ [NOME]       grava ARQ em D:\NOME (para a VM antes)
 #   sh scripts/vm.sh start                sobe a VM e espera a API HTTP
 #   sh scripts/vm.sh exec 'D:\ZTEST.EXE'  roda um comando e mostra a saida
+#   sh scripts/vm.sh mon "info registers"   monitor do QEMU de fora (depuracao)
 #   sh scripts/vm.sh stop
 set -e
 S=$(cd "$(dirname "$0")/.." && pwd)
@@ -30,6 +31,10 @@ case "$1" in
     [ -f "$VM/disk.img" ] || sh "$0" init
     if running; then sh "$0" stop; fi
     N=${3:-$(basename "$2" | tr a-z A-Z)}
+    # NOME pode ter diretorio (QEMU/bios.bin): cria o diretorio se faltar.
+    case "$N" in
+      */*) mmd -D s -i "$VM/disk.img@@512" "::/${N%/*}" 2>/dev/null || true ;;
+    esac
     mcopy -o -i "$VM/disk.img@@512" "$2" "::/$N"
     printf 'D:\\%s\n' "$N"
     ;;
@@ -42,6 +47,7 @@ case "$1" in
       -drive format=raw,file="$VM/os.img",if=ide,index=0 \
       -drive format=raw,file="$VM/disk.img",if=ide,index=1 \
       -drive format=raw,file="$VM/disk2.img",if=ide,index=2 \
+      -monitor unix:"$VM/monitor.sock",server,nowait \
       -daemonize -pidfile "$PIDF"
     i=0
     while [ $i -lt 90 ]; do
@@ -55,6 +61,32 @@ case "$1" in
   exec)
     shift
     curl -s -m "${SODOS_VM_TIMEOUT:-120}" -X POST --data-binary "$*" "http://127.0.0.1:$PORT/exec"
+    ;;
+  mon)
+    # Comando no monitor do QEMU de fora (o que roda o SODOS), ex.:
+    #   sh scripts/vm.sh mon 'info registers'
+    shift
+    python3 - "$VM/monitor.sock" "$*" <<'PY'
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+s.settimeout(1.0)
+def drain():
+    out = b""
+    try:
+        while True:
+            d = s.recv(65536)
+            if not d:
+                break
+            out += d
+    except socket.timeout:
+        pass
+    return out
+drain()
+s.sendall(sys.argv[2].encode() + b"\n")
+time.sleep(0.3)
+sys.stdout.write(drain().decode(errors="replace"))
+PY
     ;;
   stop)
     if running; then kill "$(cat "$PIDF")"; sleep 1; fi

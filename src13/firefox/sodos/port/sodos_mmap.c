@@ -3,8 +3,8 @@
  * Enquanto o kernel nao tem paginas sob demanda, o mapa anonimo e um bloco
  * do heap do processo, zerado e alinhado a 2 MiB (o coletor de lixo do
  * SpiderMonkey exige alinhamento e desmapeia cabeca/cauda para alinhar, por
- * isso munmap aceita sub-faixas). Sem MAP_FIXED, sem arquivo mapeado e sem
- * protecao real (mprotect/madvise sao no-op): o Gecko precisa disto
+ * isso munmap aceita sub-faixas). Sem MAP_FIXED de verdade, arquivo so como
+ * copia (leitura/MAP_PRIVATE) e sem protecao real (mprotect/madvise sao no-op): o Gecko precisa disto
  * desligado (--disable-jemalloc) por enquanto.
  */
 #include <so.h>
@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "sys/mman.h"
 #include "sodos.h"
@@ -99,9 +100,28 @@ void* mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off) {
     return MAP_FAILED;
   }
   if (!(flags & MAP_ANONYMOUS)) {
-    /* Mapeamento de arquivo ainda nao existe. */
-    errno = ENOSYS;
-    return MAP_FAILED;
+    /* Arquivo: copia o conteudo para uma regiao anonima. Serve para leitura
+     * e para MAP_PRIVATE (o GMappedFile do glib, o load_elf do QEMU). Um
+     * MAP_SHARED gravavel precisaria devolver as escritas ao arquivo. */
+    char* p;
+    size_t got = 0;
+    if ((flags & MAP_SHARED) && (prot & PROT_WRITE)) {
+      errno = ENOSYS;
+      return MAP_FAILED;
+    }
+    p = (char*)mmap(addr, len, prot, (flags & ~MAP_SHARED) | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == (char*)MAP_FAILED) return MAP_FAILED;
+    while (got < len) {
+      ssize_t r = pread(fd, p + got, len - got, (off_t)(off + got));
+      if (r < 0) {
+        munmap(p, len);
+        return MAP_FAILED;
+      }
+      if (r == 0) break;
+      got += (size_t)r;
+    }
+    if (got < len) memset(p + got, 0, len - got); /* depois do fim do arquivo */
+    return p;
   }
   if (len > 0xF0000000u) { /* k_malloc usa uint32_t e len + MM_ALIGN nao pode estourar */
     errno = ENOMEM;

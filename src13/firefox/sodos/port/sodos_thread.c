@@ -149,6 +149,10 @@ static void idle_wait(void) {
  * prontos (BLOCK/SLEEP/DEAD) ou marcada READY (yield). */
 static void resched(void) {
   reap_zombies();
+  /* Acorda quem ja venceu o prazo antes de escolher: sem isto, uma thread
+   * que so cede a vez (sched_yield em laco, ex.: espera de futex) sempre se
+   * reencontra na fila e as que dormem (poll, nanosleep) nunca acordam. */
+  wake_due();
   for (;;) {
     struct sodos_thread* next = q_pop(&run_h, &run_t);
     if (next) {
