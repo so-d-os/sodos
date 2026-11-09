@@ -8,6 +8,8 @@ static int usage(void) {
   puts_k("     net dhcp              pede endereco por DHCP\n");
   puts_k("     net wifi start [cfg]  conecta usando " WIFI_CFG_PATH "\n");
   puts_k("     net wifi stop | status | test | watch [s]\n");
+  puts_k("     net wifi drop [placa] simula uma queda (o vigia reconecta)\n");
+  puts_k("     net dhcp renew        pede de novo o mesmo IP (INIT-REBOOT)\n");
   return 1;
 }
 
@@ -57,6 +59,7 @@ static int do_wifi(int argc, char** argv) {
     wifi_stop();
     return 0;
   }
+  if (name_eq(argv[2], "drop")) return wifi_drop(argc > 3 && name_eq(argv[3], "placa")) ? 1 : 0;
   if (name_eq(argv[2], "watch")) {
     int secs = argc > 3 ? (int)str_to_uint32(argv[3], 10) : 40;
     return wifi_watch(secs > 0 ? secs : 40) > 0 ? 0 : 1;
@@ -81,6 +84,17 @@ int cmd_net(int argc, char** argv) {
   if (argc < 2 || name_eq(argv[1], "status")) {
     wifi_status();
     return 0;
+  }
+  if (name_eq(argv[1], "dhcp") && argc > 2 && name_eq(argv[2], "renew")) {
+    int rc = net_dhcp_reboot();
+    if (rc == 0) {
+      puts_k("DHCP: o servidor confirmou o mesmo IP\n");
+      return 0;
+    }
+    puts_k(rc == -1 ? "DHCP: ainda nao ha IP do DHCP (use: net dhcp)\n"
+                    : rc == -3 ? "DHCP: o servidor recusou o IP (use: net dhcp)\n"
+                               : "DHCP: o servidor nao respondeu\n");
+    return 1;
   }
   if (name_eq(argv[1], "dhcp")) return do_dhcp();
   if (name_eq(argv[1], "wifi")) return do_wifi(argc, argv);

@@ -44,18 +44,28 @@ uint32_t net_ms(void);
 
 /* Outra placa no lugar da NE2000 (o WiFi). tx manda um quadro Ethernet
  * (0 = ok); rx copia o proximo quadro recebido e devolve o tamanho, 0 sem
- * nada. mac fica valido enquanto a placa estiver ligada. NULL desliga. */
+ * nada. mac fica valido enquanto a placa estiver ligada. NULL desliga.
+ * tick (pode ser NULL) roda a cada net_poll, fora das esperas da pilha:
+ * ali a placa vigia o link e reconecta (pode chamar net_dhcp_reboot). */
 struct net_link {
   const char* name;
   const uint8_t* mac;
   int (*tx)(const uint8_t* frame, int len);
   int (*rx)(uint8_t* frame, int cap);
+  void (*tick)(void);
 };
 void net_attach(const struct net_link* l);
 /* "NE2000", o nome da placa ligada por net_attach, ou NULL sem placa. */
 const char* net_link_name(void);
 /* Pede endereco por DHCP. 0 = ok; -1 sem placa; -2 ninguem respondeu. */
 int net_dhcp(void);
+/* INIT-REBOOT: pede de novo o ultimo IP do DHCP (depois de reconectar).
+ * 0 = o servidor confirmou; -1 nunca houve DHCP; -2 nao respondeu;
+ * -3 recusou (NAK) ou deu outro IP: ai e net_dhcp do zero.
+ * O aluguel tambem e renovado sozinho no meio do prazo (net_poll). */
+int net_dhcp_reboot(void);
+/* Segundos ate renovar o aluguel; 0 sem aluguel (IP fixo ou sem DHCP). */
+uint32_t net_dhcp_renew_in(void);
 void net_get_addr(uint32_t* ip, uint32_t* mask, uint32_t* gw, uint32_t* dns);
 /* Falha de ARP/DNS/TCP com o WiFi ligado (wifi.c grava em U:\NET\WIFI.LOG). */
 void wifi_note(const char* what, uint32_t v);
