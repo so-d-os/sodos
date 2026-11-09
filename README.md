@@ -124,7 +124,7 @@ The USB tablet provides the absolute pointer position used by the desktop. On a 
 | `make grub` | Rebuilds the Multiboot2 kernel and copies it to this machine's SODOS GRUB entry (`/boot/sodos`, via `sudo`); creates the entry with `tools/grub-entry.sh` if it does not exist |
 | `make install-usb` | Writes `os.img` to a device with `dd` (**overwrites the device**) |
 | `make format-disk` | Formats `disk.img` as FAT16 on Linux |
-| `make disk-files` | Copies compiler, libc, examples, fonts and `content/` to `D:` |
+| `make disk-files` | Copies compiler, libc, examples, fonts and `content/` to `D:`; also puts `README.MD` and `README.PT-BR.MD` in `\SODOS` of `D:` and of the USB stick (label `SODOS`, `U:`) when it is plugged in (`tools/usb-docs.sh`, mounts with `udisksctl`) |
 | `make clean` | Removes objects, `os.img` and `executables.c` |
 | `make clean-all` | `clean` + `disk.img`, `disk2.img` and the ISOs |
 
@@ -356,6 +356,7 @@ No Ctrl (Ctrl+C does not interrupt a command); the only combination is `Ctrl+Alt
 | `mouse` | Mouse test, PS/2 or USB/xHCI (position, buttons, raw packet); `Esc` exits |
 | `win` / `win.exe` | Enters the graphical desktop; `Esc` returns to text |
 | `ping host [-n count] [-l bytes]` | ICMP; e.g. `ping 10.0.2.2`, `ping example.com -n 2` |
+| `net [status]` / `net dhcp [renew]` / `net wifi ...` | Card and address; DHCP; WiFi (see [WiFi](#wifi-rtl8852be)) |
 | `dlls` | Loaded SOX modules |
 | `shutdown` | Powers off the machine |
 
@@ -751,9 +752,10 @@ cd src13/c_compiler
 For a new program on the host, put the source in `c_compiler/examples/` (`disk-files` copies `*.c`, `*.h`, `*.cpp`) and run `make disk-files`.
 ## Network
 
-The stack is in `net/net.c`: NE2000 (`ne2k_pci`) in polling mode, ARP, IPv4 with checksum, ICMP, UDP for DNS only and TCP.
+The stack is in `net/net.c`: NE2000 (`ne2k_pci`) or WiFi (RTL8852BE) in polling mode, ARP, IPv4 with checksum, ICMP, UDP (DNS and DHCP) and TCP.
 
-- Fixed IP `10.0.2.15/24`, gateway `10.0.2.2`, DNS `10.0.2.3` (QEMU SLIRP). No DHCP.
+- In QEMU: fixed IP `10.0.2.15/24`, gateway `10.0.2.2`, DNS `10.0.2.3` (SLIRP). `net dhcp` asks for an address over DHCP.
+- DHCP: the lease is renewed automatically halfway through, asking for the same IP (*INIT-REBOOT*); once expired, it asks from scratch. `net dhcp renew` renews right away and `net status` shows how long is left.
 - UDP: DNS A queries with EDNS, up to 4 answers, following CNAME.
 - TCP: **one client connection** at a time, MSS 1460, 16 KB window, segments up to 1000 bytes, retransmission every 500 ms (8 tries), 8 s receive timeout. The HTTP server uses a separate connection.
 - No IPv6, fragmentation, SACK, *window scaling* or congestion control.
@@ -764,6 +766,48 @@ ping example.com -n 2 -l 64
 ```
 
 `ping` uses ICMP with a 2 s timeout between attempts and shows RTT and TTL. The browser and `HTTPS.EXE` use `k_tcp_*`.
+
+### WiFi (RTL8852BE)
+
+Own driver for the laptop's RTL8852BE card (`net/rtw89.c`, a port of Linux `rtw89`) with WPA2-PSK in software (`net/wpa.c`); `net/wifi.c` ties it to the stack. QEMU does not emulate the card, so it is only tested on the laptop. The files live on the USB stick:
+
+| File | Purpose |
+|---|---|
+| `U:\NET\WIFI.CFG` | Networks: `ssid=`, `psk=` (8 to 63 characters), `bssid=`, `channel=` (56 if omitted), `ip=dhcp` (default; fixed `ip=`, `mask=`, `gateway=` and `dns=` are read but not applied yet). Up to 8 networks; each `ssid=` or `[name]` line starts a new one. The first one in file order that is on the air wins |
+| `U:\NET\RTW8852B.BIN` | Firmware (Linux `/lib/firmware/rtw89/rtw8852b_fw-1.bin`) |
+| `U:\NET\HOSTS.CFG` | Optional: `dns=1.1.1.1` (up to 3, before the DHCP DNS) and `IP name` lines |
+| `U:\NET\WIFI.LOG` | Log of each connection, drop and reconnection |
+| `U:\NET\REGS.BIN` | Card registers, saved when the AP does not answer authentication |
+
+```text
+net wifi start [cfg]     connect (reads WIFI.CFG, firmware, listens, authenticates, associates, WPA2, DHCP)
+net wifi status          stage, network, MAC, watchdog, drops and reconnections
+net wifi watch [s]       pings the gateway every 2 s and logs the counters
+net wifi drop [placa]    simulates a drop to test reconnection
+net wifi stop            turns the card off
+net wifi test            WPA2 self-test (SHA1, HMAC, AES, CCMP, PBKDF2)
+```
+
+#### Drops and automatic reconnection
+
+After connecting, a watchdog (`wifi_tick`, called on every `net_poll` outside the stack's waits) does the job of Linux's *mac80211* and *wpa_supplicant*.
+
+A drop is detected by:
+
+- **deauth/disassoc** from the AP;
+- **firmware halt** (`HALT_C2H`): the card stopped DMA waiting for the driver;
+- **stuck TX queue**: 10 sends in a row refused by the card;
+- **silent AP**: more than 4 s without beacons or 16 sends in a row without ACK. Before declaring the drop it sends 3 *probe requests* to the AP; if it answers, the link stays up. This only applies when beacons keep arriving after connecting (otherwise silence means nothing).
+
+Recovery tries right away, then waits 1, 2, 5, 10, 20 and 30 s between attempts:
+
+1. **Associate again** with the same AP without restarting the card (`NO_LINK` in the firmware, authentication, association and 4-way handshake). If the AP is not heard within 0.6 s, the attempt stops there.
+2. **Restart the card** (firmware, MAC, radio) and listen again for the `WIFI.CFG` networks when the firmware halted, the TX queue got stuck, two reassociations failed with the AP on the air, or the AP stayed silent for three attempts.
+3. **IP**: asks DHCP for the same IP; if the server refuses, asks for a new one. With no answer the link stays up and DHCP retries every 15 s. With the same IP, open TCP connections survive.
+
+Reconnection does not write to the screen; each step goes to `WIFI.LOG` as `[vigia]` lines. While an attempt runs (a few seconds; restarting the card takes longer) the system does not respond, since everything is polled.
+
+Limitations: TX power and BB/RF tables for channel 56 (RFE 1, chip version B); no TSSI/IQK/DPK; 11a rates only, TX fixed at OFDM 6 Mbps; no replay check on RX. The card's RX still stops on its own a few seconds after connecting (firmware halt); the watchdog restarts the card, but the firmware's own recovery (SER) has not been ported yet.
 
 ## HTTP server
 
@@ -969,7 +1013,7 @@ Paths relative to `src13/`, except the first row:
 | root | `README.md`, `README.pt-BR.md`, `LICENSE` (GPLv3) and `.git` |
 | `kernel/` | `kmain`, boot, linker, IDT/ISR/IRQ/PIC, memory, scheduler, SOX loader, exports, Ctrl+Alt+Del/reboot (`reboot.c`), the USB mouse and pendrive over xHCI (`xhci.c`) and the ATA driver (`disk.h`) |
 | `fs/` | FAT12/16, MBR partitions, drives and files (`fat`, `partition`, `drives`, `files`) |
-| `net/` | NE2000, ARP/IPv4/ICMP/UDP/TCP/DNS and the HTTP server on port 8797 |
+| `net/` | NE2000, WiFi (RTL8852BE, WPA2), ARP/IPv4/ICMP/UDP/TCP/DNS/DHCP and the HTTP server on port 8797 |
 | `video/` | Desktop, windows, mouse, cursor, VGA font and the graphics mode |
 | `shell/` | Prompt commands (`cmd_*.c`) and `cmd_shutdown.asm` |
 | `disks/` | `mount`, `dir`/`cd`/`md`/`rd`, `cat`, `fdisk`, `format`, `copy`, `disks`, `df`, `dstat` |

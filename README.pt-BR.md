@@ -124,7 +124,7 @@ O tablet USB entrega a posição absoluta do ponteiro, usada pelo desktop. Num P
 | `make grub` | Recompila o kernel Multiboot2 e o copia para a entrada SODOS do GRUB desta máquina (`/boot/sodos`, via `sudo`); cria a entrada com `tools/grub-entry.sh` se ela não existir |
 | `make install-usb` | Grava `os.img` num dispositivo com `dd` (**sobrescreve o dispositivo**) |
 | `make format-disk` | Formata `disk.img` como FAT16 no Linux |
-| `make disk-files` | Copia compilador, libc, exemplos, fontes e `content/` para `D:` |
+| `make disk-files` | Copia compilador, libc, exemplos, fontes e `content/` para `D:`; também põe `README.MD` e `README.PT-BR.MD` em `\SODOS` do `D:` e do pendrive (rótulo `SODOS`, `U:`) quando ele está conectado (`tools/usb-docs.sh`, monta com `udisksctl`) |
 | `make clean` | Apaga objetos, `os.img` e `executables.c` |
 | `make clean-all` | `clean` + `disk.img`, `disk2.img` e as ISOs |
 
@@ -356,6 +356,7 @@ Não há Ctrl (Ctrl+C não interrompe um comando); a única combinação é `Ctr
 | `mouse` | Teste do mouse, PS/2 ou USB/xHCI (posição, botões, pacote cru); `Esc` sai |
 | `win` / `win.exe` | Entra no desktop gráfico; `Esc` volta ao texto |
 | `ping host [-n nº] [-l bytes]` | ICMP; ex.: `ping 10.0.2.2`, `ping example.com -n 2` |
+| `net [status]` / `net dhcp [renew]` / `net wifi ...` | Placa e endereço; DHCP; WiFi (ver [WiFi](#wifi-rtl8852be)) |
 | `dlls` | Módulos SOX carregados |
 | `shutdown` | Desliga a máquina |
 
@@ -752,9 +753,10 @@ Para um programa novo no host, coloque o fonte em `c_compiler/examples/` (o `dis
 
 ## Rede
 
-A pilha está em `net/net.c`: NE2000 (`ne2k_pci`) em polling, ARP, IPv4 com checksum, ICMP, UDP só para DNS e TCP.
+A pilha está em `net/net.c`: NE2000 (`ne2k_pci`) ou WiFi (RTL8852BE) em polling, ARP, IPv4 com checksum, ICMP, UDP (DNS e DHCP) e TCP.
 
-- IP fixo `10.0.2.15/24`, gateway `10.0.2.2`, DNS `10.0.2.3` (SLIRP do QEMU). Não há DHCP.
+- No QEMU: IP fixo `10.0.2.15/24`, gateway `10.0.2.2`, DNS `10.0.2.3` (SLIRP). `net dhcp` pede um endereço por DHCP.
+- DHCP: o aluguel é renovado sozinho na metade do prazo, pedindo o mesmo IP (*INIT-REBOOT*); vencido, pede um do zero. `net dhcp renew` renova na hora e `net status` mostra quanto falta.
 - UDP: consultas DNS A com EDNS, até 4 respostas, seguindo CNAME.
 - TCP: **uma conexão de cliente** por vez, MSS 1460, janela de 16 KB, segmentos de até 1000 bytes, retransmissão a cada 500 ms (8 tentativas), timeout de recepção de 8 s. O servidor HTTP usa uma conexão separada.
 - Sem IPv6, fragmentação, SACK, *window scaling* ou controle de congestionamento.
@@ -765,6 +767,48 @@ ping example.com -n 2 -l 64
 ```
 
 `ping` usa ICMP com timeout de 2 s entre tentativas e mostra RTT e TTL. O navegador e o `HTTPS.EXE` usam `k_tcp_*`.
+
+### WiFi (RTL8852BE)
+
+Driver próprio da placa RTL8852BE do notebook (`net/rtw89.c`, port do `rtw89` do Linux) com WPA2-PSK em software (`net/wpa.c`) e a ligação com a pilha em `net/wifi.c`. O QEMU não emula a placa: só se testa no notebook. Os arquivos ficam no pendrive:
+
+| Arquivo | Para quê |
+|---|---|
+| `U:\NET\WIFI.CFG` | As redes: `ssid=`, `psk=` (8 a 63 caracteres), `bssid=`, `channel=` (56 se omitido), `ip=dhcp` (padrão; `ip=`, `mask=`, `gateway=` e `dns=` fixos são lidos, mas ainda não são aplicados). Até 8 redes; cada `ssid=` ou linha `[nome]` começa uma nova. Vale a primeira, na ordem do arquivo, que estiver no ar |
+| `U:\NET\RTW8852B.BIN` | Firmware (`/lib/firmware/rtw89/rtw8852b_fw-1.bin` do Linux) |
+| `U:\NET\HOSTS.CFG` | Opcional: `dns=1.1.1.1` (até 3, antes do DNS do DHCP) e linhas `IP nome` |
+| `U:\NET\WIFI.LOG` | Log de cada conexão, queda e reconexão |
+| `U:\NET\REGS.BIN` | Registradores da placa, gravados quando o AP não responde à autenticação |
+
+```text
+net wifi start [cfg]     conecta (lê WIFI.CFG, firmware, escuta, autentica, associa, WPA2, DHCP)
+net wifi status          etapa, rede, MAC, vigia, quedas e reconexões
+net wifi watch [s]       pinga o gateway a cada 2 s e anota os contadores no log
+net wifi drop [placa]    simula uma queda para testar a reconexão
+net wifi stop            desliga a placa
+net wifi test            autoteste do WPA2 (SHA1, HMAC, AES, CCMP, PBKDF2)
+```
+
+#### Quedas e reconexão automática
+
+Depois de conectar, um vigia (`wifi_tick`, chamado a cada `net_poll` fora das esperas da pilha) faz o papel do *mac80211* e do *wpa_supplicant* do Linux.
+
+A queda é percebida por:
+
+- **deauth/disassoc** do AP;
+- **firmware em halt** (`HALT_C2H`): a placa parou o DMA esperando o driver;
+- **fila de TX parada**: 10 envios seguidos recusados pela placa;
+- **AP calado**: mais de 4 s sem beacons ou 16 envios seguidos sem ACK. Antes de declarar a queda, manda 3 *probe requests* ao AP; se ele responder, segue conectado. Isso só vale quando os beacons chegam depois de conectar (senão o silêncio não diz nada).
+
+A recuperação tenta logo e depois espera 1, 2, 5, 10, 20 e 30 s entre as tentativas:
+
+1. **Associar de novo** no mesmo AP, sem religar a placa (`NO_LINK` no firmware, autenticação, associação e handshake de 4 vias). Se o AP não aparece em 0,6 s, a tentativa acaba ali.
+2. **Religar a placa** (firmware, MAC, rádio) e escutar de novo as redes do `WIFI.CFG` quando o firmware parou, a fila de TX travou, duas reassociações falharam com o AP no ar ou o AP ficou calado em três tentativas.
+3. **IP**: pede o mesmo IP ao DHCP; se o servidor recusar, pede um novo. Sem resposta, o link fica de pé e o DHCP tenta de novo a cada 15 s. Com o mesmo IP, as conexões TCP abertas continuam.
+
+A reconexão roda sem escrever na tela; cada passo sai no `WIFI.LOG` em linhas `[vigia]`. Enquanto uma tentativa roda (alguns segundos; religar a placa leva mais), o sistema não responde, porque tudo é por polling.
+
+Limitações: tabelas de potência e de BB/RF do canal 56 (RFE 1, chip versão B); sem TSSI/IQK/DPK; só taxas 11a, TX fixo em OFDM 6 Mbps; sem verificação de *replay* no RX. O RX da placa ainda para sozinho alguns segundos depois de conectar (firmware em halt); o vigia religa a placa, mas a recuperação do próprio firmware (SER) ainda não foi portada.
 
 ## Servidor HTTP
 
@@ -970,7 +1014,7 @@ Caminhos relativos a `src13/`, exceto a primeira linha:
 | raiz | `README.md`, `README.pt-BR.md`, `LICENSE` (GPLv3) e `.git` |
 | `kernel/` | `kmain`, boot, linker, IDT/ISR/IRQ/PIC, memória, escalonador, loader SOX, exports, Ctrl+Alt+Del/reinício (`reboot.c`), o mouse e o pendrive USB pelo xHCI (`xhci.c`) e o driver ATA (`disk.h`) |
 | `fs/` | FAT12/16, partições MBR, unidades e arquivos (`fat`, `partition`, `drives`, `files`) |
-| `net/` | NE2000, ARP/IPv4/ICMP/UDP/TCP/DNS e o HTTP da porta 8797 |
+| `net/` | NE2000, WiFi (RTL8852BE, WPA2), ARP/IPv4/ICMP/UDP/TCP/DNS/DHCP e o HTTP da porta 8797 |
 | `video/` | Desktop, janelas, mouse, cursor, fonte VGA e o modo gráfico |
 | `shell/` | Comandos do prompt (`cmd_*.c`) e `cmd_shutdown.asm` |
 | `disks/` | `mount`, `dir`/`cd`/`md`/`rd`, `cat`, `fdisk`, `format`, `copy`, `disks`, `df`, `dstat` |
