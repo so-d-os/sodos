@@ -4,7 +4,7 @@
 # Chamado por "make disk-files". Sem build do QEMU, avisa e nao falha.
 # Vao o QEMU.EXE, o firmware que a maquina isapc usa (o -L aponta para a
 # propria pasta: o QEMU procura o firmware junto do executavel), os guests de
-# teste HELLO.ELF e ECO.ELF, o disquete FreeDOS e os .BAT de exemplo (sodos/disk/).
+# teste HELLO.ELF e ECO.ELF, o disquete FreeDOS, o Tiny Core Linux e os .BAT de exemplo (sodos/disk/).
 DISK=$(realpath "$1")
 S=$(cd "$(dirname "$0")/.." && pwd)
 V=${QEMU_VERSION:-9.2.0}
@@ -42,13 +42,24 @@ if sh "$S/sodos/guest/build.sh" >/dev/null 2>&1; then
   done
 fi
 # FreeDOS: disquete de 1,44 MB que boota no A:\> pela serial (scripts/make-freedos.sh)
-if sh "$S/scripts/make-freedos.sh" >/dev/null 2>&1; then
+# stderr fica visivel: se o script falhar, o motivo aparece no make disk-files.
+if sh "$S/scripts/make-freedos.sh" >/dev/null; then
   for g in FREEDOS.IMG SERCON.BIN; do
     put "$S/build/out/$g" "$g"
     n=$((n + 1))
   done
 else
   echo "QEMU: sem FreeDOS (scripts/make-freedos.sh falhou); DOS.BAT nao vai bootar."
+fi
+# Tiny Core Linux com X (scripts/make-tinycore.sh): 43 MB, LINUX.BAT
+if sh "$S/scripts/make-tinycore.sh" >/dev/null; then
+  for g in VMLINUZ CORE.GZ TINYCORE.ISO; do
+    [ -s "$S/build/out/$g" ] || { echo "QEMU: falta $S/build/out/$g"; exit 1; }
+    put "$S/build/out/$g" "$g"
+    n=$((n + 1))
+  done
+else
+  echo "QEMU: sem Tiny Core (scripts/make-tinycore.sh falhou); LINUX.BAT nao vai bootar."
 fi
 for f in "$S"/sodos/disk/*; do
   [ -f "$f" ] || continue

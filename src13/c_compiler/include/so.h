@@ -184,6 +184,10 @@ void k_gui_fill(int x, int y, int w, int h, unsigned rgb);
 void k_gui_text(int x, int y, const char* s, int n, unsigned fg, unsigned bg, int flags);
 void k_gui_present(void);
 int k_gui_event(int* ev, int timeout_ms);
+/* 1: a janela recebe o teclado em scancodes (GUI_EV_SCAN, apertar e soltar,
+ * Ctrl/Alt/Shift inclusive) e todo movimento do rato (GUI_EV_MOVE) quando
+ * tem o foco. Para emuladores (QEMU). Ctrl+F1..F7 continuam do kernel. */
+int k_gui_raw(int on);
 /* rgba = R,G,B,A por pixel. No modo retro A < 128 nao desenha; no modo
  * avancado o pixel e misturado com o que ja esta na janela. */
 void k_gui_pixels(int x, int y, int w, int h, const void* rgba, int stride);

@@ -487,6 +487,7 @@ static void k_gui_text(int x, int y, const char* s, int n, uint32_t fg, uint32_t
 }
 static void k_gui_present(void) { gui_present(); }
 static int k_gui_event(int* ev, int timeout_ms) { return gui_event(ev, timeout_ms); }
+static int k_gui_raw(int on) { return gui_raw_set(on); }
 static void k_gui_pixels(int x, int y, int w, int h, const void* rgba, int stride) {
   gui_pixels(x, y, w, h, rgba, stride);
 }
@@ -866,6 +867,7 @@ static const struct kexp table[] = {
   EXP(k_gui_text),
   EXP(k_gui_present),
   EXP(k_gui_event),
+  EXP(k_gui_raw),
   EXP(k_gui_pixels),
   EXP(k_gui_quality),
   EXP(k_win_bg),

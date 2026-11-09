@@ -41,7 +41,11 @@ case "$1" in
   start)
     [ -f "$VM/disk.img" ] || sh "$0" init
     if running; then echo "ja rodando"; exit 0; fi
-    qemu-system-x86_64 -m 2048 -display none -vga std \
+    # KVM quando o usuario pode abrir /dev/kvm (grupo kvm) e a CPU tem
+    # virtualizacao (no WSL: nestedVirtualization); senao TCG.
+    ACCEL=tcg
+    if [ -r /dev/kvm ] && [ -w /dev/kvm ] && grep -qE 'vmx|svm' /proc/cpuinfo; then ACCEL=kvm; fi
+    qemu-system-x86_64 -accel $ACCEL -m 2048 -display none -vga std \
       -netdev user,id=n0,hostfwd=tcp:127.0.0.1:$PORT-:8797 -device ne2k_pci,netdev=n0 \
       -boot order=c -serial file:"$VM/serial.log" \
       -drive format=raw,file="$VM/os.img",if=ide,index=0 \

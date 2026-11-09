@@ -29,6 +29,9 @@ void vga_force_text_mode(void);
 #define GUI_EV_UP    4
 #define GUI_EV_DRAG  5  /* movimento com o botao esquerdo apertado */
 #define GUI_EV_WHEEL 6  /* roda do rato: ev[3] > 0 desce, < 0 sobe (passos) */
+/* So com k_gui_raw(1) (emuladores): entrada crua da janela com foco. */
+#define GUI_EV_SCAN  7  /* ev[3] = byte do teclado PS/2 (set 1, com E0 e soltar) */
+#define GUI_EV_MOVE  8  /* ev[1]=x ev[2]=y ev[3]=botoes (1 esq, 2 dir, 4 meio) */
 #define GUI_KEY_UP    0x101
 #define GUI_KEY_DOWN  0x102
 #define GUI_KEY_LEFT  0x103
@@ -53,6 +56,8 @@ void gui_present(void);
 int gui_event(int* ev, int timeout_ms);
 /* 1 se a janela esta aberta e ha tecla, clique ou fechar na fila. */
 int gui_input_pending(void);
+/* Entrada crua (GUI_EV_SCAN/GUI_EV_MOVE) para a janela do programa: 0 ok. */
+int gui_raw_set(int on);
 void gui_pixels(int x, int y, int w, int h, const void* rgba, int stride);
 /* chamado pelo WIN em volta de mod_exec: so ai a janela pode abrir */
 void gui_session(int allowed);
