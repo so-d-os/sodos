@@ -329,7 +329,10 @@ No Ctrl (Ctrl+C does not interrupt a command); the only combination is `Ctrl+Alt
 | `md dir` | Creates a directory (FAT16 only) |
 | `rd dir` | Removes an empty directory (FAT16 only) |
 | `del file` / `erase file` | Deletes a file (FAT16, or `D:` in RAM). `*` and `?` delete every match (`del *.tmp`, `del u:\temp\*.log`); `del *.*` asks first |
-| `type file` / `cat file` | Shows a whole file from any drive. UTF-8 text (made on Linux) is shown with accents |
+| `type file` / `cat file` | Shows a whole file from any drive. UTF-8 text (made on Linux) is shown with accents. Several files and `*`/`?` (`type a.txt *.bat`): each one comes after its name, like `TYPE` in cmd |
+| `find [/V] [/C] [/N] [/I] "text" [file ...]` | MS-DOS `FIND`: lines with (or, with `/V`, without) the text; `/C` count, `/N` line numbers, `/I` ignore case. Files take `*`/`?`; with no file it reads the pipe (`dir \| find "EXE"`). `find /c /v "" x.txt` counts lines. Exit code 0 found, 1 not found, 2 error |
+| `grep ...` | Same as `find`; also takes `-v -c -n -i` |
+| `tail [/n] [file ...]` | Last `n` lines (10 by default) like the Resource Kit `TAIL`; also `-n`, `/N n`, `/N:n`. With no file it reads the pipe (`dir \| tail /5`) |
 | `more file` | Shows a file one screen at a time: `Space` next screen, `Enter` next line, `q`/`Esc`/`Ctrl+C` quits |
 | `cmd \| more` | Pipe: the output of the left command goes to the right one (`type x.txt \| more`, `dir /s \| more`, `help \| more`). One `\|` per line; an `.EXE` on the right reads the pipe as its input |
 | `keyb [br\|us]` | Keyboard layout: `br` ABNT2 (default: `ç`, dead keys for ´, grave, ~, ^ and ¨, AltGr) or `us`. Saved in `KEYB.CFG` on `D:` (or `U:`) and loaded at boot |

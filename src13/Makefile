@@ -115,7 +115,7 @@ kernel/irq_stubs.o: kernel/irq_stubs.asm
 	$(AS) -f elf64 kernel/irq_stubs.asm -o kernel/irq_stubs.o
 
 # Comandos do shell (pasta shell/)
-SHELL_CMD_C = shell/cmd_help.c shell/cmd_keyb.c shell/cmd_more.c shell/cmd_echo.c shell/cmd_ls.c shell/cmd_clear.c shell/cmd_cls.c shell/cmd_history.c shell/cmd_type.c shell/cmd_pause.c shell/cmd_load.c shell/cmd_edit.c shell/cmd_asm.c shell/cmd_free.c shell/cmd_visual.c shell/cmd_mouse.c shell/cmd_usb.c shell/cmd_win.c shell/cmd_ping.c shell/cmd_dlls.c shell/cmd_net.c
+SHELL_CMD_C = shell/cmd_help.c shell/cmd_keyb.c shell/cmd_more.c shell/cmd_echo.c shell/cmd_ls.c shell/cmd_clear.c shell/cmd_cls.c shell/cmd_history.c shell/cmd_type.c shell/cmd_find.c shell/cmd_tail.c shell/cmd_pause.c shell/cmd_load.c shell/cmd_edit.c shell/cmd_asm.c shell/cmd_free.c shell/cmd_visual.c shell/cmd_mouse.c shell/cmd_usb.c shell/cmd_win.c shell/cmd_ping.c shell/cmd_dlls.c shell/cmd_net.c
 SHELL_CMD_O = $(SHELL_CMD_C:.c=.o)
 
 # Comandos de discos (pasta disks/)
@@ -165,6 +165,8 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(CC) $(CFLAGS) -c shell/cmd_cls.c -o shell/cmd_cls.o
 	$(CC) $(CFLAGS) -c shell/cmd_history.c -o shell/cmd_history.o
 	$(CC) $(CFLAGS) -c shell/cmd_type.c -o shell/cmd_type.o
+	$(CC) $(CFLAGS) -c shell/cmd_find.c -o shell/cmd_find.o
+	$(CC) $(CFLAGS) -c shell/cmd_tail.c -o shell/cmd_tail.o
 	$(CC) $(CFLAGS) -c shell/cmd_pause.c -o shell/cmd_pause.o
 	$(CC) $(CFLAGS) -c shell/cmd_load.c -o shell/cmd_load.o
 	$(CC) $(CFLAGS) -c shell/cmd_edit.c -o shell/cmd_edit.o

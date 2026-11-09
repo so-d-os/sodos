@@ -140,6 +140,9 @@ int cmd_rd(int argc, char** argv);
 int cmd_del(int argc, char** argv);
 int cmd_cat(int argc, char** argv);
 int cmd_more(int argc, char** argv);
+int cmd_find(int argc, char** argv);
+int cmd_grep(int argc, char** argv);
+int cmd_tail(int argc, char** argv);
 int cmd_keyb(int argc, char** argv);
 /* Le KEYB.CFG (br/us) de D:\ ou U:\. Chamado no boot. */
 void keyb_load_cfg(void);
