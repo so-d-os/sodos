@@ -7784,8 +7784,8 @@ gfx_restart:
 
   serial_puts("[visual] entrada no loop (ESC sai)\n");
 
-  /* Polling PS/2: mascara o timer. Teclado fica unmasked (handler so envia EOI). */
-  pic_mask_irq(0);
+  /* O IRQ0 (timer) fica ligado: o kernel conta os ticks e o TOP mostra o uso.
+   * O teclado continua por polling (IRQ1 mascarado). */
   pic_mask_irq(1);
 
   if (session == GFX_SESSION_WIN) {
@@ -7940,7 +7940,7 @@ gfx_session_leave:
   gfx_session_on = 0;
   gpu_close();
   gfx_offscreen = 0;   /* com driver ele ficava 1 entre os quadros */
-  pic_mask_all();
+  pic_mask_irq(1);     /* so o teclado: o IRQ0 do timer continua ligado */
 
   cursor_restore();
   gfx_mode_sel = -1;

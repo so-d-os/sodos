@@ -194,6 +194,8 @@ Só o **IRQ0 (PIT)** está habilitado, e o handler apenas conta ticks: teclado, 
 
 Não há preempção: cada programa roda até devolver o controle em `gui_event`, `gui_present`, leitura de rede ou de disco. No desktop, até **8 programas** rodam como tarefas cooperativas, cada uma com pilha de 48 KB; o desktop alterna entre elas e desenha as janelas. O tick do PIT (IRQ0, ~1000 Hz) já é entregue e contado; ele é a base do escalonador preemptivo, que ainda não está ligado.
 
+As demais CPUs já são acordadas: o kernel as descobre no MADT do ACPI, liga o APIC local e sobe cada AP com INIT-SIPI por um trampolim em modo real (`kernel/ap_tramp.asm`) que entra em long mode e chama `ap_main`. Os APs só provam que executam em paralelo (cada um conta o próprio laço por 200 ms, registrado na COM1) e ficam parados em `hlt`; o escalonador ainda roda só na BSP. O `make run` usa `-smp 4` (`SMP=1` desliga). O driver ATA salva e restaura a flag de interrupção em cada setor, e a sessão do WIN deixa o IRQ0 desmascarado, então o timer continua contando durante disco e vídeo; a aba **CPU** do `top` mostra a quantidade, o estado e o uso de cada CPU.
+
 ## Discos e FAT
 
 | Unidade | O que é |

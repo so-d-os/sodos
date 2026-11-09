@@ -2,7 +2,7 @@
  * Telas no padrao do SPECIAL (Doutor de Disco): janelas com sombra, bordas e
  * blocos desenhados com k_font_set; barras de cima e de teclas como no MC.
  * Compila com o CC do proprio sistema:
- *   cc -o TOP.EXE top.c tela.c dados.c procs.c mapa.c video.c */
+ *   cc -o TOP.EXE top.c tela.c dados.c procs.c mapa.c video.c cpu.c */
 #ifndef TOP_H
 #define TOP_H
 
@@ -105,7 +105,7 @@ void linha(int r, int c, int n, int ch, int cor);
 void pinta(int r, int c, int n, int cor);   /* troca so a cor */
 int tam(const char* s);
 void fundo(void);
-/* barra de cima: abas e relogio; aba = 0 processos, 1 mapa, 2 video */
+/* barra de cima: abas e relogio; aba = 0 processos, 1 mapa, 2 video, 3 cpu */
 void menu_topo(int aba);
 /* barra de teclas do MC: rotulos[0] e o F1 */
 void teclas(const char* const* rotulos);
@@ -175,5 +175,9 @@ int tela_mapa(unsigned* destaque);
 /* ---------- video.c ---------- */
 /* Placa, VRAM e RAM do modo grafico. Devolve 1 para voltar aos processos, 0 para sair. */
 int tela_video(void);
+
+/* ---------- cpu.c ---------- */
+/* CPUs do SMP: quantas, uso e estado de cada uma. Devolve 1 para os processos. */
+int tela_cpu(void);
 
 #endif

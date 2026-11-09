@@ -45,6 +45,7 @@ int format_fat16(uint32_t drive, uint32_t lba_start, uint32_t total_sectors, con
 #include "clip.h"
 #include "vt.h"
 #include "kexports.h"
+#include "smp.h"
 
 const struct executable_entry* find_executable(const char* name) {
   for (int i = 0; i < executable_count; i++) {
@@ -194,10 +195,9 @@ static void ata_set_last(uint32_t drive, uint32_t lba, uint16_t status_port, uin
   last_ata_error = (last_ata_status & 0x01) ? (uint8_t)inb(base_port + 1) : 0;
 }
 
-// Função para ler setor do disco usando ATA PIO
-// Executa com interrupts desabilitadas (sem sti). Retorna 0 sucesso; -1/-2/-3 falha.
-int disk_read_sector(uint32_t drive, uint32_t lba, void* buffer) {
-  __asm__ volatile ("cli");
+// Le um setor com interrupcoes desligadas (a funcao publica salva/restaura IF).
+// Retorna 0 sucesso; -1/-2/-3 falha.
+static int disk_read_sector_locked(uint32_t drive, uint32_t lba, void* buffer) {
   TRACE_FUNC("disk_read");
   trace_event("disk_read_args", drive, lba, (uint32_t)buffer);
   if (buffer == 0) return -2;
@@ -230,10 +230,19 @@ int disk_read_sector(uint32_t drive, uint32_t lba, void* buffer) {
   return 0;
 }
 
-// Função para escrever setor do disco usando ATA PIO
-// Executa com interrupts desabilitadas (sem sti). Retorna 0 sucesso; -1/-2/-3 falha.
-int disk_write_sector(uint32_t drive, uint32_t lba, void* buffer) {
-  __asm__ volatile ("cli");
+int disk_read_sector(uint32_t drive, uint32_t lba, void* buffer) {
+  uint64_t fl;
+  int rc;
+  __asm__ volatile ("pushfq; pop %0" : "=r"(fl));
+  __asm__ volatile ("cli" ::: "memory");
+  rc = disk_read_sector_locked(drive, lba, buffer);
+  if (fl & 0x200u) __asm__ volatile ("sti" ::: "memory");
+  return rc;
+}
+
+// Escreve um setor com interrupcoes desligadas (a publica salva/restaura IF).
+// Retorna 0 sucesso; -1/-2/-3 falha.
+static int disk_write_sector_locked(uint32_t drive, uint32_t lba, void* buffer) {
   TRACE_FUNC("disk_write");
   trace_event("disk_write_args", drive, lba, (uint32_t)buffer);
   if (buffer == 0) return -2;
@@ -273,6 +282,16 @@ int disk_write_sector(uint32_t drive, uint32_t lba, void* buffer) {
     return -3;
   }
   return 0;
+}
+
+int disk_write_sector(uint32_t drive, uint32_t lba, void* buffer) {
+  uint64_t fl;
+  int rc;
+  __asm__ volatile ("pushfq; pop %0" : "=r"(fl));
+  __asm__ volatile ("cli" ::: "memory");
+  rc = disk_write_sector_locked(drive, lba, buffer);
+  if (fl & 0x200u) __asm__ volatile ("sti" ::: "memory");
+  return rc;
 }
 
 void vga_put_at(int r, int c, unsigned char ch) {
@@ -1642,6 +1661,21 @@ static void bootinfo_panic(const char* msg) {
   }
 }
 
+/* Mede os ticks do IRQ0 por 200 ms. Serve de sanidade antes e depois do SMP:
+ * o LAPIC nao pode ter derrubado a entrega do PIT pelo PIC. */
+static void irq0_probe(const char* tag) {  uint64_t t0, dt;
+  net_delay(100);
+  t0 = irq_ticks();
+  net_delay(200);
+  dt = irq_ticks() - t0;
+  serial_puts("[irq0]");
+  serial_puts(tag);
+  serial_puts(": 0x");
+  serial_hex32((uint32_t)dt);
+  serial_puts(" ticks em 200 ms");
+  serial_puts(dt >= 100 ? " (ok)\n" : " (FALHOU: IRQ0 nao chega)\n");
+}
+
 void kmain(const struct BootInfo* bi) {
   __asm__ volatile ("cli");
 
@@ -1692,20 +1726,9 @@ void kmain(const struct BootInfo* bi) {
   puts_k("SO DOS 1.0\n");
   puts_k("64-bit kernel. Type HELP or WIN.\n\n");
   net_init();
-  /* Prova de que o IRQ0 chega: o net_init deixou o PIT a ~1000 Hz, entao
-   * 200 ms devem render ~200 ticks. Se der 0, o IRQ0 nao esta sendo
-   * entregue (PIC/IDT) e o resto da fase B nao tem base. */
-  {
-    uint64_t t0, dt;
-    net_delay(100);
-    t0 = irq_ticks();
-    net_delay(200);
-    dt = irq_ticks() - t0;
-    serial_puts("[irq0] ");
-    serial_hex32((uint32_t)dt);
-    serial_puts(" ticks em 200 ms");
-    serial_puts(dt >= 100 ? " (ok)\n" : " (FALHOU: IRQ0 nao chega)\n");
-  }
+  irq0_probe("");
+  smp_init();
+  irq0_probe(" pos-smp");
   httpd_start(8797);
   update_cursor();
 

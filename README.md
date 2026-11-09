@@ -194,6 +194,8 @@ Only **IRQ0 (the PIT)** is enabled, and its handler just counts ticks: keyboard,
 
 There is no preemption: each program runs until it returns control in `gui_event`, `gui_present`, network read or disk read. On the desktop, up to **8 programs** run as cooperative tasks, each with a 48 KB stack; the desktop switches between them and draws the windows. The PIT tick (IRQ0, ~1000 Hz) is already delivered and counted; it is the base for the preemptive scheduler, which is not enabled yet.
 
+The other CPUs are already brought up: the kernel finds them in the ACPI MADT, enables the local APIC and starts each AP with INIT-SIPI through a real-mode trampoline (`kernel/ap_tramp.asm`) that switches to long mode and calls `ap_main`. The APs only prove they run in parallel (each one counts its own loop for 200 ms, logged on COM1) and then park in `hlt`; the scheduler still runs on the BSP only. `make run` uses `-smp 4` (`SMP=1` disables it). The ATA driver saves and restores the interrupt flag around each sector, and the WIN session leaves IRQ0 unmasked, so the timer keeps ticking during disk I/O and graphics; the **CPU** tab of `top` shows the count, the state and the usage of each CPU.
+
 ## Disks and FAT
 
 | Drive | What it is |

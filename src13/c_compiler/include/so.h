@@ -140,6 +140,20 @@ struct k_vram {
 };
 int k_vram(struct k_vram* v);
 
+/* CPUs (SMP): quantas o kernel acordou e o que cada uma esta fazendo.
+ * Uso em milesimos: busy_ms / (busy_ms + idle_ms). index 0 = BSP. */
+struct k_cpu_stat {
+  unsigned id;        /* APIC id */
+  unsigned index;     /* 0 = BSP */
+  unsigned online;    /* 1 = a CPU subiu */
+  unsigned state;     /* 0 = hlt/parada, 1 = ativa */
+  unsigned busy_ms;   /* tempo trabalhando, desde o boot */
+  unsigned idle_ms;   /* tempo parada (hlt), desde o boot */
+  unsigned pad[2];
+};
+int k_cpu_count(void);
+int k_cpu_stat(int i, struct k_cpu_stat* out);
+
 /* processos e DLLs */
 void k_exit(int code);
 int k_exec(const char* path, int argc, char** argv);

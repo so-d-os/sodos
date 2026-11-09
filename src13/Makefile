@@ -33,7 +33,10 @@ APP_LDFLAGS=-m elf_i386
 # KVM quando o usuario esta no grupo kvm (WSL: /dev/kvm); senao TCG. Com KVM a
 # emulacao aninhada (QEMU dentro do SODOS, qemu/README.md) fica usavel.
 QEMU_ACCEL := $(shell [ -r /dev/kvm ] && [ -w /dev/kvm ] && grep -qE 'vmx|svm' /proc/cpuinfo && echo kvm || echo tcg)
-QEMU=qemu-system-x86_64 -accel $(QEMU_ACCEL) -m 4096 -usb -device usb-tablet
+# SMP: o kernel acha as CPUs no MADT e sobe os APs (INIT-SIPI). Hoje eles
+# provam a execucao paralela e ficam em hlt; o escalonador ainda e da BSP.
+SMP ?= 4
+QEMU=qemu-system-x86_64 -accel $(QEMU_ACCEL) -m 4096 -smp $(SMP) -usb -device usb-tablet
 
 # VirtualBox (Windows/WSL).  wslpath/cygpath convertem o caminho para o
 # PowerShell; em Linux nativo o alvo vbox avisa que nao ha suporte.
@@ -117,6 +120,12 @@ kernel/isr_stubs.o: kernel/isr_stubs.asm
 kernel/irq_stubs.o: kernel/irq_stubs.asm
 	$(AS) -f elf64 kernel/irq_stubs.asm -o kernel/irq_stubs.o
 
+# Trampolim dos APs: binario cru (nasm -f bin) embutido no .rodata.
+kernel/ap_tramp.bin: kernel/ap_tramp.asm
+	$(AS) -f bin -o $@ $<
+kernel/ap_blob.o: kernel/ap_blob.asm kernel/ap_tramp.bin
+	$(AS) -f elf64 kernel/ap_blob.asm -o $@
+
 # Comandos do shell (pasta shell/)
 SHELL_CMD_C = shell/cmd_help.c shell/cmd_keyb.c shell/cmd_more.c shell/cmd_echo.c shell/cmd_ls.c shell/cmd_clear.c shell/cmd_cls.c shell/cmd_history.c shell/cmd_type.c shell/cmd_find.c shell/cmd_tail.c shell/cmd_pause.c shell/cmd_load.c shell/cmd_edit.c shell/cmd_asm.c shell/cmd_free.c shell/cmd_visual.c shell/cmd_mouse.c shell/cmd_usb.c shell/cmd_win.c shell/cmd_ping.c shell/cmd_dlls.c shell/cmd_net.c
 SHELL_CMD_O = $(SHELL_CMD_C:.c=.o)
@@ -127,7 +136,7 @@ DISKS_CMD_O = $(DISKS_CMD_C:.c=.o)
 
 CMD_O = $(SHELL_CMD_O) $(DISKS_CMD_O)
 
-kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c video/gpu.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/reboot.c kernel/xhci.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c kernel/mm.c net/net.c net/httpd.c net/wpa.c net/rtw89.c net/wifi.c kernel/module.c kernel/sched.c kernel/kexports.c kernel/keymap.c kernel/clip.c kernel/vt.c $(SHELL_CMD_C) $(DISKS_CMD_C) shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
+kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c video/gpu.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/smp.c kernel/reboot.c kernel/xhci.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c kernel/mm.c net/net.c net/httpd.c net/wpa.c net/rtw89.c net/wifi.c kernel/module.c kernel/sched.c kernel/kexports.c kernel/keymap.c kernel/clip.c kernel/vt.c $(SHELL_CMD_C) $(DISKS_CMD_C) kernel/ap_blob.o shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
 	$(CC) $(CFLAGS) -c kernel/kernel.c -o kernel/kernel.o
 	$(CC) $(CFLAGS) -c kernel/bootinfo.c -o kernel/bootinfo.o
 	$(CC) $(CFLAGS) -c kernel/mm.c -o kernel/mm.o
@@ -158,6 +167,7 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(CC) $(CFLAGS) -c kernel/isr.c -o kernel/isr.o
 	$(CC) $(CFLAGS) -c kernel/pic.c -o kernel/pic.o
 	$(CC) $(CFLAGS) -c kernel/irq.c -o kernel/irq.o
+	$(CC) $(CFLAGS) -c kernel/smp.c -o kernel/smp.o
 	$(CC) $(CFLAGS) -c kernel/reboot.c -o kernel/reboot.o
 	$(CC) $(CFLAGS) -c kernel/xhci.c -o kernel/xhci.o
 	$(CC) $(CFLAGS) -c kernel/interrupt_stack.c -o kernel/interrupt_stack.o
@@ -199,11 +209,11 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(AS) -f elf64 kernel/irq_stubs.asm -o kernel/irq_stubs.o
 	$(AS) -f elf64 kernel/modrun.asm -o kernel/modrun.o
 	$(AS) -f elf64 kernel/kernel_entry.asm -o kernel/kernel_entry.o
-	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o kernel/mm.o net/net.o net/httpd.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/sched.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o kernel/mm.o net/net.o net/httpd.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/sched.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 # Mesmo kernel de kernel.elf, com o stub Multiboot2 na frente. O GRUB carrega este ELF.
 kernel_multiboot.elf: kernel.elf kernel/multiboot_header.o kernel/linker_multiboot.ld
-	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o kernel/mm.o net/net.o net/httpd.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/sched.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o kernel/mm.o net/net.o net/httpd.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/sched.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 
 kernel.bin: kernel.elf
@@ -471,7 +481,7 @@ grow-disk:
 # exemplos e os fontes do proprio cc/link (para recompilar dentro do SO).
 # Fontes do MC em D:\SRC\MC, do TOP em D:\SRC\TOP e do git em D:\SRC\GIT, compilados no proprio SODOS por BUILD.BAT.
 MC_SRC = mc/mc.h mc/mc.c mc/scr.c mc/panel.c mc/ops.c mc/view.c mc/BUILD.BAT
-TOP_SRC = top/top.h top/top.c top/tela.c top/dados.c top/procs.c top/mapa.c top/video.c top/BUILD.BAT
+TOP_SRC = top/top.h top/top.c top/tela.c top/dados.c top/procs.c top/mapa.c top/video.c top/cpu.c top/BUILD.BAT
 GIT_SRC = git/git.h git/git.c git/http.c git/pack.c git/sha1.c git/zinf.c git/BUILD.BAT git/GETSODOS.BAT
 
 DISK_FILES = c_compiler/out/*.EXE c_compiler/out/*.DLL c_compiler/out/*.OBJ \

@@ -16,6 +16,7 @@
 #include "bootinfo.h"
 #include "httpd.h"
 #include "vt.h"
+#include "smp.h"
 
 void mod_exit(int code);
 void shell_read_line(char* buf, int max);
@@ -741,6 +742,10 @@ static void map_walk(void* arg, int area, uint64_t addr, uint64_t size, int used
  * que esse programa ocupa. Devolve quantas celulas usou. */
 static int k_vram(struct k_vram* v) { return win_vram_info(v); }
 
+/* CPUs (SMP): quantas o kernel acordou e o estado de cada uma (TOP, aba CPU). */
+static int k_cpu_count(void) { return smp_cpu_count(); }
+static int k_cpu_stat(int i, struct k_cpu_stat* out) { return smp_cpu_stat(i, out); }
+
 static int k_memmap(uint32_t* kb, int cells, uint32_t* cell_kb, uint32_t pid) {
   const struct BootInfo* bi = bootinfo_get();
   const struct BootMemEntry* map = bootinfo_mem_map(bi);
@@ -838,6 +843,8 @@ static const struct kexp table[] = {
   EXP(k_ps),
   EXP(k_memmap),
   EXP(k_vram),
+  EXP(k_cpu_count),
+  EXP(k_cpu_stat),
   EXP(k_exit),
   EXP(k_exec),
   EXP(k_shell),
