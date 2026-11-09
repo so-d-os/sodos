@@ -1775,6 +1775,21 @@ int rtw_sta_connect(const uint8_t* mac, const uint8_t* bssid, uint32_t aid) {
   return 0;
 }
 
+/* Volta o macid 0 para NO_LINK (join info e porta), como o rtw_sta_init deixa,
+ * para associar de novo sem recriar a estacao. */
+int rtw_sta_disconnect(const uint8_t* mac, const uint8_t* bssid) {
+  uint8_t p[4];
+  uint32_t v;
+  put32(p, 0u | (1u << 8) | (1u << 26));
+  if (h2c_cmd(1, 0x8, 0x0, 0, 1, p, 4)) return -1;
+  v = r32(R_AX_PORT_CFG_P0);
+  v = (v & ~B_AX_NET_TYPE_MASK) | field(B_AX_NET_TYPE_MASK, 0);
+  w32(R_AX_PORT_CFG_P0, v);
+  if (cam_update(mac, bssid, 0, 0)) return -1;
+  rlog("[rtw] desconectado (NO_LINK)\n");
+  return 0;
+}
+
 /* rtw89_mac_write_lte / read_lte: registradores do PTA (coexistencia com o BT). */
 static int lte_wait(void) {
   int i;
@@ -2092,6 +2107,13 @@ void rtw_dump_regs(uint8_t* out) {
 
 /* Estado de erro da placa quando a rede para: pedido de SER do firmware
  * (HALT_C2H), ISRs, DLE e quanto os aneis de RX chegaram a encher. */
+/* Codigo do halt (HALT_C2H, ex. 0x10 = erro L0 promovido a L1) se o
+ * firmware parou o DMA esperando o driver; 0 se nao. */
+uint32_t rtw_fw_halted(void) {
+  if (!mmio || !r32(R_AX_HALT_C2H_CTRL)) return 0;
+  return r32(R_AX_HALT_C2H) ? r32(R_AX_HALT_C2H) : 1u;
+}
+
 void rtw_log_stall(void) {
   uint32_t now = net_ms();
   int q;

@@ -55,6 +55,8 @@ void rtw_rfk_init(void);
 int rtw_sta_init(const uint8_t* mac, const uint8_t* bssid);
 /* Depois da associacao: CAM, firmware e porta no modo infraestrutura. */
 int rtw_sta_connect(const uint8_t* mac, const uint8_t* bssid, uint32_t aid);
+/* Desfaz o rtw_sta_connect (NO_LINK) para associar de novo depois de uma queda. */
+int rtw_sta_disconnect(const uint8_t* mac, const uint8_t* bssid);
 /* Quadro de gerencia completo (sem FCS) pela fila B0MG. 0 = entregue a placa. */
 int rtw_tx_mgmt(const uint8_t* frame, uint32_t len);
 /* Quadro de dados completo (sem FCS) pela fila de melhor esforco (ACH0). */
@@ -77,6 +79,9 @@ void rtw_dump_regs(uint8_t* out);
 /* Indices crus (placa << 16 | nosso) de RXQ, RPQ e ACH0, para o log. */
 /* Registradores de erro e enchimento dos aneis, no log. */
 void rtw_log_stall(void);
+/* Codigo do halt se o firmware parou o DMA esperando o driver (SER); 0 se nao.
+ * Ai so religando a placa. */
+uint32_t rtw_fw_halted(void);
 /* Leitura crua de um registrador (0 sem placa), para o log. */
 uint32_t rtw_reg(uint32_t a);
 void rtw_ring_state(uint32_t* rxq, uint32_t* rpq, uint32_t* ach0);

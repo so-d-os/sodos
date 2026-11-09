@@ -36,3 +36,6 @@ void wifi_stop(void);
 void wifi_status(void);
 /* Pinga o gateway por secs segundos anotando o RX no WIFI.LOG. Pings ok. */
 int wifi_watch(int secs);
+/* Simula uma queda (restart: como se a placa travasse) para ver o vigia
+ * reconectar. Ver o vigia em wifi.c. 0 = ok, -1 WiFi nao conectado. */
+int wifi_drop(int restart);

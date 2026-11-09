@@ -406,6 +406,10 @@ static int connected;
 static uint8_t txf[2400];
 static uint8_t rxf[2400];
 static const uint8_t llc_snap[6] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00};
+static int bg;            /* o vigia reconectando: sem tela e sem REGS.BIN */
+static int ap_heard;      /* chegou quadro do AP desde o ultimo tick */
+static uint32_t noack_run;   /* envios seguidos sem ACK (RPP) */
+static uint32_t txfail_run;  /* envios seguidos que a placa recusou */
 
 static int wait_over(uint32_t t0, uint32_t* spins, uint32_t ms) {
   return net_has_clock() ? (net_ms() - t0) >= ms : ++(*spins) > ms * 2000u;
@@ -539,8 +543,12 @@ static int link_tx(const uint8_t* fr, int len) {
   b[7] = fr[13];
   for (k = 14; k < len; k++) b[8 + k - 14] = fr[k];
   tx_n++;
-  if (send_data(fr, b, len - 14 + 8) == 0) return 0;
+  if (send_data(fr, b, len - 14 + 8) == 0) {
+    txfail_run = 0;
+    return 0;
+  }
   tx_fail++;
+  txfail_run++;
   return -1;
 }
 
@@ -550,24 +558,33 @@ static int link_rx(uint8_t* out, int cap) {
   while (rtw_rx_poll(&rx)) {
     if (rx.ring == 1) {
       uint32_t o;
-      for (o = 0; o + 4 <= rx.len && o < 32; o += 4)
-        if ((rx.data[o + 1] >> 5) & 7u) rpp_noack++;
-        else rpp_ok++;
+      for (o = 0; o + 4 <= rx.len && o < 32; o += 4) {
+        if ((rx.data[o + 1] >> 5) & 7u) {
+          rpp_noack++;
+          noack_run++;
+        } else {
+          rpp_ok++;
+          noack_run = 0;
+        }
+      }
       continue;
     }
     if (rx.ring != 0 || rx.type != 0) continue;
     rx_all++;
+    if (rx.len >= 16 && mac_same(rx.data + 10, ap_bssid)) ap_heard = 1;
     if (rx.len >= 24 && rx.data[0] == 0x80 && mac_same(rx.data + 16, ap_bssid)) rx_bcn++;
     if (rx_frame(rx.data, rx.len, out, cap, &n) == 1) return n;
   }
   return 0;
 }
 
-static const struct net_link wifi_link = {"WiFi", chip.mac, link_tx, link_rx};
+static void wifi_tick(void);
+static const struct net_link wifi_link = {"WiFi", chip.mac, link_tx, link_rx, wifi_tick};
 
 /* Pedido de associacao (802.11a: SSID, taxas, RSN IE). 0 = aceito, AID em *aid. */
+static const uint8_t rates[10] = {0x01, 0x08, 0x8C, 0x12, 0x98, 0x24, 0xB0, 0x48, 0x60, 0x6C};
+
 static int associate(uint32_t* aid) {
-  static const uint8_t rates[10] = {0x01, 0x08, 0x8C, 0x12, 0x98, 0x24, 0xB0, 0x48, 0x60, 0x6C};
   uint8_t f[128];
   struct rtw_rx rx;
   int n = 0, k, tries;
@@ -640,6 +657,12 @@ static int handshake(uint32_t ms) {
 }
 
 /* ---------- etapas ---------- */
+
+static int chip_up(void);
+static void watch_start(void);
+static int w_dhcp;           /* DHCP pendente (vigia tenta a cada 15 s) */
+static uint32_t w_dhcp_at;   /* ultima tentativa */
+static int w_dhcp_fails;
 
 static int load_firmware(void) {
   int sz = file_size(WIFI_FW_PATH);
@@ -730,6 +753,40 @@ static int start_steps(const char* path) {
   put_u(fw_buf[7]);
   puts_k("\n");
 
+  if (chip_up() != 0) return -1;
+  watch_start();
+  net_attach(&wifi_link);
+  if (cfg.dhcp) {
+    uint32_t ip, mask, gw, dns;
+    puts_k("  DHCP...\n");
+    if (net_dhcp() != 0) {
+      puts_k("  o DHCP nao respondeu (a conexao WiFi continua; o vigia tenta de novo)\n");
+      w_dhcp = 1;
+      w_dhcp_at = net_ms();
+      return -1;
+    }
+    net_get_addr(&ip, &mask, &gw, &dns);
+    puts_k("  conectado: ip ");
+    put_ip(ip);
+    puts_k("  gateway ");
+    put_ip(gw);
+    puts_k("  dns ");
+    put_ip(dns);
+    puts_k("\n");
+    rtw_log("[wifi] DHCP ok, ip ");
+    rtw_log_hex(ip);
+    rtw_log(" gateway ");
+    rtw_log_hex(gw);
+    rtw_log("\n");
+  }
+  stage = 13;
+  return 0;
+}
+
+/* Da placa ate o WPA2 pronto (etapas 3 a 12). Tambem reinicia a placa
+ * depois de uma queda (vigia, com bg = 1). Em falha a placa fica desligada. */
+static int chip_up(void) {
+  int rc;
   if (rtw_probe(&chip) != 0) {
     puts_k("  ");
     say(rtw_error());
@@ -816,7 +873,7 @@ static int start_steps(const char* path) {
         return -1;
       }
       stage = 8;
-      rc = listen_beacons(3000, ch);
+      rc = listen_beacons(bg ? 1500 : 3000, ch);
       if (rc != -2) heard = 1;
       if (rc >= 0) sel = rc;
     }
@@ -851,7 +908,7 @@ static int start_steps(const char* path) {
   rc = authenticate();
   if (rc < 0) {
     puts_k("  o AP nao respondeu a autenticacao\n");
-    save_regs();
+    if (!bg) save_regs();
     rtw_power_off();
     return -1;
   }
@@ -903,30 +960,264 @@ static int start_steps(const char* path) {
   }
   puts_k("  WPA2 pronto (chaves instaladas)\n");
   stage = 12;
+  return 0;
+}
 
-  net_attach(&wifi_link);
-  if (cfg.dhcp) {
-    uint32_t ip, mask, gw, dns;
-    puts_k("  DHCP...\n");
-    if (net_dhcp() != 0) {
-      puts_k("  o DHCP nao respondeu (a conexao WiFi continua)\n");
-      return -1;
-    }
-    net_get_addr(&ip, &mask, &gw, &dns);
-    puts_k("  conectado: ip ");
-    put_ip(ip);
-    puts_k("  gateway ");
-    put_ip(gw);
-    puts_k("  dns ");
-    put_ip(dns);
-    puts_k("\n");
-    rtw_log("[wifi] DHCP ok, ip ");
-    rtw_log_hex(ip);
-    rtw_log(" gateway ");
-    rtw_log_hex(gw);
-    rtw_log("\n");
+/* ---------- vigia do link e reconexao ----------
+ * Como o mac80211 e o wpa_supplicant: a queda vem do deauth/disassoc do AP,
+ * de beacons que param ou de envios seguidos sem ACK (ai primeiro sonda o
+ * AP com probe requests; so sem resposta e queda) ou da fila de TX travada.
+ * Depois tenta de novo com espera crescente: associar outra vez no mesmo AP
+ * e, se isso nao basta (ou a placa travou), desligar e religar a placa
+ * escutando as redes do WIFI.CFG. Volta pedindo o mesmo IP ao DHCP. */
+
+enum { W_OFF, W_UP, W_PROBE, W_DOWN };
+static const char* const w_name[] = {"desligado", "conectado", "sondando o AP", "reconectando"};
+static const uint32_t w_wait[] = {1000, 2000, 5000, 10000, 20000, 30000};
+
+static int w_state;
+static int w_busy;
+static uint32_t w_now;       /* ms desta volta */
+static uint32_t w_heard;     /* ultimo quadro do AP */
+static uint32_t w_bcn0;      /* rx_bcn ao conectar: os beacons chegam depois? */
+static uint32_t w_probe_at;
+static int w_probes;
+static uint32_t w_next;      /* proxima tentativa (W_DOWN) */
+static uint32_t w_tries;     /* tentativas desde a queda */
+static int w_full;           /* a proxima tentativa reinicia a placa */
+static int w_silent;         /* tentativas com o AP calado */
+static int w_fails;          /* reassociacoes com o AP no ar que falharam */
+static uint32_t n_drops, n_reconn, n_restarts;
+static const char* w_cause = "";
+
+static void quiet_out(char c) { (void)c; }
+
+static int beacons_seen(void) { return rx_bcn != w_bcn0; }
+
+static void watch_start(void) {
+  w_now = net_ms();
+  w_heard = w_now;
+  w_bcn0 = rx_bcn;
+  ap_heard = 0;
+  noack_run = 0;
+  txfail_run = 0;
+  w_dhcp = 0;
+  w_dhcp_fails = 0;
+  w_state = W_UP;
+}
+
+/* Probe request so para o AP (SSID e taxas): a resposta prova que ele ouve. */
+static void send_probe(void) {
+  uint8_t f[24 + 2 + 32 + sizeof(rates)];
+  int n, k;
+  for (k = 0; k < 24; k++) f[k] = 0;
+  f[0] = 0x40;
+  for (k = 0; k < 6; k++) {
+    f[4 + k] = ap_bssid[k];
+    f[10 + k] = chip.mac[k];
+    f[16 + k] = ap_bssid[k];
   }
-  stage = 13;
+  n = 24;
+  f[n++] = 0;
+  f[n++] = (uint8_t)cfg.ssid_len;
+  for (k = 0; k < cfg.ssid_len; k++) f[n++] = (uint8_t)cfg.ssid[k];
+  for (k = 0; k < (int)sizeof(rates); k++) f[n++] = rates[k];
+  rtw_tx_mgmt(f, (uint32_t)n);
+}
+
+/* 1 se chega algum quadro do AP em ate ms. */
+static int ap_on_air(uint32_t ms) {
+  struct rtw_rx rx;
+  uint32_t t0 = net_ms(), spins = 0;
+  while (!wait_over(t0, &spins, ms))
+    while (rtw_rx_poll(&rx))
+      if (rx.ring == 0 && rx.type == 0 && rx.len >= 16 && mac_same(rx.data + 10, ap_bssid))
+        return 1;
+  return 0;
+}
+
+static void log_counters(void) {
+  rtw_log(" | rx ");
+  rtw_log_hex(rx_all);
+  rtw_log(" beacons ");
+  rtw_log_hex(rx_bcn);
+  rtw_log(" tx ");
+  rtw_log_hex(tx_n);
+  rtw_log(" sem ACK ");
+  rtw_log_hex(rpp_noack);
+  rtw_log(" recusados ");
+  rtw_log_hex(tx_fail);
+  rtw_log("\n");
+}
+
+static void link_lost(const char* why, int hw) {
+  uint32_t halt = rtw_fw_halted();
+  int n;
+  rtw_log_text(&n);
+  if (n > 20000) rtw_log_clear();  /* o log tem 32 KB: fica a queda nova */
+  n_drops++;
+  w_cause = why;
+  rtw_log("[vigia] queda: ");
+  rtw_log(why);
+  log_counters();
+  rtw_log_stall();
+  if (halt) {
+    /* O firmware parou o DMA (o RX morto do boot 13): associar de novo nao
+     * adianta, so religando a placa. */
+    rtw_log("[vigia] firmware em halt ");
+    rtw_log_hex(halt);
+    rtw_log(", reiniciando a placa\n");
+    w_cause = "o firmware da placa parou (halt)";
+    hw = 1;
+  }
+  connected = 0;
+  keys_ready = 0;
+  w_state = W_DOWN;
+  w_tries = 0;
+  w_full = hw;
+  w_silent = 0;
+  w_fails = 0;
+  w_next = w_now;  /* a primeira tentativa e logo */
+}
+
+/* Associa de novo no mesmo AP, sem religar a placa. */
+static int reassociate(void) {
+  uint32_t aid = 0;
+  if (rtw_sta_disconnect(chip.mac, ap_bssid) != 0) {
+    rtw_log("[vigia] o firmware nao respondeu ao NO_LINK\n");
+    w_full = 1;
+    return -1;
+  }
+  if (authenticate() != 0) return -1;
+  if (associate(&aid) != 0) return -1;
+  if (rtw_sta_connect(chip.mac, ap_bssid, aid) != 0) {
+    w_full = 1;
+    return -1;
+  }
+  wpa_sm_init(&sm, pmk, ap_bssid, chip.mac);
+  keys_ready = 0;
+  tx_seq = 0;
+  connected = 1;
+  if (handshake(5000) != 0) {
+    connected = 0;
+    return -1;
+  }
+  return 0;
+}
+
+/* O mesmo IP de antes; se o servidor recusar, um novo. Sem resposta, o link
+ * fica de pe e o DHCP tenta de novo a cada 15 s; da segunda vez sem resposta
+ * pede do zero (o reinicio pode ter escolhido outra rede do WIFI.CFG). */
+static void dhcp_again(void) {
+  int rc;
+  if (!cfg.dhcp) return;
+  rc = w_dhcp_fails >= 1 ? -1 : net_dhcp_reboot();
+  if (rc == -1 || rc == -3) rc = net_dhcp();
+  w_dhcp = rc != 0;
+  w_dhcp_fails = w_dhcp ? w_dhcp_fails + 1 : 0;
+  w_dhcp_at = net_ms();
+  rtw_log(w_dhcp ? "[vigia] DHCP sem resposta, tenta depois\n" : "[vigia] DHCP ok\n");
+}
+
+static void reconnect(void) {
+  void (*prev)(char) = shell_get_out();
+  int rc, n;
+  w_tries++;
+  rtw_log("[vigia] tentativa ");
+  rtw_log_hex(w_tries);
+  rtw_log(w_full ? ": reiniciando a placa\n" : ": associando de novo\n");
+  shell_set_out(quiet_out);
+  bg = 1;
+  if (w_full) {
+    n_restarts++;
+    connected = 0;
+    rtw_power_off();
+    rc = chip_up();
+    w_full = rc != 0;  /* falhou: a placa ficou desligada, so religando */
+    w_silent = 0;
+    w_fails = 0;
+  } else if (beacons_seen() && !ap_on_air(600)) {
+    rtw_log("[vigia] o AP nao aparece\n");
+    rc = -1;
+    /* Calado pode ser o RX da placa que morreu sem halt. */
+    if (rtw_fw_halted() || ++w_silent >= 3) w_full = 1;
+  } else {
+    rc = reassociate();
+    if (rc != 0 && ++w_fails >= 2) w_full = 1;
+  }
+  if (rc == 0) {
+    watch_start();
+    dhcp_again();
+    n_reconn++;
+    rtw_log("[vigia] reconectado\n");
+  }
+  bg = 0;
+  shell_set_out(prev);
+  if (rc != 0) {
+    n = (int)w_tries - 1;
+    if (n >= (int)(sizeof(w_wait) / sizeof(w_wait[0]))) n = (int)(sizeof(w_wait) / sizeof(w_wait[0])) - 1;
+    w_next = net_ms() + w_wait[n];
+  }
+  {
+    const char* t = rtw_log_text(&n);
+    file_save(WIFI_LOG_PATH, t, n);
+  }
+}
+
+/* Roda a cada net_poll (net.c), fora das esperas da pilha. */
+static void wifi_tick(void) {
+  if (w_state == W_OFF || w_busy) return;
+  w_busy = 1;
+  w_now = net_ms();
+  if (ap_heard) {
+    ap_heard = 0;
+    w_heard = w_now;
+    if (w_state == W_PROBE) {
+      rtw_log("[vigia] o AP respondeu\n");
+      w_state = W_UP;
+    }
+  }
+  if ((w_state == W_UP || w_state == W_PROBE) && !connected) {
+    link_lost("deauth/disassoc do AP", 0);
+  } else if ((w_state == W_UP || w_state == W_PROBE) && txfail_run >= 10) {
+    link_lost("a fila de TX da placa nao anda", 1);
+  } else if ((w_state == W_UP || w_state == W_PROBE) && rtw_fw_halted()) {
+    link_lost("o firmware da placa parou (halt)", 1);
+  } else if (w_state == W_UP) {
+    /* So com beacons chegando depois de conectar (senao o filtro da placa
+     * os esconde e o silencio nao quer dizer nada). */
+    if (net_has_clock() && beacons_seen() && (w_now - w_heard > 4000u || noack_run >= 16)) {
+      rtw_log(noack_run >= 16 ? "[vigia] envios sem ACK, sondando o AP\n"
+                              : "[vigia] sem beacons, sondando o AP\n");
+      noack_run = 0;
+      w_probes = 0;
+      w_state = W_PROBE;
+    } else if (w_dhcp && w_now - w_dhcp_at >= 15000u) {
+      dhcp_again();
+    }
+  }
+  if (w_state == W_PROBE) {
+    if (w_probes < 3 && (!w_probes || w_now - w_probe_at >= 500u)) {
+      send_probe();
+      w_probes++;
+      w_probe_at = w_now;
+    } else if (w_probes >= 3 && w_now - w_probe_at >= 1000u) {
+      link_lost("o AP parou de responder (sem beacons nem probe response)", 0);
+    }
+  }
+  if (w_state == W_DOWN && (int32_t)(w_now - w_next) >= 0) reconnect();
+  w_busy = 0;
+}
+
+int wifi_drop(int restart) {
+  if (w_state == W_OFF) {
+    puts_k("WiFi nao conectado.\n");
+    return -1;
+  }
+  w_now = net_ms();
+  link_lost(restart ? "teste: net wifi drop placa" : "teste: net wifi drop", restart);
+  puts_k(restart ? "Queda simulada: o vigia vai reiniciar a placa.\n"
+                 : "Queda simulada: o vigia vai associar de novo.\n");
   return 0;
 }
 
@@ -1025,6 +1316,7 @@ int wifi_watch(int secs) {
 
 int wifi_start(const char* path) {
   int rc;
+  w_state = W_OFF;
   rtw_log_clear();
   rc = start_steps(path);
   save_log();
@@ -1032,7 +1324,8 @@ int wifi_start(const char* path) {
 }
 
 void wifi_stop(void) {
-  if (connected) net_attach(0);
+  if (connected || w_state != W_OFF) net_attach(0);
+  w_state = W_OFF;
   connected = 0;
   keys_ready = 0;
   rtw_power_off();
@@ -1058,6 +1351,31 @@ void wifi_status(void) {
     put_mac(chip.mac);
     puts_k("\n");
   }
+  if (w_state != W_OFF || n_drops) {
+    puts_k("  vigia: ");
+    puts_k(w_name[w_state]);
+    if (w_state == W_DOWN) {
+      uint32_t now = net_ms();
+      puts_k(", tentativa ");
+      put_u(w_tries + 1u);
+      puts_k(" em ");
+      put_u((int32_t)(w_next - now) > 0 ? (w_next - now) / 1000u : 0u);
+      puts_k(" s");
+    }
+    if (w_state != W_OFF && !beacons_seen()) puts_k(" (sem beacons visiveis: so deauth e TX)");
+    puts_k("\n  quedas ");
+    put_u(n_drops);
+    puts_k(", reconexoes ");
+    put_u(n_reconn);
+    puts_k(", placa reiniciada ");
+    put_u(n_restarts);
+    puts_k("x\n");
+    if (n_drops) {
+      puts_k("  ultima queda: ");
+      puts_k(w_cause);
+      puts_k("\n");
+    }
+  }
   {
     uint32_t ip, mask, gw, dns;
     const char* l = net_link_name();
@@ -1073,5 +1391,10 @@ void wifi_status(void) {
       put_ip(dns);
     }
     puts_k("\n");
+    if (l && net_dhcp_renew_in()) {
+      puts_k("  DHCP: renova o aluguel em ");
+      put_u(net_dhcp_renew_in());
+      puts_k(" s\n");
+    }
   }
 }

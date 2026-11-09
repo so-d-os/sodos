@@ -564,6 +564,13 @@ static uint32_t dhcp_mask;
 static uint32_t dhcp_gw;
 static uint32_t dhcp_dns;
 static uint32_t dhcp_lease;
+/* O aluguel em vigor: IP, quando chegou o ACK (ms) e quanto vale (ms, 0 =
+ * sem aluguel). Renova no meio do prazo; dhcp_try e a ultima tentativa. */
+static uint32_t dhcp_last_ip;
+static uint32_t dhcp_got_ms;
+static uint32_t dhcp_lease_ms;
+static uint32_t dhcp_try_ms;
+static int dhcp_busy;
 
 static void dhcp_rx(const uint8_t* p, int n) {
   int i;
@@ -643,7 +650,9 @@ static int dhcp_send(int type, uint32_t want, uint32_t server) {
   for (i = 0; i < 6; i++) b[n++] = our_mac[i];
   if (type == 3) {
     b[n++] = 50; b[n++] = 4; wr32(b + n, want); n += 4;
-    b[n++] = 54; b[n++] = 4; wr32(b + n, server); n += 4;
+    if (server) {  /* sem servidor e INIT-REBOOT (RFC 2131 4.3.2) */
+      b[n++] = 54; b[n++] = 4; wr32(b + n, server); n += 4;
+    }
   }
   b[n++] = 12; b[n++] = 5;
   mem_copy(b + n, "sodos", 5);
@@ -682,10 +691,88 @@ static int dhcp_wait(uint32_t want, uint32_t ms) {
   }
 }
 
+/* Guarda o ACK que acabou de chegar como o aluguel em vigor. */
+static void dhcp_take(uint32_t server) {
+  uint32_t lease = dhcp_lease;
+  if (our_ip != dhcp_yiaddr) arp_valid = 0;
+  our_ip = dhcp_yiaddr;
+  our_mask = dhcp_mask;
+  our_gw = dhcp_gw ? dhcp_gw : server;
+  our_dns = dhcp_dns ? dhcp_dns : our_gw;
+  dhcp_last_ip = our_ip;
+  time_poll();
+  dhcp_got_ms = ms_now;
+  dhcp_try_ms = 0;
+  /* Sem prazo ou "para sempre": nao renova. Mais de 7 dias vira 7 dias
+   * (o relogio em ms da a volta em 49). */
+  if (!lease || lease == 0xFFFFFFFFu) dhcp_lease_ms = 0;
+  else dhcp_lease_ms = (lease > 604800u ? 604800u : lease) * 1000u;
+}
+
+int net_dhcp_reboot(void) {
+  int tries, rc = -2;
+  if (!nic_ok || !dhcp_last_ip) return -1;
+  if (dhcp_busy) return -2;
+  dhcp_busy = 1;
+  for (tries = 0; tries < 2; tries++) {
+    int w;
+    dhcp_type = 0;
+    dhcp_xid++;
+    serial_puts("[dhcp] request (init-reboot) ");
+    serial_hex32(dhcp_last_ip);
+    serial_puts("\n");
+    if (dhcp_send(3, dhcp_last_ip, 0) < 0) break;
+    w = dhcp_wait((1u << 5) | (1u << 6), 2000);
+    if (w == 5 && dhcp_yiaddr == dhcp_last_ip) {
+      dhcp_take(dhcp_server);
+      serial_puts("[dhcp] ack, mesmo ip\n");
+      rc = 0;
+      break;
+    }
+    if (w == 6 || w == 5) {  /* NAK, ou ofereceu outro IP */
+      rc = -3;
+      break;
+    }
+    if (w == -3) break;  /* tecla: tenta de novo depois */
+  }
+  dhcp_busy = 0;
+  return rc;
+}
+
+uint32_t net_dhcp_renew_in(void) {
+  uint32_t el;
+  if (!dhcp_lease_ms || our_ip != dhcp_last_ip) return 0;
+  time_poll();
+  el = ms_now - dhcp_got_ms;
+  return el >= dhcp_lease_ms / 2u ? 1u : (dhcp_lease_ms / 2u - el) / 1000u + 1u;
+}
+
+/* No meio do prazo pede o mesmo IP de novo (no maximo uma vez por minuto);
+ * vencido, pede um do zero. */
+static void dhcp_tick(void) {
+  uint32_t el;
+  if (!dhcp_lease_ms || dhcp_busy || !nic_ok || our_ip != dhcp_last_ip) return;
+  time_poll();
+  el = ms_now - dhcp_got_ms;
+  if (el < dhcp_lease_ms / 2u) return;
+  if (dhcp_try_ms && ms_now - dhcp_try_ms < 60000u) return;
+  dhcp_try_ms = ms_now;
+  if (dhcp_try_ms == 0) dhcp_try_ms = 1;
+  serial_puts("[dhcp] renovando o aluguel\n");
+  if (net_dhcp_reboot() == 0) return;
+  if (el >= dhcp_lease_ms) {
+    serial_puts("[dhcp] aluguel vencido, pedindo de novo\n");
+    dhcp_lease_ms = 0;
+    net_dhcp();
+  }
+}
+
 int net_dhcp(void) {
   uint32_t old_ip = our_ip;
   int tries;
   if (!nic_ok) return -1;
+  if (dhcp_busy) return -2;
+  dhcp_busy = 1;
   dhcp_xid = 0x534F0000u ^ (ms_now * 2654435761u) ^ ((uint32_t)our_mac[5] << 8);
   our_ip = 0;
   for (tries = 0; tries < 4; tries++) {
@@ -708,18 +795,17 @@ int net_dhcp(void) {
     rc = dhcp_wait((1u << 5) | (1u << 6), 3000);
     if (rc == -3) break;
     if (rc != 5) continue;
-    our_ip = dhcp_yiaddr;
-    our_mask = dhcp_mask;
-    our_gw = dhcp_gw ? dhcp_gw : server;
-    our_dns = dhcp_dns ? dhcp_dns : our_gw;
+    dhcp_take(server);
     arp_valid = 0;
     hosts_loaded = 0;
     serial_puts("[dhcp] ack ");
     serial_hex32(our_ip);
     serial_puts("\n");
+    dhcp_busy = 0;
     return 0;
   }
   our_ip = old_ip;
+  dhcp_busy = 0;
   return -2;
 }
 
@@ -740,6 +826,8 @@ void net_attach(const struct net_link* l) {
   if (l)
     for (i = 0; i < 6; i++) our_mac[i] = l->mac[i];
   nic_ok = l ? 1 : ne_ok;
+  dhcp_last_ip = 0;
+  dhcp_lease_ms = 0;
   arp_valid = 0;
   hosts_loaded = 0;
   tcp_state = ST_CLOSED;
@@ -1622,7 +1710,17 @@ static void nic_poll(void) {
   httpd_poll();
 }
 
-void net_poll(void) { nic_poll(); }
+/* Daqui (o laco do teclado e o do desktop) e nunca de dentro de uma espera
+ * da pilha: o tick da placa e o DHCP podem mandar quadros (txframe). */
+void net_poll(void) {
+  static int ticking;
+  nic_poll();
+  if (ticking) return;
+  ticking = 1;
+  if (nlink && nlink->tick) nlink->tick();
+  dhcp_tick();
+  ticking = 0;
+}
 
 static int ne_reset(uint16_t io) {
   int i;
