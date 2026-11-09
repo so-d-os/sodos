@@ -59,9 +59,11 @@ def is64():
 def host_version():
     exe = "g++" if is_cxx() else "gcc"
     try:
-        return subprocess.check_output([exe, "--version"], text=True).splitlines()[0]
+        # Saida inteira: o meson so reconhece o gcc pela linha do copyright
+        # ("Free Software Foundation").
+        return subprocess.check_output([exe, "--version"], text=True).rstrip("\n")
     except Exception:
-        return "gcc (SODOS) 13.3.0"
+        return "gcc (SODOS) 13.3.0\nCopyright (C) Free Software Foundation, Inc."
 
 
 def print_info(arg):
@@ -189,8 +191,11 @@ def gnu_link(out, kind, local_objs, objs, rlibs, tmp, shared):
 
 def main():
     args = expand_response_files(sys.argv[1:])
-    if args:
-        r = print_info(args[0])
+    # O meson pergunta "-m64 --version": flags -m de ABI antes da consulta
+    # nao mudam a resposta.
+    info = [a for a in args if a not in ("-m64", "-mx32", "-m32")]
+    if info:
+        r = print_info(info[0])
         if r is not None:
             return r
         # O configure pergunta a versao do linker por -Wl,--version; nao ha
