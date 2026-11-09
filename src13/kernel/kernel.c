@@ -5,6 +5,7 @@
 #include "bootinfo.h"
 #include "idt.h"
 #include "pic.h"
+#include "irq.h"
 #include "reboot.h"
 #include "trace.h"
 #include "serial.h"
@@ -1677,7 +1678,13 @@ void kmain(const struct BootInfo* bi) {
   pic_mask_all();
   pic_remap(0x20, 0x28);         /* IRQ0..7 -> 0x20; deixa o PIC mascarado */
   idt_init();
-  /* Sem sti. O shell e o WIN leem o PS/2 por polling. */
+  /* B1: liga so o IRQ0 (timer). O IRQ1 continua mascarado: o teclado e lido
+   * por polling. Neste ponto o PIT ainda esta no modo do BIOS (~18 Hz);
+   * net_init reprograma para ~1000 Hz. O handler do IRQ0 so conta ticks,
+   * nao toca em nenhum estado do kernel, entao interromper qualquer rotina
+   * aqui e seguro. */
+  pic_unmask(0);
+  __asm__ volatile ("sti");
 
   vga_capture_bios_font();
   vga_force_text_mode();         /* a leitura da fonte mexe nos registros VGA */
@@ -1685,6 +1692,20 @@ void kmain(const struct BootInfo* bi) {
   puts_k("SO DOS 1.0\n");
   puts_k("64-bit kernel. Type HELP or WIN.\n\n");
   net_init();
+  /* Prova de que o IRQ0 chega: o net_init deixou o PIT a ~1000 Hz, entao
+   * 200 ms devem render ~200 ticks. Se der 0, o IRQ0 nao esta sendo
+   * entregue (PIC/IDT) e o resto da fase B nao tem base. */
+  {
+    uint64_t t0, dt;
+    net_delay(100);
+    t0 = irq_ticks();
+    net_delay(200);
+    dt = irq_ticks() - t0;
+    serial_puts("[irq0] ");
+    serial_hex32((uint32_t)dt);
+    serial_puts(" ticks em 200 ms");
+    serial_puts(dt >= 100 ? " (ok)\n" : " (FALHOU: IRQ0 nao chega)\n");
+  }
   httpd_start(8797);
   update_cursor();
 

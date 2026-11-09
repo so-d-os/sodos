@@ -167,7 +167,7 @@ gdb -ex "target remote :1234" -ex "symbol-file kernel.elf" -ex "break kmain" -ex
 3. `kernel_entry.asm` confere long mode, monta as tabelas de página (128 páginas de 2 MB = 256 MB de identidade + LFB), ativa PAE + paging e chama `kmain(BootInfo*)`. Sem long mode escreve `N` na serial e para; BootInfo inválido escreve `B`.
 4. `kmain` valida o BootInfo, zera o BSS, inicializa a memória (arena baixa do `kmalloc` + arena alta do `umalloc` escolhida pelo E820 após o kernel), a serial (COM1), remapeia e mascara o PIC, monta a IDT, captura a fonte 8×16 da BIOS, entra em modo texto, sobe a rede e o HTTP, registra os comandos, inicializa as unidades, monta `D:` se houver FAT16, roda `HTTPD.EXE` se ele existir em `D:` e abre o shell.
 
-O kernel **não habilita interrupções** (`sti` nunca é chamado): teclado, mouse, rede, timer e disco são lidos por *polling*. A IDT existe para capturar exceções e IRQs, que são mascaradas.
+Só o **IRQ0 (PIT)** está habilitado, e o handler apenas conta ticks: teclado, mouse, rede, disco e o resto continuam em *polling*. A IDT captura exceções e IRQs; as demais IRQs seguem mascaradas.
 
 ### Mapa de memória
 
@@ -192,7 +192,7 @@ O kernel **não habilita interrupções** (`sti` nunca é chamado): teclado, mou
 
 ### Escalonamento
 
-Não há preempção: cada programa roda até devolver o controle em `gui_event`, `gui_present`, leitura de rede ou de disco. No desktop, até **8 programas** rodam como tarefas cooperativas, cada uma com pilha de 48 KB; o desktop alterna entre elas e desenha as janelas.
+Não há preempção: cada programa roda até devolver o controle em `gui_event`, `gui_present`, leitura de rede ou de disco. No desktop, até **8 programas** rodam como tarefas cooperativas, cada uma com pilha de 48 KB; o desktop alterna entre elas e desenha as janelas. O tick do PIT (IRQ0, ~1000 Hz) já é entregue e contado; ele é a base do escalonador preemptivo, que ainda não está ligado.
 
 ## Discos e FAT
 

@@ -167,7 +167,7 @@ gdb -ex "target remote :1234" -ex "symbol-file kernel.elf" -ex "break kmain" -ex
 3. `kernel_entry.asm` checks for long mode, builds the page tables (128 2 MB pages = 256 MB identity plus the LFB), enables PAE + paging and calls `kmain(BootInfo*)`. Without long mode it writes `N` to the serial port and halts; a bad BootInfo writes `B`.
 4. `kmain` validates BootInfo, zeroes the BSS, initializes memory (low `kmalloc` arena + E820-driven high `umalloc` arena after the kernel), the serial port (COM1), remaps and masks the PIC, builds the IDT, captures the BIOS 8×16 font, enters text mode, starts the network and HTTP, registers the commands, initializes the drives, mounts `D:` if there is FAT16, runs `HTTPD.EXE` if it exists on `D:` and opens the shell.
 
-The kernel **does not enable interrupts** (`sti` is never called): keyboard, mouse, network, timer and disk are polled. The IDT exists to catch exceptions and IRQs, which are masked.
+Only **IRQ0 (the PIT)** is enabled, and its handler just counts ticks: keyboard, mouse, network, disk and the rest are still polled. The IDT catches exceptions and IRQs; every other IRQ stays masked.
 
 ### Memory map
 
@@ -192,7 +192,7 @@ The kernel **does not enable interrupts** (`sti` is never called): keyboard, mou
 
 ### Scheduling
 
-There is no preemption: each program runs until it returns control in `gui_event`, `gui_present`, network read or disk read. On the desktop, up to **8 programs** run as cooperative tasks, each with a 48 KB stack; the desktop switches between them and draws the windows.
+There is no preemption: each program runs until it returns control in `gui_event`, `gui_present`, network read or disk read. On the desktop, up to **8 programs** run as cooperative tasks, each with a 48 KB stack; the desktop switches between them and draws the windows. The PIT tick (IRQ0, ~1000 Hz) is already delivered and counted; it is the base for the preemptive scheduler, which is not enabled yet.
 
 ## Disks and FAT
 
