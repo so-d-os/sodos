@@ -4,3 +4,10 @@ build/
 vendor/*
 !vendor/.gitkeep
 *.log
+# sodos/sysroot/ - libs portadas (glib, zlib...), geradas por scripts/build-*.sh
+sodos/sysroot/*
+!sodos/sysroot/lib/
+sodos/sysroot/lib/*
+!sodos/sysroot/lib/pkgconfig/
+sodos/sysroot/lib/pkgconfig/*
+!sodos/sysroot/lib/pkgconfig/.gitkeep

@@ -47,6 +47,7 @@ int fsync(int fd);
 int ftruncate(int fd, off_t len);
 int dup(int fd);
 pid_t getpid(void);
+int gethostname(char* name, size_t len);
 pid_t getppid(void);
 uid_t getuid(void);
 uid_t geteuid(void);

@@ -427,6 +427,15 @@ int getpwuid_r(unsigned uid, void* pw, char* buf, size_t n, void** out) {
   return ENOENT;
 }
 
+int getpwnam_r(const char* name, void* pw, char* buf, size_t n, void** out) {
+  (void)name;
+  (void)pw;
+  (void)buf;
+  (void)n;
+  *out = NULL;
+  return ENOENT;
+}
+
 /* ---- ainda sem suporte no kernel ---------------------------------------- */
 
 #define ENOSYS_STUB(name, ...)     \

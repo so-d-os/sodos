@@ -729,6 +729,11 @@ __export struct dirent* readdir(DIR* dp) {
   return &d->cur;
 }
 
+__export void rewinddir(DIR* dp) {
+  struct __so_DIR* d = (struct __so_DIR*)dp;
+  if (d && d->used) d->pos = 0;
+}
+
 __export int closedir(DIR* dp) {
   struct __so_DIR* d = (struct __so_DIR*)dp;
   if (!d || !d->used) {

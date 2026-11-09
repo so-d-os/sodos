@@ -65,6 +65,7 @@ int open(const char* path, int flags, ...);
 int creat(const char* path, mode_t mode);
 int fcntl(int fd, int cmd, ...);
 int lockf(int fd, int cmd, off_t len);
+int fallocate(int fd, int mode, long off, long len); /* como em sodos_linux_abi.c */
 
 
 #ifdef __cplusplus
