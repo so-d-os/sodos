@@ -151,6 +151,11 @@ void* pthread_getspecific(pthread_key_t key);
 int pthread_setcancelstate(int state, int* oldstate);
 int pthread_setcanceltype(int type, int* oldtype);
 int pthread_cancel(pthread_t t);
+
+/* Sem cancelamento assincrono: o handler roda so no pop(1), como em
+ * pthread_cleanup_pop(1) da glibc. */
+#define pthread_cleanup_push(fn, arg)   {                                        void (*__sodos_cu_fn)(void*) = (fn);     void* __sodos_cu_arg = (arg);
+#define pthread_cleanup_pop(run)                          if (run) __sodos_cu_fn(__sodos_cu_arg);             }
 int pthread_kill(pthread_t t, int sig);
 
 #ifdef __cplusplus

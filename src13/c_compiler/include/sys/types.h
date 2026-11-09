@@ -29,5 +29,10 @@ typedef long long off64_t;
 }
 #endif
 typedef long loff_t;
+/* tipos BSD (QEMU: net/eth.h, slirp) */
+typedef unsigned char u_char;
+typedef unsigned short u_short;
+typedef unsigned int u_int;
+typedef unsigned long u_long;
 typedef char* caddr_t;
 #endif

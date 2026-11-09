@@ -66,6 +66,13 @@ int creat(const char* path, mode_t mode);
 int fcntl(int fd, int cmd, ...);
 int lockf(int fd, int cmd, off_t len);
 int fallocate(int fd, int mode, long off, long len); /* como em sodos_linux_abi.c */
+#define POSIX_FADV_NORMAL 0
+#define POSIX_FADV_RANDOM 1
+#define POSIX_FADV_SEQUENTIAL 2
+#define POSIX_FADV_WILLNEED 3
+#define POSIX_FADV_DONTNEED 4
+#define POSIX_FADV_NOREUSE 5
+int posix_fadvise(int fd, off_t off, off_t len, int advice);
 
 
 #ifdef __cplusplus

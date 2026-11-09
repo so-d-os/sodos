@@ -9,5 +9,7 @@
 /* lote3 */
 #define NCP_SUPER_MAGIC 0x564c
 #define MSDOS_SUPER_MAGIC 0x4d44
+#define TMPFS_MAGIC 0x01021994
+#define HUGETLBFS_MAGIC 0x958458f6
 
 #endif

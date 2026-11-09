@@ -13,6 +13,9 @@ int prctl(int option, ...);
 
 /* lote6 */
 #define PR_CAPBSET_READ 23
+#define PR_SET_PDEATHSIG 1
+#define PR_GET_PDEATHSIG 2
+#define PR_SET_TIMERSLACK 29
 
 #ifdef __cplusplus
 }
