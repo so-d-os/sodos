@@ -5,6 +5,8 @@
 # Vao o QEMU.EXE, o firmware que a maquina isapc usa (o -L aponta para a
 # propria pasta: o QEMU procura o firmware junto do executavel), os guests de
 # teste HELLO.ELF e ECO.ELF, o disquete FreeDOS, o Tiny Core Linux e os .BAT de exemplo (sodos/disk/).
+# Com o pendrive SODOS conectado, a mesma pasta vai tambem para U:\UTILS\QEMU
+# (nos .BAT, D:\UTILS\QEMU vira U:\UTILS\QEMU). Sem pendrive, so avisa.
 DISK=$(realpath "$1")
 S=$(cd "$(dirname "$0")/.." && pwd)
 V=${QEMU_VERSION:-9.2.0}
@@ -20,8 +22,12 @@ fi
 mkdir_d() {
   mdir -i "$DISK@@512" "::/$1" >/dev/null 2>&1 || mmd -i "$DISK@@512" "::/$1" || exit 1
 }
+# Lista "origem|nome" do que foi para o D:, repetida depois no pendrive.
+LIST=$(mktemp)
+trap 'rm -f "$LIST"' EXIT
 put() {
   mcopy -o -i "$DISK@@512" "$1" "::/UTILS/QEMU/$2" || exit 1
+  printf '%s|%s\n' "$1" "$2" >>"$LIST"
 }
 
 mkdir_d UTILS
@@ -67,3 +73,22 @@ for f in "$S"/sodos/disk/*; do
   n=$((n + 1))
 done
 echo "QEMU: $n arquivos em D:\\UTILS\\QEMU."
+
+. "$S/../tools/usb-mount.sh"
+usb_mount QEMU || { echo "QEMU: nada copiado para U:\\UTILS\\QEMU"; exit 0; }
+U=$USB_MNT/UTILS/QEMU
+rc=0
+mkdir -p "$U" || rc=1
+while [ $rc -eq 0 ] && IFS='|' read -r src name; do
+  case "$name" in
+    *.BAT) sed 's/D:\\UTILS\\QEMU/U:\\UTILS\\QEMU/g' "$src" >"$U/$name" || rc=1 ;;
+    *) cmp -s "$src" "$U/$name" || cp "$src" "$U/$name" || rc=1 ;;
+  esac
+done <"$LIST"
+usb_umount
+if [ $rc -eq 0 ]; then
+  echo "QEMU: $n arquivos em U:\\UTILS\\QEMU ($U)."
+else
+  echo "QEMU: falhou copiar para $U"
+fi
+exit $rc

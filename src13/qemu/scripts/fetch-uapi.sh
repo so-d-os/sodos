@@ -11,10 +11,18 @@ U=$SYSROOT/include-uapi
 rm -rf "$U"
 T=$(mktemp -d /tmp/sodos-uapi-XXXXXX)
 trap 'rm -rf "$T"' EXIT
-(cd "$T" && apt-get download linux-libc-dev libc6-dev >/dev/null)
 mkdir -p "$T/x" "$U"
-for d in "$T"/*.deb; do dpkg -x "$d" "$T/x"; done
 I=$T/x/usr/include
+# Kernel proprio (linux-libc-dev fora do repositorio): o apt nao baixa essa
+# versao, entao usa os headers ja instalados em /usr/include.
+if (cd "$T" && apt-get download linux-libc-dev libc6-dev >/dev/null); then
+  for d in "$T"/*.deb; do dpkg -x "$d" "$T/x"; done
+elif [ -f /usr/include/linux/types.h ] && [ -f /usr/include/scsi/sg.h ]; then
+  echo "fetch-uapi: apt-get download falhou; usando /usr/include"
+  I=/usr/include
+else
+  exit 1
+fi
 # netfilter*: nomes que so diferem na caixa (xt_MARK.h/xt_mark.h) nao cabem
 # no NTFS do /mnt/c, e o QEMU nao os usa.
 (cd "$I" && tar cf - --exclude='linux/netfilter*' linux asm-generic) | (cd "$U" && tar xf -)
