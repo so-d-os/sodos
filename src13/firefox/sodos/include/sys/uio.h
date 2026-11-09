@@ -8,6 +8,11 @@
 extern "C" {
 #endif
 
+#ifndef IOV_MAX
+#define IOV_MAX 1024
+#endif
+#define UIO_MAXIOV IOV_MAX
+
 struct iovec {
   void* iov_base;
   size_t iov_len;

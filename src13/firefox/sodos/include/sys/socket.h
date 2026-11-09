@@ -45,6 +45,7 @@ struct linger {
 #define SOCK_RAW 3
 
 #define SOL_SOCKET 1
+#define SOMAXCONN 4096
 #define SO_DEBUG 1
 #define SO_REUSEADDR 2
 #define SO_TYPE 3
@@ -100,6 +101,14 @@ ssize_t sendfile(int out_fd, int in_fd, off_t* offset, size_t count);
 #define MSG_TRUNC 0x20
 #define MSG_WAITALL 0x100
 #define SCM_RIGHTS 1
+#define SCM_CREDENTIALS 2
+#define SO_PASSCRED 16
+#define SO_PEERCRED 17
+struct ucred {
+  pid_t pid;
+  uid_t uid;
+  gid_t gid;
+};
 struct msghdr {
   void* msg_name;
   socklen_t msg_namelen;

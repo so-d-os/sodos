@@ -172,6 +172,10 @@ def gnu_link(out, kind, local_objs, objs, rlibs, tmp, shared):
     if os.path.exists(POSIX64):
         libs.append(POSIX64)
     libs += glob.glob(os.path.join(C, "build", "x64_*.o"))
+    # libgcc do gcc do host (x86-64, PIC): __divti3/__udivti3 de __int128 etc.
+    libgcc = subprocess.check_output(["gcc", "-print-libgcc-file-name"], text=True).strip()
+    if os.path.exists(libgcc):
+        libs.append(libgcc)
     elf = out + ".elf"
     cmd = ["ld", "-pie", "--no-dynamic-linker", "-z", "notext", "-z", "norelro",
            "-z", "max-page-size=0x1000", "-z", "noexecstack", "--no-eh-frame-hdr",
@@ -272,6 +276,13 @@ def main():
         if a.startswith("-l"):
             libnames.append(a[2:])
             i += 1
+            continue
+        # Opcoes de compilacao com o valor no argumento seguinte: o valor nao e
+        # arquivo de entrada (o meson liga com "-idirafter DIR" nos flags).
+        if a in ("-idirafter", "-isystem", "-iquote", "-include", "-imacros", "-I",
+                 "-D", "-U", "-MF", "-MT", "-MQ", "-x") and i + 1 < len(args):
+            flags += [a, args[i + 1]]
+            i += 2
             continue
         if a.startswith("-B") or a.startswith("--") or a in ("-O1", "-O2", "-O3", "-Os"):
             i += 1

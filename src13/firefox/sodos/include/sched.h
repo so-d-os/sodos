@@ -32,6 +32,14 @@ int sched_setaffinity(pid_t pid, size_t n, const cpu_set_t* set);
 int sched_getaffinity(pid_t pid, size_t n, cpu_set_t* set);
 int sched_getcpu(void);
 
+/* clone(2): so as constantes (o SODOS nao cria processos; clone falha). */
+#define CLONE_VM 0x00000100
+#define CLONE_FS 0x00000200
+#define CLONE_FILES 0x00000400
+#define CLONE_SIGHAND 0x00000800
+#define CLONE_THREAD 0x00010000
+int clone(int (*fn)(void*), void* stack, int flags, void* arg, ...);
+
 #ifdef __cplusplus
 }
 #endif

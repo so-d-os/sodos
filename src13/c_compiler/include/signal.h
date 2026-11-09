@@ -25,6 +25,9 @@ typedef void (*sighandler_t)(int);
 #define SIGFPE 8
 #define SIGKILL 9
 #define SIGUSR1 10
+#define SIGIO 29
+#define SIGPOLL SIGIO
+#define SIGPWR 30
 #define SIGSEGV 11
 #define SIGUSR2 12
 #define SIGPIPE 13
@@ -73,6 +76,16 @@ typedef struct {
   long __pad[14];
 #endif
 } siginfo_t;
+
+/* si_code (valores do Linux) */
+#define SI_USER 0
+#define SI_KERNEL 0x80
+#define SI_QUEUE (-1)
+#define SI_TIMER (-2)
+#define SI_MESGQ (-3)
+#define SI_ASYNCIO (-4)
+#define SI_SIGIO (-5)
+#define SI_TKILL (-6)
 
 struct sigaction {
   sighandler_t sa_handler;

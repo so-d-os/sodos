@@ -37,6 +37,6 @@ cd "$B"
   --enable-tcg \
   --disable-install-blobs \
   --with-coroutine=ucontext \
-  --extra-cflags="-I$SYSROOT/include" \
+  --extra-cflags="-I$SYSROOT/include -idirafter $SYSROOT/include-uapi" \
   "$@" > "$S/build/configure.log" 2>&1 || { tail -15 "$S/build/configure.log"; exit 1; }
 tail -3 "$S/build/configure.log"
