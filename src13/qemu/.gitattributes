@@ -3,3 +3,7 @@
 *.ld text eol=lf
 *.S text eol=lf
 *.ini text eol=lf
+*.sh text eol=lf
+# Lidos pelo BAT.EXE do SODOS
+*.BAT text eol=crlf
+*.patch text eol=lf

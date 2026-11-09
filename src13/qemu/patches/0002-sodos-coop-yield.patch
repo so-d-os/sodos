@@ -1,0 +1,86 @@
+SODOS: a vCPU do TCG cede a vez periodicamente (threads cooperativas, sem
+preempcao no kernel). Sem isto, um guest em laco de espera (in/out na serial)
+prende o laco principal e o -serial stdio nunca le o teclado.
+
+diff -ru a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
+--- a/accel/tcg/cpu-exec.c	2026-11-09 13:40:43.911670005 -0300
++++ b/accel/tcg/cpu-exec.c	2026-11-09 13:40:43.922503671 -0300
+@@ -402,6 +402,11 @@
+ {
+     CPUState *cpu = env_cpu(env);
+     TranslationBlock *tb;
++
++    /* SODOS: volta ao cpu_exec_loop, que cede a vez. */
++    if (sodos_coop_due()) {
++        return tcg_code_gen_epilogue;
++    }
+     vaddr pc;
+     uint64_t cs_base;
+     uint32_t flags, cflags;
+@@ -964,6 +969,9 @@
+             uint64_t cs_base;
+             uint32_t flags, cflags;
+ 
++            /* SODOS: fora da BQL, ponto seguro para ceder a vez. */
++            sodos_coop_yield();
++
+             cpu_get_tb_cpu_state(cpu_env(cpu), &pc, &cs_base, &flags);
+ 
+             /*
+diff -ru a/include/qemu/osdep.h b/include/qemu/osdep.h
+--- a/include/qemu/osdep.h	2026-11-09 13:40:43.900836340 -0300
++++ b/include/qemu/osdep.h	2026-11-09 13:40:43.911670005 -0300
+@@ -52,6 +52,20 @@
+ 
+ #include "qemu/compiler.h"
+ 
++/*
++ * SODOS: as threads sao cooperativas e o kernel nao preempta. A vCPU do TCG
++ * cede a vez de tempos em tempos (a cada ~10 ms) para o laco principal ler
++ * o teclado, rodar timers e atender o -serial stdio. Ver firefox/sodos/port/
++ * sodos_thread.c (sodos_coop_due, sodos_coop_yield).
++ */
++#ifdef __SODOS__
++int sodos_coop_due(void);
++void sodos_coop_yield(void);
++#else
++static inline int sodos_coop_due(void) { return 0; }
++static inline void sodos_coop_yield(void) { }
++#endif
++
+ /* Older versions of C++ don't get definitions of various macros from
+  * stdlib.h unless we define these macros before first inclusion of
+  * that system header.
+diff -ru a/system/memory.c b/system/memory.c
+--- a/system/memory.c	2026-11-09 13:40:43.922503671 -0300
++++ b/system/memory.c	2026-11-09 13:40:43.933337337 -0300
+@@ -1478,6 +1478,14 @@
+     unsigned size = memop_size(op);
+     MemTxResult r;
+ 
++    /*
++     * SODOS: um guest esperando um dispositivo (in/out em laco) nao sai do
++     * TB encadeado. Pede a saida do TB; o cpu_exec_loop cede a vez.
++     */
++    if (current_cpu && sodos_coop_due()) {
++        qatomic_set(&current_cpu->neg.icount_decr.u16.high, -1);
++    }
++
+     if (mr->alias) {
+         return memory_region_dispatch_read(mr->alias,
+                                            mr->alias_offset + addr,
+@@ -1527,6 +1535,14 @@
+ {
+     unsigned size = memop_size(op);
+ 
++    /*
++     * SODOS: um guest esperando um dispositivo (in/out em laco) nao sai do
++     * TB encadeado. Pede a saida do TB; o cpu_exec_loop cede a vez.
++     */
++    if (current_cpu && sodos_coop_due()) {
++        qatomic_set(&current_cpu->neg.icount_decr.u16.high, -1);
++    }
++
+     if (mr->alias) {
+         return memory_region_dispatch_write(mr->alias,
+                                             mr->alias_offset + addr,

@@ -371,6 +371,33 @@ int sched_yield(void) {
   sodos__yield();
   return 0;
 }
+
+/* ---------- fatia de tempo cooperativa ----------
+ * Para lacos longos que nunca chamam o sistema (a vCPU do QEMU rodando o
+ * guest): sodos_coop_due diz se a thread ja passou da fatia (~10 ms) e
+ * sodos_coop_yield cede a vez se passou. A contagem evita ler o PIT
+ * (k_ms) a cada chamada. */
+#define COOP_SLICE_MS 10
+static uint64_t coop_last;
+static unsigned coop_n;
+static int coop_flag;
+
+int sodos_coop_due(void) {
+  uint64_t now;
+  if (coop_flag) return 1;
+  if (++coop_n & 63) return 0;
+  now = sodos__ms();
+  if (now - coop_last < COOP_SLICE_MS) return 0;
+  coop_flag = 1;
+  return 1;
+}
+
+void sodos_coop_yield(void) {
+  if (!sodos_coop_due()) return;
+  sodos__yield();
+  coop_last = sodos__ms();
+  coop_flag = 0;
+}
 /* ---------- atributos ---------- */
 
 int pthread_attr_init(pthread_attr_t* a) {

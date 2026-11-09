@@ -448,10 +448,64 @@ __export int close(int fd) {
   return 0;
 }
 
+/* Teclado em modo raw (tcsetattr sem ICANON, c_compiler/lib/misc.c): teclas
+ * que o poll ja tirou do kernel esperam aqui o read(0). Converte para o que
+ * um terminal manda: Enter = CR, Backspace = DEL e setas = ESC [ A..D. */
+extern int __so_stdin_raw;
+#if defined(__GNUC__) && defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+extern int sched_yield(void) __attribute__((weak));
+#endif
+static unsigned char kin[64];
+static int kin_h, kin_t;
+
+static void kin_put(int c) {
+  if (((kin_h + 1) & 63) != kin_t) {
+    kin[kin_h] = (unsigned char)c;
+    kin_h = (kin_h + 1) & 63;
+  }
+}
+
+static void kin_seq(const char* s) {
+  while (*s) kin_put(*s++);
+}
+
+/* Le o que houver no teclado, sem esperar. Devolve quantos bytes ha. */
+__export int sodos_stdin_ready(void) {
+  int c;
+  while (((kin_h + 8) & 63) != kin_t && (c = k_trygetc()) > 0) {
+    switch (c) {
+      case '\n': kin_put('\r'); break;
+      case '\b': kin_put(0x7f); break;
+      case 0x100: kin_seq("\033[A"); break;  /* KEY_UP */
+      case 0x101: kin_seq("\033[B"); break;  /* KEY_DOWN */
+      case 0x102: kin_seq("\033[D"); break;  /* KEY_LEFT */
+      case 0x103: kin_seq("\033[C"); break;  /* KEY_RIGHT */
+      default:
+        if (c < 0x100) kin_put(c);
+    }
+  }
+  return (kin_h - kin_t) & 63;
+}
+
 __export ssize_t read(int fd, void* buf, size_t n) {
   if (PIPE_FD(fd)) return sodos_pipe_read(fd, buf, n);
   struct fd_ent* e;
   size_t left;
+  if (fd == 0 && __so_stdin_raw) {
+    size_t got = 0;
+    /* LP64: as threads sao cooperativas; ceder so ao kernel as prenderia. */
+    while (!sodos_stdin_ready()) {
+#if defined(__GNUC__) && defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+      if (sched_yield) sched_yield(); else
+#endif
+      k_yield();
+    }
+    while (got < n && kin_t != kin_h) {
+      ((char*)buf)[got++] = (char)kin[kin_t];
+      kin_t = (kin_t + 1) & 63;
+    }
+    return (ssize_t)got;
+  }
   if (fd == 0) {
     /* stdin da libc: linha a linha */
     size_t got = 0;
