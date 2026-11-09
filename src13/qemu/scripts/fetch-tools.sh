@@ -19,9 +19,17 @@ case "$need" in *venv*) touch "$D/.venv-ok" ;; esac
 echo "ferramentas em $D"
 fi
 
-# venv proprio com pip (instalado direto do wheel, sem ensurepip do sistema).
+# venv proprio com pip: pelo ensurepip do sistema quando existe (Debian), senao
+# direto do wheel baixado acima (WSL/Ubuntu sem ensurepip).
 VENV=$D/venv
 if [ ! -x "$VENV/bin/pip" ] || ! "$VENV/bin/python" -c "import setuptools" 2>/dev/null; then
+  if python3 -c 'import ensurepip' 2>/dev/null; then
+    rm -rf "$VENV"
+    python3 -m venv --system-site-packages "$VENV"
+    "$VENV/bin/python" -c "import setuptools" 2>/dev/null || "$VENV/bin/pip" install -q setuptools
+    echo "venv em $VENV"
+    exit 0
+  fi
   python3 -m venv --system-site-packages --without-pip "$VENV"
   W=$(ls "$D"/usr/share/python-wheels/pip-*.whl | head -1)
   "$VENV/bin/python" "$W/pip" install --no-index -q "$W" "$D"/usr/share/python-wheels/setuptools-*.whl

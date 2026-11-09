@@ -7,7 +7,27 @@ modulos nao usa.
 
 --- a/meson.build
 +++ b/meson.build
-@@ -2387,11 +2387,17 @@
+@@ -894,7 +894,9 @@
+ endif
+ 
+ # Check for futex(2)
+-if cc.compiles('''#include <linux/futex.h>
++# SODOS: linux/futex.h existe, mas syscall() devolve ENOSYS; usa o pthread.
++sodos_futex = not meson.get_external_property('sodos', false)
++if sodos_futex and cc.compiles('''#include <linux/futex.h>
+                #include <sys/syscall.h>
+                #include <unistd.h>
+                int main (int argc, char ** argv) {
+@@ -903,7 +905,7 @@
+                }''', name : 'futex(2) system call')
+   glib_conf.set('HAVE_FUTEX', 1)
+ endif
+-if cc.compiles('''#include <linux/futex.h>
++if sodos_futex and cc.compiles('''#include <linux/futex.h>
+                #include <sys/syscall.h>
+                #include <unistd.h>
+                int main (int argc, char ** argv) {
+@@ -2387,11 +2389,17 @@
  windows = import('windows')
  subdir('tools')
  subdir('glib')
