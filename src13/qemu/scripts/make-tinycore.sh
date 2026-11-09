@@ -29,8 +29,12 @@ if grep -q " $ISO\$" ../SHA256SUMS 2>/dev/null; then
 else
   sha256sum "$ISO" >> ../SHA256SUMS
 fi
+# No /mnt/c do WSL o nome e case-insensitive: apaga as copias minusculas de
+# builds antigos antes de extrair, senao o nome gravado continua o antigo.
+rm -f "$O/vmlinuz" "$O/core.gz"
 python3 -I "$S/scripts/isoextract.py" "$ISO" "$O" /BOOT/VMLINUZ /BOOT/CORE.GZ >/dev/null
-mv -f "$O/vmlinuz" "$O/VMLINUZ"
-mv -f "$O/core.gz" "$O/CORE.GZ"
 cp -f "$ISO" "$O/TINYCORE.ISO"
+for f in VMLINUZ CORE.GZ TINYCORE.ISO; do
+  [ -s "$O/$f" ] || { echo "falta $O/$f"; exit 1; }
+done
 echo "$O/VMLINUZ $O/CORE.GZ $O/TINYCORE.ISO"

@@ -4,6 +4,9 @@
 Leitor minimo (sem Joliet/Rock Ridge: usa os nomes 8.3 do ISO 9660, sem o
 ";1"). Sem CAMINHO, lista tudo. Ex.:
     isoextract.py TinyCore-15.0.iso out /boot/vmlinuz /boot/core.gz
+
+O arquivo sai com o nome como esta na ISO (VMLINUZ, CORE.GZ): no /mnt/c do
+WSL, que e case-insensitive, "mv vmlinuz VMLINUZ" falha ("same file").
 """
 import os
 import struct
@@ -60,7 +63,7 @@ def main():
                 continue
             if is_dir or path.lower() not in wanted:
                 continue
-            out = os.path.join(dest, os.path.basename(path).lower())
+            out = os.path.join(dest, os.path.basename(path))
             f.seek(lba * SECTOR)
             with open(out, 'wb') as o:
                 o.write(f.read(size))

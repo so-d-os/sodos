@@ -42,7 +42,8 @@ if sh "$S/sodos/guest/build.sh" >/dev/null 2>&1; then
   done
 fi
 # FreeDOS: disquete de 1,44 MB que boota no A:\> pela serial (scripts/make-freedos.sh)
-if sh "$S/scripts/make-freedos.sh" >/dev/null 2>&1; then
+# stderr fica visivel: se o script falhar, o motivo aparece no make disk-files.
+if sh "$S/scripts/make-freedos.sh" >/dev/null; then
   for g in FREEDOS.IMG SERCON.BIN; do
     put "$S/build/out/$g" "$g"
     n=$((n + 1))
@@ -51,8 +52,9 @@ else
   echo "QEMU: sem FreeDOS (scripts/make-freedos.sh falhou); DOS.BAT nao vai bootar."
 fi
 # Tiny Core Linux com X (scripts/make-tinycore.sh): 43 MB, LINUX.BAT
-if sh "$S/scripts/make-tinycore.sh" >/dev/null 2>&1; then
+if sh "$S/scripts/make-tinycore.sh" >/dev/null; then
   for g in VMLINUZ CORE.GZ TINYCORE.ISO; do
+    [ -s "$S/build/out/$g" ] || { echo "QEMU: falta $S/build/out/$g"; exit 1; }
     put "$S/build/out/$g" "$g"
     n=$((n + 1))
   done

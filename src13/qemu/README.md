@@ -48,11 +48,14 @@ Vale nos dois caminhos do WIN: programa como tarefa (Command) e direto.
 
 **Linux** (`scripts/make-tinycore.sh`): baixa a ISO TinyCore 15.0 (25 MB,
 confere o MD5 publicado) e tira `VMLINUZ` e `CORE.GZ` com o
-`scripts/isoextract.py` (leitor ISO 9660 mínimo). O `LINUX.BAT` usa
-`-kernel/-initrd` (pula o menu do isolinux), `-append "loglevel=3 cde
-noapic"` e a ISO como CD (extensões do X em `cde/`). O `noapic` é preciso: a
-máquina `isapc` anuncia um IOAPIC sem linhas e o kernel caía ao configurá-lo.
-A VGA ISA tem o Bochs VBE com framebuffer linear, o bastante para o Xvesa.
+`scripts/isoextract.py` (leitor ISO 9660 mínimo), já com o nome da ISO. No
+`/mnt/c` do WSL o nome é case-insensitive e `mv vmlinuz VMLINUZ` falha
+(*same file*): por isso o `isoextract.py` preserva a caixa e não há rename. O
+`LINUX.BAT` usa `-kernel/-initrd` (pula o menu do isolinux), `-append
+"loglevel=3 cde noapic"` e a ISO como CD (extensões do X em `cde/`). O
+`noapic` é preciso: a máquina `isapc` anuncia um IOAPIC sem linhas e o kernel
+caía ao configurá-lo. A VGA ISA tem o Bochs VBE com framebuffer linear, o
+bastante para o Xvesa.
 Memória do guest 128 MB, `tb-size=64` (o padrão reservaria 1 GB para o JIT).
 
 Limites: o mouse é relativo (PS/2), então o cursor do guest pode se afastar
@@ -394,7 +397,7 @@ em `build/`.
 | `scripts/vm.sh`, `scripts/test.sh` | VM de teste (com `mon`, o monitor de fora) e testes de `sodos/tests` |
 | `scripts/run-guest.sh` | Q3: copia QEMU, firmware e guest para o D: e roda |
 | `scripts/vm-stack.sh` | backtrace heurístico do programa travado na VM de teste |
-| `scripts/copy-qemu-disk.sh` | chamado pelo `make disk-files`: QEMU, firmware, guests, FreeDOS e `.BAT` em `D:\UTILS\QEMU` |
+| `scripts/copy-qemu-disk.sh` | chamado pelo `make disk-files`: QEMU, firmware, guests, FreeDOS, Tiny Core e `.BAT` em `D:\UTILS\QEMU` |
 | `scripts/make-tinycore.sh`, `scripts/isoextract.py` | Tiny Core 15 (ISO, `VMLINUZ`, `CORE.GZ`) para o `LINUX.BAT` |
 | `scripts/make-freedos.sh` | disquete FreeDOS 1.3 que boota no `A:\>` e o `SERCON.BIN` (baixa a FD13-FloppyEdition, SHA-256 em `vendor/SHA256SUMS`) |
 | `sodos/devices/i386-sodos.mak` | dispositivos do `qemu-system-i386` (`isapc`) |
