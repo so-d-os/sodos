@@ -18,6 +18,7 @@ struct con_state {
   int row, col;
   void (*out)(char c);
   int (*exec)(const char* path, int argc, char** argv);
+  void (*flush)(void);  /* shell_set_flush */
   int pipe_on;
 };
 void con_state_save(struct con_state* s);

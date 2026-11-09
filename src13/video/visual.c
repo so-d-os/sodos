@@ -2734,11 +2734,35 @@ static void (*cons_paint)(void);
 static void cons_wipe(struct cmd_con* c);
 static void cmd_push(struct cmd_con* c, const char* s);
 static int in_task(void);
+static struct cmd_con* cons_dirty; /* Command com saida nova de uma tarefa */
+static int cons_late;              /* saida que ainda nao foi para a tela */
+static uint64_t cons_last;
+
+#define CONS_GAP 30000000u   /* ciclos entre redesenhos: as linhas saem em rajada */
+
+static uint64_t cons_tsc(void) {
+  uint32_t a, d;
+  __asm__ volatile ("rdtsc" : "=a"(a), "=d"(d));
+  return ((uint64_t)d << 32) | a;
+}
+
+/* Mostra o que ficou para tras. O kernel chama antes de esperar uma tecla. */
+static void cons_flush(void) {
+  if (!cons_late || !cons_paint || cons_painting) return;
+  cons_late = 0;
+  cons_paint();
+  cons_last = cons_tsc();
+}
 
 /* Numa tarefa o desktop redesenha quando ela ceder o turno. */
 static void cons_refresh(void) {
-  if (in_task()) win_api_dirty = 1;
-  else if (cons_paint && !cons_painting) cons_paint();
+  if (in_task()) {
+    if (cons_dirty && cons_dirty != cons_cap) win_api_dirty = 1;
+    cons_dirty = cons_cap;
+    return;
+  }
+  cons_late = 1;
+  if (cons_tsc() - cons_last >= CONS_GAP) cons_flush();
 }
 
 static void cons_emit(char ch) {
@@ -2799,7 +2823,7 @@ static int cmd_is_exit(const char* s) {
   return s[i] == '\0';
 }
 
-static void desk_load(void);
+static int desk_refresh(void);
 static int cmd_spawn(const char* path, int argc, char** argv);
 
 /* Troca a linha digitada e sai da navegacao no historico (ESC, Enter). */
@@ -2848,13 +2872,20 @@ static int cmd_enter(struct wm_win* w) {
     cons_cap = c;
     shell_set_out(cons_emit);
     shell_set_exec(cmd_spawn);
+    shell_set_flush(cons_flush);
     shell_exec_line(buf);
+    shell_set_flush(0);
     shell_set_exec(0);
     shell_set_out(0);
     cons_cap = 0;
-    desk_load();
-    if (cons_paint && !cons_painting) cons_paint();
+    /* Com cons_cap, cons_paint refaz so esta janela. O desktop so se mudou. */
+    if (!desk_refresh()) cons_cap = c;
+  } else {
+    cons_cap = c;
   }
+  cons_late = 0;
+  if (cons_paint && !cons_painting) cons_paint();
+  cons_cap = 0;
   return 0;
 }
 
@@ -4719,19 +4750,32 @@ static void desk_load_thm(struct desk_item* it) {
   it->px = b;
 }
 
-static void desk_load(void) {
-  char list[1024];
-  int n, p;
-  const char* prefix = DESK_ROOT;
-  int plen = 0;
-  desk_free();
-  n = drives_is_mounted('D') ? file_list(DESK_ROOT, list, (int)sizeof(list)) : -1;
+#define DESK_LIST 1024
+static char desk_last[DESK_LIST];
+static int desk_last_n = -1;
+
+static int desk_read_list(char* list, const char** prefix) {
+  int n;
+  *prefix = DESK_ROOT;
+  n = drives_is_mounted('D') ? file_list(DESK_ROOT, list, DESK_LIST) : -1;
   if (n <= 0) {
     /* sem D: (notebook com boot pelo GRUB): a mesma pasta no pendrive */
-    prefix = DESK_ROOT_USB;
-    if (!drives_is_mounted('U') && drives_mount_usb() != 0) return;
-    n = file_list(prefix, list, (int)sizeof(list));
+    *prefix = DESK_ROOT_USB;
+    if (!drives_is_mounted('U') && drives_mount_usb() != 0) return -1;
+    n = file_list(*prefix, list, DESK_LIST);
   }
+  return n;
+}
+
+static void desk_load(void) {
+  char list[DESK_LIST];
+  int n, p;
+  const char* prefix;
+  int plen = 0;
+  desk_free();
+  n = desk_read_list(list, &prefix);
+  desk_last_n = n;
+  for (p = 0; p < n && p < DESK_LIST; p++) desk_last[p] = list[p];
   if (n <= 0) return;
   while (prefix[plen]) plen++;
   p = 0;
@@ -4771,6 +4815,21 @@ static void desk_load(void) {
     if (it->image == 1) desk_load_thm(it);
     desk_n++;
   }
+}
+
+/* Depois de um comando: rele as miniaturas so se a lista de arquivos mudou.
+ * 1 se mudou (o desktop precisa de um quadro inteiro). */
+static int desk_refresh(void) {
+  char list[DESK_LIST];
+  const char* prefix;
+  int n = desk_read_list(list, &prefix);
+  int i;
+  if (n == desk_last_n) {
+    for (i = 0; i < n && i < DESK_LIST && list[i] == desk_last[i]; i++) { }
+    if (i >= n || i >= DESK_LIST) return 0;
+  }
+  desk_load();
+  return 1;
 }
 
 static int desk_place(int index, int icon, int ch, int scale, int sw, int sh, int bar_h,
@@ -5493,6 +5552,16 @@ static void gui_draw_frame(struct gui_win* w, int active, uint32_t col_title, ui
   round_top_frame(w->ox, w->oy, w->cw, hh, UI_RADIUS, gui_col(UI_BORDER));
 }
 
+/* Com paint_only, paint_stacked so desenha o que esta da janela paint_z para
+ * cima e encosta no retangulo: o resto da tela nao muda. */
+static int paint_only, paint_z, paint_x, paint_y, paint_w, paint_h;
+
+static int paint_skip(int z, int x, int y, int w, int h) {
+  if (!paint_only) return 0;
+  return z < paint_z || x >= paint_x + paint_w || x + w <= paint_x ||
+         y >= paint_y + paint_h || y + h <= paint_y;
+}
+
 static void paint_stacked(struct wm_win* wins, int title_h, int scale, uint32_t col_win,
                           uint32_t col_title, uint32_t col_white, uint32_t col_black,
                           uint32_t col_btn, uint32_t col_inactive) {
@@ -5503,6 +5572,7 @@ static void paint_stacked(struct wm_win* wins, int title_h, int scale, uint32_t 
   for (i = 0; i < WM_MAX; i++) {
     if (!wins[i].used || run_hidden(&wins[i])) continue;
     if (dc.capture && dc.wm == i) continue;
+    if (paint_skip(wins[i].z, wins[i].x, wins[i].y, wins[i].w, wins[i].h)) continue;
     order[n] = i;
     kind[n] = 1;
     n++;
@@ -5510,6 +5580,8 @@ static void paint_stacked(struct wm_win* wins, int title_h, int scale, uint32_t 
   for (i = 0; gwins && i < GUI_MAX; i++) {
     if (!gwins[i].open) continue;
     if (dc.capture && dc.gw == i) continue;
+    if (paint_skip(gwins[i].z, gwins[i].ox, gwins[i].oy, gwins[i].cw,
+                   gwins[i].title_h + gwins[i].ch)) continue;
     order[n] = i;
     kind[n] = 2;
     n++;
@@ -5991,15 +6063,59 @@ static int chrome_on_click(int x, int y) {
   return 0;
 }
 
+static int wm_no_partial; /* menu ou dialogo aberto: ficam sobre a janela */
+
+/* Refaz so a janela w e o que esta na frente dela, e copia so esse retangulo
+ * para a pagina visivel. 0: nao da, precisa do quadro inteiro. O quadro de tras
+ * fica com o retangulo novo, sem problema: o proximo quadro inteiro refaz tudo. */
+static int wm_present_win(struct wm_win* w) {
+  int x0 = w->x, y0 = w->y, x1 = w->x + w->w, y1 = w->y + w->h;
+  int over, r;
+  if (!gfx_bochs || !c_wins || wm_no_partial || dc.on || dc.capture) return 0;
+  if (!gfx_dbuf && !gfx_back) return 0;
+  if (chrome_menu && *chrome_menu) return 0;
+  /* Fora da area livre (sobre a barra de tarefas, por exemplo). */
+  if (x0 < 0 || y0 < 0 || x1 > (int)gfx_w || y1 > (int)gfx_h - c_bar_h) return 0;
+  over = cursor_saved && old_mx < x1 && old_mx + cur_bw > x0 &&
+         old_my < y1 && old_my + cur_bh > y0;
+  if (over) cursor_restore();
+  gfx_frame_begin();
+  paint_only = 1;
+  paint_z = w->z;
+  paint_x = x0;
+  paint_y = y0;
+  paint_w = w->w;
+  paint_h = w->h;
+  paint_stacked(c_wins, c_title_h, c_scale, c_win, c_title, c_white, c_black, c_btn, c_inactive);
+  paint_only = 0;
+  for (r = y0; r < y1; r++)
+    dc_copy((volatile uint32_t*)(gfx_lfb + ((uint32_t)r + gfx_front_y) * gfx_pitch_bytes + (uint32_t)x0 * 4u),
+            (const volatile uint32_t*)gfx_at(x0, r), (uint32_t)(x1 - x0));
+  gfx_offscreen = 0;
+  gfx_draw_y0 = gfx_front_y;
+  if (over) cursor_redraw_at(old_mx, old_my, sys_cursor_col());
+  return 1;
+}
+
+static int cons_present(struct cmd_con* c) {
+  int i;
+  for (i = 0; c_wins && i < WM_MAX; i++)
+    if (c_wins[i].used && c_wins[i].kind == WM_KIND_CMD && c_wins[i].st == (struct app_state*)c)
+      return wm_present_win(&c_wins[i]);
+  return 0;
+}
+
 static void cons_redraw(void) {
   if (!c_wins || cons_painting) return;
   cons_painting = 1;
-  gfx_frame_begin();
-  cursor_saved = 0;
-  chrome_paint_under();
-  chrome_paint_over();
-  cursor_redraw_at((int)sys_mx, (int)sys_my, sys_cursor_col());
-  gfx_frame_end();
+  if (!cons_cap || !cons_present(cons_cap)) {
+    gfx_frame_begin();
+    cursor_saved = 0;
+    chrome_paint_under();
+    chrome_paint_over();
+    cursor_redraw_at((int)sys_mx, (int)sys_my, sys_cursor_col());
+    gfx_frame_end();
+  }
   cons_painting = 0;
 }
 
@@ -6216,6 +6332,14 @@ static int win_wm_run(void) {
         host_open_ai(wins, &focus, big);
         need_draw = 1;
       }
+    }
+    wm_no_partial = menu_open || pop_open || note_dlg || note_file_menu;
+    if (need_draw) {
+      cons_dirty = 0; /* o quadro inteiro ja mostra */
+    } else if (cons_dirty && !dc.on) {
+      struct cmd_con* cd = cons_dirty;
+      cons_dirty = 0;
+      if (!cons_present(cd)) need_draw = 1;
     }
     /* A janela arrastada sumiu (programa fechou, por exemplo). */
     if ((dc.on || dc.capture) &&
@@ -7065,7 +7189,7 @@ static int win_wm_run(void) {
           else if (sc == 0x53) cmd_key(&wins[focus], 0x7f);
           else if (cc && (sc == 0x4B || sc == 0x4D || sc == 0x47 || sc == 0x4F))
             cmd_move(cc, sc, keymap_shift());
-          need_draw = 1;
+          if (!wm_present_win(&wins[focus])) need_draw = 1;
         } else if (!(sc & 0x80) && focus >= 0 && wins[focus].used && wins[focus].kind == WM_KIND_NOTE) {
           int top = title_h + note_menubar_h(ch);
           if (sc == 0x53) {
@@ -7122,7 +7246,7 @@ static int win_wm_run(void) {
         }
         if (focus >= 0 && wins[focus].used && wins[focus].kind == WM_KIND_CMD) {
           cmd_set_input((struct cmd_con*)wins[focus].st, "");
-          need_draw = 1;
+          if (!wm_present_win(&wins[focus])) need_draw = 1;
           continue;
         }
         if (focus >= 0 && wins[focus].used && wins[focus].kind == WM_KIND_NOTE && note_dirty)
@@ -7234,8 +7358,10 @@ static int win_wm_run(void) {
             wins[focus].used = 0;
             focus = wm_find_kind(wins, WM_KIND_MGR);
             if (focus < 0) focus = 0;
+            need_draw = 1;
+          } else if (c != '\n' && c != '\r' && !wm_present_win(&wins[focus])) {
+            need_draw = 1; /* Enter: cmd_enter ja redesenhou */
           }
-          need_draw = 1;
           continue;
         }
         if (!(focus >= 0 && wins[focus].used && wins[focus].kind == WM_KIND_NOTE))

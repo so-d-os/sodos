@@ -23,6 +23,9 @@ void (*shell_get_out(void))(char c);
 /* Enquanto fn nao e nulo, o .EXE achado por shell_exec_line vai para fn.
  * fn devolve 0 quando nao quer o programa, e ai roda o mod_exec de sempre. */
 void shell_set_exec(int (*fn)(const char* path, int argc, char** argv));
+/* Enquanto fn nao e nulo, e chamada antes de ler o teclado: quem guarda a saida
+ * para mostrar em rajada mostra agora (o Command do WIN). */
+void shell_set_flush(void (*fn)(void));
 /* Executa uma linha como o prompt do boot. line e modificada.
  * Devolve o codigo do comando (0 = ok). Erro de carga de .EXE e negativo. */
 int shell_exec_line(char* line);

@@ -332,6 +332,10 @@ static int (*shell_exec_fn)(const char* path, int argc, char** argv);
 
 void shell_set_exec(int (*fn)(const char* path, int argc, char** argv)) { shell_exec_fn = fn; }
 
+static void (*shell_flush_fn)(void);
+
+void shell_set_flush(void (*fn)(void)) { shell_flush_fn = fn; }
+
 static int pipe_on;
 
 void con_state_save(struct con_state* s) {
@@ -339,6 +343,7 @@ void con_state_save(struct con_state* s) {
   s->col = col;
   s->out = shell_out_fn;
   s->exec = shell_exec_fn;
+  s->flush = shell_flush_fn;
   s->pipe_on = pipe_on;
 }
 
@@ -347,6 +352,7 @@ void con_state_load(const struct con_state* s) {
   col = s->col;
   shell_out_fn = s->out;
   shell_exec_fn = s->exec;
+  shell_flush_fn = s->flush;
   pipe_on = s->pipe_on;
 }
 
@@ -505,6 +511,8 @@ static int kb_read(unsigned char* sc) {
 /* wait = 0: nao espera; devolve 0 se nao ha tecla pronta. */
 static int get_key(int wait) {
   unsigned char sc;
+
+  if (shell_flush_fn) shell_flush_fn();
 
   /* Tecla que sobrou de acento sem combinacao (~ e x -> ~ depois x). */
   {
