@@ -61,4 +61,10 @@ typedef struct ucontext_t {
 #define REG_OLDMASK 21
 #define REG_CR2 22
 
+/* LP64: firefox/sodos/port/sodos_ucontext.c (sem mascara de sinais). */
+int getcontext(ucontext_t* ucp);
+int setcontext(const ucontext_t* ucp);
+int swapcontext(ucontext_t* oucp, const ucontext_t* ucp);
+void makecontext(ucontext_t* ucp, void (*func)(void), int argc, ...);
+
 #endif

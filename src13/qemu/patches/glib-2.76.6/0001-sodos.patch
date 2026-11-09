@@ -1,0 +1,27 @@
+SODOS: sem futex(2) e sem gobject/gio.
+
+O SODOS tem linux/futex.h (para o Firefox), mas syscall() devolve ENOSYS.
+Com a propriedade "sodos" no cross file, o glib usa mutex/cond do pthread
+e nao configura gobject (libffi) nem gio (resolver DNS), que o QEMU sem
+modulos nao usa.
+
+--- a/meson.build
++++ b/meson.build
+@@ -2387,11 +2387,17 @@
+ windows = import('windows')
+ subdir('tools')
+ subdir('glib')
++# SODOS: so glib/gthread/gmodule; gobject (libffi) e gio (resolver, xdg...)
++# ainda nao sao usados pelo QEMU.
++if not meson.get_external_property('sodos', false)
+ subdir('gobject')
++endif
+ subdir('gthread')
+ subdir('gmodule')
++if not meson.get_external_property('sodos', false)
+ subdir('gio')
+ subdir('fuzzing')
++endif
+ 
+ # xgettext is optional (on Windows for instance)
+ if find_program('xgettext', required : get_option('nls')).found()

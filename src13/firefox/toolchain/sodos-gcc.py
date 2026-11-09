@@ -229,6 +229,8 @@ def main():
     objs = []
     rlibs = []
     flags = []
+    libdirs = []
+    libnames = []
     shared = False
     i = 0
     while i < len(args):
@@ -256,10 +258,19 @@ def main():
                 shared = True
             i += 1
             continue
-        if a in ("-L", "-z", "-T", "-u", "-rpath", "-rpath-link"):
+        if a == "-L" and i + 1 < len(args):
+            libdirs.append(args[i + 1])
             i += 2
             continue
-        if a.startswith("-l") or a.startswith("-L"):
+        if a in ("-z", "-T", "-u", "-rpath", "-rpath-link", "-l"):
+            i += 2
+            continue
+        if a.startswith("-L"):
+            libdirs.append(a[2:])
+            i += 1
+            continue
+        if a.startswith("-l"):
+            libnames.append(a[2:])
             i += 1
             continue
         if a.startswith("-B") or a.startswith("--") or a in ("-O1", "-O2", "-O3", "-Os"):
@@ -281,6 +292,17 @@ def main():
             if os.path.exists(a):
                 objs.append(a)
         i += 1
+
+    # -lfoo vira libfoo.a quando existe em algum -L (bibliotecas portadas para
+    # o sysroot, ex.: glib/zlib do QEMU). As demais (-lm, -lpthread, -lutil...)
+    # ja estao na libc/libsodos e continuam ignoradas.
+    for name in libnames:
+        for d in libdirs:
+            p = os.path.join(d, "lib%s.a" % name)
+            if os.path.exists(p):
+                if p not in rlibs:
+                    rlibs.append(p)
+                break
 
     linker = LINK64 if is64() else LINK
     crt = CRT64 if is64() else CRT

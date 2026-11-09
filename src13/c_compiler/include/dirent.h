@@ -19,6 +19,7 @@ typedef struct __so_DIR DIR;
 DIR* opendir(const char* path);
 struct dirent* readdir(DIR* d);
 int closedir(DIR* d);
+void rewinddir(DIR* d);
 
 
 #ifdef __cplusplus

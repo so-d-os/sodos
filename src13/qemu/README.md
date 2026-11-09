@@ -50,6 +50,62 @@ O `host_os` é `linux`: o driver mantém `__linux__` ao compilar (como no
 Firefox), e a libsodos imita a ABI Linux. Os pontos que isso puxa (eventfd,
 signalfd, `/proc`) aparecem no Q1/Q2.
 
+## Q1: resultado
+
+As três peças rodam **dentro do SODOS** (VM de teste, `scripts/test.sh`):
+
+```
+== D:\ZTEST.EXE     compress2/uncompress/crc32              ZTEST: ok (zlib 1.3.1)
+== D:\CTXTEST.EXE   makecontext (8 args), swapcontext,
+                    siglongjmp para fora da corrotina, uc_link   CTXTEST: ok
+== D:\GTEST.EXE     GHashTable, GString/printf 64 bits, printf posicional,
+                    UTF-8 + g_convert (iconv), GRegex (pcre2), 2 GThreads + GMutex,
+                    GMainLoop com idle + 3 timeouts de 50 ms (151 ms)   GTEST: ok (glib 2.76.6)
+```
+
+- **zlib 1.3.1** (`scripts/build-zlib.sh`): compilada direto, sem configure.
+- **glib 2.76.6** (`scripts/build-glib.sh`): meson cruzado com
+  `sodos/meson-cross.ini` + `sodos/cross-sodos.ini`; instala
+  `libglib-2.0.a`, `libgmodule-2.0.a`, `libgnulib.a`, `libcharset.a`,
+  `libpcre2-8.a` (subprojeto) e `libintl.a` (proxy) em `sodos/sysroot`. O
+  patch `patches/glib-2.76.6/0001-sodos.patch` desliga o futex (o
+  `syscall()` do SODOS é `ENOSYS`; o glib usa mutex/cond do pthread) e não
+  configura gobject (libffi) nem gio (resolver DNS). O printf do glib é o do
+  gnulib embutido (o da libc não tem `%n$`).
+- **ucontext** em `firefox/sodos/port/sodos_ucontext.c` (LP64): troca
+  callee-saved, rsp/rip, registradores de argumento, MXCSR e x87 CW. O QEMU
+  agora configura com `coroutine backend: ucontext`.
+- **iconv mínimo** em `firefox/sodos/port/sodos_iconv.c`: UTF-8, ASCII,
+  Latin-1, UTF-16 e UTF-32.
+
+Correções na base LP64 encontradas no caminho:
+
+- `c_compiler/include/limits.h`: `LONG_MAX`/`ULONG_MAX` eram de 32 bits também
+  no LP64 (o glib quebrava em `G_MAXSIZE == SIZE_MAX`). Agora vêm de
+  `__LONG_MAX__`; `SSIZE_MAX` novo.
+- headers: `sys/poll.h`, `utime.h`, `iconv.h`; `rewinddir`
+  (`libs/posix-lite`), `getpwnam_r`; protótipos de `fallocate` e `gethostname`.
+- `sodos-gcc.py`: `-lfoo` vira `libfoo.a` quando existe num `-L` (LP64).
+
+Limite conhecido: `off_t` é 32 bits em toda a libc (FAT16, arquivos < 2 GB).
+Basta para imagens de guest pequenas.
+
+## Q2: o que falta
+
+`scripts/build-qemu.sh -k 0` compila 2008 dos 2051 objetos. Os 43 que falham
+são lacunas de headers POSIX/Linux, não problemas de ABI:
+
+- `u_char`/`u_short` (`sys/types.h`), `IOV_MAX`, `SOMAXCONN`, `in6addr_any`,
+  `st_rdev`;
+- termios completo (`IEXTEN`, `ECHONL`, `CS8`, `B9600`, `TIOCM*`...) para
+  `chardev/char-serial`, `char-stdio`;
+- `linux/types.h`, `linux/fs.h`, `linux/ioctl.h`, `scsi/sg.h`, `glob.h`,
+  `SIGIO`, `SI_*`, `CLONE_VM`, `PR_SET_PDEATHSIG`.
+
+Parte desses arquivos nem deveria entrar (tap, vfio, userfaultfd, NBD, testes
+qtest): o próximo passo é desligá-los no configure ou no meson antes de
+completar os headers. Depois vem o link e `QEMU.EXE --version` no SODOS.
+
 ## Riscos conhecidos
 
 - **Threads cooperativas** (o M1b, preempção, segue pendente): a thread da vCPU
@@ -67,7 +123,7 @@ sh scripts/configure-qemu.sh   # para em "Dependency glib-2.0 not found" ate o Q
 sh scripts/probe-deps.sh       # lista todas as dependencias obrigatorias
 ```
 
-O build fica em `~/sodos-build/qemu-9.2.0` (ext4 do WSL; no `/mnt/c` o meson
+Os builds ficam em `~/sodos-build/` (`qemu-9.2.0`, `glib-2.76.6`, `zlib-1.3.1`) (ext4 do WSL; no `/mnt/c` o meson
 acusa *clock skew*). Mude com `QEMU_BUILD_DIR=...`. O log do configure fica em
 `build/configure.log`.
 
