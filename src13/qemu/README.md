@@ -18,7 +18,42 @@ Alvo: `qemu-system-i386` com TCG, compilado pelo toolchain LP64 do SODOS
 | **Q3** | bootar um kernel multiboot mínimo pela serial (`-M isapc`) | **feito (2026-11-09)** |
 | **Q4a** | `-serial stdio` no console do SODOS (saída e teclado); QEMU no `make disk-files` (`D:\UTILS\QEMU`) | **feito (2026-11-09)** |
 | **Q4b** | bootar um sistema de verdade: FreeDOS 1.3 (disquete) com tela e teclado pela serial | **feito (2026-11-09)** |
-| Q4c | backend de tela `ui/sodos.c` numa janela do SODOS | — |
+| **Q4c** | tela de texto do guest no console do SODOS (`ui/sodos.c`): EDIT do FreeDOS | **feito (2026-11-09)** |
+| Q5 | modos gráficos numa janela do WIN; disco IDE com um sistema maior | — |
+
+## Q4c: resultado
+
+Programas de tela cheia rodam: o **FreeDOS Edit** abre, edita, salva e sai,
+com a tela do guest no console de texto do SODOS (`D:\UTILS\QEMU\DOS.BAT`).
+
+O backend `sodos/ui/sodos.c` (copiado para `vendor/.../ui/` pelo
+`configure-qemu.sh`) se registra como o display `curses` (`-display curses`):
+a VGA entrega a tela de texto em células e cada linha alterada vai para a
+tela 80x25 do SODOS com `k_vput`, no formato da VGA; o cursor vai por
+`k_cursor`. O `patches/0003` liga o arquivo no build (com a propriedade
+`sodos` do cross file, sem a biblioteca curses) e aloca a superfície de vídeo
+em memória anônima (o SODOS não tem `memfd` nem `mmap` compartilhado).
+
+Teclado: cada tecla do `k_trygetc` vira aperta+solta no i8042 do guest
+(layout US). O kernel não informa Ctrl/Alt, então:
+
+| Tecla no SODOS | No guest |
+|---|---|
+| **F11** e depois uma tecla | Ctrl + tecla (F11 S = salvar no EDIT) |
+| **F12** e depois uma tecla | Alt + tecla (F12 F = menu Arquivo, F12 X = sair) |
+| **F12 F12** | desliga o QEMU gravando os discos |
+| Ctrl+C | o kernel mata o QEMU na hora |
+
+Discos: a posix-lite guarda a imagem em memória e só grava no `fsync`/`close`.
+O backend pede `bdrv_flush_all()` a cada 2 s, então um Ctrl+C perde no máximo
+os últimos 2 s de escrita; F12 F12 grava tudo. O disquete agora traz o
+`EDIT.EXE` (pacote `edit.zip` do repositório FreeDOS 1.3, GPL; licença em
+`A:\FREEDOS\DOC\EDIT.TXT`). A versão só serial (sercon, sem VGA) ficou em
+`DOSSER.BAT`.
+
+Limites: só modo texto (modos gráficos do guest não aparecem); a tela mostra
+as primeiras 25 linhas e 80 colunas; caracteres fora do ASCII que o teclado
+ABNT2 gera (ç, acentos) não são enviados.
 
 ## Q4b: resultado
 
@@ -46,7 +81,7 @@ should be prefixed with "opt/"` é esperado (o SeaBIOS lê esse nome exato).
 
 O disquete (`scripts/make-freedos.sh`, 1,44 MB) sai do `x86BOOT.img` oficial da
 FD13-FloppyEdition, sem o menu de idioma e sem o instalador; o
-`make disk-files` grava `FREEDOS.IMG`, `SERCON.BIN` e `DOS.BAT` em
+`make disk-files` grava `FREEDOS.IMG`, `SERCON.BIN` e `DOSSER.BAT` (no Q4b era o `DOS.BAT`) em
 `D:\UTILS\QEMU`. `-drive` usa `file.driver=file` explícito: senão o QEMU lê
 `D:\...` como o protocolo `D:`.
 
@@ -86,7 +121,8 @@ os guests de teste e três `.BAT` (`sodos/disk/`):
 | `D:\UTILS\QEMU\HELLO.BAT` | guest escreve pela serial no console e sai (código 33), ~4 s |
 | `D:\UTILS\QEMU\ECO.BAT` | guest interativo: o que você digita volta em maiúsculas; `q` sai |
 | `D:\UTILS\QEMU\SERIAL.BAT arq.elf` | boota um kernel multiboot com a serial no console |
-| `D:\UTILS\QEMU\DOS.BAT` | FreeDOS 1.3 (Q4b) |
+| `D:\UTILS\QEMU\DOS.BAT` | FreeDOS 1.3 na tela de texto, com EDIT (Q4c) |
+| `D:\UTILS\QEMU\DOSSER.BAT` | FreeDOS 1.3 só pela serial (Q4b) |
 
 Ctrl+C encerra o QEMU (regra do kernel para programas de console). Ainda não
 há tela: só aparece o que o guest escreve na COM1.
@@ -256,11 +292,10 @@ que o meson recusa, até o configure passar. O `host_os` é `linux`: o driver
 mantém `__linux__` ao compilar (como no Firefox) e a libsodos imita a ABI
 Linux. O backend do TCG é o nativo x86-64, como o JIT do SpiderMonkey.
 
-## Q4c: próximos passos
+## Q5: próximos passos
 
-1. Backend de tela `ui/sodos.c` (DisplayChangeListener) numa janela do WIN,
-   com o pixman portado; teclado/mouse da janela para o guest. Com ele o
-   FreeDOS mostra também o que escreve direto na memória de vídeo (EDIT...).
+1. Modos gráficos numa janela do WIN (o `ui/sodos.c` desenhando a superfície
+   da VGA), com teclado e mouse da janela, inclusive Ctrl/Alt de verdade.
 2. Disco rígido IDE com um sistema maior (FreeDOS instalado, Linux pequeno
    com `console=ttyS0`).
 
@@ -323,12 +358,14 @@ em `build/`.
 | `scripts/make-freedos.sh` | disquete FreeDOS 1.3 que boota no `A:\>` e o `SERCON.BIN` (baixa a FD13-FloppyEdition, SHA-256 em `vendor/SHA256SUMS`) |
 | `sodos/devices/i386-sodos.mak` | dispositivos do `qemu-system-i386` (`isapc`) |
 | `sodos/guest/` | guests de teste multiboot (`hello.S`, `eco.S`, `hello.ld`, `build.sh`) |
-| `sodos/disk/` | `.BAT` que vão para `D:\UTILS\QEMU` (`HELLO`, `ECO`, `SERIAL`, `DOS`) |
+| `sodos/disk/` | `.BAT` que vão para `D:\UTILS\QEMU` (`HELLO`, `ECO`, `SERIAL`, `DOS`, `DOSSER`) |
+| `sodos/ui/sodos.c` | display de texto no console do SODOS (`-display curses`) |
 | `sodos/cross-sodos.ini` | propriedades do meson para o alvo (`needs_exe_wrapper`, glib) |
 | `sodos/meson-cross.ini` | cross file das libs (compilador, pkg-config, host) |
 | `sodos/sysroot/` | libs portadas: `.pc`, headers e `.a` (gerados, fora do git) |
 | `sodos/tests/` | `ztest.c`, `ctxtest.c`, `cotest.c`, `gtest.c`, `elfread.c` |
 | `patches/0001-*` | deixa o configure do QEMU somar o `cross-sodos.ini` |
+| `patches/0003-*` | liga o `ui/sodos.c` no build e aloca a superfície sem `memfd` |
 | `patches/0002-*` | vCPU do TCG cede a vez a cada ~10 ms: E/S, salto indireto e contagem de TBs (threads cooperativas) |
 | `patches/glib-2.76.6/` | glib sem futex e sem gobject/gio |
 
