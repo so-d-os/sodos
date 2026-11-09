@@ -536,6 +536,9 @@ disk-files: disk.img
 	@for f in c_compiler/out/DRV/*.DLL; do [ -f "$$f" ] && mcopy -o -i $(DISK)@@512 "$$f" ::/SODOS/DRV/ || true; done
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/AIPANEL.EXE ::/SODOS/AIPANEL.EXE
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/MENUCFG.EXE ::/SODOS/MENUCFG.EXE
+	@# Os READMEs vao para \SODOS: no disk.img e no pendrive (U:), se conectado
+	@mcopy -o -i $(DISK)@@512 ../README.md ::/SODOS/README.MD
+	@mcopy -o -i $(DISK)@@512 ../README.pt-BR.md ::/SODOS/README.PT-BR.MD
 	@if ! mdir -i $(DISK)@@512 ::/SODOS/WALLS >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS/WALLS; fi
 	@for f in content/wallpapers/*; do \
 	  [ -f "$$f" ] || continue; \
@@ -564,6 +567,7 @@ disk-files: disk.img
 	@if [ -f AGENT.CFG ]; then mcopy -o -i $(DISK)@@512 AGENT.CFG ::/AGENT.CFG || exit 1; fi
 	@sh firefox/sodos/scripts/copy-firefox-disk.sh $(DISK)
 	@mdir -i $(DISK)@@512 -w ::/
+	@sh tools/usb-docs.sh
 
 # Sobe o QEMU e mostra os comandos para formatar o disco (digite no prompt do QEMU)
 run-format: os.img disk.img disk2.img
