@@ -29,3 +29,11 @@ IRQ_STUB 12
 IRQ_STUB 13
 IRQ_STUB 14
 IRQ_STUB 15
+
+; IPI do SMP: o BSP acorda um AP (ou o AP avisa que a tarefa terminou).
+; Vetor 0xF1; o EOI do LAPIC fica no C (smp_ipi_ack).
+global smp_ipi_stub
+smp_ipi_stub:
+  push qword 0
+  push qword 0xF1
+  jmp isr_common

@@ -169,6 +169,7 @@ int cmd_format(int argc, char** argv);
 int cmd_copy(int argc, char** argv);
 int cmd_disks(int argc, char** argv);
 int cmd_free(int argc, char** argv);
+int cmd_smp(int argc, char** argv);
 int cmd_df(int argc, char** argv);
 int cmd_dstat(int argc, char** argv);
 int cmd_visual(int argc, char** argv);

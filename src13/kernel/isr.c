@@ -11,6 +11,7 @@
 #include "net.h"
 
 #include "fbcon.h"
+#include "smp.h"
 #define VGA vga_text  /* 0xB8000, ou a copia do fbcon no UEFI */
 #define ATTR 0x1F00  /* fundo azul, texto branco */
 
@@ -347,6 +348,12 @@ static void call_on_stack(void (*fn)(void), void* top) {
 
 void isr_dispatch(isr_frame_t* f) {
   __asm__ volatile ("cli");
+
+  /* IPI do SMP (vetor 0xF1): so confirma no LAPIC e volta. */
+  if (f->int_no == 0xF1) {
+    smp_ipi_ack();
+    return;
+  }
 
   /* IRQ 32..47: enviar EOI e retornar (nao travar) */
   if (f->int_no >= 32 && f->int_no <= 47) {

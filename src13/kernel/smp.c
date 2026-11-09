@@ -32,6 +32,16 @@ static volatile uint32_t ap_parked;
 static volatile uint32_t ap_park_ms;      /* quando os APs entraram em hlt */
 static volatile uint8_t ap_up[SMP_MAX];
 static volatile uint64_t ap_work[SMP_MAX];
+
+/* Fila de tarefa por CPU: uma de cada vez, despachada por IPI (vetor 0xF1).
+ * A BSP chama smp_run e fica em hlt; o AP roda e avisa de volta. */
+static volatile void (*job_fn)(void*);
+static volatile void* job_arg;
+static volatile int job_cpu = -1;
+static volatile int job_pending;
+static volatile int job_done;
+static volatile uint32_t job_t0;
+static volatile uint32_t ap_busy_ms[SMP_MAX];
 static uint8_t ap_stacks[SMP_MAX][16384] __attribute__((aligned(16)));
 
 /* ---------- portas/MSR ---------- */
@@ -150,7 +160,7 @@ static void lapic_enable(void) {
   b |= 1u << 11;                      /* APIC enable */
   b &= ~(1u << 10);                   /* xAPIC (nao x2APIC) */
   wrmsr(0x1B, b);
-  lapic_wr(0xF0, 0x1FF);              /* SVR: ligado, vetor espurio 0xFF */
+  lapic_wr(0xF0, 0x1F1);              /* SVR: ligado, espurio 0xF1 (tem gate) */
   lapic_wr(0x80, 0);                  /* TPR: aceita tudo */
   lapic_wr(0xB0, 0);                  /* EOI */
 }
@@ -210,6 +220,25 @@ static int start_ap(int cpu) {
   return -1;
 }
 
+void smp_ipi_ack(void) { lapic_wr(0xB0, 0); }
+
+/* Depois da prova de paralelismo: acorda por IPI, roda a tarefa da vez e
+ * avisa a BSP (IPI de volta). Fica em hlt quando nao ha tarefa. */
+static void ap_idle(uint32_t cpu) {
+  for (;;) {
+    if (job_pending && job_cpu == (int)cpu) {
+      void (*fn)(void*) = (void(*)(void*))job_fn;
+      void* arg = (void*)job_arg;
+      job_pending = 0;
+      fn(arg);
+      ap_busy_ms[cpu] += (uint32_t)(irq_ticks() - job_t0);
+      job_done = 1;
+      ipi(ids[0], 0x000000F1);
+    }
+    __asm__ volatile ("sti; hlt");
+  }
+}
+
 /* Corpo dos APs: nunca volta (o trampolim chamou sem return address). */
 void ap_main(uint32_t cpu) {
   if (cpu >= (uint32_t)ncpu) {              /* parametro de um AP que reiniciou */
@@ -222,9 +251,7 @@ void ap_main(uint32_t cpu) {
       __sync_fetch_and_add(&ap_online, 1);
     }
     for (;;) {
-      if (ap_parked) {
-        for (;;) __asm__ volatile ("cli; hlt");
-      }
+      if (ap_parked) ap_idle(cpu);          /* nao volta */
       ap_work[cpu]++;
       __asm__ volatile ("pause");
     }
@@ -233,6 +260,28 @@ void ap_main(uint32_t cpu) {
 }
 
 int smp_cpu_count(void) { return ncpu; }
+
+int smp_run(int cpu, void (*fn)(void*), void* arg) {
+  if (cpu <= 0 || cpu >= ncpu || cpu >= SMP_MAX || !ap_up[cpu] || !fn) return -1;
+  job_fn = fn;
+  job_arg = arg;
+  job_cpu = cpu;
+  job_t0 = (uint32_t)irq_ticks();
+  job_done = 0;
+  job_pending = 1;
+  if (ipi(ids[cpu], 0x000000F1) < 0) {
+    job_pending = 0;
+    return -1;
+  }
+  while (!job_done) __asm__ volatile ("sti; hlt");
+  job_done = 0;
+  serial_puts("[smp] cpu ");
+  serial_hex32((uint32_t)cpu);
+  serial_puts(" tarefa: ");
+  serial_hex32((uint32_t)(irq_ticks() - job_t0));
+  serial_puts(" ms\n");
+  return 0;
+}
 
 int smp_cpu_stat(int i, struct k_cpu_stat* out) {
   if (!out || i < 0 || i >= ncpu) return -1;
@@ -243,6 +292,11 @@ int smp_cpu_stat(int i, struct k_cpu_stat* out) {
   out->busy_ms = (i == 0) ? (unsigned)irq_ticks() : 0u;
   out->idle_ms = (i == 0) ? 0u
                 : (ap_parked ? (unsigned)(irq_ticks() - ap_park_ms) : 0u);
+  if (i > 0) {
+    uint32_t up = ap_parked ? (uint32_t)(irq_ticks() - ap_park_ms) : 0u;
+    out->busy_ms = ap_busy_ms[i];
+    out->idle_ms = up > ap_busy_ms[i] ? up - ap_busy_ms[i] : 0u;
+  }
   out->pad[0] = 0;
   out->pad[1] = 0;
   return 0;

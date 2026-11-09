@@ -24,4 +24,12 @@ struct k_cpu_stat {
 };
 int smp_cpu_stat(int i, struct k_cpu_stat* out);
 
+/* Executa fn(arg) numa CPU (1..N-1) e espera terminar. 0 = ok.
+ * A BSP fica em hlt enquanto a tarefa roda: quem chama tem a maquina so
+ * para si (teclado, tela, rede), como se fosse a BSP. */
+int smp_run(int cpu, void (*fn)(void*), void* arg);
+
+/* Confirma o IPI no LAPIC (chamado pelo isr_dispatch). */
+void smp_ipi_ack(void);
+
 #endif

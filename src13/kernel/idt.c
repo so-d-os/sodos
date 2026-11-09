@@ -20,6 +20,7 @@ extern void irq0_stub(void),  irq1_stub(void),  irq2_stub(void),  irq3_stub(void
 extern void irq4_stub(void),  irq5_stub(void),  irq6_stub(void),  irq7_stub(void);
 extern void irq8_stub(void),  irq9_stub(void),  irq10_stub(void), irq11_stub(void);
 extern void irq12_stub(void), irq13_stub(void), irq14_stub(void), irq15_stub(void);
+extern void smp_ipi_stub(void);
 
 static void set_gate(int n, uint64_t handler, uint16_t sel, uint8_t flags) {
   idt[n].off_lo    = (uint16_t)(handler & 0xFFFFu);
@@ -93,6 +94,9 @@ void idt_init(void) {
   set_gate(45, (uint64_t)irq13_stub, IDT_SEL_CODE, IDT_FLAGS);
   set_gate(46, (uint64_t)irq14_stub, IDT_SEL_CODE, IDT_FLAGS);
   set_gate(47, (uint64_t)irq15_stub, IDT_SEL_CODE, IDT_FLAGS);
+
+  /* IPI do SMP (acordar AP / avisar que a tarefa terminou). */
+  set_gate(0xF1, (uint64_t)smp_ipi_stub, IDT_SEL_CODE, IDT_FLAGS);
 
   idtp.limit = (uint16_t)(sizeof(idt) - 1);
   idtp.base  = (uint64_t)&idt[0];

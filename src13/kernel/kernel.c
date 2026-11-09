@@ -1773,6 +1773,7 @@ void kmain(const struct BootInfo* bi) {
   register_builtin("ping", cmd_ping);
   register_builtin("net", cmd_net);
   register_builtin("dlls", cmd_dlls);
+  register_builtin("smp", cmd_smp);
   register_builtin("shutdown", cmd_shutdown);
 
   drives_init();
