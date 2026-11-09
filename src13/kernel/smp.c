@@ -40,7 +40,9 @@ static volatile void* job_arg;
 static volatile int job_cpu = -1;
 static volatile int job_pending;
 static volatile int job_done;
+static volatile int job_busy;             /* tarefa em andamento (p/ TOP) */
 static volatile uint32_t job_t0;
+static volatile uint32_t ap_job_ms;       /* tempo da tarefa atual */
 static volatile uint32_t ap_busy_ms[SMP_MAX];
 static uint8_t ap_stacks[SMP_MAX][16384] __attribute__((aligned(16)));
 
@@ -231,7 +233,6 @@ static void ap_idle(uint32_t cpu) {
       void* arg = (void*)job_arg;
       job_pending = 0;
       fn(arg);
-      ap_busy_ms[cpu] += (uint32_t)(irq_ticks() - job_t0);
       job_done = 1;
       ipi(ids[0], 0x000000F1);
     }
@@ -262,23 +263,36 @@ void ap_main(uint32_t cpu) {
 int smp_cpu_count(void) { return ncpu; }
 
 int smp_run(int cpu, void (*fn)(void*), void* arg) {
+  uint32_t dt;
   if (cpu <= 0 || cpu >= ncpu || cpu >= SMP_MAX || !ap_up[cpu] || !fn) return -1;
   job_fn = fn;
   job_arg = arg;
   job_cpu = cpu;
   job_t0 = (uint32_t)irq_ticks();
+  ap_job_ms = 0;
   job_done = 0;
+  job_busy = 1;
   job_pending = 1;
   if (ipi(ids[cpu], 0x000000F1) < 0) {
     job_pending = 0;
+    job_busy = 0;
     return -1;
   }
-  while (!job_done) __asm__ volatile ("sti; hlt");
+  cpu_idle(1);                       /* o BSP fica ocioso enquanto o AP roda */
+  while (!job_done) {
+    ap_job_ms = (uint32_t)(irq_ticks() - job_t0);   /* uso ao vivo no TOP */
+    __asm__ volatile ("sti; hlt");
+  }
+  cpu_idle(0);
+  dt = (uint32_t)(irq_ticks() - job_t0);
+  ap_busy_ms[cpu] += dt;
+  ap_job_ms = 0;
+  job_busy = 0;
   job_done = 0;
   serial_puts("[smp] cpu ");
   serial_hex32((uint32_t)cpu);
   serial_puts(" tarefa: ");
-  serial_hex32((uint32_t)(irq_ticks() - job_t0));
+  serial_hex32(dt);
   serial_puts(" ms\n");
   return 0;
 }
@@ -289,13 +303,15 @@ int smp_cpu_stat(int i, struct k_cpu_stat* out) {
   out->index = (unsigned)i;
   out->online = (i == 0) ? 1u : (ap_up[i] ? 1u : 0u);
   out->state = (i == 0) ? 1u : (ap_parked ? 0u : (ap_up[i] ? 1u : 0u));
-  out->busy_ms = (i == 0) ? (unsigned)irq_ticks() : 0u;
-  out->idle_ms = (i == 0) ? 0u
-                : (ap_parked ? (unsigned)(irq_ticks() - ap_park_ms) : 0u);
-  if (i > 0) {
+  if (i == 0) {
+    out->busy_ms = (unsigned)irq_busy();
+    out->idle_ms = (unsigned)irq_idle();
+  } else {
+    uint32_t busy = ap_busy_ms[i];
     uint32_t up = ap_parked ? (uint32_t)(irq_ticks() - ap_park_ms) : 0u;
-    out->busy_ms = ap_busy_ms[i];
-    out->idle_ms = up > ap_busy_ms[i] ? up - ap_busy_ms[i] : 0u;
+    if (job_busy && job_cpu == i) busy += ap_job_ms;
+    out->busy_ms = busy;
+    out->idle_ms = up > busy ? up - busy : 0u;
   }
   out->pad[0] = 0;
   out->pad[1] = 0;

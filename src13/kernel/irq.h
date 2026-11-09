@@ -6,3 +6,8 @@
 void irq_handle(isr_frame_t* f);
 /* Ticks do IRQ0 (PIT), contados desde o boot. O IRQ0 e desmascarado no kmain. */
 uint64_t irq_ticks(void);
+/* Ticks do BSP trabalhando e ocioso (marcado por cpu_idle). */
+uint64_t irq_busy(void);
+uint64_t irq_idle(void);
+/* 1 = BSP esperando (tecla, tarefa em outra CPU); o tick conta como ocioso. */
+void cpu_idle(int on);

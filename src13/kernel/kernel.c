@@ -605,16 +605,19 @@ static int get_key(int wait) {
   for (;;) {
     /* O teclado e da tela visivel. Ao fundo, cede a vez. */
     if (vt_bg()) {
+      cpu_idle(wait ? 1 : 0);
       vt_yield(wait);
-      if (!wait) return 0;
+      if (!wait) { cpu_idle(0); return 0; }
       continue;
     }
     net_poll();
     if (!kb_read(&sc)) {
-      if (!wait) return 0;
+      if (!wait) { cpu_idle(0); return 0; }
+      cpu_idle(1);
       vt_idle();
       continue;
     }
+    cpu_idle(0);
     break_fire();
     if (sc == 0xFA || sc == 0xFE) {
       if (!wait) return 0;

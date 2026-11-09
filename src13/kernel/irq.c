@@ -5,8 +5,16 @@
 
 /* B1: contador do IRQ0. volatile: quem le nao pode cachear o valor. */
 static volatile uint64_t irq_tick_count;
+static volatile uint64_t bsp_busy_ticks;
+static volatile uint64_t bsp_idle_ticks;
+static volatile int bsp_idle_flag;
 
 uint64_t irq_ticks(void) { return irq_tick_count; }
+uint64_t irq_busy(void) { return bsp_busy_ticks; }
+uint64_t irq_idle(void) { return bsp_idle_ticks; }
+
+/* Marca o BSP como ocioso (esperando tecla/tarefa) para o TOP. */
+void cpu_idle(int on) { bsp_idle_flag = on ? 1 : 0; }
 
 static inline unsigned char irq_inb(unsigned short port) {
   unsigned char data;
@@ -21,6 +29,8 @@ void irq_handle(isr_frame_t* f) {
     if (irq == 0) {
       /* So conta: nenhum outro estado do kernel e tocado aqui. */
       irq_tick_count++;
+      if (bsp_idle_flag) bsp_idle_ticks++;
+      else bsp_busy_ticks++;
     } else if (irq == 1) {
       uint8_t st = irq_inb(0x64);
       if (st & 1) {
