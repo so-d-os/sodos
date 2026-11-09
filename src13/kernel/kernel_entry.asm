@@ -198,6 +198,23 @@ kernel_entry:
     mov cr0, eax
     fninit
 
+    ; AVX para programas (LLAMA): CR4.OSXSAVE e XCR0 = x87|SSE|AVX, so se o
+    ; CPU tem XSAVE e AVX (CPUID.1:ECX bits 26 e 28).  O kernel nao usa AVX e o
+    ; escalonador e cooperativo, entao nao ha xsave na troca de tarefa.
+    mov eax, 1
+    cpuid
+    and ecx, (1 << 26) | (1 << 28)
+    cmp ecx, (1 << 26) | (1 << 28)
+    jne .no_avx
+    mov eax, cr4
+    or eax, (1 << 18)
+    mov cr4, eax
+    xor ecx, ecx
+    xgetbv
+    or eax, 7
+    xsetbv
+.no_avx:
+
     mov eax, 0x1000
     mov cr3, eax
 

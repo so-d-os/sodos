@@ -738,6 +738,8 @@ static void map_walk(void* arg, int area, uint64_t addr, uint64_t size, int used
 /* kb[celula * KM_CATS + categoria]. *cell_kb = 0 escolhe a menor potencia de
  * 2 MB que cobre toda a RAM em 'cells'. pid != 0 tambem conta, em KM_DONO, o
  * que esse programa ocupa. Devolve quantas celulas usou. */
+static int k_vram(struct k_vram* v) { return win_vram_info(v); }
+
 static int k_memmap(uint32_t* kb, int cells, uint32_t* cell_kb, uint32_t pid) {
   const struct BootInfo* bi = bootinfo_get();
   const struct BootMemEntry* map = bootinfo_mem_map(bi);
@@ -834,6 +836,7 @@ static const struct kexp table[] = {
   EXP(k_meminfo),
   EXP(k_ps),
   EXP(k_memmap),
+  EXP(k_vram),
   EXP(k_exit),
   EXP(k_exec),
   EXP(k_shell),

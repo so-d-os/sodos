@@ -43,7 +43,8 @@ all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/H
 	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE $(O)/VIDEOCFG.EXE $(O)/IMGBIG.DLL $(O)/AIPANEL.EXE $(O)/MENUCFG.EXE \
 	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
 	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
-	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/TOP.EXE $(O)/COBRA.EXE $(O)/GIT.EXE $(O)/AGENT.EXE $(O)/LLAMA.EXE
+	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/TOP.EXE $(O)/COBRA.EXE $(O)/GIT.EXE $(O)/AGENT.EXE $(O)/LLAMA.EXE \
+	drivers
 
 # GUI.DLL (janela canvas do WIN) e o navegador, em varios arquivos
 $(B)/gui_gui.obj: gui/gui.c include/gui.h $(HCC) $(HEADERS) | $(B)
@@ -193,7 +194,7 @@ $(O)/MC.EXE: $(MC_SRC) ../mc/mc.h $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DL
 	$(HCC) -o $@ $(MC_SRC)
 
 # TOP.EXE (../top): programas e mapa da memoria no padrao do SPECIAL. BUILD.BAT idem.
-TOP_SRC = ../top/top.c ../top/tela.c ../top/dados.c ../top/procs.c ../top/mapa.c
+TOP_SRC = ../top/top.c ../top/tela.c ../top/dados.c ../top/procs.c ../top/mapa.c ../top/video.c
 $(O)/TOP.EXE: $(TOP_SRC) ../top/top.h $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
 	$(HCC) -o $@ $(TOP_SRC)
 
@@ -240,6 +241,44 @@ $(O)/HELLO64.EXE: $(CRT64) $(B)/hello64.o $(LINK64) $(O)/KERNEL.IMP
 	$(LINK64) /out:$@ $(CRT64) $(B)/hello64.o $(O)/KERNEL.IMP
 
 hello64: $(O)/HELLO64.EXE
+
+# Drivers de placa de video (docs/GPU.md): DLL SOX2 que roda no contexto do
+# kernel, entao sem SSE, sem red zone e sem libc. Ficam em out/DRV para o
+# disk-files levar a D:\SODOS\DRV (e nao a raiz do D:).
+DRV = $(O)/DRV
+DRVCC = gcc -m64 -O2 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -mno-red-zone \
+	-mno-sse -mno-mmx -mcmodel=large -fno-asynchronous-unwind-tables \
+	-fno-tree-loop-distribute-patterns -I../video
+
+$(DRV):
+	mkdir -p $@
+
+$(B)/drv_gputest.o: ../drivers/gputest/gputest.c ../video/gpu.h | $(B)
+	$(DRVCC) -c $< -o $@
+$(B)/drv_gpufail.o: ../drivers/gputest/gputest.c ../video/gpu.h | $(B)
+	$(DRVCC) -DGPU_FALHA=20 -c $< -o $@
+
+$(DRV)/GPUTEST.DLL: $(B)/drv_gputest.o $(LINK64) | $(DRV)
+	$(LINK64) /dll /export:gpu_driver /out:$@ $(B)/drv_gputest.o
+$(DRV)/GPUFAIL.DLL: $(B)/drv_gpufail.o $(LINK64) | $(DRV)
+	$(LINK64) /dll /export:gpu_driver /out:$@ $(B)/drv_gpufail.o
+
+$(B)/drv_virtgpu.o: ../drivers/virtgpu/virtgpu.c ../video/gpu.h | $(B)
+	$(DRVCC) -c $< -o $@
+$(DRV)/VIRTGPU.DLL: $(B)/drv_virtgpu.o $(LINK64) | $(DRV)
+	$(LINK64) /dll /export:gpu_driver /out:$@ $(B)/drv_virtgpu.o
+
+$(B)/drv_amdgop.o: ../drivers/amdgop/amdgop.c ../video/gpu.h | $(B)
+	$(DRVCC) -c $< -o $@
+$(DRV)/AMDGOP.DLL: $(B)/drv_amdgop.o $(LINK64) | $(DRV)
+	$(LINK64) /dll /export:gpu_driver /out:$@ $(B)/drv_amdgop.o
+
+$(B)/drv_amdcur.o: ../drivers/amdgop/amdgop.c ../video/gpu.h | $(B)
+	$(DRVCC) -DAMD_CURSOR -c $< -o $@
+$(DRV)/AMDCUR.DLL: $(B)/drv_amdcur.o $(LINK64) | $(DRV)
+	$(LINK64) /dll /export:gpu_driver /out:$@ $(B)/drv_amdcur.o
+
+drivers: $(DRV)/GPUTEST.DLL $(DRV)/GPUFAIL.DLL $(DRV)/VIRTGPU.DLL $(DRV)/AMDGOP.DLL $(DRV)/AMDCUR.DLL
 
 # LIBCX64 estatica: mesma libc, compilada -m64, ligada no HELLO64C.
 LIBC64_SRC = string ctype stdlib stdio printf scanf fpconv math time misc wchar setjmp64 ctors64

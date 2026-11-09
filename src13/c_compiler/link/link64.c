@@ -5,10 +5,12 @@
  * x32), aqui os campos de relocacao e os slots de import tem 8 bytes.
  *
  *   link64 [/out:ARQ.EXE] [/entry:nome] a.o b.o KERNEL.IMP
+ *   link64 /dll /export:nome [/export:outro] /out:ARQ.DLL a.o [KERNEL.IMP]
  *
  * Suporta R_X86_64_64 (base+addend no load) e R_X86_64_PC32/PLT32 (resolvido
  * aqui). Relocacoes absolutas de 32 bits sao rejeitadas: compile com
- * -mcmodel=large. Sem DLLs/exports nesta primeira versao.
+ * -mcmodel=large. DLL: /dll marca SOX_FLAG_DLL, a entrada passa a ser
+ * DllMain (se existir) e cada /export:nome entra na tabela de exports.
  */
 #include <elf.h>
 #include <stdint.h>
@@ -272,6 +274,8 @@ static uint32_t sym_addr(int o, int symtab, uint32_t si, const Elf64_Sym* s,
 int main(int argc, char** argv) {
   const char* out = "OUT.EXE";
   const char* entry_name = "_start";
+  const char* exp_names[64];
+  int nexp = 0, is_dll = 0, entry_set = 0;
   uint32_t off = 0;
   uint32_t image_size, bss_size, thunk_off;
   uint8_t* image;
@@ -279,11 +283,19 @@ int main(int argc, char** argv) {
 
   for (i = 1; i < argc; i++) {
     if (strncmp(argv[i], "/out:", 5) == 0) out = argv[i] + 5;
-    else if (strncmp(argv[i], "/entry:", 7) == 0) entry_name = argv[i] + 7;
+    else if (strncmp(argv[i], "/entry:", 7) == 0) {
+      entry_name = argv[i] + 7;
+      entry_set = 1;
+    } else if (strcmp(argv[i], "/dll") == 0) is_dll = 1;
+    else if (strncmp(argv[i], "/export:", 8) == 0) {
+      if (nexp >= 64) die("exports demais");
+      exp_names[nexp++] = argv[i] + 8;
+    }
     else if (strstr(argv[i], ".imp") || strstr(argv[i], ".IMP")) read_imp(argv[i]);
     else load_obj(argv[i]);
   }
   if (nobj == 0) die("nenhum objeto");
+  if (is_dll && !entry_set) entry_name = "DllMain";
   for (i = 0; i < nobj; i++) init_xindex(i);
 
   /* 1. layout das secoes com conteudo */
@@ -614,7 +626,7 @@ int main(int argc, char** argv) {
         if (P + 8u > image_size) die("relocacao fora da imagem");
         switch (type) {
           case R_X86_64_64:
-            if (S == 0 && A != 0) {
+            if (S == 0 && A != 0 && nm[0]) {
               static int warned;
               if (warned < 300) {
                 fprintf(stderr, "warn64 fraca/indefinida '%s' A=%lld P=%x\n", nm,
@@ -695,6 +707,8 @@ int main(int argc, char** argv) {
   {
     char strtab[16384];
     uint32_t strn = 0, name_off[MAX_IMP];
+    struct sox_export exps[64];
+    uint32_t off_exports;
     uint32_t entry = SOX_NO_ENTRY;
     struct sox_hdr h;
     uint32_t off_relocs, off_imports, off_strtab;
@@ -710,6 +724,17 @@ int main(int argc, char** argv) {
     }
     for (i = 0; i < ngs; i++)
       if (strcmp(gsyms[i].name, entry_name) == 0) entry = gsyms[i].addr;
+    for (j = 0; j < nexp; j++) {
+      struct gsym* g = find_gsym(exp_names[j]);
+      if (!g || !g->defined) {
+        fprintf(stderr, "link64: export sem definicao: %s\n", exp_names[j]);
+        exit(1);
+      }
+      exps[j].name = strn;
+      exps[j].value = g->addr;
+      strcpy(strtab + strn, exp_names[j]);
+      strn += (uint32_t)strlen(exp_names[j]) + 1;
+    }
     if (getenv("LINK64_MAP")) {
       for (i = 0; i < ngs; i++)
         fprintf(stderr, "map %08x %s\n", gsyms[i].addr, gsyms[i].name);
@@ -726,10 +751,11 @@ int main(int argc, char** argv) {
 
     off_relocs = sizeof(h) + image_size;
     off_imports = off_relocs + (uint32_t)nrel_abs * 4u;
-    off_strtab = off_imports + (uint32_t)nimp * sizeof(struct sox_import);
+    off_exports = off_imports + (uint32_t)nimp * sizeof(struct sox_import);
+    off_strtab = off_exports + (uint32_t)nexp * sizeof(struct sox_export);
 
     h.magic = SOX_MAGIC2;
-    h.flags = 0;
+    h.flags = is_dll ? (SOX_FLAG_DLL | SOX_FLAG_64) : 0;
     h.image_size = image_size;
     h.bss_size = bss_size;
     h.entry = entry;
@@ -739,8 +765,8 @@ int main(int argc, char** argv) {
     h.off_relocs = off_relocs;
     h.nimports = (uint32_t)nimp;
     h.off_imports = off_imports;
-    h.nexports = 0;
-    h.off_exports = 0;
+    h.nexports = (uint32_t)nexp;
+    h.off_exports = nexp ? off_exports : 0;
     h.strtab_size = strn;
     h.off_strtab = off_strtab;
     h.off_image = sizeof(h);
@@ -757,6 +783,7 @@ int main(int argc, char** argv) {
       im.slot = imps[i].slot;
       fwrite(&im, 1, sizeof(im), f);
     }
+    fwrite(exps, sizeof(exps[0]), (size_t)nexp, f);
     fwrite(strtab, 1, strn, f);
     fclose(f);
     printf("link64: %s image=%u bss=%u imports=%d relocs=%d entry=%u\n", out, image_size,

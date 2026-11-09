@@ -23,6 +23,7 @@
 #include "fbcon.h"
 #include "xhci.h"
 #include "vt.h"
+#include "gpu.h"
 #include "c_compiler/sox.h"
 
 static inline void outl(uint16_t port, uint32_t v) {
@@ -49,8 +50,9 @@ static void pci_cfg_write32(uint8_t bus, uint8_t dev, uint8_t fun, uint8_t off, 
   outl(0xCFC, val);
 }
 
-/* BAR0 memoria do primeiro dispositivo classe Display (PCI class 0x03) */
-static uint32_t pci_find_display_bar0(void) {
+/* BAR0 memoria do primeiro dispositivo classe Display (PCI class 0x03).
+ * id (se nao for NULL) recebe vendor << 16 | device. */
+static uint32_t pci_find_display(uint32_t* id) {
   for (uint8_t dev = 0; dev < 32; dev++) {
     uint32_t vid = pci_cfg_read32(0, dev, 0, 0);
     if (vid == 0xFFFFFFFFu) continue;
@@ -59,6 +61,7 @@ static uint32_t pci_find_display_bar0(void) {
     uint32_t bar0 = pci_cfg_read32(0, dev, 0, 0x10);
     if (bar0 == 0 || bar0 == 0xFFFFFFFFu) continue;
     if (bar0 & 1u) continue;
+    if (id) *id = (vid & 0xFFFFu) << 16 | vid >> 16;
     return bar0 & ~0xFu;
   }
   return 0;
@@ -167,6 +170,9 @@ static int gfx_bochs;
 /* 1 = o LFB e o framebuffer GOP do UEFI: sem registros Bochs, sem troca de modo */
 static int gfx_gop;
 static int gfx_live;
+/* 1 do inicio ao fim de uma sessao grafica, mesmo atras de uma tela do DOS
+ * (gfx_live fica 0 nesse caso). So o TOP le, por win_vram_info. */
+static int gfx_session_on;
 static uint32_t gfx_w;
 static uint32_t gfx_h;
 static uint32_t gfx_pitch_bytes;
@@ -180,6 +186,9 @@ static uint32_t gfx_front_y;
 static int gfx_dbuf;
 static int gfx_offscreen;
 static uint8_t* gfx_back;
+/* 1 so enquanto gfx_gpu_try() remonta o quadro para um driver de placa:
+ * o driver usa o back buffer em RAM, entao a pagina dupla fica de fora. */
+static int gfx_for_gpu;
 
 static void set_palette_color(uint8_t index, uint8_t r, uint8_t g, uint8_t b) {
   outb(0x3C8, index);
@@ -456,7 +465,7 @@ static int bochs_bind_lfb(void) {
   int j;
   cand[nc++] = BOCHS_LFB_PHYS;
   {
-    uint32_t bar = pci_find_display_bar0();
+    uint32_t bar = pci_find_display(0);
     if (bar && bar != BOCHS_LFB_PHYS) cand[nc++] = bar;
   }
   cand[nc++] = 0xFD000000u;
@@ -900,7 +909,7 @@ static void gfx_buf_init(void) {
   gfx_offscreen = 0;
   gfx_dbuf = 0;
   gfx_back = 0;
-  if (gfx_bochs && !gfx_gop) {
+  if (gfx_bochs && !gfx_gop && !gfx_for_gpu) {
     uint32_t vram = 0;
     uint32_t frame = gfx_w * gfx_h * 4u;
     uint16_t vh = bochs_vbe_read(VBE_DISPI_INDEX_VIRT_HEIGHT);
@@ -931,6 +940,8 @@ static void gfx_frame_begin(void) {
   }
 }
 
+static void gfx_gpu_frame(void);   /* abaixo, depois do cursor */
+
 static void gfx_frame_end(void) {
   if (gfx_dbuf) {
     bochs_vbe_write(VBE_DISPI_INDEX_Y_OFFSET, (uint16_t)gfx_draw_y0);
@@ -939,9 +950,47 @@ static void gfx_frame_end(void) {
     return;
   }
   if (gfx_offscreen) {
+    /* driver de placa: o unico teste dele por quadro (docs/GPU.md) */
+    if (gpu_drv) {
+      gfx_gpu_frame();
+      return;
+    }
     gfx_copy_back();
     gfx_offscreen = 0;
   }
+}
+
+/* Na troca de modo do WIN: se ha placa com driver (ou gpudrv= no
+ * VIDEO.CFG), monta o quadro em RAM e tenta o driver. Se nao der, volta a
+ * escolha de sempre. Sem placa conhecida, so gpu_wanted() roda. */
+static void gfx_hwcur_on(void);   /* com o cursor, mais abaixo */
+
+static void gfx_gpu_try(void) {
+  struct gpu_mode m;
+  int volta = gpu_suspended();
+  if (!gfx_bochs || (!volta && !gpu_wanted())) return;
+  if (gfx_dbuf || !gfx_back) {
+    gfx_for_gpu = 1;
+    gfx_buf_init();
+    gfx_for_gpu = 0;
+  }
+  if (gfx_back) {
+    m.w = gfx_w;
+    m.h = gfx_h;
+    m.pitch = gfx_w * 4u;
+    m.back = gfx_back;
+    m.fb = gfx_lfb;
+    m.fb_pitch = gfx_pitch_bytes;
+    m.pci_id = m.pci_bus = m.pci_dev = m.pci_fun = 0;
+    if (volta ? gpu_resume(&m) == 0 : gpu_start(&m) == 0) {
+      gfx_hwcur_on();
+      return;
+    }
+  } else {
+    serial_puts("[gpu] sem quadro em RAM: driver nao entra\n");
+    gpu_stop("sem quadro em RAM");
+  }
+  gfx_buf_init();
 }
 
 static const uint8_t* glyph16(unsigned char c) {
@@ -1100,8 +1149,15 @@ static void cursor_restore(void) {
 /* Apaga o cursor na ultima posicao (repoe cursor_under) e desenha-o em (mx,my).
  * Para o rato: restore + redesenho. Para teclado: chamar cursor_restore ANTES de
  * desenhar texto na zona do cursor; depois so cursor_redraw_at (sem restore no inicio). */
+static void gfx_hwcur_move(int x, int y);   /* abaixo */
+
 static void cursor_redraw_at(int mx, int my, uint32_t cursor_color) {
   int scale = cur_scale();
+  /* cursor da placa (docs/GPU.md, etapa 4): fica fora do quadro */
+  if (gpu_hwcur) {
+    gfx_hwcur_move(mx, my);
+    return;
+  }
   int bw = CUR_W * scale;
   int bh = CUR_H * scale;
   int k = 0;
@@ -1138,9 +1194,130 @@ static void cursor_redraw_at(int mx, int my, uint32_t cursor_color) {
   cursor_saved = 1;
 }
 
+/* ---------------------------------------------------------------------------
+ * Areas alteradas para o driver de placa (docs/GPU.md, etapa 3). So sao
+ * gravadas com driver ativo; sem ele nada aqui roda alem dos testes listados
+ * na tabela de custo. Com driver, gfx_offscreen fica 1 entre os quadros: o
+ * back buffer e a tela, e o que se desenha fora de um quadro (cursor,
+ * arrasto) vai para ele e e apresentado so naquele retangulo.
+ * ------------------------------------------------------------------------- */
+#define GFX_DMG_MAX 10
+static struct gpu_rect gfx_dmg[GFX_DMG_MAX];
+static int gfx_dmg_n, gfx_dmg_over;
+/* 1 = o quadro em montagem so mudou nas areas de gfx_dmg (need_draw == 2) */
+static int gfx_frame_dmg;
+/* cursor na tela pela ultima apresentacao */
+static struct gpu_rect gfx_cur_shown;
+
+static void gfx_dmg_add(int x, int y, int w, int h) {
+  if (x < 0) {
+    w += x;
+    x = 0;
+  }
+  if (y < 0) {
+    h += y;
+    y = 0;
+  }
+  if (x + w > (int)gfx_w) w = (int)gfx_w - x;
+  if (y + h > (int)gfx_h) h = (int)gfx_h - y;
+  if (w <= 0 || h <= 0) return;
+  if (gfx_dmg_n >= GFX_DMG_MAX) {
+    gfx_dmg_over = 1;
+    return;
+  }
+  gfx_dmg[gfx_dmg_n].x = x;
+  gfx_dmg[gfx_dmg_n].y = y;
+  gfx_dmg[gfx_dmg_n].w = w;
+  gfx_dmg[gfx_dmg_n].h = h;
+  gfx_dmg_n++;
+}
+
+/* Mostra o back buffer pela placa; se o driver cair, pela CPU. */
+static void gfx_gpu_show(const struct gpu_rect* r, int n) {
+  if (gpu_present(r, n) != 0) {
+    gfx_copy_back();
+    gfx_offscreen = 0;
+  }
+}
+
+static void gfx_cur_mark(void) {
+  gfx_cur_shown.x = old_mx;
+  gfx_cur_shown.y = old_my;
+  gfx_cur_shown.w = cursor_saved ? cur_bw : 0;
+  gfx_cur_shown.h = cursor_saved ? cur_bh : 0;
+}
+
+static void gfx_gpu_frame(void) {
+  const struct gpu_rect* r = 0;
+  int n = 0;
+  if (gfx_frame_dmg && !gfx_dmg_over && gfx_dmg_n > 0) {
+    /* o quadro redesenha o cursor onde o mouse esta: as duas posicoes */
+    gfx_dmg_add(gfx_cur_shown.x, gfx_cur_shown.y, gfx_cur_shown.w, gfx_cur_shown.h);
+    if (cursor_saved) gfx_dmg_add(old_mx, old_my, cur_bw, cur_bh);
+    if (!gfx_dmg_over) {
+      r = gfx_dmg;
+      n = gfx_dmg_n;
+    }
+  }
+  gfx_cur_mark();
+  gfx_dmg_n = 0;
+  gfx_dmg_over = 0;
+  gfx_frame_dmg = 0;
+  gfx_gpu_show(r, n);
+}
+
+/* definidas mais abaixo (posicao do mouse e pedido de redesenho do WIN) */
+static int32_t sys_mx, sys_my;
+static int win_api_dirty;
+
+/* Cursor da placa: so a posicao. Se o driver cair, o quadro volta a CPU e o
+ * proximo quadro inteiro ja desenha o cursor por software. */
+static void gfx_hwcur_move(int x, int y) {
+  if (gpu_cursor_move(x, y) != 0) {
+    gfx_copy_back();
+    gfx_offscreen = 0;
+    win_api_dirty = 1;
+  }
+}
+
+/* Entrega a seta (cur_row, na escala da tela) ao driver, se ele tem cursor. */
+static void gfx_hwcur_on(void) {
+  int scale = cur_scale(), w = CUR_W * scale, h = CUR_H * scale, x, y;
+  uint32_t* img;
+  if (!gpu_drv || !(gpu_drv->caps & GPU_CAP_CURSOR) || w > 64 || h > 64) return;
+  img = (uint32_t*)umalloc_owned((uint32_t)(w * h) * 4u, 0);
+  if (!img) return;
+  for (y = 0; y < h; y++)
+    for (x = 0; x < w; x++) {
+      char c = cur_row[y / scale][x / scale];
+      img[y * w + x] = c == 'W' ? 0xFFFFFFFFu : c == 'B' ? 0xFF000000u : 0u;
+    }
+  gpu_cursor_set(img, w, h, 0, 0);
+  ufree(img);
+  if (gpu_hwcur) {
+    /* a seta saiu do quadro: o proximo quadro inteiro vem sem ela */
+    cursor_saved = 0;
+    gfx_cur_shown.w = gfx_cur_shown.h = 0;
+    gfx_hwcur_move((int)sys_mx, (int)sys_my);
+    win_api_dirty = 1;
+  }
+}
+
 static void cursor_draw(int mx, int my, uint32_t cursor_color) {
+  struct gpu_rect r[2];
+  if (gpu_hwcur) {
+    gfx_hwcur_move(mx, my);
+    return;
+  }
   cursor_restore();
   cursor_redraw_at(mx, my, cursor_color);
+  /* com driver o cursor foi para o back buffer: mostra so as duas caixas */
+  if (gpu_drv && gfx_offscreen) {
+    r[0] = gfx_cur_shown;
+    gfx_cur_mark();
+    r[1] = gfx_cur_shown;
+    gfx_gpu_show(r[0].w > 0 ? r : r + 1, r[0].w > 0 ? 2 : 1);
+  }
 }
 
 /* Uma so posicao para o desktop e para a janela canvas (navegador). */
@@ -3694,7 +3871,9 @@ void gui_present(void) {
   uint32_t title_bg = gui_col(0x000080), white = gui_col(0xFFFFFF), btn = gui_col(0xC0C0C0);
   uint32_t edge = gui_col(0x000000);
   if (host_on && task_cur >= 0) {
-    win_api_dirty = 1;
+    /* 2 = so o conteudo desta janela mudou; qualquer outro "= 1" vence */
+    win_api_dirty |= 2;
+    if (gpu_drv) gfx_dmg_add(gui.ox, gui.oy, gui.cw, gui.title_h + gui.ch);
     return;
   }
   if (!gui.open || gui_painting) return;
@@ -5215,6 +5394,9 @@ static void dc_present(int x, int y, int cx, int cy) {
   int wx0 = x < 0 ? 0 : x;
   int wx1 = x + dc.w > (int)gfx_w ? (int)gfx_w : x + dc.w;
   uint32_t black = pix32(PIXA(0, 0, 0)), white = pix32(PIXA(255, 255, 255));
+  volatile uint8_t* base = gfx_lfb + gfx_front_y * gfx_pitch_bytes;
+  uint32_t pitch = gfx_pitch_bytes;
+  int cur_rows = gpu_hwcur ? 0 : chh;   /* cursor da placa: nao entra na imagem */
   int r;
   dc_grow(&x0, &y0, &x1, &y1, dc.x, dc.y, dc.w, dc.h);
   dc_grow(&x0, &y0, &x1, &y1, dc.cx, dc.cy, cw, chh);
@@ -5230,15 +5412,19 @@ static void dc_present(int x, int y, int cx, int cy) {
   dc.cx = cx;
   dc.cy = cy;
   if (x0 >= x1 || y0 >= y1) return;
+  /* com driver a tela e o back buffer; sem ele, a pagina visivel do LFB */
+  if (gpu_drv && gfx_offscreen) {
+    base = gfx_back;
+    pitch = gfx_w * 4u;
+  }
 
   for (r = y0; r < y1; r++) {
     const uint32_t* bg = dc.bg + (uint32_t)r * gfx_w;
-    volatile uint32_t* out =
-        (volatile uint32_t*)(gfx_lfb + ((uint32_t)r + gfx_front_y) * gfx_pitch_bytes);
+    volatile uint32_t* out = (volatile uint32_t*)(base + (uint32_t)r * pitch);
     int in_win = r >= y && r < y + dc.h && wx0 < wx1;
     const uint32_t* src = in_win ? dc.win + (r - y) * dc.w : 0;
     int corner = in_win && r - y < UI_RADIUS;
-    int in_cur = r >= cy && r < cy + chh;
+    int in_cur = r >= cy && r < cy + cur_rows;
     if (!in_cur && !corner) {
       /* Caso comum: cada pedaco vai direto, sem copia intermediaria. */
       if (!in_win) {
@@ -5270,6 +5456,19 @@ static void dc_present(int x, int y, int cx, int cy) {
       }
     }
     dc_copy(out + x0, dc.line + x0, (uint32_t)(x1 - x0));
+  }
+  if (gpu_drv && gfx_offscreen) {
+    struct gpu_rect d;
+    d.x = x0;
+    d.y = y0;
+    d.w = x1 - x0;
+    d.h = y1 - y0;
+    gfx_cur_shown.x = cx;
+    gfx_cur_shown.y = cy;
+    gfx_cur_shown.w = cur_rows ? cw : 0;
+    gfx_cur_shown.h = cur_rows;
+    gfx_gpu_show(&d, 1);
+    if (gpu_hwcur) gfx_hwcur_move(cx, cy);
   }
 }
 
@@ -5850,6 +6049,7 @@ static void win_vt_away(int to) {
   serial_puts("[visual] WIN sai para a tela de texto\n");
   cursor_restore();
   gfx_live = 0;
+  gpu_suspend();
   if (gfx_gop) {
     fbcon_suspend(0);
   } else {
@@ -5867,10 +6067,12 @@ static void win_vt_away(int to) {
   serial_puts("[visual] WIN volta a tela\n");
   if (gfx_gop) {
     fbcon_suspend(1);
+    gfx_gpu_try();
   } else if (gfx_bochs) {
     if (!bochs_program((uint16_t)gfx_w, (uint16_t)gfx_h))
       serial_puts("[visual] modo grafico nao voltou\n");
     gfx_buf_init();
+    gfx_gpu_try();
   } else {
     vga_mode13h();
     set_palette_color(0, 0, 0, 0);
@@ -5990,8 +6192,9 @@ static int win_wm_run(void) {
     }
     if (task_pick() >= 0) tasks_pump();
     if (win_api_dirty) {
+      /* 2: so janelas de programa mudaram; vira need_draw 2 se nada mais pediu */
+      need_draw = win_api_dirty == 2 && need_draw != 1 ? 2 : 1;
       win_api_dirty = 0;
-      need_draw = 1;
     }
     if (chrome_leave) {
       int leave = chrome_leave;
@@ -6036,6 +6239,7 @@ static int win_wm_run(void) {
       struct start_menu gm;
       int mi;
       start_menu_geom(&gm, w, h, bar_h, menu_w, menu_item_h, scale);
+      gfx_frame_dmg = need_draw == 2;
       gfx_frame_begin();
       cursor_saved = 0;
       gfx_desk_clear();
@@ -7215,6 +7419,7 @@ static void win_load_cfg(void) {
   static char cfg[256];
   int n, i, mode = 0, wall = 0;
   uint32_t bg = 0;
+  gpu_cfg_line(0, 0);
   n = file_load("D:\\SODOS\\VIDEO.CFG", cfg, (int)sizeof(cfg) - 1);
   if (n <= 0) return;
   cfg[n] = 0;
@@ -7242,6 +7447,8 @@ static void win_load_cfg(void) {
     } else if (k + 3 <= j && cfg[k] == 'i' && cfg[k + 1] == 'a' && cfg[k + 2] == '=') {
       ui_ia = cfg[k + 3] == '1';
       if (ui_ia) ui_ia_launch = 1;
+    } else if (k + 4 <= j && cfg[k] == 'g' && cfg[k + 1] == 'p' && cfg[k + 2] == 'u') {
+      gpu_cfg_line(cfg + k, j - k);
     }
     while (j < n && (cfg[j] == '\n' || cfg[j] == '\r')) j++;
     i = j;
@@ -7322,7 +7529,11 @@ gfx_restart:
 
   gfx_buf_init();
   gfx_live = 1;
-  if (session == GFX_SESSION_WIN) win_load_cfg();
+  gfx_session_on = 1;
+  if (session == GFX_SESSION_WIN) {
+    win_load_cfg();
+    gfx_gpu_try();
+  }
   fbcon_suspend(1);
   font_cell_w = FONT_W;
   font_cell_h = vga_bios_font_ok ? FONT_H : 8;
@@ -7524,6 +7735,9 @@ gfx_restart:
 
 gfx_session_leave:
   gfx_live = 0;
+  gfx_session_on = 0;
+  gpu_close();
+  gfx_offscreen = 0;   /* com driver ele ficava 1 entre os quadros */
   pic_mask_all();
 
   cursor_restore();
@@ -7546,4 +7760,79 @@ void visual_run(void) {
 
 void win_run(void) {
   gfx_session_run(GFX_SESSION_WIN);
+}
+
+static void vram_name(char* d, const char* s) {
+  int i;
+  for (i = 0; i < 23 && s[i]; i++) d[i] = s[i];
+  for (; i < 24; i++) d[i] = 0;
+}
+
+/* Para o TOP: a placa, a memoria de video e o que o modo grafico ocupa.
+ * Le so o estado que ja existe; nao reprograma nada. */
+int win_vram_info(struct k_vram* v) {
+  uint32_t vram = 0, frame, n = 0, kb = 0;
+  int i;
+  if (!v) return -1;
+  for (i = 0; i < (int)sizeof(*v); i++) ((uint8_t*)v)[i] = 0;
+  v->lfb = pci_find_display(&v->pci_id);
+  /* a placa pode estar atras de uma ponte (notebook: barramento 4) */
+  if (!v->pci_id) v->pci_id = gpu_find_display();
+  if (gfx_gop || (!gfx_session_on && !vga_legacy())) {
+    const struct BootInfo* bi = bootinfo_get();
+    vram_name(v->dev, "GOP (UEFI)");
+    if (bi && bi->fb_addr) {
+      v->lfb = (uint32_t)bi->fb_addr;
+      /* o GOP so conta o quadro visivel; o resto da placa nao aparece */
+      v->vram_kb = (uint32_t)(((uint64_t)bi->fb_pitch * bi->fb_height + 1023u) >> 10);
+    }
+  } else if (bochs_present()) {
+    vram_name(v->dev, "Bochs VBE");
+    if (bochs_vram_bytes(&vram)) v->vram_kb = vram >> 10;
+  } else {
+    vram_name(v->dev, "VGA");
+    v->vram_kb = 256;
+  }
+  if (gpu_name()) {
+    vram_name(v->drv, gpu_name());
+    v->gpu_kb = gpu_mem_kb();
+  }
+  if (!gfx_session_on) {
+    v->state = 0;
+    /* tela de texto 80x25 (4 KB) + fonte no plano 2 (8 KB); no GOP o fbcon
+     * desenha o texto no proprio framebuffer */
+    if (vga_legacy()) {
+      v->w = 80;
+      v->h = 25;
+      v->bpp = 4;
+      v->pitch = 160;
+      v->text_kb = 12;
+    } else {
+      v->front_kb = v->vram_kb;
+    }
+    return 0;
+  }
+  v->state = gfx_live ? 1 : 2;
+  v->w = gfx_w;
+  v->h = gfx_h;
+  v->bpp = gfx_bochs ? 32 : 8;
+  v->pitch = gfx_bochs ? gfx_pitch_bytes : FB13_W;
+  frame = gfx_bochs ? gfx_pitch_bytes * gfx_h : FB13_W * FB13_H;
+  v->front_kb = (frame + 1023u) >> 10;
+  if (gfx_dbuf) v->page2_kb = v->front_kb;
+  if (gfx_back) {
+    v->back_addr = (uint32_t)(uintptr_t)gfx_back;
+    v->back_kb = (gfx_w * gfx_h * (gfx_bochs ? 4u : 1u) + 1023u) >> 10;
+  }
+  if (desk_wall) v->wall_kb = (gfx_w * gfx_h * 4u + 1023u) >> 10;
+  if (gwins) {
+    for (i = 0; i < GUI_MAX; i++) {
+      if (!gwins[i].open || !gwins[i].pix) continue;
+      n++;
+      kb += ((uint32_t)gwins[i].cw * (uint32_t)gwins[i].ch * 4u + 1023u) >> 10;
+    }
+  }
+  v->win_n = n;
+  v->win_kb = kb;
+  return 0;
 }

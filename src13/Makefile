@@ -124,7 +124,7 @@ DISKS_CMD_O = $(DISKS_CMD_C:.c=.o)
 
 CMD_O = $(SHELL_CMD_O) $(DISKS_CMD_O)
 
-kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/reboot.c kernel/xhci.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c kernel/mm.c net/net.c net/httpd.c net/wpa.c net/rtw89.c net/wifi.c kernel/module.c kernel/sched.c kernel/kexports.c kernel/keymap.c kernel/clip.c kernel/vt.c $(SHELL_CMD_C) $(DISKS_CMD_C) shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
+kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c video/gpu.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/reboot.c kernel/xhci.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c kernel/mm.c net/net.c net/httpd.c net/wpa.c net/rtw89.c net/wifi.c kernel/module.c kernel/sched.c kernel/kexports.c kernel/keymap.c kernel/clip.c kernel/vt.c $(SHELL_CMD_C) $(DISKS_CMD_C) shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
 	$(CC) $(CFLAGS) -c kernel/kernel.c -o kernel/kernel.o
 	$(CC) $(CFLAGS) -c kernel/bootinfo.c -o kernel/bootinfo.o
 	$(CC) $(CFLAGS) -c kernel/mm.c -o kernel/mm.o
@@ -149,6 +149,7 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(CC) $(CFLAGS) -c video/font8x8_data.c -o video/font8x8_data.o
 	$(CC) $(CFLAGS) -c video/font8x16_data.c -o video/font8x16_data.o
 	$(CC) $(CFLAGS) -c video/fbcon.c -o video/fbcon.o
+	$(CC) $(CFLAGS) -c video/gpu.c -o video/gpu.o
 	$(CC) $(CFLAGS) -c kernel/serial.c -o kernel/serial.o
 	$(CC) $(CFLAGS) -c kernel/idt.c -o kernel/idt.o
 	$(CC) $(CFLAGS) -c kernel/isr.c -o kernel/isr.o
@@ -195,11 +196,11 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(AS) -f elf64 kernel/irq_stubs.asm -o kernel/irq_stubs.o
 	$(AS) -f elf64 kernel/modrun.asm -o kernel/modrun.o
 	$(AS) -f elf64 kernel/kernel_entry.asm -o kernel/kernel_entry.o
-	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o kernel/mm.o net/net.o net/httpd.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/sched.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o kernel/mm.o net/net.o net/httpd.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/sched.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 # Mesmo kernel de kernel.elf, com o stub Multiboot2 na frente. O GRUB carrega este ELF.
 kernel_multiboot.elf: kernel.elf kernel/multiboot_header.o kernel/linker_multiboot.ld
-	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o kernel/mm.o net/net.o net/httpd.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/sched.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o kernel/mm.o net/net.o net/httpd.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/sched.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 
 kernel.bin: kernel.elf
@@ -366,6 +367,14 @@ run: os.img disk.img disk2.img
 	  -drive format=raw,file=disk.img,if=ide,index=1 \
 	  -drive format=raw,file=disk2.img,if=ide,index=2
 
+# Placa virtio-gpu (docs/GPU.md): o WIN usa D:\SODOS\DRV\VIRTGPU.DLL.
+# Sem o DLL, a mesma placa responde como Bochs VBE e tudo segue pela CPU.
+run-virtio: os.img disk.img disk2.img
+	$(QEMU) -device virtio-vga -netdev user,id=n0,hostfwd=tcp::8797-:8797 -device ne2k_pci,netdev=n0 -boot order=c \
+	  -drive format=raw,file=os.img,if=ide,index=0 \
+	  -drive format=raw,file=disk.img,if=ide,index=1 \
+	  -drive format=raw,file=disk2.img,if=ide,index=2
+
 # O QEMU GTK pode manter o zoom antigo quando o guest muda de resolucao em
 # fullscreen (texto 720x400 -> win 1920x1080).  Este alvo inicia em fullscreen
 # com zoom-to-fit=off: a tela do guest fica 1:1 (em um monitor 1080p, 1920x1080
@@ -459,7 +468,7 @@ grow-disk:
 # exemplos e os fontes do proprio cc/link (para recompilar dentro do SO).
 # Fontes do MC em D:\SRC\MC, do TOP em D:\SRC\TOP e do git em D:\SRC\GIT, compilados no proprio SODOS por BUILD.BAT.
 MC_SRC = mc/mc.h mc/mc.c mc/scr.c mc/panel.c mc/ops.c mc/view.c mc/BUILD.BAT
-TOP_SRC = top/top.h top/top.c top/tela.c top/dados.c top/procs.c top/mapa.c top/BUILD.BAT
+TOP_SRC = top/top.h top/top.c top/tela.c top/dados.c top/procs.c top/mapa.c top/video.c top/BUILD.BAT
 GIT_SRC = git/git.h git/git.c git/http.c git/pack.c git/sha1.c git/zinf.c git/BUILD.BAT git/GETSODOS.BAT
 
 DISK_FILES = c_compiler/out/*.EXE c_compiler/out/*.DLL c_compiler/out/*.OBJ \
@@ -523,6 +532,8 @@ disk-files: disk.img
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/FONTADV.EXE ::/SODOS/FONTADV.EXE
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/VIDEOCFG.EXE ::/SODOS/VIDEOCFG.EXE
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/IMGBIG.DLL ::/SODOS/IMGBIG.DLL
+	@if ! mdir -i $(DISK)@@512 ::/SODOS/DRV >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS/DRV; fi
+	@for f in c_compiler/out/DRV/*.DLL; do [ -f "$$f" ] && mcopy -o -i $(DISK)@@512 "$$f" ::/SODOS/DRV/ || true; done
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/AIPANEL.EXE ::/SODOS/AIPANEL.EXE
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/MENUCFG.EXE ::/SODOS/MENUCFG.EXE
 	@if ! mdir -i $(DISK)@@512 ::/SODOS/WALLS >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS/WALLS; fi
@@ -585,6 +596,7 @@ debug: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/pa
 	$(CC) $(CFLAGS_DEBUG) -c video/font8x8_data.c -o video/font8x8_data.o
 	$(CC) $(CFLAGS_DEBUG) -c video/font8x16_data.c -o video/font8x16_data.o
 	$(CC) $(CFLAGS_DEBUG) -c video/fbcon.c -o video/fbcon.o
+	$(CC) $(CFLAGS_DEBUG) -c video/gpu.c -o video/gpu.o
 	$(CC) $(CFLAGS_DEBUG) -c kernel/serial.c -o kernel/serial.o
 	$(CC) $(CFLAGS_DEBUG) -c kernel/idt.c -o kernel/idt.o
 	$(CC) $(CFLAGS_DEBUG) -c kernel/isr.c -o kernel/isr.o
@@ -598,7 +610,7 @@ debug: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/pa
 	$(AS) -f elf64 kernel/isr_stubs.asm -o kernel/isr_stubs.o
 	$(AS) -f elf64 kernel/irq_stubs.asm -o kernel/irq_stubs.o
 	$(AS) -f elf64 kernel/kernel_entry.asm -o kernel/kernel_entry.o
-	$(LD) $(LDFLAGS) -T kernel/linker.ld -o kernel.elf kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o net/net.o kernel/isr_stubs.o kernel/irq_stubs.o
+	$(LD) $(LDFLAGS) -T kernel/linker.ld -o kernel.elf kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o net/net.o kernel/isr_stubs.o kernel/irq_stubs.o
 	$(MAKE) boot.bin kernel.bin
 	$(MAKE) os.img
 

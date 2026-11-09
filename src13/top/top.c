@@ -1,5 +1,6 @@
-/* top.c - TOP do SODOS. Duas telas: Processos (o que esta na memoria e
- * quanto ocupa) e Mapa (a RAM toda num quadro). F3 ou Tab alterna.
+/* top.c - TOP do SODOS. Tres telas: Processos (o que esta na memoria e
+ * quanto ocupa), Mapa (a RAM toda num quadro) e Video (placa e VRAM).
+ * F3 ou Tab passa para a proxima.
  * Fora da tela de texto (WIN, saida desviada) ou com -l imprime a lista. */
 #include "top.h"
 
@@ -35,9 +36,9 @@ int main(int argc, char** argv) {
     return 0;
   }
   for (;;) {
-    int r = aba == 0 ? tela_procs(&destaque) : tela_mapa(&destaque);
+    int r = aba == 0 ? tela_procs(&destaque) : aba == 1 ? tela_mapa(&destaque) : tela_video();
     if (!r) break;
-    aba = !aba;
+    aba = (aba + 1) % 3;
   }
   tela_fim();
   return 0;

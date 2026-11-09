@@ -386,6 +386,10 @@ HELLO um dois
 - A interface foi desenhada em 1024×768 e é escalada; em telas altas a fonte e o cursor usam escala 2.
 - Para trocar: menu Iniciar → **Configurações** → **Tela**, ou a janela **Configurações de tela**. A troca reinicia o desktop e fecha as janelas abertas. **Padrão** volta ao modo automático.
 
+### Driver de placa de vídeo (em construção)
+
+O desenho por CPU continua sendo o padrão. Um driver de placa (o primeiro será o **virtio-gpu** do QEMU) vem como `.DLL` separado em `D:\SODOS\DRV\`, carregado só quando a placa existe, inicializa e passa num quadro de teste. Sem driver ativo, o sistema não gasta memória nem processamento a mais: o kernel ganha só um ponteiro (8 bytes), testado uma vez por quadro e uma vez na troca de modo. Qualquer erro do driver o desativa e devolve a tela ao caminho por CPU. `gpu=0` no `VIDEO.CFG` desliga a tentativa. O carregador (`video/gpu.c`) e o driver `VIRTGPU.DLL` já funcionam: `make run-virtio` sobe o QEMU com `-device virtio-vga` e o quadro sai pela placa. No notebook (Radeon Barcelo), o `U:\SODOS.CFG` diz qual placa usa qual driver (`AMDGOP.DLL`), e o resultado fica em `U:\SODOS\GPU.LOG`. A aba **Video** do `TOP` mostra a placa, a VRAM e o que o vídeo ocupa. O contrato, a interface e as etapas estão em [`src13/docs/GPU.md`](src13/docs/GPU.md).
+
 ### Barra e menu
 
 A barra tem só o botão **Iniciar** e o aviso `ESC=DOS`. O menu tem 7 itens:
