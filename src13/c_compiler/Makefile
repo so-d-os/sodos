@@ -37,7 +37,7 @@ SOXRUN = $(B)/soxrun
 HCC = $(B)/cc
 CC_SRC = cc/main.c cc/util.c cc/lex.c cc/pp.c cc/type.c cc/parse.c cc/gen.c
 
-all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/HELLO.EXE \
+all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/HELLO.EXE $(O)/CRASHT.EXE \
 	$(O)/CC.EXE $(O)/LINK.EXE $(O)/TLS.DLL $(O)/HTTPS.EXE $(O)/GUI.DLL $(O)/IMG.DLL \
 	$(O)/BROWSER.EXE $(O)/IMAGEVW.EXE $(O)/VIDPLAY.EXE $(O)/FONTADV.EXE $(O)/COMMAND.EXE $(O)/HTTPD.EXE \
 	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE $(O)/VIDEOCFG.EXE $(O)/IMGBIG.DLL $(O)/AIPANEL.EXE $(O)/MENUCFG.EXE \
@@ -324,6 +324,13 @@ $(B)/g_hello.o: examples/hello.c $(HEADERS) | $(B)
 
 $(O)/HELLO.EXE: $(B)/hello.obj $(O)/CRT0.OBJ $(O)/LIBC.DLL $(LINK)
 	$(LINK) /out:$@ /map $(O)/CRT0.OBJ $(B)/hello.obj $(O)/LIBC.DLL $(O)/KERNEL.IMP
+
+# CRASHT.EXE: excecao de proposito, para testar o CRASH.LOG do kernel (isr.c)
+$(B)/crasht.obj: examples/crasht.c $(HCC) $(HEADERS)
+	$(HCC) -c examples/crasht.c -o $@
+
+$(O)/CRASHT.EXE: $(B)/crasht.obj $(O)/CRT0.OBJ $(O)/LIBC.DLL $(LINK)
+	$(LINK) /out:$@ /map $(O)/CRT0.OBJ $(B)/crasht.obj $(O)/LIBC.DLL $(O)/KERNEL.IMP
 
 # ---- CC.EXE e LINK.EXE para o SO, compilados pelo nosso cc (estagio 1) ----
 CC_OBJ1 = $(patsubst cc/%.c,$(B)/s1_%.obj,$(CC_SRC))

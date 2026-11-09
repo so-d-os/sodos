@@ -6,6 +6,8 @@
 
 void trace_event(const char* tag, uint32_t a, uint32_t b, uint32_t c);
 void trace_dump_vga(int row);
+int trace_dump_text(char* out, int max);
+void trace_freeze(void);
 
 static inline uint32_t trace_get_esp(void) {
   uint64_t v;

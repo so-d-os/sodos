@@ -6,6 +6,11 @@ static void (*idle_fn)(void);
 static int (*jobs[SCHED_JOBS])(void*);
 static void* job_arg[SCHED_JOBS];
 static int in_yield;
+static int frozen;
+
+/* Excecao: o CRASH.LOG grava com o FAT, que cede a vez a cada poucos setores.
+ * Depois disto ninguem mais troca de tarefa. */
+void sched_freeze(void) { frozen = 1; }
 
 void sched_set_idle(void (*fn)(void)) {
   idle_fn = fn;
@@ -29,7 +34,7 @@ int sched_post(int (*fn)(void*), void* arg) {
 
 void sched_yield(void) {
   int i;
-  if (in_yield) return;
+  if (in_yield || frozen) return;
   /* Antes de in_yield: outro programa, retomado daqui, tambem precisa ceder. */
   if (gui_coop_pause()) return;
   in_yield = 1;

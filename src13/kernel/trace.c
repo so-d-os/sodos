@@ -11,6 +11,7 @@ static uint32_t trace_b[TRACE_SIZE];
 static uint32_t trace_c[TRACE_SIZE];
 static uint32_t trace_head = 0;
 static uint32_t trace_count = 0;
+static int trace_off;
 
 #include "fbcon.h"
 #define VGA vga_text  /* 0xB8000, ou a copia do fbcon no UEFI */
@@ -34,7 +35,11 @@ static void print_hex(uint32_t v, int row, int* col) {
   }
 }
 
+/* Excecao: o que vier depois (as escritas do CRASH.LOG) nao entra no trace. */
+void trace_freeze(void) { trace_off = 1; }
+
 void trace_event(const char* tag, uint32_t a, uint32_t b, uint32_t c) {
+  if (trace_off) return;
   trace_tags[trace_head] = tag;
   trace_a[trace_head] = a;
   trace_b[trace_head] = b;
@@ -64,4 +69,26 @@ void trace_dump_vga(int row) {
     print_hex(trace_c[idx], row, &c);
     row++;
   }
+}
+
+/* Mesmo conteudo do trace_dump_vga, em texto (para o CRASH.LOG). Bytes escritos. */
+int trace_dump_text(char* out, int max) {
+  static const char hex[] = "0123456789ABCDEF";
+  int n = 0;
+  uint32_t start = (trace_head + TRACE_SIZE - trace_count) % TRACE_SIZE;
+  for (uint32_t i = 0; i < trace_count; i++) {
+    uint32_t idx = (start + i) % TRACE_SIZE;
+    const char* t = trace_tags[idx] ? trace_tags[idx] : "null";
+    uint32_t v[3] = { trace_a[idx], trace_b[idx], trace_c[idx] };
+    if (n + 80 > max) break;
+    while (*t && n < max - 60) out[n++] = *t++;
+    for (int k = 0; k < 3; k++) {
+      out[n++] = ' ';
+      out[n++] = (char)('a' + k);
+      out[n++] = '=';
+      for (int h = 7; h >= 0; h--) out[n++] = hex[(v[k] >> (h * 4)) & 0xF];
+    }
+    out[n++] = '\n';
+  }
+  return n;
 }

@@ -14,3 +14,5 @@ void sched_yield(void);
 int gui_coop_pause(void);
 /* fn devolve 1 quando a tarefa acabou. No maximo uma por yield. */
 int sched_post(int (*fn)(void*), void* arg);
+/* Excecao fatal: sched_yield nao faz mais nada (ver isr.c). */
+void sched_freeze(void);
