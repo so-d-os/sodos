@@ -30,7 +30,10 @@ APP_CFLAGS=-ffreestanding -fno-pic -fno-stack-protector -fno-pie -nostdlib -O2 -
 APP_LDFLAGS=-m elf_i386
 # 4 GB: o kernel_entry mapeia 0..4 GB e mm.c usa a maior regiao E820 abaixo de 4 GB (~3 GB no QEMU).
 # -usb -device usb-tablet: o QEMU entrega a posicao absoluta do ponteiro.
-QEMU=qemu-system-x86_64 -m 4096 -usb -device usb-tablet
+# KVM quando o usuario esta no grupo kvm (WSL: /dev/kvm); senao TCG. Com KVM a
+# emulacao aninhada (QEMU dentro do SODOS, qemu/README.md) fica usavel.
+QEMU_ACCEL := $(shell [ -r /dev/kvm ] && [ -w /dev/kvm ] && grep -qE 'vmx|svm' /proc/cpuinfo && echo kvm || echo tcg)
+QEMU=qemu-system-x86_64 -accel $(QEMU_ACCEL) -m 4096 -usb -device usb-tablet
 
 # VirtualBox (Windows/WSL).  wslpath/cygpath convertem o caminho para o
 # PowerShell; em Linux nativo o alvo vbox avisa que nao ha suporte.

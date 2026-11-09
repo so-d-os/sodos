@@ -12,6 +12,9 @@
 #define GUI_EV_UP    4
 #define GUI_EV_DRAG  5  /* moveu com o botao esquerdo apertado */
 #define GUI_EV_WHEEL 6  /* roda do rato: ev.key > 0 desce, < 0 sobe (passos) */
+/* So com k_gui_raw(1) (emuladores): entrada crua quando a janela tem foco. */
+#define GUI_EV_SCAN  7  /* ev.key = byte do teclado PS/2 (set 1, com E0 e soltar) */
+#define GUI_EV_MOVE  8  /* ev.x, ev.y, ev.key = botoes (1 esq, 2 dir, 4 meio) */
 
 #define GUI_KEY_UP    0x101
 #define GUI_KEY_DOWN  0x102

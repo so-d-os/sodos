@@ -19,7 +19,46 @@ Alvo: `qemu-system-i386` com TCG, compilado pelo toolchain LP64 do SODOS
 | **Q4a** | `-serial stdio` no console do SODOS (saída e teclado); QEMU no `make disk-files` (`D:\UTILS\QEMU`) | **feito (2026-11-09)** |
 | **Q4b** | bootar um sistema de verdade: FreeDOS 1.3 (disquete) com tela e teclado pela serial | **feito (2026-11-09)** |
 | **Q4c** | tela de texto do guest no console do SODOS (`ui/sodos.c`): EDIT do FreeDOS | **feito (2026-11-09)** |
-| Q5 | modos gráficos numa janela do WIN; disco IDE com um sistema maior | — |
+| **Q5** | QEMU numa janela do WIN (gráfico, teclado e mouse crus); Linux com X (Tiny Core, Xvesa) | **feito (2026-11-09)** |
+
+## Q5: resultado
+
+O QEMU abre como **janela do WIN** e roda um **Linux com X**: o Tiny Core 15
+(kernel 6.6.8, BusyBox, servidor X do projeto X.Org — o Xvesa, sobre o VBE
+da VGA — com FLWM e wbar) boota dentro do QEMU dentro do SODOS. Na VM de
+teste, em que o próprio SODOS roda em TCG, o X sobe em ~11 minutos.
+
+No WIN, abra o `D:\UTILS\QEMU\LINUX.BAT` (ou rode o `QEMU.EXE` pelo
+Command): com o WIN aberto o `-display curses` vira janela. Fechar a janela
+desliga o QEMU. O `DOS.BAT` também abre numa janela no WIN (e no console de
+texto fora dele).
+
+**Janela** (`sodos/ui/sodos.c`): a superfície da VGA (texto ou gráfico,
+32 bpp) vai para a janela com `k_gui_pixels`, ampliada por um fator inteiro
+quando cabe (720x400 do DOS vira 1440x800) ou reduzida para caber.
+
+**Teclado e mouse crus** (kernel, `video/visual.c`): `k_gui_raw(1)` faz a
+janela com foco receber `GUI_EV_SCAN` (cada byte do teclado PS/2: apertar,
+soltar, E0, Ctrl/Alt/Shift) e `GUI_EV_MOVE` (todo movimento do rato, com os
+botões). O QEMU repassa os scancodes ao i8042 do guest, um por vez
+(`qemu_input_event_send_key_delay`; sem isso o DOS perdia o Alt de Alt+F), e
+o movimento como deltas do rato PS/2. Ctrl+F1..F7 seguem com o kernel. A fila
+de eventos por janela passou de 16 para 64, e movimentos seguidos se juntam.
+Vale nos dois caminhos do WIN: programa como tarefa (Command) e direto.
+
+**Linux** (`scripts/make-tinycore.sh`): baixa a ISO TinyCore 15.0 (25 MB,
+confere o MD5 publicado) e tira `VMLINUZ` e `CORE.GZ` com o
+`scripts/isoextract.py` (leitor ISO 9660 mínimo). O `LINUX.BAT` usa
+`-kernel/-initrd` (pula o menu do isolinux), `-append "loglevel=3 cde
+noapic"` e a ISO como CD (extensões do X em `cde/`). O `noapic` é preciso: a
+máquina `isapc` anuncia um IOAPIC sem linhas e o kernel caía ao configurá-lo.
+A VGA ISA tem o Bochs VBE com framebuffer linear, o bastante para o Xvesa.
+Memória do guest 128 MB, `tb-size=64` (o padrão reservaria 1 GB para o JIT).
+
+Limites: o mouse é relativo (PS/2), então o cursor do guest pode se afastar
+do do WIN; o Xorg completo (`Xorg-7.7.tcz`) precisaria de rede no guest.
+Velocidade: é emulação dentro de emulação. Com o `make run` em KVM (o WSL tem
+`/dev/kvm`; falta o usuário no grupo `kvm`) tudo fica várias vezes mais rápido.
 
 ## Q4c: resultado
 
@@ -123,6 +162,7 @@ os guests de teste e três `.BAT` (`sodos/disk/`):
 | `D:\UTILS\QEMU\SERIAL.BAT arq.elf` | boota um kernel multiboot com a serial no console |
 | `D:\UTILS\QEMU\DOS.BAT` | FreeDOS 1.3 na tela de texto, com EDIT (Q4c) |
 | `D:\UTILS\QEMU\DOSSER.BAT` | FreeDOS 1.3 só pela serial (Q4b) |
+| `D:\UTILS\QEMU\LINUX.BAT` | Tiny Core Linux com X numa janela do WIN (Q5) |
 
 Ctrl+C encerra o QEMU (regra do kernel para programas de console). Ainda não
 há tela: só aparece o que o guest escreve na COM1.
@@ -292,12 +332,12 @@ que o meson recusa, até o configure passar. O `host_os` é `linux`: o driver
 mantém `__linux__` ao compilar (como no Firefox) e a libsodos imita a ABI
 Linux. O backend do TCG é o nativo x86-64, como o JIT do SpiderMonkey.
 
-## Q5: próximos passos
+## Próximos passos
 
-1. Modos gráficos numa janela do WIN (o `ui/sodos.c` desenhando a superfície
-   da VGA), com teclado e mouse da janela, inclusive Ctrl/Alt de verdade.
-2. Disco rígido IDE com um sistema maior (FreeDOS instalado, Linux pequeno
-   com `console=ttyS0`).
+1. Mouse absoluto (usb-tablet ou vmmouse) para o cursor do guest seguir o do
+   WIN.
+2. Rede no guest (slirp) para o Tiny Core baixar extensões, como o Xorg 7.7.
+3. KVM no QEMU de fora (`make run`) para a emulação aninhada ficar usável.
 
 ## Riscos conhecidos
 
@@ -306,7 +346,7 @@ Linux. O backend do TCG é o nativo x86-64, como o JIT do SpiderMonkey.
   cede a vez a cada ~10 ms: em E/S, em salto indireto e a cada ~1000 TBs.
   O Firefox usa a mesma libsodos (mutex FIFO, `poll` e sono novos) e não foi
   retestado nesta etapa.
-- **Memória**: o kernel mapeia 256 MiB em identidade; guest de 16–32 MB.
+- **Memória**: o Linux usa 128 MB de guest mais ~100 MB do QEMU (JIT de 64 MB).
 - **Velocidade**: o SODOS costuma rodar no QEMU, então é emulação aninhada.
 
 ## Como rodar (WSL)
@@ -355,11 +395,12 @@ em `build/`.
 | `scripts/run-guest.sh` | Q3: copia QEMU, firmware e guest para o D: e roda |
 | `scripts/vm-stack.sh` | backtrace heurístico do programa travado na VM de teste |
 | `scripts/copy-qemu-disk.sh` | chamado pelo `make disk-files`: QEMU, firmware, guests, FreeDOS e `.BAT` em `D:\UTILS\QEMU` |
+| `scripts/make-tinycore.sh`, `scripts/isoextract.py` | Tiny Core 15 (ISO, `VMLINUZ`, `CORE.GZ`) para o `LINUX.BAT` |
 | `scripts/make-freedos.sh` | disquete FreeDOS 1.3 que boota no `A:\>` e o `SERCON.BIN` (baixa a FD13-FloppyEdition, SHA-256 em `vendor/SHA256SUMS`) |
 | `sodos/devices/i386-sodos.mak` | dispositivos do `qemu-system-i386` (`isapc`) |
 | `sodos/guest/` | guests de teste multiboot (`hello.S`, `eco.S`, `hello.ld`, `build.sh`) |
-| `sodos/disk/` | `.BAT` que vão para `D:\UTILS\QEMU` (`HELLO`, `ECO`, `SERIAL`, `DOS`, `DOSSER`) |
-| `sodos/ui/sodos.c` | display de texto no console do SODOS (`-display curses`) |
+| `sodos/disk/` | `.BAT` que vão para `D:\UTILS\QEMU` (`HELLO`, `ECO`, `SERIAL`, `DOS`, `DOSSER`, `LINUX`) |
+| `sodos/ui/sodos.c` | `-display curses`: janela do WIN (gráfico, entrada crua) ou console de texto |
 | `sodos/cross-sodos.ini` | propriedades do meson para o alvo (`needs_exe_wrapper`, glib) |
 | `sodos/meson-cross.ini` | cross file das libs (compilador, pkg-config, host) |
 | `sodos/sysroot/` | libs portadas: `.pc`, headers e `.a` (gerados, fora do git) |

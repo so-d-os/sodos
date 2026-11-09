@@ -3481,7 +3481,7 @@ static void wm_run_status(struct wm_win* w, int rc) {
  * Cada um tem o seu retangulo e a sua fila. Quem espera tecla ou rede
  * devolve o turno ao desktop; um clique traz essa janela para a frente. */
 #define GUI_MAX 8
-#define GUI_Q 16
+#define GUI_Q 64   /* com entrada crua cada tecla sao 2+ bytes */
 #define TASK_MAX 8
 #define TASK_STACK (48 * 1024)
 #define TASK_ARGC 16
@@ -3510,6 +3510,8 @@ struct gui_win {
   int ask_close;
   int drag;
   int drag_ox, drag_oy;
+  int raw;      /* k_gui_raw: scancodes e movimento crus (emuladores) */
+  int raw_btn;  /* botoes apertados dentro da janela (captura do arrasto) */
 };
 
 struct gui_task {
@@ -3978,6 +3980,33 @@ static void gq_push(struct gui_win* w, int type, int x, int y, int key) {
   w->qn++;
 }
 
+int gui_raw_set(int on) {
+  if (!gui_ok()) return -1;
+  gui.raw = on ? 1 : 0;
+  gui.raw_btn = 0;
+  return 0;
+}
+
+/* Janela com foco em modo cru, ou -1. */
+static int gui_raw_focus(void) {
+  if (!gwins || gui_focus < 0 || gui_focus >= GUI_MAX) return -1;
+  if (!gwins[gui_focus].open || !gwins[gui_focus].raw) return -1;
+  return gui_focus;
+}
+
+/* Movimento cru: junta com o anterior se os botoes nao mudaram. */
+static void gq_push_move(struct gui_win* w, int x, int y, int btn) {
+  if (w->qn > 0) {
+    int last = (w->qr + w->qn - 1) % GUI_Q;
+    if (w->qt[last] == GUI_EV_MOVE && w->qk[last] == btn) {
+      w->qx[last] = x;
+      w->qy[last] = y;
+      return;
+    }
+  }
+  gq_push(w, GUI_EV_MOVE, x, y, btn);
+}
+
 /* Injeta uma tecla (ASCII) na janela GUI com foco. Usado pelo httpd, para
  * automatizar testes de digito sem teclado fisico. */
 int win_api_key(int ch) {
@@ -4141,6 +4170,11 @@ int gui_event(int* ev, int timeout_ms) {
       __asm__ volatile ("pause");
       continue;
     }
+    if (kind == 0 && gui.raw) {
+      ev[0] = GUI_EV_SCAN;
+      ev[3] = scb;
+      return GUI_EV_SCAN;
+    }
     if (kind == 1) {
       int left, right, x, y;
       int dz = mouse_wheel();
@@ -4154,6 +4188,16 @@ int gui_event(int* ev, int timeout_ms) {
       y = (int)sys_my - (gui.oy + gui.title_h);
       ev[1] = x;
       ev[2] = y;
+      if (gui.raw && !gui.drag) {
+        int btn = gui.pkt[0] & 7;
+        int inside = x >= 0 && y >= 0 && x < gui.cw && y < gui.ch;
+        if (inside || gui.raw_btn) {
+          gui.raw_btn = btn && (gui.raw_btn || inside);
+          ev[0] = GUI_EV_MOVE;
+          ev[3] = btn;
+          return GUI_EV_MOVE;
+        }
+      }
       if (gui.drag) {
         if (left) {
           gui_move_to((int)sys_mx, (int)sys_my);
@@ -4232,7 +4276,8 @@ static void gui_idle(void) {
     if (kind < 0) break;
     if (kind == 0) {
       int key = 0;
-      if (gui_key_event(scb, &key)) gui_q_push(GUI_EV_KEY, 0, 0, key);
+      if (gui.raw) gui_q_push(GUI_EV_SCAN, 0, 0, scb);
+      else if (gui_key_event(scb, &key)) gui_q_push(GUI_EV_KEY, 0, 0, key);
       continue;
     }
     moved = 1;
@@ -4240,6 +4285,16 @@ static void gui_idle(void) {
       int dz = mouse_wheel();
       if (!from_abs)
         sys_mouse_place(sys_mx + (int8_t)gui.pkt[1], sys_my - (int8_t)gui.pkt[2]);
+      if (gui.raw && !gui.drag) {
+        int rx = (int)sys_mx - gui.ox, ry = (int)sys_my - (gui.oy + gui.title_h);
+        int btn = gui.pkt[0] & 7;
+        int inside = rx >= 0 && ry >= 0 && rx < gui.cw && ry < gui.ch;
+        if (inside || gui.raw_btn) {
+          gui.raw_btn = btn && (gui.raw_btn || inside);
+          gq_push_move(&gui, rx, ry, btn);
+          continue;
+        }
+      }
       if (dz) {
         int wx = (int)sys_mx - gui.ox, wy = (int)sys_my - (gui.oy + gui.title_h);
         if (wx >= 0 && wy >= 0 && wx < gui.cw && wy < gui.ch) gui_q_push(GUI_EV_WHEEL, wx, wy, dz);
@@ -6538,6 +6593,13 @@ static int win_wm_run(void) {
         continue;
       }
       if (kind == 0) {
+        int rf = gui_raw_focus();
+        /* Janela crua (emulador): o byte vai inteiro, exceto Ctrl+F1..F7. */
+        if (rf >= 0 && !(!(scb & 0x80) && kbd_ctrl_down() && vt_hotkey(scb) >= 0)) {
+          gq_push(&gwins[rf], GUI_EV_SCAN, 0, 0, scb);
+          win_api_dirty = 1;
+          continue;
+        }
         data = scb;
         goto wm_key;
       }
@@ -6547,6 +6609,20 @@ static int win_wm_run(void) {
           sys_mouse_place(mx + (int8_t)packet[1], my - (int8_t)packet[2]);
         mx = sys_mx;
         my = sys_my;
+        {
+          int rf = gui_raw_focus();
+          if (rf >= 0) {
+            struct gui_win* g = &gwins[rf];
+            int rx = (int)mx - g->ox, ry = (int)my - (g->oy + g->title_h);
+            int btn = packet[0] & 7;
+            int inside = rx >= 0 && ry >= 0 && rx < g->cw && ry < g->ch;
+            if (inside || g->raw_btn) {
+              gq_push_move(g, rx, ry, btn);
+              win_api_dirty = 1;
+            }
+            g->raw_btn = btn && (g->raw_btn || inside);
+          }
+        }
         if (menu_open) {
           struct start_menu gm;
           int cfg = menu_cfg;
