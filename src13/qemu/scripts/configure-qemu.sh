@@ -17,6 +17,8 @@ B=${QEMU_BUILD_DIR:-$BUILD_ROOT/qemu-$V}
 
 export PKG_CONFIG=x86_64-sodos-pkg-config
 export QEMU_EXTRA_MACHINE_FILE="$S/sodos/cross-sodos.ini"
+# Dispositivos: sodos/devices/i386-sodos.mak (o QEMU so procura em configs/).
+cp "$S/sodos/devices/i386-sodos.mak" "$Q/configs/devices/i386-softmmu/sodos.mak"
 mkdir -p "$B"
 cd "$B"
 # ucontext: sodos_ucontext.c; o backend sigaltstack precisaria de sinais.
@@ -37,6 +39,7 @@ cd "$B"
   --enable-tcg \
   --disable-install-blobs \
   --with-coroutine=ucontext \
+  --with-devices-i386=sodos \
   --extra-cflags="-I$SYSROOT/include -idirafter $SYSROOT/include-uapi" \
   "$@" > "$S/build/configure.log" 2>&1 || { tail -15 "$S/build/configure.log"; exit 1; }
 tail -3 "$S/build/configure.log"

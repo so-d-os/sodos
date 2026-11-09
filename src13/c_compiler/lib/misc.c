@@ -354,7 +354,75 @@ size_t wcstombs(char* dst, const wchar_t* src, size_t n) {
   return i;
 }
 
+#if defined(__x86_64__) && !defined(__ILP32__)
+/* LP64: futex(2) sobre as threads cooperativas da libsodos. FUTEX_WAIT cede a
+ * vez ate o valor mudar (ou o timeout vencer); FUTEX_WAKE nao precisa fazer
+ * nada, porque cada thread em espera confere o valor sozinha. Quem usa (QEMU
+ * QemuEvent/lockcnt) sempre muda o valor antes do wake. */
+struct __so_ts {
+  long tv_sec, tv_nsec;
+};
+int sched_yield(void);
+int clock_gettime(int clk, struct __so_ts* ts);
+
+static long long __so_now_ns(int clk) {
+  struct __so_ts t;
+  if (clock_gettime(clk, &t) != 0) return 0;
+  return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+
+static long __so_futex(volatile int* addr, int op, int val, const struct __so_ts* ts) {
+  int cmd = op & 127; /* sem FUTEX_PRIVATE_FLAG/FUTEX_CLOCK_REALTIME */
+  if (cmd == 1 || cmd == 10) return 0; /* FUTEX_WAKE(_BITSET) */
+  if (cmd == 0 || cmd == 9) {          /* FUTEX_WAIT(_BITSET) */
+    /* WAIT: timeout relativo (monotonic); WAIT_BITSET: absoluto (o relogio
+     * vem do FUTEX_CLOCK_REALTIME). */
+    int clk = (cmd == 9 && (op & 256)) ? 0 : 1;
+    long long end = 0;
+    if (ts) {
+      long long t = (long long)ts->tv_sec * 1000000000LL + ts->tv_nsec;
+      end = cmd == 0 ? __so_now_ns(1) + t : t;
+    }
+    if (*addr != val) {
+      errno = EAGAIN;
+      return -1;
+    }
+    while (*addr == val) {
+      if (ts && __so_now_ns(clk) >= end) {
+        errno = ETIMEDOUT;
+        return -1;
+      }
+      sched_yield();
+    }
+    return 0;
+  }
+  errno = ENOSYS;
+  return -1;
+}
+
+long syscall(long number, ...) {
+  va_list ap;
+  long r;
+  if (number == 202) { /* __NR_futex */
+    volatile int* addr;
+    int op, val;
+    const struct __so_ts* ts;
+    va_start(ap, number);
+    addr = va_arg(ap, volatile int*);
+    op = va_arg(ap, int);
+    val = va_arg(ap, int);
+    ts = va_arg(ap, const struct __so_ts*);
+    va_end(ap);
+    return __so_futex(addr, op, val, ts);
+  }
+  if (number == 186) return gettid(); /* __NR_gettid */
+  r = -1;
+  errno = ENOSYS;
+  return r;
+}
+#else
 long syscall(long number, ...) { (void)number; errno = ENOSYS; return -1; }
+#endif
 
 struct termios;
 int tcgetattr(int fd, struct termios* t) { (void)fd; (void)t; return -1; }

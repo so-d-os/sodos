@@ -1,13 +1,13 @@
 #!/bin/sh
 # test.sh - compila os testes de sodos/tests e roda na VM de teste (vm.sh).
-#   sh scripts/test.sh             ZTEST, CTXTEST e GTEST
+#   sh scripts/test.sh             ZTEST, CTXTEST, COTEST e GTEST
 #   sh scripts/test.sh gtest       so um
 set -e
 S=$(cd "$(dirname "$0")/.." && pwd)
 . "$S/scripts/env.sh"
 sh "$S/scripts/build-port64.sh"
 mkdir -p "$S/build/out"
-T=${*:-ztest ctxtest gtest}
+T=${*:-ztest ctxtest cotest gtest}
 for t in $T; do
   E=$(echo "$t" | tr a-z A-Z).EXE
   $CC64 -O2 $(x86_64-sodos-pkg-config --cflags glib-2.0 zlib) "$S/sodos/tests/$t.c" \

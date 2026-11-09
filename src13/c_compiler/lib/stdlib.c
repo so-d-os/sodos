@@ -225,7 +225,18 @@ void exit(int code) {
 
 void abort(void) {
   __so_stdio_flush_out();
+#ifdef __GNUC__
+  {
+    /* Quem chamou: subtraia o endereco de abort e some o de abort no ELF
+     * (SODOS_KEEP_ELF=1 no link) para achar a funcao com nm/addr2line. */
+    char b[96];
+    snprintf(b, sizeof b, "abort() chamado de %p (abort em %p)\n",
+             __builtin_return_address(0), (void*)abort);
+    k_puts(b);
+  }
+#else
   k_puts("abort()\n");
+#endif
   k_exit(134);
 }
 

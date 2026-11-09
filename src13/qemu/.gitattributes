@@ -1,0 +1,5 @@
+# Lidos no WSL (minikconf, ld, gas, meson): LF mesmo em checkout no Windows.
+*.mak text eol=lf
+*.ld text eol=lf
+*.S text eol=lf
+*.ini text eol=lf
