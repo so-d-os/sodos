@@ -51,6 +51,11 @@ static int kw_skip;   /* Pause: E1 1D 45 E1 9D C5 nao e Ctrl */
 static uint8_t kw_ctrl;
 static uint8_t kw_alt;
 static int kw_break;
+static int kw_armed;   /* comando do prompt rodando: no WIN Ctrl+C tambem para */
+
+void kbd_break_arm(int on) {
+  kw_armed = on;
+}
 
 int kbd_ctrl_down(void) {
   return kw_ctrl != 0;
@@ -98,7 +103,7 @@ void kbd_watch(uint8_t sc) {
   }
   /* 0x2E: C. E0 46: Break (Ctrl+Pause). O WIN trata Ctrl+C como tecla. */
   if (!up && kw_ctrl && ((key == 0x2E && !ext) || (key == 0x46 && ext))) {
-    if (!win_screen_size(0, 0)) kw_break = 1;
+    if (kw_armed || !win_screen_size(0, 0)) kw_break = 1;
     return;
   }
   /* 0x53: Delete (E0 53) ou o Del do teclado numerico. */

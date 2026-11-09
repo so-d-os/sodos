@@ -13,6 +13,9 @@ void kbd_watch(uint8_t sc);
  * No WIN o aviso nao e registrado: la Ctrl+C e tecla comum. */
 int kbd_break_take(void);
 
+/* on = 1 enquanto um comando do prompt roda: ai Ctrl+C vale tambem no WIN. */
+void kbd_break_arm(int on);
+
 /* 1 enquanto um dos Ctrl esta apertado (ja vale para a tecla que
  * get_char acabou de devolver). */
 int kbd_ctrl_down(void);

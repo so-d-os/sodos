@@ -60,6 +60,9 @@ int shell_try_char(void);   /* 0 se nao ha tecla */
 /* Le o teclado sem bloquear e, se veio Ctrl+C, encerra o programa DOS
  * em execucao (nao retorna). Fora de programa ou no WIN nao faz nada. */
 void con_break_poll(void);
+/* 1 se o comando do prompt que esta rodando levou Ctrl+C (le o teclado).
+ * Depois disso o putc descarta a saida ate o comando voltar. */
+int shell_break(void);
 
 #define KEY_UP    0x100
 #define KEY_DOWN  0x101
