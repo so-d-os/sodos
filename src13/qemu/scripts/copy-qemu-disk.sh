@@ -4,7 +4,8 @@
 # Chamado por "make disk-files". Sem build do QEMU, avisa e nao falha.
 # Vao o QEMU.EXE, o firmware que a maquina isapc usa (o -L aponta para a
 # propria pasta: o QEMU procura o firmware junto do executavel), os guests de
-# teste HELLO.ELF e ECO.ELF, o disquete FreeDOS, o Tiny Core Linux e os .BAT de exemplo (sodos/disk/).
+# teste HELLO.ELF e ECO.ELF, o disquete FreeDOS, o Tiny Core Linux, o CRASHT.EXE e os .BAT
+# de exemplo (sodos/disk/; QTESTE.BAT roda o QEMU por passos para achar uma EXCEPTION).
 # Com o pendrive SODOS conectado, a mesma pasta vai tambem para U:\UTILS\QEMU
 # (nos .BAT, D:\UTILS\QEMU vira U:\UTILS\QEMU). Sem pendrive, so avisa.
 DISK=$(realpath "$1")
@@ -66,6 +67,12 @@ if sh "$S/scripts/make-tinycore.sh" >/dev/null; then
   done
 else
   echo "QEMU: sem Tiny Core (scripts/make-tinycore.sh falhou); LINUX.BAT nao vai bootar."
+fi
+# CRASHT.EXE (c_compiler/examples/crasht.c): o "qteste crash" testa o CRASH.LOG
+C=$S/../c_compiler/out/CRASHT.EXE
+if [ -f "$C" ]; then
+  put "$C" CRASHT.EXE
+  n=$((n + 1))
 fi
 for f in "$S"/sodos/disk/*; do
   [ -f "$f" ] || continue

@@ -171,7 +171,13 @@ def gnu_link(out, kind, local_objs, objs, rlibs, tmp, shared):
     libs += glob.glob(os.path.join(PORT64, "*.o"))
     if os.path.exists(POSIX64):
         libs.append(POSIX64)
-    libs += glob.glob(os.path.join(C, "build", "x64_*.o"))
+    # Com --allow-multiple-definition vence a primeira definicao, e o glob segue
+    # a ordem do diretorio: x64_misc.o (__sodos_ctors vazio, para a LIBCX) ja
+    # passou na frente do x64_ctors64.o e nenhum construtor rodava (sem TLS, o
+    # QEMU caia no primeiro thread_local). O ctors64 vai sempre primeiro.
+    x64 = sorted(glob.glob(os.path.join(C, "build", "x64_*.o")))
+    x64.sort(key=lambda f: os.path.basename(f) != "x64_ctors64.o")
+    libs += x64
     # libgcc do gcc do host (x86-64, PIC): __divti3/__udivti3 de __int128 etc.
     libgcc = subprocess.check_output(["gcc", "-print-libgcc-file-name"], text=True).strip()
     if os.path.exists(libgcc):
