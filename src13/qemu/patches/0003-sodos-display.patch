@@ -1,0 +1,52 @@
+SODOS: display de texto ui/sodos.c no lugar do curses (-display curses)
+e superficie de video em memoria anonima (sem memfd).
+
+diff -ru a/meson.build b/meson.build
+--- a/meson.build	2026-11-09 15:24:50.547125127 -0300
++++ b/meson.build	2026-11-09 15:24:56.443034977 -0300
+@@ -2437,7 +2437,8 @@
+                        blkio.version().version_compare('>=1.4.0'))
+ endif
+ config_host_data.set('CONFIG_CURL', curl.found())
+-config_host_data.set('CONFIG_CURSES', curses.found())
++# SODOS: ui/sodos.c faz o papel do curses (-display curses) sem a biblioteca.
++config_host_data.set('CONFIG_CURSES', curses.found() or meson.get_external_property('sodos', false))
+ config_host_data.set('CONFIG_GBM', gbm.found())
+ config_host_data.set('CONFIG_GIO', gio.found())
+ config_host_data.set('CONFIG_GLUSTERFS', glusterfs.found())
+diff -ru a/ui/meson.build b/ui/meson.build
+--- a/ui/meson.build	2026-11-09 15:25:01.867333701 -0300
++++ b/ui/meson.build	2026-11-09 15:25:02.285595018 -0300
+@@ -30,6 +30,10 @@
+   system_ss.add(files('input-linux.c', 'udmabuf.c'))
+ endif
+ system_ss.add(when: cocoa, if_true: files('cocoa.m'))
++# SODOS: tela de texto no console do SODOS (copiado de qemu/sodos/ui/sodos.c)
++if meson.get_external_property('sodos', false)
++  system_ss.add(files('sodos.c'))
++endif
+ 
+ vnc_ss = ss.source_set()
+ vnc_ss.add(files(
+diff -ru a/ui/qemu-pixman.c b/ui/qemu-pixman.c
+--- a/ui/qemu-pixman.c	2026-11-09 15:25:07.766964004 -0300
++++ b/ui/qemu-pixman.c	2026-11-09 15:25:08.177210137 -0300
+@@ -277,6 +277,18 @@
+ {
+ #ifdef WIN32
+     return qemu_win32_map_alloc(size, handle, errp);
++#elif defined(__SODOS__)
++    /* SODOS: sem memfd nem mmap compartilhado de arquivo; a superficie so
++     * e usada dentro do processo (ui/sodos.c). qemu_memfd_free faz munmap
++     * e ignora o fd -1. */
++    void *p = mmap(NULL, size, PROT_READ | PROT_WRITE,
++                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    if (p == MAP_FAILED) {
++        error_setg_errno(errp, errno, "failed to allocate surface");
++        return NULL;
++    }
++    *handle = -1;
++    return p;
+ #else
+     return qemu_memfd_alloc(name, size, 0, handle, errp);
+ #endif

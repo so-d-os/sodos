@@ -19,6 +19,8 @@ export PKG_CONFIG=x86_64-sodos-pkg-config
 export QEMU_EXTRA_MACHINE_FILE="$S/sodos/cross-sodos.ini"
 # Dispositivos: sodos/devices/i386-sodos.mak (o QEMU so procura em configs/).
 cp "$S/sodos/devices/i386-sodos.mak" "$Q/configs/devices/i386-softmmu/sodos.mak"
+# Tela de texto no console do SODOS (-display curses): patches/0003 liga no build.
+cp "$S/sodos/ui/sodos.c" "$Q/ui/sodos.c"
 mkdir -p "$B"
 cd "$B"
 # ucontext: sodos_ucontext.c; o backend sigaltstack precisaria de sinais.
