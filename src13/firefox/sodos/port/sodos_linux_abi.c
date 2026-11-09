@@ -311,11 +311,22 @@ struct so_timespec64 {
   int64_t tv_nsec;
 };
 
+/* flags & 1 = TIMER_ABSTIME: req e um instante do relogio clk, nao uma
+ * duracao (o glib e o QEMU dormem assim). Tratar como duracao fazia a
+ * thread dormir o uptime inteiro. */
 int clock_nanosleep(int clk, int flags, const struct so_timespec64* req, void* rem) {
-  (void)clk;
-  (void)flags;
+  int64_t want = req->tv_sec * 1000 + req->tv_nsec / 1000000;
   (void)rem;
-  sodos_sleep_ms((unsigned)(req->tv_sec * 1000 + req->tv_nsec / 1000000));
+  if (flags & 1) {
+    struct timespec now;
+    clock_gettime(clk, &now);
+    want -= (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+    if (want <= 0) {
+      sched_yield();
+      return 0;
+    }
+  }
+  sodos_sleep_ms(want > 0 ? (unsigned)want : 0);
   return 0;
 }
 

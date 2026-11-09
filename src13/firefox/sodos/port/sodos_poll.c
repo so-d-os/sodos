@@ -19,10 +19,18 @@ extern short sodos_pipe_poll(int fd, short events);
 #endif
 
 extern int __so_stdin_raw;           /* c_compiler/lib/misc.c */
+extern void sodos_coop_yield(void);  /* sodos_thread.c */
 extern int sodos_stdin_ready(void);   /* libs/posix-lite/posix.c */
 
 int poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
   uint64_t start = sodos_now_ms();
+
+#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+  /* Um laco de eventos com fd sempre pronto (o pipe de um notificador que se
+   * rearma, ex.: aio_poll do QEMU) nunca chegaria ao yield do timeout 0.
+   * Passada a fatia (~10 ms), cede a vez assim mesmo. */
+  sodos_coop_yield();
+#endif
 
   for (;;) {
     nfds_t i;

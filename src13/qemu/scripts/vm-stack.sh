@@ -11,6 +11,8 @@ ELF=${2:-$BUILD_ROOT/qemu-${QEMU_VERSION:-9.2.0}/qemu-system-i386.elf}
 RSP=$(sh "$S/scripts/vm.sh" mon "info registers" | grep -oE "RSP=[0-9a-f]+" | cut -d= -f2)
 echo "base=$BASE rsp=0x$RSP"
 sh "$S/scripts/vm.sh" mon "x/512gx 0x$RSP" | grep -oE "0x[0-9a-f]{16}" | while read -r w; do
+  # palavras acima de 2^63 estouram a aritmetica do sh: so o que cabe em 32 bits
+  case "$w" in 0x00000000*) ;; *) continue ;; esac
   o=$((w - BASE))
   if [ "$o" -gt 0 ] && [ "$o" -lt $((0x1000000)) ]; then
     f=$(nm -n "$ELF" | awk -v c=$o '{x=strtonum("0x"$1); if (x<=c) l=$3; else {print l; exit}}')

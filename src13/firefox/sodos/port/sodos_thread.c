@@ -125,6 +125,13 @@ static void reap_zombies(void) {
   }
 }
 
+/* Fatia cooperativa (sodos_coop_due/yield, mais abaixo): conta desde que a
+ * thread atual ganhou a CPU. */
+#define COOP_SLICE_MS 10
+static uint64_t coop_last;
+static unsigned coop_n;
+static int coop_flag;
+
 static int wake_due(void) {
   int any = 0;
   uint64_t now = sodos__ms();
@@ -162,6 +169,9 @@ static void resched(void) {
       if (next != prev) {
         sodos__tls_switch(next->tls_tp);
         sodos_ctx_switch(&prev->rsp, next->rsp);
+        /* (ja na thread que voltou a rodar) a fatia dela recomeca */
+        coop_last = sodos__ms();
+        coop_flag = 0;
       }
       in_finish = 0;   /* quem morreu ja saiu da propria pilha */
       return;
@@ -376,12 +386,8 @@ int sched_yield(void) {
  * Para lacos longos que nunca chamam o sistema (a vCPU do QEMU rodando o
  * guest): sodos_coop_due diz se a thread ja passou da fatia (~10 ms) e
  * sodos_coop_yield cede a vez se passou. A contagem evita ler o PIT
- * (k_ms) a cada chamada. */
-#define COOP_SLICE_MS 10
-static uint64_t coop_last;
-static unsigned coop_n;
-static int coop_flag;
-
+ * (k_ms) a cada chamada. O poll() tambem chama sodos_coop_yield: um laco
+ * de eventos com fd sempre pronto nao pode prender as outras threads. */
 int sodos_coop_due(void) {
   uint64_t now;
   if (coop_flag) return 1;
@@ -395,6 +401,7 @@ int sodos_coop_due(void) {
 void sodos_coop_yield(void) {
   if (!sodos_coop_due()) return;
   sodos__yield();
+  /* Sem outra thread pronta o yield volta direto: comeca outra fatia. */
   coop_last = sodos__ms();
   coop_flag = 0;
 }
