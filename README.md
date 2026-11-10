@@ -317,7 +317,7 @@ The main loop reads a line and calls `shell_exec_line`. If the first token is a 
 | `Esc` | Clears the whole line |
 | `Enter` | Runs it |
 
-No Ctrl (Ctrl+C does not interrupt a command); the only combination is `Ctrl+Alt+Del`, which reboots the machine, from the shell and from the desktop. The line is at most 255 characters; the tokenizer splits on spaces only and accepts up to 16 arguments. No wildcards, pipes or quotes.
+There is no Ctrl editing on the prompt line. The OS combinations are `Ctrl+F1`..`Ctrl+F12` (screens; `Ctrl+F7` is WIN), `Ctrl+Backspace` (closes WIN and releases graphics memory) and `Ctrl+Alt+Del` (reboots the machine), in the shell and on the desktop. The line is at most 255 characters; the tokenizer splits on spaces only and accepts up to 16 arguments. No wildcards, pipes or quotes.
 
 ### Built-in commands
 
@@ -356,7 +356,7 @@ No Ctrl (Ctrl+C does not interrupt a command); the only combination is `Ctrl+Alt
 | `dstat` / `ata` | Last ATA access (drive, LBA, status, error) |
 | `visual` | 320×200 graphics demo (or VBE); `Esc` returns |
 | `mouse` | Mouse test, PS/2 or USB/xHCI (position, buttons, raw packet); `Esc` exits |
-| `win` / `win.exe` | Enters the graphical desktop; `Esc` returns to text |
+| `win` / `win.exe` | Enters the graphical desktop; `Esc` or `Ctrl+Backspace` returns to text |
 | `ping host [-n count] [-l bytes]` | ICMP; e.g. `ping 10.0.2.2`, `ping example.com -n 2` |
 | `net [status]` / `net dhcp [renew]` / `net wifi ...` | Card and address; DHCP; WiFi (see [WiFi](#wifi-rtl8852be)) |
 | `dlls` | Loaded SOX modules |
@@ -381,7 +381,9 @@ HELLO um dois
 
 ## Desktop (`win`)
 
-`win` enters the graphical environment; `Esc` returns to the text prompt (saving Notepad if it has changes).
+`win` enters the graphical environment; `Esc` or `Ctrl+Backspace` returns to the text prompt (saving Notepad if it has changes). `Ctrl+Backspace` also releases the graphical environment's memory: windows, wallpaper, desktop tables, tasks and the WIN stack.
+
+The OS screens belong to the kernel: `Ctrl+F1`..`Ctrl+F12` switch screens even with a program, the editor, `visual` or a raw (emulator) window in the foreground; no program receives those keys. `Ctrl+F7` is WIN; the other ten are text screens (1..6 and 8..12).
 
 ### Display
 
@@ -999,7 +1001,7 @@ dlls      loaded modules, base, size and references
 - **No audio**, no floppy, no DMA.
 - **USB is only the mouse and the pendrive**: one HID boot mouse and one bulk-only mass storage device on an xHCI controller, in the PC's ports or behind USB 2 hubs; no USB 3 hubs, no USB keyboard, no I2C touchpad.
 - **8.3 names** on FAT; files from `make disk-files` are copied in uppercase.
-- **No Ctrl** in the shell; there is no way to interrupt a running command.
+- **No Ctrl line editing** in the shell; the OS combinations are the `Ctrl+F1`..`Ctrl+F12` screens and `Ctrl+Backspace`.
 - **No access control**: the HTTP server on port 8797 runs commands without authentication.
 - **No `reboot` command**: `Ctrl+Alt+Del` reboots (8042 pulse, port `0xCF9` or triple fault, in that order). `shutdown` uses ACPI/the Bochs port without parsing the ACPI tables and does not power off a real PC.
 - `IMG.DLL` does not decode BMP, although the desktop accepts `.BMP`.

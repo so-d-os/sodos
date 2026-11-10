@@ -2,6 +2,7 @@
 #include "reboot.h"
 #include "net.h"
 #include "xhci.h"
+#include "vt.h"
 
 #define SCANCODE_ESC 0x01
 
@@ -94,6 +95,11 @@ int cmd_mouse(int argc, char** argv) {
       } else {
         uint8_t sc = shell_inb(0x60);
         kbd_watch(sc);
+        /* Ctrl+F1..F12 e do SO: troca de tela mesmo com o teste aberto. */
+        if (!(sc & 0x80) && kbd_ctrl_down() && vt_hotkey(sc) >= 0) {
+          vt_select(vt_hotkey(sc));
+          continue;
+        }
         if (sc == SCANCODE_ESC) break;
       }
     }

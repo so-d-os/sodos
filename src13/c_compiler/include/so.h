@@ -200,7 +200,8 @@ void k_gui_present(void);
 int k_gui_event(int* ev, int timeout_ms);
 /* 1: a janela recebe o teclado em scancodes (GUI_EV_SCAN, apertar e soltar,
  * Ctrl/Alt/Shift inclusive) e todo movimento do rato (GUI_EV_MOVE) quando
- * tem o foco. Para emuladores (QEMU). Ctrl+F1..F7 continuam do kernel. */
+ * tem o foco. Para emuladores (QEMU). Ctrl+F1..F12 trocam de tela e
+ * Ctrl+Backspace fecha o WIN: continuam do kernel. */
 int k_gui_raw(int on);
 /* rgba = R,G,B,A por pixel. No modo retro A < 128 nao desenha; no modo
  * avancado o pixel e misturado com o que ja esta na janela. */

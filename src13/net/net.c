@@ -10,6 +10,7 @@
 #include "shell.h"
 #include "mm.h"
 #include "drives.h"
+#include "vt.h"
 
 #define SLIRP_IP   0x0A00020Fu
 #define SLIRP_MASK 0xFFFFFF00u
@@ -174,11 +175,15 @@ static void time_poll(void) {
 static int wait_done(uint32_t* spins, uint32_t t0, uint32_t ms, uint32_t spin_max) {
   int done;
   extern int gui_input_pending(void);
+  extern void con_break_poll(void);
+  /* Ctrl+F/Ctrl+C tambem valem nas esperas de DNS, conexao e envio. */
+  con_break_poll();
   time_poll();
   if (pit_ok) done = (ms_now - t0) >= ms;
   else done = ++(*spins) >= spin_max;
   /* Cada volta entrega teclado e rato. A espera nao prende o desktop. */
   sched_yield();
+  if (vt_bg()) vt_yield(0);   /* .EXE desta tela ao fundo: a tela visivel le o teclado */
   if (gui_input_pending()) return 2;
   return done;
 }
@@ -1940,6 +1945,7 @@ static int api_recv(void* data, int cap) {
   if (!nic_ok || !data || cap < 2) return -1;
   /* O clique ganha dos bytes ja recebidos: um download rapido nao esconde a tecla. */
   sched_yield();
+  if (vt_bg()) vt_yield(0);
   if (gui_input_pending()) return -3;
   time_poll();
   t0 = ms_now;

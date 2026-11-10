@@ -1,5 +1,6 @@
-/* vt.h - Telas virtuais: Ctrl+F1..F5 sao cinco prompts do DOS em modo
- * texto, cada um com a sua tela, cursor, unidade e programa. Ctrl+F7 e o WIN.
+/* vt.h - Telas virtuais: Ctrl+F1..F6 e Ctrl+F8..F12 sao prompts do DOS em
+ * modo texto, cada um com a sua tela, cursor, unidade e programa. Ctrl+F7 e o
+ * WIN. As doze combinacoes sao do SO: nenhum programa as recebe.
  *
  * Cada tela e uma tarefa cooperativa com pilha propria (ctx_switch). So a
  * tela visivel le o teclado. As outras andam quando a visivel espera tecla:
@@ -9,7 +10,7 @@
 #pragma once
 #include <stdint.h>
 
-#define VT_TEXT 5            /* Ctrl+F1..F5 */
+#define VT_TEXT 11           /* Ctrl+F1..F6 e F8..F12 (F7 e o WIN) */
 #define VT_WIN  VT_TEXT      /* indice da tarefa do WIN (Ctrl+F7) */
 #define VT_TASKS (VT_TEXT + 1)
 

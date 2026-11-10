@@ -1,4 +1,4 @@
-/* vt.c - Telas virtuais (Ctrl+F1..F5 texto, Ctrl+F7 WIN). Ver vt.h. */
+/* vt.c - Telas virtuais (Ctrl+F1..F6/F8..F12 texto, Ctrl+F7 WIN). Ver vt.h. */
 #include <stdint.h>
 #include "vt.h"
 #include "mm.h"
@@ -75,6 +75,14 @@ static void vt_switch_to(int j) {
   vt_cur = j;
   vt_load(j);
   ctx_switch(&vts[i].rsp, vts[j].rsp);
+  /* A CPU ja esta na pilha da tarefa que acordou. Se o WIN fechou, a pilha
+   * dele (256 KB) pode ser liberada agora; ate aqui ela era a pilha corrente
+   * ou ainda podia ser retomada pelo vt_idle/vt_yield. */
+  if (vts[VT_WIN].state == VS_DEAD && vts[VT_WIN].stack) {
+    kfree(vts[VT_WIN].stack);
+    vts[VT_WIN].stack = 0;
+    serial_puts("[vt] pilha do WIN liberada\n");
+  }
 }
 
 static void font_save(uint8_t f[256][16]) {
@@ -162,10 +170,11 @@ static int vt_new(int i, uint32_t size, void (*fn)(void)) {
 }
 
 static void vt_text_entry(void) {
-  char n = (char)('1' + vt_cur);
+  int n = vt_cur < 6 ? vt_cur + 1 : vt_cur + 2;   /* F7 e o WIN */
   puts_k("SO DOS - tela ");
-  putc(n);
-  puts_k(" (Ctrl+F1..F5 trocam de tela, Ctrl+F7 vai ao WIN)\n\n");
+  if (n >= 10) putc((char)('0' + n / 10));
+  putc((char)('0' + n % 10));
+  puts_k(" (Ctrl+F1..F12 trocam de tela, F7 = WIN)\n\n");
   shell_loop();
 }
 
@@ -197,10 +206,16 @@ int vt_bg(void) {
   return vt_on && vt_cur != vt_fg;
 }
 
+/* Ctrl+Fn: as doze combinacoes sao do SO e nenhum programa as recebe.
+ * F7 continua sendo o WIN; as outras dez sao telas de texto numeradas 1..12
+ * (a tela de texto 7 nao existe: esse numero e o WIN). */
 int vt_hotkey(uint8_t sc) {
   if (!vt_on) return -1;
-  if (sc >= 0x3B && sc < 0x3B + VT_TEXT) return sc - 0x3B;  /* F1..F5 */
-  if (sc == 0x41) return VT_WIN;                            /* F7 */
+  if (sc >= 0x3B && sc <= 0x40) return sc - 0x3B;           /* F1..F6  -> 0..5 */
+  if (sc == 0x41) return VT_WIN;                            /* F7      -> WIN */
+  if (sc >= 0x42 && sc <= 0x44) return 6 + (sc - 0x42);     /* F8..F10 -> 6..8 */
+  if (sc == 0x57) return 9;                                 /* F11     -> 9 */
+  if (sc == 0x58) return 10;                                /* F12     -> 10 */
   return -1;
 }
 

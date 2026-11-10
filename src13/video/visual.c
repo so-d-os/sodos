@@ -4546,6 +4546,7 @@ static void tasks_shutdown(void) {
       task_switch_to(i);
     }
     if (gtasks[i].used && gtasks[i].wake != WAKE_DEAD) {
+      if (gtasks[i].stack) kfree(gtasks[i].stack);
       gtasks[i].used = 0;
       gtasks[i].stack = 0;
     } else if (gtasks[i].used) {
@@ -6213,7 +6214,7 @@ static void chrome_bind(struct wm_win* wins, int* focus, int* menu, int* cfg, in
 }
 
 /* 0 = voltar ao DOS. 1 = aplicar outra resolucao e redesenhar o desktop. */
-/* Ctrl+F1..F5 no WIN: a tela volta ao modo texto da tela do DOS pedida.
+/* Ctrl+F1..F12 no WIN: a tela volta ao modo texto da tela do SO pedida.
  * O WIN fica parado ate alguem voltar a ele (Ctrl+F7); ai o modo grafico
  * e reprogramado e o quadro inteiro e desenhado de novo. */
 static void win_vt_away(int to) {
@@ -6258,6 +6259,56 @@ static void win_vt_away(int to) {
   gfx_live = 1;
   cursor_saved = 0;
   win_api_dirty = 1;
+}
+
+/* Fim do WIN (Esc, menu Sair ou Ctrl+Backspace): desfaz o ambiente grafico e
+ * devolve a memoria. As janelas, as tarefas, o papel de parede, o driver da
+ * placa e os buffers do desktop saem agora; a tarefa do WIN em vt.c fica
+ * marcada como fechada e o Ctrl+F7 cria outra. */
+static void win_session_free(struct wm_win* wins) {
+  int i;
+  if (wins) {
+    for (i = 0; i < WM_MAX; i++) {
+      if (!wins[i].used) continue;
+      task_forget_win(&wins[i]);   /* ninguem mais aponta para esta janela */
+    }
+  }
+  chrome_unbind();   /* fecha janelas canvas e encerra as tarefas */
+  if (wins) {
+    for (i = 0; i < WM_MAX; i++) {
+      if (wins[i].st) kfree(wins[i].st);
+      wins[i].st = 0;
+      wins[i].used = 0;
+    }
+  }
+  desk_free();
+  if (desk_wall) {
+    ufree(desk_wall);
+    desk_wall = 0;
+  }
+  /* As tabelas do desktop sao pequenas, mas tambem sao do ambiente grafico. */
+  if (gwins) {
+    kfree(gwins);
+    gwins = 0;
+  }
+  if (gtasks) {
+    kfree(gtasks);
+    gtasks = 0;
+  }
+  run_out = 0;
+  cons_cap = 0;
+  app_win = 0;
+  gui_focus = -1;
+  win_api_dirty = 1;
+}
+
+/* Tecla que pertence ao SO e nao pode chegar a janela (nem ao guest do
+ * QEMU): Ctrl+F1..F12 troca de tela e Ctrl+Backspace fecha o WIN. */
+static int win_os_key(uint8_t sc) {
+  uint8_t k = sc & 0x7F;
+  if (!kbd_ctrl_down()) return 0;
+  if (k == 0x0E) return 1;                       /* Backspace */
+  return (k >= 0x3B && k <= 0x44) || k == 0x57 || k == 0x58;  /* F1..F12 */
 }
 
 static int win_wm_run(void) {
@@ -6370,9 +6421,15 @@ static int win_wm_run(void) {
     if (chrome_leave) {
       int leave = chrome_leave;
       chrome_leave = 0;
+      if (leave == 1) {
+        if (focus >= 0 && wins[focus].used && wins[focus].kind == WM_KIND_NOTE && note_dirty)
+          note_save();
+        win_session_free(wins);
+        return 0;
+      }
       chrome_unbind();
       desk_free();
-      return leave == 1 ? 0 : 1;
+      return 1;
     }
     mx = sys_mx;
     my = sys_my;
@@ -6594,8 +6651,8 @@ static int win_wm_run(void) {
       }
       if (kind == 0) {
         int rf = gui_raw_focus();
-        /* Janela crua (emulador): o byte vai inteiro, exceto Ctrl+F1..F7. */
-        if (rf >= 0 && !(!(scb & 0x80) && kbd_ctrl_down() && vt_hotkey(scb) >= 0)) {
+        /* Janela crua (emulador): o byte vai inteiro, exceto as teclas do SO. */
+        if (rf >= 0 && !win_os_key(scb)) {
           gq_push(&gwins[rf], GUI_EV_SCAN, 0, 0, scb);
           win_api_dirty = 1;
           continue;
@@ -6922,8 +6979,7 @@ static int win_wm_run(void) {
                 else if (item == 5) wm_open_command(wins, &focus, big);
                 else {
                   serial_puts("[visual] Sair (menu)\n");
-                  chrome_unbind();
-                  desk_free();
+                  win_session_free(wins);
                   return 0;
                 }
               }
@@ -7221,15 +7277,27 @@ static int win_wm_run(void) {
     {
       uint8_t sc = data;
       int kp = 0; /* Enter e / do teclado numerico: seguem como tecla comum */
-      /* Ctrl+F1..F5: telas do DOS. Ctrl+F7 e esta. */
-      if (!(sc & 0x80) && !kbd_e0 && kbd_ctrl_down() && vt_hotkey(sc) >= 0) {
-        if (vt_hotkey(sc) != VT_WIN) {
-          win_vt_away(vt_hotkey(sc));
+      int vt_to;
+      /* Ctrl+F1..F12: telas do SO. Ctrl+F7 e esta. */
+      vt_to = (!(sc & 0x80) && !kbd_e0 && kbd_ctrl_down()) ? vt_hotkey(sc) : -1;
+      if (vt_to >= 0) {
+        if (vt_to != VT_WIN) {
+          win_vt_away(vt_to);
           pkt_idx = 0;
           shift_on = 0;
           need_draw = 1;
         }
         continue;
+      }
+      /* Ctrl+Backspace: sai do WIN e devolve a memoria do ambiente grafico.
+       * Fica antes de qualquer janela, dialogo ou janela crua para nenhum
+       * programa receber a combinacao. */
+      if (!(sc & 0x80) && sc == 0x0E && kbd_ctrl_down()) {
+        serial_puts("[visual] Ctrl+Backspace: fim do WIN\n");
+        if (focus >= 0 && wins[focus].used && wins[focus].kind == WM_KIND_NOTE && note_dirty)
+          note_save();
+        win_session_free(wins);
+        return 0;
       }
       if (keymap_kp_nav(sc)) kbd_e0 = 1; /* NumLock desligado: vira seta, Home... */
       if (kbd_e0 && !(sc & 0x80)) kp = keymap_ext_char(sc);
@@ -7328,8 +7396,7 @@ static int win_wm_run(void) {
         if (focus >= 0 && wins[focus].used && wins[focus].kind == WM_KIND_NOTE && note_dirty)
           note_save();
         serial_puts("[visual] ESC\n");
-        chrome_unbind();
-        desk_free();
+        win_session_free(wins);
         return 0;
       }
       if (sc == SCANCODE_F2) {
@@ -7355,8 +7422,7 @@ static int win_wm_run(void) {
           if (focus >= 0 && wins[focus].used && wins[focus].kind == WM_KIND_NOTE && note_dirty)
             note_save();
           serial_puts("[visual] ESC (map)\n");
-          chrome_unbind();
-          desk_free();
+          win_session_free(wins);
           return 0;
         }
         if (c == 0) continue;
@@ -7684,6 +7750,7 @@ static void gfx_session_run(int session) {
   uint32_t col_accent;
   uint32_t col_frame;
   uint32_t col_cursor;
+  int vt_to = -1;   /* tela pedida com Ctrl+Fn durante o modo grafico */
 
   serial_puts("[visual] enter\n");
   if (!vga_bios_font_ok)
@@ -7836,6 +7903,12 @@ gfx_restart:
       uint8_t sc = data;
       int kp = 0;
 
+      /* Ctrl+F1..F12 tambem troca de tela com o "visual" aberto: sai do modo
+       * grafico e so entao seleciona a tela pedida. */
+      if (!(sc & 0x80) && kbd_ctrl_down() && vt_hotkey(sc) >= 0) {
+        vt_to = vt_hotkey(sc);
+        break;
+      }
       if (kbd_e0) {
         kbd_e0 = 0;
         if (!(sc & 0x80)) kp = keymap_ext_char(sc);
@@ -7953,6 +8026,11 @@ gfx_session_leave:
     fbcon_suspend(0);
   }
   clear_screen();
+  if (vt_to >= 0 && session != GFX_SESSION_WIN) {
+    int to = vt_to;
+    vt_to = -1;
+    vt_select(to);
+  }
   serial_puts("[visual] fim\n");
 }
 

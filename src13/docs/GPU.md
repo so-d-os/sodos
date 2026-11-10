@@ -91,7 +91,7 @@ WIN abre (ou volta com Ctrl+F7)
 |---|---|
 | Cada quadro | `gfx_frame_end` chama `gpu_present()` em vez de `gfx_copy_back()` |
 | `present` devolve erro | `gpu_drv = 0` primeiro, o mesmo quadro sai por `gfx_copy_back()`, `fini` + `mod_dll_free` |
-| Ctrl+F1..F5 (WIN ao fundo) | `suspend()`: o driver devolve a tela ao modo texto e guarda o que reservou. Sem `suspend`, e descarregado |
+| Ctrl+F1..F12 (WIN ao fundo) | `suspend()`: o driver devolve a tela ao modo texto e guarda o que reservou. Sem `suspend`, e descarregado |
 | Ctrl+F7 (WIN volta) | `resume(modo)` com o modo reprogramado; se falhar, descarrega e fica na CPU |
 | Fim do WIN | `fini` + `mod_dll_free` |
 

@@ -317,7 +317,7 @@ O laço principal lê uma linha e chama `shell_exec_line`. Se o primeiro token f
 | `Esc` | Limpa a linha inteira |
 | `Enter` | Executa |
 
-Não há Ctrl (Ctrl+C não interrompe um comando); a única combinação é `Ctrl+Alt+Del`, que reinicia a máquina, no shell e no desktop. A linha tem no máximo 255 caracteres; o tokenizador separa só por espaços e aceita até 16 argumentos. Não há curingas, pipes ou aspas.
+Não há edição com Ctrl na linha do prompt. As combinações do SO são `Ctrl+F1`..`Ctrl+F12` (telas; `Ctrl+F7` é o WIN), `Ctrl+Backspace` (fecha o WIN e libera a memória gráfica) e `Ctrl+Alt+Del` (reinicia a máquina), no shell e no desktop. A linha tem no máximo 255 caracteres; o tokenizador separa só por espaços e aceita até 16 argumentos. Não há curingas, pipes ou aspas.
 
 ### Comandos internos
 
@@ -356,7 +356,7 @@ Não há Ctrl (Ctrl+C não interrompe um comando); a única combinação é `Ctr
 | `dstat` / `ata` | Último acesso ATA (drive, LBA, status, error) |
 | `visual` | Demonstração gráfica 320×200 (ou VBE); `Esc` volta |
 | `mouse` | Teste do mouse, PS/2 ou USB/xHCI (posição, botões, pacote cru); `Esc` sai |
-| `win` / `win.exe` | Entra no desktop gráfico; `Esc` volta ao texto |
+| `win` / `win.exe` | Entra no desktop gráfico; `Esc` ou `Ctrl+Backspace` voltam ao texto |
 | `ping host [-n nº] [-l bytes]` | ICMP; ex.: `ping 10.0.2.2`, `ping example.com -n 2` |
 | `net [status]` / `net dhcp [renew]` / `net wifi ...` | Placa e endereço; DHCP; WiFi (ver [WiFi](#wifi-rtl8852be)) |
 | `dlls` | Módulos SOX carregados |
@@ -381,7 +381,9 @@ HELLO um dois
 
 ## Desktop (`win`)
 
-`win` entra no ambiente gráfico; `Esc` volta ao prompt de texto (salvando o Bloco de notas se houver alterações).
+`win` entra no ambiente gráfico; `Esc` ou `Ctrl+Backspace` voltam ao prompt de texto (salvando o Bloco de notas se houver alterações). O `Ctrl+Backspace` também devolve a memória do ambiente gráfico: janelas, papel de parede, tabelas do desktop, tarefas e a pilha do WIN.
+
+As telas do SO são do kernel: `Ctrl+F1`..`Ctrl+F12` trocam de tela mesmo com um programa, o editor, o `visual` ou uma janela crua (emulador) em primeiro plano; nenhum programa recebe essas teclas. `Ctrl+F7` é o WIN; as outras dez são telas de texto (1..6 e 8..12).
 
 ### Tela
 
@@ -1000,7 +1002,7 @@ dlls      módulos carregados, base, tamanho e referências
 - **Sem áudio**, sem disquete, sem DMA.
 - **USB só para o mouse e o pendrive**: um mouse HID boot e um disco mass storage bulk-only num controlador xHCI, nas portas do PC ou atrás de hubs USB 2; sem hubs USB 3, sem teclado USB, sem touchpad I2C.
 - **Nomes 8.3** no FAT; arquivos de `make disk-files` são copiados em maiúsculas.
-- **Sem Ctrl** no shell; não há como interromper um comando em execução.
+- **Sem edição com Ctrl** na linha do prompt; as combinações do SO são as telas `Ctrl+F1`..`Ctrl+F12` e o `Ctrl+Backspace`.
 - **Sem controle de acesso**: o HTTP da porta 8797 executa comandos sem autenticação.
 - **Sem comando `reboot`**: `Ctrl+Alt+Del` reinicia (pulso do 8042, porta `0xCF9` ou triple fault, nessa ordem). `shutdown` usa ACPI/porta Bochs sem interpretar as tabelas ACPI e não desliga um PC real.
 - `IMG.DLL` não decodifica BMP, embora o desktop aceite `.BMP`.

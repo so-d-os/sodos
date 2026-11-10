@@ -507,6 +507,19 @@ static void break_fire(void) {
   mod_exit(MOD_EXIT_BREAK);
 }
 
+/* Ctrl+F1..F12 durante uma espera de rede: a tela troca na hora e a
+ * operacao fica suspensa com esta tela. Fora do get_key (que ja trata as
+ * teclas), este e o ponto que le o teclado enquanto um .EXE espera a API. */
+static int break_hotkey(unsigned char sc) {
+  int to;
+  if (sc & 0x80) return 0;
+  if (!kbd_ctrl_down()) return 0;
+  to = vt_hotkey(sc);
+  if (to < 0) return 0;
+  vt_select(to);
+  return 1;
+}
+
 void con_break_poll(void) {
   unsigned char st;
   if (!break_applies() || vt_bg()) return;
@@ -514,6 +527,7 @@ void con_break_poll(void) {
   while (((st = inb(0x64)) & 1) && !(st & 0x20)) {
     unsigned char sc = inb(0x60);
     kbd_watch(sc);
+    if (break_hotkey(sc)) continue;
     if (((kb_head + 1) % KB_PEND) != kb_tail) {
       kb_pend[kb_head] = sc;
       kb_head = (kb_head + 1) % KB_PEND;
@@ -532,6 +546,7 @@ int shell_break(void) {
     while (((st = inb(0x64)) & 1) && !(st & 0x20)) {
       unsigned char sc = inb(0x60);
       kbd_watch(sc);
+      if (break_hotkey(sc)) continue;
       if (((kb_head + 1) % KB_PEND) != kb_tail) {
         kb_pend[kb_head] = sc;
         kb_head = (kb_head + 1) % KB_PEND;
@@ -623,7 +638,7 @@ static int get_key(int wait) {
       if (!wait) return 0;
       continue;
     }
-    /* Ctrl+F1..F5 trocam de tela; Ctrl+F7 vai ao WIN. */
+    /* Ctrl+F1..F12 trocam de tela; Ctrl+F7 vai ao WIN. */
     if (kbd_ctrl_down() && vt_hotkey(sc) >= 0) {
       vt_select(vt_hotkey(sc));
       if (!wait) return 0;
@@ -1789,7 +1804,7 @@ void kmain(const struct BootInfo* bi) {
       mod_exec(path, 0, 0);
   }
 
-  puts_k("OS Ready. Ctrl+F1..F5: telas do DOS, Ctrl+F7: WIN.\n");
+  puts_k("OS Ready. Ctrl+F1..F12: telas do DOS, Ctrl+F7: WIN.\n");
   /* Unico trafego serial depois do boot ate ao visual: shell nao usa COM1 (só VGA). */
   serial_puts("[kernel] shell ready — mais linhas na serial apos o comando 'visual'\n");
 

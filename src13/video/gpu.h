@@ -51,7 +51,7 @@ struct gpu_drv {
   /* rects = 0 apresenta a tela inteira */
   int (*present)(const struct gpu_rect* rects, int n);
   void (*fini)(void);
-  /* Opcionais. O WIN foi para o fundo (Ctrl+F1..F5): a placa devolve a tela
+  /* Opcionais. O WIN foi para o fundo (Ctrl+F1..F12): a placa devolve a tela
    * ao modo texto mas guarda o que reservou. resume volta com o modo novo.
    * Sem elas o kernel usa fini e, na volta, carrega de novo. */
   int (*suspend)(void);
