@@ -1,19 +1,19 @@
-; ap_tramp.asm - trampolim dos APs (blob binario copiado para 0x8000).
+; ap_tramp.asm - trampolim dos APs (blob binario copiado para 0xA000).
 ;
-; O BSP envia INIT-SIPI (vetor 8 -> CS=0x0800, IP=0, linear 0x8000) e o AP
-; comeca em modo real aqui. Parametros em 0x8F40, escritos pelo BSP antes do
+; O BSP envia INIT-SIPI (vetor 0x0A -> CS=0x0A00, IP=0, linear 0xA000) e o AP
+; comeca em modo real aqui. Parametros em 0xAF40, escritos pelo BSP antes do
 ; SIPI:
-;   0x8F40 u32 cr3
-;   0x8F48 u64 pilha (topo, alinhado a 16)
-;   0x8F50 u64 entrada (ap_main)
-;   0x8F58 u32 numero da cpu
-;   0x8F60      GDTR do BSP (sgdt)  - 10 bytes
-;   0x8F70      IDTR do BSP (sidt)  - 10 bytes
+;   0xAF40 u32 cr3
+;   0xAF48 u64 pilha (topo, alinhado a 16)
+;   0xAF50 u64 entrada (ap_main)
+;   0xAF58 u32 numero da cpu
+;   0xAF60      GDTR do BSP (sgdt)  - 10 bytes
+;   0xAF70      IDTR do BSP (sidt)  - 10 bytes
 ;
-; GDT temporaria em 0x8F00: 0x08 = codigo 32, 0x10 = codigo 64, 0x18 = dados.
+; GDT temporaria em 0xAF00: 0x08 = codigo 32, 0x10 = codigo 64, 0x18 = dados.
 ; No fim carrega a GDT/IDT do BSP e cai em ap_main com a pilha do AP.
 bits 16
-org 0x8000
+org 0xA000
 
 start:
     cli
@@ -21,7 +21,7 @@ start:
     mov ds, ax
     mov es, ax
     mov ss, ax
-    mov sp, 0x8F00
+    mov sp, 0xAF00
 
     mov dx, 0x3F8          ; "A1": o AP comecou a executar
     mov al, 'A'
@@ -84,7 +84,7 @@ pm32:
     mov edx, 0x00070406
     wrmsr
 
-    mov eax, [0x8F40]      ; CR3 do BSP (mesmas tabelas, identidade 0..4 GB)
+    mov eax, [0xAF40]      ; CR3 do BSP (mesmas tabelas, identidade 0..4 GB)
     mov cr3, eax
 
     mov ecx, 0xC0000080    ; EFER.LME
@@ -109,7 +109,7 @@ lm64:
     mov ds, ax
     mov es, ax
 
-    lgdt [abs 0x8F60]      ; GDT definitiva do BSP
+    lgdt [abs 0xAF60]      ; GDT definitiva do BSP
     ; Em 64 bits nao existe jmp ptr16:64 direto: empilha seletor+offset e retfq.
     mov rax, lm64b
     push qword 0x08
@@ -125,9 +125,9 @@ lm64b:
     mov fs, ax
     mov gs, ax
 
-    lidt [abs 0x8F70]      ; IDT do BSP
-    mov rsp, [abs 0x8F48]  ; pilha do AP
-    mov edi, [abs 0x8F58]  ; numero da cpu (arg de ap_main)
+    lidt [abs 0xAF70]      ; IDT do BSP
+    mov rsp, [abs 0xAF48]  ; pilha do AP
+    mov edi, [abs 0xAF58]  ; numero da cpu (arg de ap_main)
 
     mov dx, 0x3F8          ; "D4": vai entrar em ap_main
     mov al, 'D'
@@ -135,14 +135,14 @@ lm64b:
     mov al, '4'
     out dx, al
 
-    mov rax, [abs 0x8F50]
+    mov rax, [abs 0xAF50]
     call rax               ; ap_main(cpu); ABI: call deixa rsp % 16 == 8
 .hang:
     cli
     hlt
     jmp .hang
 
-; ---- dados fixos em 0x8F00 (offset 0xF00 no blob) ----
+; ---- dados fixos em 0xAF00 (offset 0xF00 no blob) ----
 times 0xF00 - ($ - $$) db 0
 
 gdt:
@@ -152,6 +152,6 @@ gdt:
     dq 0x00CF92000000FFFF  ; 0x18: dados
 gdt_desc:
     dw 4 * 8 - 1
-    dq 0x8F00
+    dq 0xAF00
 
 times 0xF80 - ($ - $$) db 0

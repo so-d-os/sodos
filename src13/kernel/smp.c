@@ -12,7 +12,9 @@
 #include "irq.h"
 
 #define SMP_MAX        8
-#define TRAMP_ADDR     0x8000u
+/* 0xA000: o stage2 ja terminou.  0x8000/0x9000 NAO: sao os diretorios de
+ * pagina de 1..3 GB montados pelo kernel_entry (ver kernel_entry.asm). */
+#define TRAMP_ADDR     0xA000u
 #define TRAMP_SIZE     0xF80u
 #define LAPIC_DEFAULT  0xFEE00000u
 
@@ -208,7 +210,7 @@ static int start_ap(int cpu) {
   write_params(cpu);
   if (ipi(id, 0x00004500) < 0) return -1;   /* INIT (edge, delivery 5) */
   net_delay(10);
-  if (ipi(id, 0x00004608) < 0) return -1;   /* SIPI, vetor 8 -> 0x8000 */
+  if (ipi(id, 0x00004600 | (TRAMP_ADDR >> 12)) < 0) return -1;   /* SIPI -> TRAMP_ADDR */
   for (i = 0; i < 100; i++) {
     if (ap_online > base) return 0;
     net_delay(1);

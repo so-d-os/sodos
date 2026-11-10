@@ -12,7 +12,8 @@
 ; 0x9000 (GB 2) e 0x6000 (GB 3); ver mm.c.  Tabelas em 0x1000/0x2000.  No GB 3
 ; o buraco PCI fica UC pelos MTRRs do firmware; o framebuffer Bochs em
 ; 0xE0000000 e o candidato 0xFD000000 ganham UC explicito. GDT em 0x4000.
-; 0x8000-0x9FFF era o stage2; ele ja terminou quando chegamos aqui.
+; 0x8000-0x9FFF era o stage2; ele ja terminou quando chegamos aqui.  O
+; trampolim dos APs (smp.c) fica em 0xA000, fora destas tabelas.
 ; BootInfo fica em 0x5000 e o mapa E820 em 0x5200; nada aqui os sobrescreve.
 
 bits 32
