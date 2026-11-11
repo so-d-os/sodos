@@ -25,12 +25,19 @@ int prctl(int option, ...) {
  * define __sodos_stack_size (simbolo absoluto) com o tamanho pedido ao
  * loader. O SpiderMonkey usa isto para o limite de recursao. */
 extern char* __sodos_stack_top;
+#ifdef SODOS_DYNAMIC
+/* libc.so.6: o tamanho vem do kernel (PT_GNU_STACK), lido em libs/dso/start.c. */
+extern unsigned long __sodos_stack_size_v;
+#define SO_STACK_SIZE ((size_t)__sodos_stack_size_v)
+#else
 extern char __sodos_stack_size[];
+#define SO_STACK_SIZE ((size_t)(uintptr_t)__sodos_stack_size)
+#endif
 #define SO_STACK_HEADROOM 0x4000u /* argv/ambiente ficam no topo da pilha */
 
 int pthread_attr_getstack(const pthread_attr_t* a, void** addr, size_t* size) {
   uintptr_t top = (uintptr_t)__sodos_stack_top;
-  size_t sz = (size_t)(uintptr_t)__sodos_stack_size;
+  size_t sz = SO_STACK_SIZE;
   (void)a;
   if (!top || sz < 0x20000u) {
     /* Sem a informacao do loader: assume o padrao do kernel. */
@@ -60,11 +67,14 @@ void longjmp_mangled(void* b, int v) { longjmp(*(jmp_buf*)b, v); }
 int setjmp_mangled(void* b) { return setjmp(*(jmp_buf*)b); }
 
 #include <dlfcn.h>
-/* Tudo esta no proprio executavel: dlopen(NULL) e o programa, o resto nao existe. */
+#ifndef SODOS_DYNAMIC
+/* Tudo esta no proprio executavel: dlopen(NULL) e o programa, o resto nao existe.
+ * Na libc.so.6 o dlopen de verdade fica em libs/dso/dl.c. */
 void* dlopen(const char* f, int m) { (void)m; return f ? 0 : (void*)1; }
 void* dlsym(void* h, const char* n) { (void)h; (void)n; return 0; }
 char* dlerror(void) { return (char*)"no dynamic loader"; }
 int dlclose(void* h) { (void)h; return 0; }
+#endif
 void* dlopen_m(void* f, int m) __asm__("_Z6dlopenPKci");
 void* dlsym_m(void* h, const char* n) __asm__("_Z5dlsymPvPKc");
 char* dlerror_m(void) __asm__("_Z6dlerrorv");

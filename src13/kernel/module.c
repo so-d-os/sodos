@@ -8,7 +8,7 @@
 #include "serial.h"
 #include "reboot.h"
 #include "kexports.h"
-#include "c_compiler/sox.h"
+#include "module_priv.h"
 
 void* kexport_find(const char* name);
 int mod_call_entry(void* fn, int argc, char** argv, void* stack_top);
@@ -17,32 +17,11 @@ extern uint64_t cur_ctx;
 
 #define MOD_STACK_DEFAULT 0x100000u
 #define MOD_DEPTH_MAX 16
-#define MOD_DEPS_MAX 16
 #define LOAD_NEST_MAX 8
 
 typedef int (*dllmain_fn)(int reason);
 
-struct module {
-  int used;
-  int refs;
-  int is_dll;
-  int is64;
-  uint32_t pid;
-  char name[32];
-  uint8_t* base;
-  uint8_t* raw;
-  uint32_t size;
-  uint32_t entry;
-  uint32_t stack_size;
-  struct sox_export* exports;
-  uint32_t nexports;
-  char* strtab;
-  uint32_t strtab_size;
-  int deps[MOD_DEPS_MAX];
-  int ndeps;
-};
-
-static struct module mods[MOD_MAX];
+struct module mods[MOD_MAX];
 static char last_err[64];
 static uint32_t next_pid = 1;
 static uint32_t cur_pid;
@@ -55,6 +34,8 @@ static void set_err(const char* a, const char* b) {
   while (b && *b && i < 63) last_err[i++] = *b++;
   last_err[i] = '\0';
 }
+
+void mod_set_err(const char* a, const char* b) { set_err(a, b); }
 
 const char* mod_last_error(void) { return last_err; }
 uint32_t mod_current_pid(void) { return cur_pid; }
@@ -158,6 +139,17 @@ static int locate(const char* name, char pref, char* out, int max) {
   return -1;
 }
 
+int mod_locate(const char* name, char pref, char* out, int max) { return locate(name, pref, out, max); }
+
+void mod_base_name(const char* path, char* out, int max) { base_name(path, out, max); }
+
+int mod_free_slot(void) {
+  int id;
+  for (id = 0; id < MOD_MAX; id++)
+    if (!mods[id].used) return id;
+  return -1;
+}
+
 int mod_find_exe(const char* name, char* out, int max) {
   char tmp[DRV_PATH];
   if (!name || !name[0]) return -1;
@@ -205,6 +197,7 @@ static int find_loaded(const char* base) {
 
 static void* find_export(struct module* m, const char* name) {
   uint32_t i;
+  if (m->elf) return elf_export(m, name);
   for (i = 0; i < m->nexports; i++) {
     uint32_t off = m->exports[i].name;
     if (off < m->strtab_size && str_eq(m->strtab + off, name))
@@ -217,6 +210,8 @@ static void unload(int id);
 
 static void release(int id) {
   if (id < 0 || id >= MOD_MAX || !mods[id].used) return;
+  /* Biblioteca ELF vive ate o processo acabar (elf_release_pid). */
+  if (mods[id].elf && mods[id].is_dll) return;
   if (--mods[id].refs <= 0) unload(id);
 }
 
@@ -229,6 +224,8 @@ static void unload(int id) {
   ufree(m->raw);
   ufree(m->exports);
   ufree(m->strtab);
+  ufree(m->elf);
+  m->elf = 0;
   m->used = 0;
 }
 
@@ -312,6 +309,8 @@ static int load(const char* req, int want_dll) {
     set_err("nao achei ", req);
     return -1;
   }
+  /* PIE ou .so: o carregador ELF traz tambem as bibliotecas de DT_NEEDED. */
+  if (elf_probe(path)) return elf_load(path, want_dll, !want_dll);
   base_name(path, bname, sizeof(bname));
   fsz = file_size(path);
   if (fsz < (int)sizeof(struct sox_hdr)) {
@@ -374,6 +373,7 @@ static int load(const char* req, int want_dll) {
   m->entry = h->entry;
   m->stack_size = h->stack_size;
   m->ndeps = 0;
+  m->elf = 0;
   m->nexports = h->nexports;
   m->strtab_size = h->strtab_size;
   for (i = 0; i < h->image_size; i++) m->base[i] = file[h->off_image + i];
@@ -584,6 +584,7 @@ int mod_exec(const char* path, int argc, char** argv) {
   dyn_release_pid(pid);
   kexp_release_pid(pid);
   unload(id);
+  elf_release_pid(pid);
   um_set_owner(prev_owner);
   cur_pid = prev_pid;
   ufree_owner(pid);
@@ -657,7 +658,7 @@ int mod_get(int i, struct mod_info* out) {
   out->base = (uint32_t)(uintptr_t)m->base;
   out->size = m->size;
   out->blk[0] = (uint32_t)(uintptr_t)m->raw;
-  out->blk[1] = (uint32_t)(uintptr_t)m->exports;
+  out->blk[1] = (uint32_t)(uintptr_t)(m->elf ? (void*)m->elf : (void*)m->exports);
   out->blk[2] = (uint32_t)(uintptr_t)m->strtab;
   return 1;
 }

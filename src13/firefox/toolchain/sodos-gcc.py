@@ -38,6 +38,7 @@ CXXRT2 = os.path.join(ROOT, "build", "libcxx", "cxx_runtime.o")
 FP = os.path.join(ROOT, "build", "libcxx", "fpconv.o")
 MATH = os.path.join(ROOT, "build", "libcxx", "mathx.o")
 SODOS_INCLUDE = os.path.join(ROOT, "sodos", "include")
+SYSROOT_LIB = os.path.join(SRC13, "libs", "dso", "build", "sysroot", "lib")
 CC = os.path.join(ROOT, "sodos", "sodos-cc")
 CXX = os.path.join(ROOT, "sodos", "sodos-cxxlib")
 CXX64 = os.path.join(ROOT, "sodos", "sodos-cxxlib64")
@@ -115,17 +116,35 @@ def expand_response_files(args):
     return out
 
 
+def code_model(args):
+    """Sem -fPIC: large e nao-PIC (so executavel). Com -fPIC/-fPIE ou SODOS_PIC=1:
+    PIC no modelo small, que tambem entra em .so; o TLS initial-exec dispensa
+    __tls_get_addr e o ld o relaxa nos executaveis. O sodos-cxxlib64 faz o mesmo."""
+    model = ["-mcmodel=large", "-fno-pic", "-fno-pie"]
+    if os.environ.get("SODOS_PIC"):
+        model = ["-fPIC", "-ftls-model=initial-exec"]
+    for a in args:
+        if a in ("-fPIC", "-fpic", "-fPIE", "-fpie"):
+            model = ["-ftls-model=initial-exec"]
+        elif a in ("-fno-pic", "-fno-PIC", "-fno-pie", "-fno-PIE"):
+            model = ["-mcmodel=large", "-fno-pic", "-fno-pie"]
+    return model
+
+
+def c64_cmd(args):
+    return (["gcc", "-m64", "-ffreestanding"] + code_model(args) +
+            ["-fno-stack-protector", "-mno-red-zone",
+             "-nostdinc", "-isystem", SODOS_INCLUDE,
+             "-isystem", os.path.join(C, "include"),
+             "-isystem", GCC_INCLUDE,
+             "-D__SODOS__"])
+
+
 def compile_one(kind, src, obj, flags):
     if is64():
         if kind == "cxx":
             return run([CXX64, "-c", src, "-o", obj] + flags)
-        cmd = ["gcc", "-m64", "-ffreestanding", "-fno-pic", "-fno-pie",
-               "-fno-stack-protector", "-mno-red-zone", "-mcmodel=large",
-               "-nostdinc", "-isystem", SODOS_INCLUDE,
-               "-isystem", os.path.join(C, "include"),
-               "-isystem", GCC_INCLUDE,
-               "-D__SODOS__", "-c", src, "-o", obj] + flags
-        return run(cmd)
+        return run(c64_cmd(flags) + ["-c", src, "-o", obj] + flags)
     cc = CXX if kind == "cxx" else CC
     cmd = [cc, "-c", src, "-o", obj] + flags
     return run(cmd)
@@ -151,6 +170,170 @@ def kernel_stubs(tmp):
     if run(["gcc", "-c", src, "-o", obj]) != 0:
         return None
     return obj
+
+
+# ---- Link dinamico: bibliotecas .so e executaveis ELF ----------------------
+# O kernel carrega ELF direto (kernel/elf.c): -shared gera uma .so de verdade e o
+# executavel sai como PIE ligado a libc.so.6, sem passar pelo SOX2. As
+# bibliotecas do sistema ficam em libs/dso/build/sysroot/lib (make -C libs/dso).
+
+# "dynamic": executavel ligado a libc.so.6, como em qualquer Unix. "static": tudo
+# dentro do .EXE (SOX2). Vale quando nem -static nem SODOS_STATIC/SODOS_DYNAMIC
+# decidem.
+DEFAULT_LINK = "static"
+
+# Opcoes de -Wl que nao fazem sentido aqui: o interpretador e o kernel, os
+# grupos ja envolvem tudo e o resto e de outros linkers (lld/gold).
+LD_DROP = ("--dynamic-linker", "-dynamic-linker", "-I", "--sysroot", "--hash-style",
+           "--start-group", "--end-group", "-(", "-)", "--icf", "--gdb-index", "--threads",
+           "--thinlto", "--lto", "-plugin", "--plugin", "--no-rosegment", "--pack-dyn-relocs",
+           "--fatal-warnings", "--color-diagnostics", "--no-color-diagnostics")
+# Opcoes de ld cujo valor vem no token seguinte (-Wl,-soname,libx.so).
+LD_PAIR = ("-soname", "--soname", "-h", "-rpath", "--rpath", "-rpath-link", "--rpath-link",
+           "-z", "-e", "--entry", "-u", "--undefined", "-T", "--script", "--version-script",
+           "--dynamic-list", "-Map", "--defsym", "-L", "-l", "--exclude-libs", "-init", "-fini",
+           "--retain-symbols-file", "--export-dynamic-symbol", "--require-defined",
+           "--dynamic-linker", "-dynamic-linker", "-I", "--sysroot", "--hash-style",
+           "-plugin", "--plugin", "--wrap", "-y", "--trace-symbol", "-m", "-b", "--format",
+           "--build-id-dir", "-f", "--auxiliary", "-F", "--filter", "-G", "--gpsize")
+
+
+def dynamic_runtime():
+    return os.path.exists(os.path.join(SYSROOT_LIB, "libc.so.6"))
+
+
+def link_mode(args):
+    """Como ligar: "static" (SOX2 com a libc dentro) ou "dynamic" (ELF + libc.so.6)."""
+    if "-static" in args or os.environ.get("SODOS_STATIC", "0") not in ("0", ""):
+        return "static"
+    mode = DEFAULT_LINK
+    env = os.environ.get("SODOS_DYNAMIC")
+    if env is not None:
+        mode = "static" if env in ("0", "") else "dynamic"
+    if mode == "dynamic" and not dynamic_runtime():
+        return "static"
+    return mode
+
+
+def find_lib(name, dirs):
+    for d in dirs:
+        for suffix in (".so", ".a"):
+            if os.path.exists(os.path.join(d, "lib%s%s" % (name, suffix))):
+                return True
+    return False
+
+
+def ld_tokens(tokens):
+    """Traduz as opcoes de um -Wl,a,b,c para o ld, descartando as de LD_DROP."""
+    out = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        key = t.split("=", 1)[0]
+        takes_next = t in LD_PAIR and "=" not in t and i + 1 < len(tokens)
+        if key in LD_DROP or key.startswith(("--icf", "--lto", "--thinlto", "-plugin-opt")):
+            i += 2 if takes_next else 1
+            continue
+        out.append(t)
+        if takes_next:
+            out.append(tokens[i + 1])
+            i += 1
+        i += 1
+    return out
+
+
+def gnu_link_dyn(args, out, kind, local_objs, shared):
+    """Link ELF com o GNU ld, na ordem da linha de comando (como o gcc faz)."""
+    nostdlib = "-nostdlib" in args
+    startfiles = not (nostdlib or "-nostartfiles" in args)
+    defaultlibs = not (nostdlib or "-nodefaultlibs" in args)
+    # -nostdlib: nunca as bibliotecas do Linux do host (/usr/lib), so -L e o sysroot.
+    cmd = ["ld", "-nostdlib", "--hash-style=both", "-z", "max-page-size=0x1000",
+           "-z", "noexecstack", "-z", "notext", "-z", "norelro", "--no-eh-frame-hdr"]
+    if not os.environ.get("SODOS_KEEP_DEBUG"):
+        cmd.append("--strip-debug")
+    if shared:
+        cmd.append("-shared")
+    else:
+        # Sem PT_INTERP: quem carrega as bibliotecas e o kernel.
+        cmd += ["-pie", "--no-dynamic-linker", "-e", "_start", "-z", "stack-size=0x1000000"]
+    cmd += shlex.split(os.environ.get("SODOS_LDFLAGS", ""))
+    cmd += ["-o", out]
+    if startfiles:
+        if not shared:
+            cmd.append(os.path.join(SYSROOT_LIB, "crt1.o"))
+        cmd.append(os.path.join(SYSROOT_LIB, "crtdso.o"))
+    libdirs = []
+    inputs = list(local_objs)
+    i = 0
+    while i < len(args):
+        a = args[i]
+        nxt = args[i + 1] if i + 1 < len(args) else None
+        if a in ("-o", "-I", "-D", "-U", "-isystem", "-idirafter", "-iquote", "-include",
+                 "-imacros", "-MF", "-MT", "-MQ", "-x", "-B", "--param", "-arch", "-target"):
+            i += 2
+            continue
+        if a == "-L" and nxt is not None:
+            libdirs.append(nxt)
+            inputs += ["-L", nxt]
+            i += 2
+            continue
+        if a.startswith("-L"):
+            libdirs.append(a[2:])
+            inputs.append(a)
+            i += 1
+            continue
+        if a == "-l" and nxt is not None:
+            a = "-l" + nxt
+            i += 1
+        if a.startswith("-l"):
+            # Bibliotecas que o SODOS nao tem (-lstdc++, -lgcc_s...) ja estao na
+            # libc/libc++: somem em silencio, como no link estatico.
+            if a[2:].startswith(":") or find_lib(a[2:], libdirs + [SYSROOT_LIB]):
+                inputs.append(a)
+            i += 1
+            continue
+        if a.startswith("-Wl,"):
+            inputs += ld_tokens([t for t in a[4:].split(",") if t])
+            i += 1
+            continue
+        if a == "-Xlinker" and nxt is not None:
+            inputs += ld_tokens([nxt])
+            i += 2
+            continue
+        if a in ("-z", "-u", "-T", "-e") and nxt is not None:
+            inputs += [a, nxt]
+            i += 2
+            continue
+        if a == "-rdynamic":
+            inputs.append("--export-dynamic")
+        elif a == "-s":
+            inputs.append("--strip-all")
+        elif a.startswith("-"):
+            pass  # opcao de compilacao ou do driver
+        elif a.lower().endswith((".c", ".cc", ".cpp", ".cxx", ".s", ".sx")):
+            pass  # ja compilado para local_objs
+        elif os.path.exists(a):
+            inputs.append(a)
+        i += 1
+    cmd += ["--start-group"] + inputs + ["--end-group"]
+    # As DT_NEEDED das bibliotecas ligadas (libm.so.6 de uma libfoo.so) tambem
+    # saem do sysroot e dos -L, nao do host.
+    for d in libdirs + [SYSROOT_LIB]:
+        cmd += ["-rpath-link", d]
+    if defaultlibs:
+        cmd += ["-L", SYSROOT_LIB]
+        if kind == "cxx" and os.path.exists(os.path.join(SYSROOT_LIB, "libc++.so.1")):
+            cmd.append("-lc++")
+        cmd += ["-lc", "-lkernel"]
+        # libgcc do gcc do host (x86-64, PIC): __divti3/__udivti3 de __int128 etc.
+        libgcc = subprocess.check_output(["gcc", "-print-libgcc-file-name"], text=True).strip()
+        if os.path.exists(libgcc):
+            cmd.append(libgcc)
+    r = run(cmd)
+    if r == 0:
+        os.chmod(out, 0o755)
+    return r
 
 
 def gnu_link(out, kind, local_objs, objs, rlibs, tmp, shared):
@@ -221,12 +404,7 @@ def main():
             undef = ["-U__linux__", "-Ulinux"] if "-E" in args else []
             if is_cxx():
                 return run([CXX64] + undef + args)
-            return run(["gcc", "-m64", "-ffreestanding", "-fno-pic", "-fno-pie",
-                        "-fno-stack-protector", "-mno-red-zone", "-mcmodel=large",
-                        "-nostdinc", "-isystem", SODOS_INCLUDE,
-                        "-isystem", os.path.join(C, "include"),
-                        "-isystem", GCC_INCLUDE,
-                        "-D__SODOS__"] + undef + args)
+            return run(c64_cmd(args) + undef + args)
         cc = CXX if is_cxx() else CC
         # O configure descobre o kernel preprocessando um conftest; ai o alvo
         # precisa parecer SODOS e nao Linux. Compilar/ligar mantem __linux__
@@ -349,6 +527,8 @@ def main():
             out = "a.out"
 
         if is64() and os.environ.get("SODOS_LINKER") != "link64":
+            if link_mode(args) == "dynamic":
+                return gnu_link_dyn(args, out, kind, local_objs, shared)
             return gnu_link(out, kind, local_objs, objs, rlibs, tmp, shared)
 
         cmd = [linker]

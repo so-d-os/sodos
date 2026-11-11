@@ -352,11 +352,13 @@ int sched_setaffinity(pid_t pid, size_t n, const cpu_set_t* set) {
   (void)set;
   return 0;
 }
+#ifndef SODOS_DYNAMIC /* na libc.so.6: libs/dso/dl.c */
 int dladdr(const void* addr, void* info) {
   (void)addr;
   (void)info;
   return 0;
 }
+#endif
 int truncate(const char* path, off_t len) {
   int fd = open(path, O_WRONLY, 0);
   int r;
@@ -490,7 +492,9 @@ ENOSYS_STUB(getsockname, int a, void* b, unsigned* c)
 ENOSYS_STUB(getsockopt, int a, int b, int c, void* d, unsigned* e)
 ENOSYS_STUB(setsockopt, int a, int b, int c, const void* d, unsigned e)
 ENOSYS_STUB(shutdown, int a, int b)
+#ifndef SODOS_DYNAMIC /* na libc.so.6: libs/dso/dl.c */
 ENOSYS_STUB(dl_iterate_phdr, void* a, void* b)
+#endif
 
 #define ENOSYS_SSIZE(name, ...)    \
   ssize_t name(__VA_ARGS__) {      \

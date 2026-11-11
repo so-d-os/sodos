@@ -18,7 +18,19 @@ else
   fi
 fi
 
-exec "$GXX" $B -m64 -mcmodel=large -mno-red-zone -ffreestanding -fno-pic -fno-pie \
+# Modelo de codigo: sem -fPIC, large e nao-PIC (so serve em executavel). Com
+# -fPIC/-fPIE (ou SODOS_PIC=1), PIC no modelo small, que tambem entra em .so; o
+# TLS initial-exec dispensa __tls_get_addr e o ld o relaxa nos executaveis.
+MODEL="-mcmodel=large -fno-pic -fno-pie"
+[ -n "$SODOS_PIC" ] && MODEL="-fPIC -ftls-model=initial-exec"
+for a in "$@"; do
+  case "$a" in
+    -fPIC|-fpic|-fPIE|-fpie) MODEL="-ftls-model=initial-exec" ;;
+    -fno-pic|-fno-PIC|-fno-pie|-fno-PIE) MODEL="-mcmodel=large -fno-pic -fno-pie" ;;
+  esac
+done
+
+exec "$GXX" $B -m64 $MODEL -mno-red-zone -ffreestanding \
   -fno-stack-protector -fno-asynchronous-unwind-tables -fno-jump-tables -fcf-protection=none \
   -fno-tree-loop-distribute-patterns -nostdinc -nostdinc++ -fno-exceptions \
   -isystem "$D/libcxx64/include" -isystem "$L" -isystem "$D/libcxx/include" \

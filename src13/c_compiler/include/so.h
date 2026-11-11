@@ -168,6 +168,52 @@ int k_dll_load(const char* name);
 void* k_dll_sym(int handle, const char* name);
 void k_dll_free(int handle);
 
+/* Bibliotecas ELF (.so). Programas usam dlopen/dlsym/dladdr (dlfcn.h); estas
+ * chamadas sao a base deles na libc. Mesmos tipos de kernel/module.h. */
+#define K_DL_NOLOAD 4       /* so devolve se ja estiver carregada */
+#define K_DL_GLOBAL 0x100   /* simbolos visiveis as proximas cargas */
+#define K_DL_EXE 1u          /* k_dl_info.flags: e o executavel */
+#define K_DL_GLOBAL_SCOPE 2u /* k_dl_info.flags: esta no escopo global */
+
+struct k_dl_info {
+  unsigned long long base;          /* endereco de carga */
+  unsigned long long size;
+  const char* name;                 /* DT_SONAME, ou o nome do arquivo */
+  const char* path;                 /* caminho completo no SODOS */
+  unsigned long long phdr;          /* tabela de segmentos; 0 se nao foi mapeada */
+  unsigned phnum;
+  unsigned flags;
+  unsigned long long dynamic;
+  unsigned long long init, init_array, init_arraysz;
+  unsigned long long fini, fini_array, fini_arraysz;
+  unsigned long long tls_image, tls_filesz, tls_memsz, tls_align;
+  unsigned long long tls_offset;    /* o bloco comeca em (ponteiro de thread - tls_offset) */
+  unsigned tls_modid;               /* 0 = sem TLS */
+  unsigned handle;
+  unsigned long long tls_static;    /* so no executavel: bytes de TLS estatico por thread */
+  unsigned long long stack_size;    /* so no executavel */
+};
+
+struct k_dl_addr {
+  const char* fname;
+  unsigned long long fbase;
+  const char* sname;                /* 0 se nenhum simbolo cobre o endereco */
+  unsigned long long saddr;
+};
+
+/* name 0 devolve o executavel. Handle > 0; 0 = falhou (k_last_error). */
+int k_dl_open(const char* name, int flags);
+/* handle 0 = escopo global; -1 = depois do modulo de caller (RTLD_NEXT). */
+void* k_dl_sym(int handle, const char* name, const void* caller);
+int k_dl_info(int handle, struct k_dl_info* out);
+/* index-esimo modulo ELF do processo, em ordem de carga; 0 quando acaba. */
+int k_dl_iter(int index, struct k_dl_info* out);
+/* Proximo modulo a inicializar (dependencias primeiro) ou a finalizar (ordem
+ * inversa); cada chamada marca o modulo. 0 quando nao ha mais. */
+int k_dl_init_next(struct k_dl_info* out);
+int k_dl_fini_next(struct k_dl_info* out);
+int k_dl_addr(const void* addr, struct k_dl_addr* out);
+
 /* tempo e aleatoriedade */
 unsigned k_rdtsc(unsigned* hi);
 unsigned k_ms(void);

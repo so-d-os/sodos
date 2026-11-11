@@ -17,6 +17,10 @@ void* malloc(size_t n);
 void free(void* p);
 void k_exit(int code);
 
+#ifndef SODOS_DYNAMIC
+/* Na libc++.so.1 nada disto entra: os construtores quem roda e a libc.so.6
+ * (libs/dso/start.c), que tambem tem __cxa_atexit, e __dso_handle e um por
+ * modulo (libs/dso/crtdso.c). */
 typedef void (*sodos_ctor_fn)(void);
 extern sodos_ctor_fn __init_array_start[];
 extern sodos_ctor_fn __init_array_end[];
@@ -58,6 +62,7 @@ void __cxa_finalize(void* dso) {
   (void)dso;
   __sodos_dtors();
 }
+#endif
 
 /* static local: 8 bytes; byte 0 = concluido, byte 1 = em andamento. */
 int __cxa_guard_acquire(uint64_t* guard) {
@@ -84,10 +89,12 @@ void __cxa_pure_virtual(void) {
   for (;;) {}
 }
 
+#ifndef SODOS_DYNAMIC
 /* Sem threads reais morrendo: os destrutores de thread_local rodam na saida. */
 int __cxa_thread_atexit(void (*fn)(void*), void* obj, void* dso) {
   return __cxa_atexit(fn, obj, dso);
 }
+#endif
 
 /* Sem demangler: quem chama (abseil) mostra o nome como esta. */
 char* __cxa_demangle(const char*, char*, size_t*, int* status) {
@@ -95,10 +102,12 @@ char* __cxa_demangle(const char*, char*, size_t*, int* status) {
   return nullptr;
 }
 
+#ifndef SODOS_DYNAMIC
 void __stack_chk_fail(void) {
   k_exit(5);
   for (;;) {}
 }
+#endif
 }
 
 void* operator new(size_t n) {

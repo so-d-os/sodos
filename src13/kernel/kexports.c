@@ -345,6 +345,14 @@ static const char* k_last_error(void) { return mod_last_error(); }
 static int k_dll_load(const char* name) { return mod_dll_load(name); }
 static void* k_dll_sym(int h, const char* name) { return mod_dll_sym(h, name); }
 static void k_dll_free(int h) { mod_dll_free(h); }
+/* Bibliotecas ELF (.so): dlopen/dlsym/dladdr da libc ficam em cima destas. */
+static int k_dl_open(const char* name, int flags) { return mod_dl_open(name, flags); }
+static void* k_dl_sym(int h, const char* name, const void* caller) { return mod_dl_sym(h, name, caller); }
+static int k_dl_info(int h, struct k_dl_info* out) { return mod_dl_info(h, out); }
+static int k_dl_iter(int index, struct k_dl_info* out) { return mod_dl_iter(index, out); }
+static int k_dl_init_next(struct k_dl_info* out) { return mod_dl_init_next(out); }
+static int k_dl_fini_next(struct k_dl_info* out) { return mod_dl_fini_next(out); }
+static int k_dl_addr(const void* addr, struct k_dl_addr* out) { return mod_dl_addr(addr, out); }
 
 /* ---------- tempo e aleatoriedade ---------- */
 static uint32_t rdtsc_lo(uint32_t* hi) {
@@ -853,6 +861,13 @@ static const struct kexp table[] = {
   EXP(k_dll_load),
   EXP(k_dll_sym),
   EXP(k_dll_free),
+  EXP(k_dl_open),
+  EXP(k_dl_sym),
+  EXP(k_dl_info),
+  EXP(k_dl_iter),
+  EXP(k_dl_init_next),
+  EXP(k_dl_fini_next),
+  EXP(k_dl_addr),
   EXP(k_rdtsc),
   EXP(k_ms),
   EXP(k_date),

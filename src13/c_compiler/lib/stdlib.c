@@ -211,6 +211,21 @@ void* realloc(void* p, size_t n) {
 /* ---------- inicio e fim ---------- */
 void __so_libc_start(void) {}
 
+#ifdef SODOS_DYNAMIC
+/* libc.so.6: atexit, destrutores C++ e .fini_array das bibliotecas saem pela
+ * mesma fila, em libs/dso/start.c. */
+int __cxa_atexit(void (*fn)(void*), void* arg, void* dso);
+void __so_run_exit(void);
+
+int atexit(void (*fn)(void)) { return __cxa_atexit((void (*)(void*))(void*)fn, 0, 0); }
+
+void exit(int code) {
+  __so_run_exit();
+  __so_stdio_flush_all();
+  k_exit(code);
+  for (;;) {}
+}
+#else
 int atexit(void (*fn)(void)) {
   if (hs.natexit >= 32) return -1;
   hs.atexit_fn[hs.natexit++] = fn;
@@ -222,6 +237,7 @@ void exit(int code) {
   __so_stdio_flush_all();
   k_exit(code);
 }
+#endif
 
 void abort(void) {
   __so_stdio_flush_out();

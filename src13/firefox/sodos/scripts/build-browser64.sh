@@ -44,21 +44,40 @@ export CARGO="$RT/cargo"
 # So o configure exige: o build nao depende do llvm-objdump.
 command -v llvm-objdump >/dev/null 2>&1 || export LLVM_OBJDUMP="$(command -v objdump)"
 
-# bindgen: clang de fachada e libclang do wheel Python (docs/05-firefox-build.md).
-LIBCLANG=$HOME/libclang/libclang-18.1.1.data/platlib/clang/native
+# bindgen: precisa de uma libclang >= 16 (a libc++ 18 nao compila em clang mais
+# antigo) e dos headers de intrinsecos da mesma versao. Ordem: o wheel Python em
+# ~/libclang (docs/05-firefox-build.md), a de vendor/tools (sodos/scripts/
+# fetch-libclang.sh) e, por ultimo, a do sistema.
 EXTRA=
 [ -x "$HOME/bin/clang" ] && EXTRA="$EXTRA --with-clang-path=$HOME/bin/clang"
-if [ -f "$LIBCLANG/libclang.so" ]; then
+LIBCLANG=$HOME/libclang/libclang-18.1.1.data/platlib/clang/native
+CLANG_INC=$S/vendor/tools/usr/lib/llvm-18/lib/clang/18/include
+if [ ! -f "$LIBCLANG/libclang.so" ]; then
+  LIBCLANG=
+  for d in $(ls -d "$S"/vendor/tools/usr/lib/llvm-*/lib /usr/lib/llvm-*/lib 2>/dev/null | sort -t- -k2 -V -r); do
+    ls "$d"/libclang.so* >/dev/null 2>&1 || continue
+    LIBCLANG=$d   # a versao mais nova
+    break
+  done
+fi
+if [ -n "$LIBCLANG" ]; then
   export LIBCLANG_PATH="$LIBCLANG"
   EXTRA="$EXTRA --with-libclang-path=$LIBCLANG"
+  inc=$(ls -d "$LIBCLANG"/clang/*/include 2>/dev/null | sort -V | tail -1)
+  [ -d "$CLANG_INC" ] || CLANG_INC=$inc
 fi
+if [ ! -d "$CLANG_INC" ] && command -v clang >/dev/null 2>&1; then
+  CLANG_INC=$(clang -print-resource-dir)/include
+fi
+# O Node so e usado por passos que este build nao executa.
+command -v node >/dev/null 2>&1 || command -v nodejs >/dev/null 2>&1 || EXTRA="$EXTRA --disable-nodejs"
 
 # bindgen ve o alvo como Linux, com os mesmos headers do compilador.
 export BINDGEN_CFLAGS="-nostdinc -nostdinc++ -D__linux__=1 -D__SODOS__=1 -D_LIBCPP_PSTL_CPU_BACKEND_SERIAL \
 -isystem $S/sodos/libcxx64/include -isystem $S/vendor/libcxx-18.1.8/include \
 -isystem $S/sodos/libcxx/include -isystem $S/sodos/include \
 -isystem $S/../c_compiler/include \
--isystem $S/vendor/tools/usr/lib/llvm-18/lib/clang/18/include"
+-isystem $CLANG_INC"
 
 # Sem g++ no sistema, os build scripts do Rust acham a libstdc++ do g++ local.
 if ! command -v g++ >/dev/null 2>&1; then
