@@ -493,6 +493,12 @@ static void handle(char* req) {
 }
 
 void httpd_start(int port) {
+  char num[16];
+  if (port <= 0 || port > 65535) return;
+  if (listening) {
+    if (port_num == port) return;
+    httpd_stop();
+  }
   if (!net_ready()) {
     puts_k("HTTP: sem rede\n");
     return;
@@ -500,8 +506,21 @@ void httpd_start(int port) {
   port_num = port;
   net_srv_listen(port);
   listening = 1;
-  puts_k("HTTP na porta 8797. GET /   POST /exec   POST /mouse\n");
-  serial_puts("[httpd] escuta 8797\n");
+  int32_to_string(port, num, (int)sizeof(num));
+  puts_k("HTTP na porta ");
+  puts_k(num);
+  puts_k(". GET /   POST /exec   POST /mouse\n");
+  serial_puts("[httpd] escuta ");
+  serial_puts(num);
+  serial_puts("\n");
+}
+
+void httpd_stop(void) {
+  if (!listening) return;
+  listening = 0;
+  port_num = 0;
+  net_srv_stop();
+  serial_puts("[httpd] parado\n");
 }
 
 int httpd_port(void) { return listening ? port_num : 0; }

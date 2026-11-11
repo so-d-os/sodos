@@ -359,6 +359,7 @@ There is no Ctrl editing on the prompt line. The OS combinations are `Ctrl+F1`..
 | `win` / `win.exe` | Enters the graphical desktop; `Esc` or `Ctrl+Backspace` returns to text |
 | `ping host [-n count] [-l bytes]` | ICMP; e.g. `ping 10.0.2.2`, `ping example.com -n 2` |
 | `net [status]` / `net dhcp [renew]` / `net wifi ...` | Card and address; DHCP; WiFi (see [WiFi](#wifi-rtl8852be)) |
+| `api [status]` / `api start` / `api stop` / `api restart` | HTTP API service: shows On/Off, address and port; starts after the network becomes ready post-boot; stops and restarts (see [HTTP server](#http-server)) |
 | `dlls` | Loaded SOX modules |
 | `shutdown` | Powers off the machine |
 
@@ -836,7 +837,16 @@ Limitations: TX power and BB/RF tables for channel 56 (RFE 1, chip version B); n
 
 ## HTTP server
 
-The kernel starts a server on port **8797** at boot, in parallel with the shell. With `make run`, the host reaches the guest at `http://127.0.0.1:8797/`.
+The kernel **tries** to start a server on port **8797** at boot, in parallel with the shell. If the network was not ready yet (WiFi associated later, no DHCP reply, cable plugged in later), the service stays Off: run `api start` once the network is up. The `api` command shows the state, address and port, and `api stop` shuts the service down without stopping the OS.
+
+With `make run`, the host reaches the guest at `http://127.0.0.1:8797/`; the guest shows its own address in `api` (e.g. `http://10.0.2.15:8797/`).
+
+```text
+api            # On/Off, address and port
+api start      # starts the service once the network is ready
+api stop       # stops the service
+api restart    # stops and starts it again
+```
 
 It is through this API that an AI agent operates the machine: `GET /exec` and `/win/execute` run commands, `/win/mouse` and `/click` control the pointer, `/win/windows` and `/win/close` manage the windows and `/win/printscreen` returns the screen as BMP.
 

@@ -1,8 +1,9 @@
 #include <stdio.h>
 
-/* O servico ja escuta no boot. Este EXE so confirma a API. */
+/* O servico tenta escutar no boot. Se a rede chegou depois, use api start. */
 int main(void) {
   printf("HTTPD na porta 8797 (10.0.2.15).\n");
+  printf("Controle: api | api start | api stop\n");
   printf("GET /win/printscreen\n");
   printf("GET /win/mouse/coord\n");
   printf("GET /win/windows\n");

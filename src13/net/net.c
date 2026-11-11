@@ -1522,6 +1522,20 @@ void net_srv_listen(int port) {
   sv_reset_listen();
 }
 
+void net_srv_stop(void) {
+  if (sv_state == SV_SYN || sv_state == SV_EST || sv_state == SV_FIN)
+    sv_raw(0x04, 0, 0, sv_snd_nxt, 0);
+  sv_state = SV_OFF;
+  sv_port = 0;
+  sv_rx_len = 0;
+  sv_need_syn = 0;
+  sv_need_ack = 0;
+  sv_overflow = 0;
+  sv_busy = 0;
+  sv_gen++;
+  if (sv_gen == 0) sv_gen = 1;
+}
+
 int net_srv_take(char* buf, int cap) {
   int i, hend, body, have, need;
   int clen = -1;

@@ -31,6 +31,8 @@ void net_tcp_close(void);
 void net_poll(void);
 /* Segunda conexao: escuta. Nao usa o cliente do navegador. */
 void net_srv_listen(int port);
+/* Fecha a conexao em andamento e para de escutar. */
+void net_srv_stop(void);
 /* >0 pedido HTTP completo, 0 ainda nao, -1 estouro. */
 int net_srv_take(char* buf, int cap);
 /* Sobe a cada conexao nova. A resposta antiga nao deve ser enviada depois. */

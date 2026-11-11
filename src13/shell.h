@@ -178,5 +178,6 @@ int cmd_usb(int argc, char** argv);
 int cmd_win(int argc, char** argv);
 int cmd_ping(int argc, char** argv);
 int cmd_net(int argc, char** argv);
+int cmd_api(int argc, char** argv);
 int cmd_dlls(int argc, char** argv);
 int cmd_shutdown(int argc, char** argv);

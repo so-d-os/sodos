@@ -359,6 +359,7 @@ Não há edição com Ctrl na linha do prompt. As combinações do SO são `Ctrl
 | `win` / `win.exe` | Entra no desktop gráfico; `Esc` ou `Ctrl+Backspace` voltam ao texto |
 | `ping host [-n nº] [-l bytes]` | ICMP; ex.: `ping 10.0.2.2`, `ping example.com -n 2` |
 | `net [status]` / `net dhcp [renew]` / `net wifi ...` | Placa e endereço; DHCP; WiFi (ver [WiFi](#wifi-rtl8852be)) |
+| `api [status]` / `api start` / `api stop` / `api restart` | Serviço HTTP da API: mostra On/Off, endereço e porta; sobe quando a rede ficou pronta depois do boot; para e reinicia (ver [Servidor HTTP](#servidor-http)) |
 | `dlls` | Módulos SOX carregados |
 | `shutdown` | Desliga a máquina |
 
@@ -837,7 +838,16 @@ Limitações: tabelas de potência e de BB/RF do canal 56 (RFE 1, chip versão B
 
 ## Servidor HTTP
 
-O kernel sobe um servidor na porta **8797** no boot, em paralelo ao shell. Com `make run`, o host alcança o guest em `http://127.0.0.1:8797/`.
+O kernel **tenta** subir um servidor na porta **8797** no boot, em paralelo ao shell. Se a rede ainda não estava pronta (WiFi associado depois, DHCP sem resposta, cabo conectado depois), o serviço fica Off: rode `api start` quando a rede estiver de pé. O comando `api` mostra o estado, o endereço e a porta, e `api stop` desliga o serviço sem parar o SO.
+
+Com `make run`, o host alcança o guest em `http://127.0.0.1:8797/`; o guest mostra o próprio endereço em `api` (ex.: `http://10.0.2.15:8797/`).
+
+```text
+api            # On/Off, endereço e porta
+api start      # sobe o serviço quando a rede estiver pronta
+api stop       # para o serviço
+api restart    # para e sobe de novo
+```
 
 É por essa API que um agente de IA opera a máquina: `GET /exec` e `/win/execute` rodam comandos, `/win/mouse` e `/click` controlam o ponteiro, `/win/windows` e `/win/close` gerenciam as janelas e `/win/printscreen` devolve a tela em BMP.
 

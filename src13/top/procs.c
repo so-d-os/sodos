@@ -108,7 +108,7 @@ static void detalhe(int r, const struct proc* p) {
     strcpy(l2, "So o kernel alcanca estes enderecos; programas x32 nao.");
   } else if (!strcmp(p->k.name, "HTTPD")) {
     if (p->k.state == 'A') sprintf(l1, "Servico HTTP escutando na porta %u", p->k.refs);
-    else strcpy(l1, "Servico HTTP parado: sobe no boot quando ha rede");
+    else strcpy(l1, "Servico HTTP parado: api start sobe quando houver rede");
     strcpy(l2, "Faz parte do kernel; a memoria dele esta na linha KERNEL.");
   } else if (!strcmp(p->k.name, "REDE")) {
     strcpy(l1, p->k.state == 'A' ? "Rede ligada: pilha TCP/IP com endereco" : "Rede parada: sem placa ou sem DHCP");
