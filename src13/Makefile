@@ -484,7 +484,7 @@ grow-disk:
 MC_SRC = mc/mc.h mc/mc.c mc/scr.c mc/panel.c mc/ops.c mc/view.c mc/BUILD.BAT
 TOP_SRC = top/top.h top/top.c top/tela.c top/dados.c top/procs.c top/mapa.c top/video.c top/cpu.c top/BUILD.BAT
 GIT_SRC = git/git.h git/git.c git/http.c git/pack.c git/sha1.c git/zinf.c git/BUILD.BAT git/GETSODOS.BAT
-WIFI_SRC = wifi/wifi.cpp wifi/BUILD.BAT
+WIFI_SRC = wifi/wifi.cpp wifi/BUILD.BAT wifi/WIFI.SIM
 
 DISK_FILES = c_compiler/out/*.EXE c_compiler/out/*.DLL c_compiler/out/*.OBJ \
 	c_compiler/out/*.IMP c_compiler/include/*.h c_compiler/include/sys/*.h \
@@ -584,6 +584,10 @@ disk-files: disk.img
 	done
 	@# AGENT.CFG tem a chave da API: fica fora do git, vai so para o disco
 	@if [ -f AGENT.CFG ]; then mcopy -o -i $(DISK)@@512 AGENT.CFG ::/AGENT.CFG || exit 1; fi
+	@# WIFI.SIM: APs falsos para o net wifi scan rodar no QEMU (sem a placa).
+	@# So entra em acao quando a RTL8852BE nao esta no barramento.
+	@if ! mdir -i $(DISK)@@512 ::/NET >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/NET; fi
+	@mcopy -o -i $(DISK)@@512 wifi/WIFI.SIM ::/NET/WIFI.SIM || exit 1
 	@sh firefox/sodos/scripts/copy-firefox-disk.sh $(DISK)
 	@# QEMU (qemu/): QEMU.EXE, firmware, guests de teste e .BAT em D:\UTILS\QEMU
 	@sh qemu/scripts/copy-qemu-disk.sh $(DISK)

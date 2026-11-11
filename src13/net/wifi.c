@@ -32,11 +32,20 @@ static void say(const char* s) {
   rtw_log(s);
 }
 
-/* Grava o log da tentativa no pendrive (o notebook nao tem COM1). */
+/* Grava o log da tentativa. Pendrive (U:); sem ele, o D:\NET do disk.img,
+ * que e o que existe no QEMU. */
 static void save_log(void) {
   int n;
   const char* t = rtw_log_text(&n);
-  if (file_save(WIFI_LOG_PATH, t, n) == 0) puts_k("  log gravado em " WIFI_LOG_PATH "\n");
+  if (file_save(WIFI_LOG_PATH, t, n) == 0) {
+    puts_k("  log gravado em " WIFI_LOG_PATH "\n");
+    return;
+  }
+  if (file_save("D:\\NET\\WIFI.LOG", t, n) == 0) {
+    puts_k("  log gravado em D:\\NET\\WIFI.LOG\n");
+    return;
+  }
+  puts_k("  nao consegui gravar o WIFI.LOG\n");
 }
 
 static void put_u(uint32_t n) {
@@ -112,6 +121,23 @@ static void copy_str(char* d, const char* s, int max) {
   int i = 0;
   while (s[i] && i < max - 1) { d[i] = s[i]; i++; }
   d[i] = 0;
+}
+
+static void junta(char* d, const char* a, const char* b, int max) {
+  int n = 0;
+  while (a[n] && n < max - 1) { d[n] = a[n]; n++; }
+  d[n] = 0;
+  copy_str(d + n, b, max - n);
+}
+
+/* Arquivo do NET: o pendrive (U:) manda; sem ele, D:\NET do disk.img, que e
+ * o caso do QEMU (nao ha RTL8852BE nem pendrive). 0 = achou. */
+static int net_path(const char* nome, char* out, int max) {
+  junta(out, "U:\\NET\\", nome, max);
+  if (file_size(out) >= 0) return 0;
+  junta(out, "D:\\NET\\", nome, max);
+  if (file_size(out) >= 0) return 0;
+  return -1;
 }
 
 static void cfg_clear(struct wifi_cfg* c) {
@@ -340,6 +366,88 @@ static int listen_beacons(uint32_t ms, int ch) {
   }
   if (found < 0 && !scan_on) puts_k("  nenhuma rede do WIFI.CFG neste canal\n");
   return found;
+}
+
+/* ---------- modo simulado: WIFI.SIM no lugar da placa (QEMU) ---------- */
+
+#define SIM_MAX 8
+struct sim_ap {
+  uint8_t bssid[6];
+  int ch;
+  char ssid[33];
+};
+static struct sim_ap sim_aps[SIM_MAX];
+static int sim_n;
+
+/* Le o NET\WIFI.SIM (U: ou D:): linhas "BSSID CANAL SSID"; o resto da linha
+ * e o nome. 1 = tem APs falsos. */
+static int sim_carrega(void) {
+  static char txt[1024];
+  char p[40];
+  char* l;
+  sim_n = 0;
+  if (net_path("WIFI.SIM", p, (int)sizeof p) != 0) return 0;
+  if (file_load(p, txt, (int)sizeof txt) <= 0) return 0;
+  l = txt;
+  while (*l && sim_n < SIM_MAX) {
+    char* fim = l;
+    int i, ok = 1, k;
+    while (*fim && *fim != '\n') fim++;
+    if (*fim) *fim++ = 0;
+    while (*l == ' ' || *l == '\t') l++;
+    if (*l && *l != '#' && *l != ';') {
+      for (i = 0; i < 17; i++)
+        if (i % 3 == 2 ? l[i] != ':' : hexv(l[i]) < 0) ok = 0;
+      if (ok) {
+        struct sim_ap* a = &sim_aps[sim_n];
+        for (i = 0; i < 6; i++)
+          a->bssid[i] = (uint8_t)(hexv(l[i * 3]) * 16 + hexv(l[i * 3 + 1]));
+        k = 17;
+        while (l[k] == ' ') k++;
+        a->ch = 0;
+        while (l[k] >= '0' && l[k] <= '9') a->ch = a->ch * 10 + (l[k++] - '0');
+        while (l[k] == ' ') k++;
+        copy_str(a->ssid, l + k, (int)sizeof a->ssid);
+        if (a->ch > 0) sim_n++;
+      }
+    }
+    l = fim;
+  }
+  return sim_n > 0;
+}
+
+/* Escuta falsa: grava e imprime no mesmo formato do listen_beacons, para o
+ * WIFI.EXE ler o log sem saber que a placa nao existe. */
+static void sim_listen(int ch) {
+  int i, n = 0;
+  for (i = 0; i < sim_n; i++)
+    if (sim_aps[i].ch == ch) n++;
+  rtw_log("[wifi] quadros=");
+  rtw_log_hex((uint32_t)n * 12u);
+  rtw_log(" ppdu=00000000 outros=00000000 bssids=");
+  rtw_log_hex((uint32_t)n);
+  rtw_log("\n");
+  bcn_bssids = n;
+  for (i = 0; i < sim_n; i++) {
+    int j;
+    if (sim_aps[i].ch != ch) continue;
+    j = net_match(sim_aps[i].bssid, sim_aps[i].ssid, ch);
+    puts_k(j >= 0 ? "  * " : "    ");
+    put_mac(sim_aps[i].bssid);
+    puts_k("  \"");
+    puts_k(sim_aps[i].ssid);
+    puts_k("\"  beacons 12  ch ");
+    put_u((uint32_t)sim_aps[i].ch);
+    puts_k("\n");
+    rtw_log(j >= 0 ? "[wifi] * " : "[wifi]   ");
+    log_mac(sim_aps[i].bssid);
+    rtw_log(" \"");
+    rtw_log(sim_aps[i].ssid);
+    rtw_log("\" 0000000C ch ");
+    rtw_log_hex((uint32_t)sim_aps[i].ch);
+    rtw_log("\n");
+  }
+  if (!n) puts_k("  nenhum quadro recebido do ar\n");
 }
 
 /* Autenticacao aberta (802.11 seq 1) e espera a resposta do AP (seq 2).
@@ -719,9 +827,13 @@ static int load_firmware(void) {
 }
 
 static int start_steps(const char* path) {
+  static char cfg_alvo[40];
   int rc;
   stage = 0;
-  if (!path) path = WIFI_CFG_PATH;
+  if (!path) {
+    path = WIFI_CFG_PATH;
+    if (net_path("WIFI.CFG", cfg_alvo, (int)sizeof cfg_alvo) == 0) path = cfg_alvo;
+  }
 
   puts_k("WiFi: lendo ");
   puts_k(path);
@@ -1394,10 +1506,16 @@ int wifi_scan(const char* arg) {
     return -1;
   }
   if (w_state != W_OFF) wifi_stop();
+  net_delay(150);   /* a placa precisa assentar depois do power off */
 
   /* marca com "*" no log as redes do cfg que aparecerem no ar */
-  nets_n = wifi_cfg_load(WIFI_CFG_PATH, nets, WIFI_CFG_MAX);
-  if (nets_n < 0) nets_n = 0;
+  {
+    static char cfg_alvo[40];
+    const char* cfg = WIFI_CFG_PATH;
+    if (net_path("WIFI.CFG", cfg_alvo, (int)sizeof cfg_alvo) == 0) cfg = cfg_alvo;
+    nets_n = wifi_cfg_load(cfg, nets, WIFI_CFG_MAX);
+    if (nets_n < 0) nets_n = 0;
+  }
 
   puts_k("WiFi: procurando em ");
   put_u((uint32_t)n);
@@ -1411,13 +1529,43 @@ int wifi_scan(const char* arg) {
     rtw_log(arg);
   }
   rtw_log("\n");
+
+  /* QEMU: WIFI.SIM no lugar da placa (a RTL8852BE nao existe la) */
+  if (!rtw_present() && sim_carrega()) {
+    puts_k("WiFi: modo simulado (WIFI.SIM): ");
+    put_u((uint32_t)sim_n);
+    puts_k(" AP(s), sem placa\n");
+    rtw_log("[wifi] sim: ");
+    rtw_log_hex((uint32_t)sim_n);
+    rtw_log(" AP(s) do WIFI.SIM\n");
+    scan_on = 1;
+    for (i = 0; i < n; i++) {
+      rtw_log("[wifi] scan: canal ");
+      rtw_log_hex((uint32_t)ch[i]);
+      rtw_log(" (sim)\n");
+      puts_k("  canal ");
+      put_u((uint32_t)ch[i]);
+      puts_k("\n");
+      sim_listen(ch[i]);
+    }
+    scan_on = 0;
+    stage = 0;
+    rtw_log("[wifi] scan: fim\n");
+    save_log();
+    return 0;
+  }
+
   if (load_firmware() != 0) {
-    rtw_log("[wifi] scan: sem firmware\n");
+    rtw_log("[wifi] scan: sem firmware: ");
+    rtw_log(rtw_error());
+    rtw_log("\n");
     save_log();
     return -1;
   }
   if (chip_up() != 0) {
-    rtw_log("[wifi] scan: a placa nao subiu\n");
+    rtw_log("[wifi] scan: a placa nao subiu: ");
+    rtw_log(rtw_error());
+    rtw_log("\n");
     save_log();
     return -1;
   }

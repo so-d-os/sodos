@@ -802,6 +802,18 @@ net wifi test            autoteste do WPA2 (SHA1, HMAC, AES, CCMP, PBKDF2)
 - **No ar**: os beacons e o canal que a última varredura gravou no `WIFI.LOG`. `Enter` traz a rede vista para o arquivo — é o jeito rápido de acertar o `ssid=`/`channel=` quando o AP muda de nome ou de canal.
 - **Conectar** (`2`): roda `net wifi start` e mostra a saída na tela, sem sair do programa.
 
+#### Rede falsa no QEMU (WIFI.SIM)
+
+A RTL8852BE não existe no QEMU. Se `U:\NET\WIFI.SIM` (ou `D:\NET\WIFI.SIM`, que o `make disk-files` grava em `::/NET`) existir **e** a placa não estiver no barramento, o `net wifi scan` usa os APs desse arquivo em vez do rádio: cada linha é `BSSID CANAL SSID`. O log sai no mesmo formato (`quadros=`, `bssids=`, `ch`), então o `WIFI.EXE` e o caminho todo (canal do DS, `channel=` no cfg) são testados igual. Com a placa presente o arquivo é ignorado.
+
+```text
+wsl make disk-files
+wsl make run
+# no SODOS:
+net wifi scan
+wifi
+```
+
 #### Quedas e reconexão automática
 
 Depois de conectar, um vigia (`wifi_tick`, chamado a cada `net_poll` fora das esperas da pilha) faz o papel do *mac80211* e do *wpa_supplicant* do Linux.

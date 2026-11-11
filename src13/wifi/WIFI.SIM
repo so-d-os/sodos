@@ -1,0 +1,9 @@
+# WIFI.SIM - APs falsos para testar o net wifi scan no QEMU, onde a
+# RTL8852BE nao existe. Coloque em U:\NET (pendrive) ou D:\NET (disk.img:
+# o make disk-files ja poe este arquivo em ::/NET).
+#
+# Formato: BSSID CANAL SSID (o resto da linha e o nome, com espacos)
+# O canal aqui e o do "channel=" do WIFI.CFG.
+E8:45:8B:75:AA:3F 36  PS ESTUDIO
+E8:45:8B:E0:69:B7 52  CRIATIVA APP OI FIBRA 5G
+A2:09:2E:62:82:3C 149 RL NET - Wasem_5G

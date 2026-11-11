@@ -404,10 +404,17 @@ static void mac_texto(const char* s, char* out) {
 }
 
 /* ---------- leitura e gravacao ---------- */
+static char arquivo_usado[32];   /* o caminho que o le_arquivo achou */
+
 static int le_arquivo(const char* prim, const char* seg, char* buf, int max) {
   FILE* f = fopen(prim, "rb");
   int n;
-  if (!f && seg && seg[0]) f = fopen(seg, "rb");
+  if (f) {
+    copia(arquivo_usado, prim, (int)sizeof(arquivo_usado));
+  } else if (seg && seg[0]) {
+    f = fopen(seg, "rb");
+    if (f) copia(arquivo_usado, seg, (int)sizeof(arquivo_usado));
+  }
   if (!f) return -1;
   n = (int)fread(buf, 1, (size_t)(max - 1), f);
   fclose(f);
@@ -428,7 +435,7 @@ static void carrega_cfg(void) {
     diz("nao achei U:\\NET\\WIFI.CFG (nem em D:)");
     return;
   }
-  copia(cfg_path, "U:\\NET\\WIFI.CFG", (int)sizeof(cfg_path));
+  copia(cfg_path, arquivo_usado, (int)sizeof(cfg_path));
   memset(&r, 0, sizeof(r));
   copia(r.ip, "dhcp", (int)sizeof(r.ip));
   p = texto_cfg;
@@ -552,7 +559,7 @@ static void carrega_log(void) {
     diz("nao achei o WIFI.LOG: rode net wifi scan uma vez");
     return;
   }
-  copia(log_path, "U:\\NET\\WIFI.LOG", (int)sizeof(log_path));
+  copia(log_path, arquivo_usado, (int)sizeof(log_path));
   log_scan = 0;
   p = texto_log;
   while (*p) {

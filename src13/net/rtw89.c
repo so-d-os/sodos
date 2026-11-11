@@ -392,6 +392,24 @@ static void aspm_off_all(int bus, int dev, int fun) {
       }
 }
 
+/* 1 se a RTL8852BE esta no barramento. Nao liga nada: serve para o scan
+ * saber se pode usar o WIFI.SIM (no QEMU nao ha placa). */
+int rtw_present(void) {
+  int bus, dev, fun;
+  for (bus = 0; bus < 256; bus++) {
+    for (dev = 0; dev < 32; dev++) {
+      int nf = 1;
+      for (fun = 0; fun < nf; fun++) {
+        uint32_t id = pci_rd(bus, dev, fun, 0);
+        if (id == 0xFFFFFFFFu || id == 0) continue;
+        if (fun == 0 && (pci_rd(bus, dev, 0, 0x0C) & 0x00800000u)) nf = 8;
+        if ((id & 0xFFFFu) == RTW_VID && (id >> 16) == RTW_DID_8852BE) return 1;
+      }
+    }
+  }
+  return 0;
+}
+
 int rtw_probe(struct rtw_info* inf) {
   int bus, dev, fun;
   for (bus = 0; bus < 256; bus++) {

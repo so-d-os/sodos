@@ -31,6 +31,8 @@ struct rtw_info {
 
 /* 0 achou e mapeou o BAR; -1 sem a placa. */
 int rtw_probe(struct rtw_info* inf);
+/* 1 se a RTL8852BE esta no barramento (sem ligar nada). */
+int rtw_present(void);
 /* Liga a MAC, le versao e efuse. 0 = ok; <0 = etapa que falhou (rtw_error). */
 int rtw_power_on(struct rtw_info* inf);
 void rtw_power_off(void);
