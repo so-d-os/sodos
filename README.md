@@ -848,7 +848,7 @@ api stop       # stops the service
 api restart    # stops and starts it again
 ```
 
-It is through this API that an AI agent operates the machine: `GET /exec` and `/win/execute` run commands, `/win/mouse` and `/click` control the pointer, `/win/windows` and `/win/close` manage the windows and `/win/printscreen` returns the screen as BMP.
+It is through this API that an AI agent operates the machine: `GET /exec` and `/win/execute` run commands, `/win/mouse` and `/click` control the pointer, `/win/windows` and `/win/close` manage the windows and `/win/printscreen` returns the screen as BMP or PNG.
 
 It is HTTP/1.0, one request per connection (`Connection: close`), and accepts `GET`, `POST`, `PUT`, `DELETE` and `HEAD`.
 
@@ -856,7 +856,8 @@ It is HTTP/1.0, one request per connection (`Connection: close`), and accepts `G
 |---|---|
 | `GET /` | Lists the routes |
 | `GET /win` | Lists only the desktop routes |
-| `GET /win/printscreen` | Desktop screen as 24-bit BMP |
+| `GET /win/printscreen` | Desktop screen as 24-bit BMP (default) |
+| `GET /win/printscreen.png` | Desktop screen as RGB PNG |
 | `GET /win/mouse/coord` | Cursor position |
 | `GET /win/mouse?x=10&y=20&click=1` | Moves the cursor; `click=1` presses and releases |
 | `GET /win/windows` | Windows: `title x y w h` |
@@ -867,6 +868,22 @@ It is HTTP/1.0, one request per connection (`Connection: close`), and accepts `G
 | `POST /exec` | The body is the command |
 | `POST /mouse` | `x`, `y`, `click` |
 | `POST /click` | Click |
+
+### PNG screenshot
+
+The BMP remains the default for `/win/printscreen` for compatibility. For fast transfers use the `.png` route or `format=png`:
+
+```text
+GET /win/printscreen.png
+GET /win/printscreen.png?scale=2&level=6
+GET /win/printscreen?format=png&scale=2&level=1
+```
+
+- `scale=1..8`: downsamples by 1/N (nearest neighbour). `scale=2` turns 1920×1080 into 960×540.
+- `level=1..9` (or `quality=1..9`): deflate effort. Higher compresses more and uses more CPU; the default is 6.
+- The image is 8-bit RGB, lossless.
+
+On a 1920×1080 screen the BMP is over 6 MB; the full PNG is about 73 KB and `scale=2` about 21 KB.
 
 The `cmd` is the same prompt line (`help`, `dir`, `ping 10.0.2.2`, `HELLO`, …). `win` and `visual` refuse a second open while another API command is still running. Captured output is limited to 4608 bytes and the command to 240.
 

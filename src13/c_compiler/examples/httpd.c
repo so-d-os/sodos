@@ -5,6 +5,7 @@ int main(void) {
   printf("HTTPD na porta 8797 (10.0.2.15).\n");
   printf("Controle: api | api start | api stop\n");
   printf("GET /win/printscreen\n");
+  printf("GET /win/printscreen.png?scale=2&level=6\n");
   printf("GET /win/mouse/coord\n");
   printf("GET /win/windows\n");
   printf("GET /win/close?program=Gerenciador\n");

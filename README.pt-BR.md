@@ -849,7 +849,7 @@ api stop       # para o serviço
 api restart    # para e sobe de novo
 ```
 
-É por essa API que um agente de IA opera a máquina: `GET /exec` e `/win/execute` rodam comandos, `/win/mouse` e `/click` controlam o ponteiro, `/win/windows` e `/win/close` gerenciam as janelas e `/win/printscreen` devolve a tela em BMP.
+É por essa API que um agente de IA opera a máquina: `GET /exec` e `/win/execute` rodam comandos, `/win/mouse` e `/click` controlam o ponteiro, `/win/windows` e `/win/close` gerenciam as janelas e `/win/printscreen` devolve a tela em BMP ou PNG.
 
 É HTTP/1.0, uma requisição por conexão (`Connection: close`), e aceita `GET`, `POST`, `PUT`, `DELETE` e `HEAD`.
 
@@ -857,7 +857,8 @@ api restart    # para e sobe de novo
 |---|---|
 | `GET /` | Lista as rotas |
 | `GET /win` | Lista só as rotas do desktop |
-| `GET /win/printscreen` | Tela do desktop em BMP 24 bits |
+| `GET /win/printscreen` | Tela do desktop em BMP 24 bits (padrão) |
+| `GET /win/printscreen.png` | Tela do desktop em PNG RGB |
 | `GET /win/mouse/coord` | Posição do cursor |
 | `GET /win/mouse?x=10&y=20&click=1` | Move o cursor; `click=1` aperta e solta |
 | `GET /win/windows` | Janelas: `titulo x y w h` |
@@ -868,6 +869,22 @@ api restart    # para e sobe de novo
 | `POST /exec` | O corpo é o comando |
 | `POST /mouse` | `x`, `y`, `click` |
 | `POST /click` | Clique |
+
+### Print em PNG
+
+O BMP continua sendo o padrão de `/win/printscreen` por compatibilidade. Para baixar rápido, use a rota `.png` ou `format=png`:
+
+```text
+GET /win/printscreen.png
+GET /win/printscreen.png?scale=2&level=6
+GET /win/printscreen?format=png&scale=2&level=1
+```
+
+- `scale=1..8`: reduz a imagem para 1/N (amostragem nearest). `scale=2` transforma 1920×1080 em 960×540.
+- `level=1..9` (ou `quality=1..9`): esforço do deflate. Mais alto comprime mais e gasta mais CPU; o padrão é 6.
+- A imagem é RGB de 8 bits, sem perda.
+
+Numa tela 1920×1080 o BMP passa de 6 MB; o PNG completo fica em ~73 KB e o `scale=2` em ~21 KB.
 
 O `cmd` é a mesma linha do prompt (`help`, `dir`, `ping 10.0.2.2`, `HELLO`, …). `win` e `visual` recusam uma segunda abertura enquanto outro comando da API ainda está em execução. A saída capturada é limitada a 4608 bytes e o comando a 240.
 

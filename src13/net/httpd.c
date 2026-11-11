@@ -6,6 +6,7 @@
 #include "net.h"
 #include "shell.h"
 #include "visual.h"
+#include "png.h"
 #include "serial.h"
 #include "mm.h"
 
@@ -86,6 +87,26 @@ static int num_of(const char* s, int* out) {
   if (!any) return 0;
   *out = sign < 0 ? -v : v;
   return 1;
+}
+
+static int eq_ci(const char* a, const char* b) {
+  while (*a && *b) {
+    char ca = *a;
+    char cb = *b;
+    if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+    if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
+    if (ca != cb) return 0;
+    a++;
+    b++;
+  }
+  return *a == *b;
+}
+
+static int q_int(const char* q, const char* key, int def) {
+  char buf[16];
+  int v;
+  if (form_get(q, key, buf, (int)sizeof(buf)) && num_of(buf, &v)) return v;
+  return def;
 }
 
 static char cap_buf[4608];
@@ -199,7 +220,8 @@ static void reply(int code, const char* reason, const char* body, int blen, int 
 static const char PAGE[] =
   "SO DOS HTTP\n"
   "GET /win\n"
-  "GET /win/printscreen\n"
+  "GET /win/printscreen[?format=png&scale=2&level=6]\n"
+  "GET /win/printscreen.png[?scale=2&level=6]\n"
   "GET /win/mouse/coord\n"
   "GET /win/mouse?x=10&y=20&click=1\n"
   "GET /win/windows\n"
@@ -239,23 +261,32 @@ static int send_hdr(int code, const char* reason, const char* ctype, int blen, i
   return net_srv_write(pkt, n, head || blen == 0);
 }
 
-static void send_bmp(void) {
-  int w = 0, h = 0, y, row, x;
+static void send_bmp(int scale) {
+  int w = 0, h = 0, sw, sh, y, row, x, sy, sx, n;
   unsigned imagesz, filesz;
   uint8_t hdr[54];
   uint8_t* line;
+  uint8_t* src;
   if (!win_screen_size(&w, &h) || w < 1 || h < 1 || w > 2048) {
     reply(404, "Not Found", "win fechado\n", 12, 0);
     return;
   }
-  row = (w * 3 + 3) & ~3;
+  if (scale < 1) scale = 1;
+  sw = (w + scale - 1) / scale;
+  sh = (h + scale - 1) / scale;
+  if (sw < 1) sw = 1;
+  if (sh < 1) sh = 1;
+  row = (sw * 3 + 3) & ~3;
   /* Fora do BSS: o nucleo tem de acabar antes do slot 0x58000. */
   line = (uint8_t*)kmalloc((uint32_t)row);
-  if (!line) {
+  src = (uint8_t*)kmalloc((uint32_t)(w * 3));
+  if (!line || !src) {
+    if (line) kfree(line);
+    if (src) kfree(src);
     reply(500, "Error", "sem memoria\n", 12, 0);
     return;
   }
-  imagesz = (unsigned)row * (unsigned)h;
+  imagesz = (unsigned)row * (unsigned)sh;
   filesz = 54u + imagesz;
   for (x = 0; x < 54; x++) hdr[x] = 0;
   hdr[0] = 'B';
@@ -263,23 +294,90 @@ static void send_bmp(void) {
   put_u32(hdr + 2, filesz);
   put_u32(hdr + 10, 54);
   put_u32(hdr + 14, 40);
-  put_u32(hdr + 18, (unsigned)w);
-  put_u32(hdr + 22, (unsigned)h);
+  put_u32(hdr + 18, (unsigned)sw);
+  put_u32(hdr + 22, (unsigned)sh);
   put_u16(hdr + 26, 1);
   put_u16(hdr + 28, 24);
   put_u32(hdr + 34, imagesz);
   if (send_hdr(200, "OK", "image/bmp", (int)filesz, 0) < 0 ||
       net_srv_write(hdr, 54, 0) < 0) {
+    kfree(src);
     kfree(line);
     return;
   }
-  for (y = h - 1; y >= 0; y--) {
-    int n = win_screen_bgr(y, line, w);
-    if (n < 0) n = 0;
-    for (x = n * 3; x < row; x++) line[x] = 0;
+  for (y = sh - 1; y >= 0; y--) {
+    sy = y * scale;
+    if (sy >= h) sy = h - 1;
+    n = win_screen_bgr(sy, src, w);
+    if (n <= 0) {
+      n = w;
+      for (x = 0; x < n * 3; x++) src[x] = 0;
+    }
+    for (x = 0; x < sw; x++) {
+      sx = x * scale;
+      if (sx >= n) sx = n - 1;
+      line[x * 3 + 0] = src[sx * 3 + 0];
+      line[x * 3 + 1] = src[sx * 3 + 1];
+      line[x * 3 + 2] = src[sx * 3 + 2];
+    }
+    for (x = sw * 3; x < row; x++) line[x] = 0;
     if (net_srv_write(line, row, y == 0) < 0) break;
   }
+  kfree(src);
   kfree(line);
+}
+
+static void send_png(int scale, int level) {
+  int w = 0, h = 0, sw, sh, y, x, sy, sx, n, len = 0;
+  uint8_t* row;
+  uint8_t* rgb;
+  uint8_t* png;
+  if (!win_screen_size(&w, &h) || w < 1 || h < 1 || w > 2048) {
+    reply(404, "Not Found", "win fechado\n", 12, 0);
+    return;
+  }
+  if (scale < 1) scale = 1;
+  sw = (w + scale - 1) / scale;
+  sh = (h + scale - 1) / scale;
+  if (sw < 1) sw = 1;
+  if (sh < 1) sh = 1;
+  row = (uint8_t*)kmalloc((uint32_t)(w * 3));
+  rgb = (uint8_t*)umalloc_owned((uint32_t)(sw * sh * 3), 0);
+  if (!row || !rgb) {
+    if (row) kfree(row);
+    if (rgb) ufree(rgb);
+    reply(500, "Error", "sem memoria\n", 12, 0);
+    return;
+  }
+  for (y = 0; y < sh; y++) {
+    sy = y * scale;
+    if (sy >= h) sy = h - 1;
+    n = win_screen_bgr(sy, row, w);
+    if (n <= 0) {
+      n = w;
+      for (x = 0; x < n * 3; x++) row[x] = 0;
+    }
+    for (x = 0; x < sw; x++) {
+      sx = x * scale;
+      if (sx >= n) sx = n - 1;
+      rgb[(y * sw + x) * 3 + 0] = row[sx * 3 + 2];
+      rgb[(y * sw + x) * 3 + 1] = row[sx * 3 + 1];
+      rgb[(y * sw + x) * 3 + 2] = row[sx * 3 + 0];
+    }
+  }
+  kfree(row);
+  png = png_encode_rgb(rgb, sw, sh, sw * 3, level, &len);
+  ufree(rgb);
+  if (!png) {
+    reply(500, "Error", "sem memoria\n", 12, 0);
+    return;
+  }
+  if (send_hdr(200, "OK", "image/png", len, 0) < 0 ||
+      net_srv_write(png, len, 1) < 0) {
+    ufree(png);
+    return;
+  }
+  ufree(png);
 }
 
 static void handle(char* req) {
@@ -364,6 +462,8 @@ static void handle(char* req) {
   if (eq(path, "/win")) {
     const char* t =
       "GET /win/printscreen\n"
+      "GET /win/printscreen?format=png&scale=2&level=6\n"
+      "GET /win/printscreen.png?scale=2&level=6\n"
       "GET /win/mouse/coord\n"
       "GET /win/mouse?x=10&y=20&click=1\n"
       "GET /win/windows\n"
@@ -376,9 +476,25 @@ static void handle(char* req) {
     reply(200, "OK", t, n, head);
     return;
   }
-  if (eq(path, "/win/printscreen")) {
-    if (head) reply(200, "OK", 0, 0, 1);
-    else send_bmp();
+  if (eq(path, "/win/printscreen") || eq(path, "/win/printscreen.png")) {
+    int scale = q_int(q, "scale", 1);
+    int level = q_int(q, "level", q_int(q, "quality", 6));
+    char fmt[8];
+    int png = eq(path, "/win/printscreen.png");
+    fmt[0] = 0;
+    form_get(q, "format", fmt, (int)sizeof(fmt));
+    if (eq_ci(fmt, "png")) png = 1;
+    else if (eq_ci(fmt, "bmp")) png = 0;
+    if (scale < 1) scale = 1;
+    if (scale > 8) scale = 8;
+    if (level < 1) level = 1;
+    if (level > 9) level = 9;
+    if (head) {
+      send_hdr(200, "OK", png ? "image/png" : "image/bmp", 0, 1);
+      return;
+    }
+    if (png) send_png(scale, level);
+    else send_bmp(scale);
     return;
   }
   if (eq(path, "/win/key")) {

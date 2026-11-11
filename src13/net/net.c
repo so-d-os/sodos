@@ -1440,6 +1440,15 @@ static void srv_input(uint32_t src, const uint8_t* seg, int len) {
   data = seg + doff;
   plen = len - doff;
   if ((flags & 0x02) && !(flags & 0x10)) {
+    /* SYN repetido do mesmo par: so reenvia o SYN-ACK. Um SYN atrasado
+     * depois de ESTABLISHED nao pode derrubar a conexao em andamento. */
+    if (sv_state == SV_SYN && src == sv_rip && sport == sv_rport) {
+      sv_need_syn = 1;
+      return;
+    }
+    /* ESTABLISHED: SYN atrasado nao derruba a conexao. Fechando (FIN) ou
+     * escutando (LISTEN): o proximo SYN pode abrir a conexao nova. */
+    if (sv_state == SV_EST || sv_state == SV_SYN) return;
     sv_rip = src;
     sv_rport = sport;
     sv_rcv_nxt = seq + 1;
