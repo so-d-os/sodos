@@ -1681,7 +1681,7 @@ int rtw_radio_init(int channel) {
 int rtw_radio_channel(int channel) {
   if (!mmio || !dma_ready) return fail("MAC nao inicializada");
   set_channel(channel);
-  clr32(R_AX_RX_FLTR_OPT, B_AX_A1_MATCH | B_AX_A_BC | B_AX_A_BCN_CHK_EN);
+  clr32(R_AX_RX_FLTR_OPT, B_AX_A_A1_MATCH | B_AX_A_BC | B_AX_A_BCN_CHK_EN);
   rlog_hex("[rtw] radio no canal ", (uint32_t)channel);
   return 0;
 }
