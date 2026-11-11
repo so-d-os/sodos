@@ -922,7 +922,8 @@ static int start_steps(const char* path) {
 
 /* Da placa ate o WPA2 pronto (etapas 3 a 12). Tambem reinicia a placa
  * depois de uma queda (vigia, com bg = 1). Em falha a placa fica desligada. */
-static int chip_up(void) {
+/* Sobe a placa ate a MAC pronta (etapas 3 a 7), sem procurar rede. */
+static int chip_up_mac(void) {
   int rc;
   if (rtw_probe(&chip) != 0) {
     puts_k("  ");
@@ -989,6 +990,14 @@ static int chip_up(void) {
   }
   puts_k("  MAC pronta, firmware respondeu pelo RX\n");
   stage = 7;
+  return 0;
+}
+
+/* Placa + a rede do WIFI.CFG, ate associar (quem chama: start_steps). O scan
+ * usa so o chip_up_mac: se chamasse este, ele escutaria os canais do cfg. */
+static int chip_up(void) {
+  int rc;
+  if (chip_up_mac() != 0) return -1;
 
   /* escuta cada canal das redes do WIFI.CFG, na ordem do arquivo */
   {
@@ -1562,7 +1571,7 @@ int wifi_scan(const char* arg) {
     save_log();
     return -1;
   }
-  if (chip_up() != 0) {
+  if (chip_up_mac() != 0) {
     rtw_log("[wifi] scan: a placa nao subiu: ");
     rtw_log(rtw_error());
     rtw_log("\n");
