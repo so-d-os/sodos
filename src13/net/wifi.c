@@ -17,6 +17,7 @@ static int stage;  /* ultima etapa que deu certo */
 static uint8_t* fw_buf;
 static uint32_t fw_len;
 static int scan_on;   /* net wifi scan: a lista nao e "do WIFI.CFG" */
+static int bcn_bssids;  /* BSSIDs distintos que a ultima escuta viu */
 
 static const char* stage_name[] = {
   "parado", "configuracao lida", "autoteste WPA2 e firmware prontos", "placa encontrada",
@@ -210,6 +211,7 @@ struct seen {
   uint8_t bssid[6];
   char ssid[33];
   uint32_t count;
+  uint32_t ch;      /* canal do DS Parameter Set do beacon (o do channel=) */
 };
 
 static void log_mac(const uint8_t* m) {
@@ -252,7 +254,7 @@ static int listen_beacons(uint32_t ms, int ch) {
   int n = 0, i, found = -1;
   uint32_t frames = 0, ppdu = 0, other = 0;
   uint32_t t0 = net_ms(), spins = 0;
-  puts_k("  escutando beacons...\n");
+  if (!scan_on) puts_k("  escutando beacons...\n");
   for (;;) {
     while (rtw_rx_poll(&rx)) {
       const uint8_t* f = rx.data;
@@ -263,15 +265,26 @@ static int listen_beacons(uint32_t ms, int ch) {
       for (i = 0; i < n; i++)
         if (mac_same(list[i].bssid, f + 16)) break;
       if (i == n && n < 16) {
-        int k;
+        int k, off = 36, rl = (int)rx.len;
         for (k = 0; k < 6; k++) list[n].bssid[k] = f[16 + k];
         list[n].ssid[0] = 0;
         list[n].count = 0;
-        /* SSID: primeiro IE depois de timestamp, intervalo e capacidades */
-        if (f[36] == 0 && f[37] <= 32 && 38u + f[37] <= rx.len) {
-          for (k = 0; k < f[37]; k++)
-            list[n].ssid[k] = (char)(f[38 + k] >= 32 && f[38 + k] < 127 ? f[38 + k] : '?');
-          list[n].ssid[k] = 0;
+        list[n].ch = 0;
+        /* IEs: SSID (0) e o DS (3), que traz o canal do AP - e esse numero
+         * que vai no channel= do WIFI.CFG, nao o canal em que escutamos. */
+        while (off + 2 <= rl) {
+          int id = f[off], len = f[off + 1];
+          if (off + 2 + len > rl) break;
+          if (id == 0) {
+            int c, m = len > 32 ? 32 : len;
+            for (c = 0; c < m; c++)
+              list[n].ssid[c] = (char)(f[off + 2 + c] >= 32 && f[off + 2 + c] < 127
+                                           ? f[off + 2 + c] : '?');
+            list[n].ssid[c] = 0;
+          } else if (id == 3 && len == 1) {
+            list[n].ch = f[off + 2];
+          }
+          off += 2 + len;
         }
         n++;
       }
@@ -285,7 +298,10 @@ static int listen_beacons(uint32_t ms, int ch) {
   rtw_log_hex(ppdu);
   rtw_log(" outros=");
   rtw_log_hex(other);
+  rtw_log(" bssids=");
+  rtw_log_hex((uint32_t)n);
   rtw_log("\n");
+  bcn_bssids = n;
   for (i = 0; i < n; i++) {
     int j = net_match(list[i].bssid, list[i].ssid, ch);
     int match = j >= 0;
@@ -301,6 +317,10 @@ static int listen_beacons(uint32_t ms, int ch) {
     puts_k(list[i].ssid);
     puts_k("\"  beacons ");
     put_u(list[i].count);
+    if (list[i].ch) {
+      puts_k("  ch ");
+      put_u(list[i].ch);
+    }
     puts_k("\n");
     rtw_log(match ? "[wifi] * " : "[wifi]   ");
     log_mac(list[i].bssid);
@@ -308,6 +328,10 @@ static int listen_beacons(uint32_t ms, int ch) {
     rtw_log(list[i].ssid);
     rtw_log("\" ");
     rtw_log_hex(list[i].count);
+    if (list[i].ch) {
+      rtw_log(" ch ");
+      rtw_log_hex(list[i].ch);
+    }
     rtw_log("\n");
   }
   if (!frames) {
@@ -1379,26 +1403,59 @@ int wifi_scan(const char* arg) {
   put_u((uint32_t)n);
   puts_k(" canal(is); a lista sai no fim\n");
   rtw_log_clear();
+  rtw_log("[wifi] scan: ");
+  rtw_log_hex((uint32_t)n);
+  rtw_log(" canal(is)");
+  if (arg && *arg) {
+    rtw_log(": ");
+    rtw_log(arg);
+  }
+  rtw_log("\n");
   if (load_firmware() != 0) {
+    rtw_log("[wifi] scan: sem firmware\n");
     save_log();
     return -1;
   }
   if (chip_up() != 0) {
+    rtw_log("[wifi] scan: a placa nao subiu\n");
     save_log();
     return -1;
   }
   scan_on = 1;
-  for (i = 0; i < n; i++) {
-    puts_k("  canal ");
-    put_u((uint32_t)ch[i]);
-    puts_k("\n");
-    if (rtw_radio_init(ch[i]) != 0) {
-      puts_k("  ligar o radio falhou: ");
-      puts_k(rtw_error());
+  {
+    int iniciado = 0;
+    int total = 0;
+    for (i = 0; i < n; i++) {
+      int rc;
+      puts_k("  canal ");
+      put_u((uint32_t)ch[i]);
+      rtw_log("[wifi] scan: canal ");
+      rtw_log_hex((uint32_t)ch[i]);
+      if (!iniciado) {
+        rtw_log(" (inicia o radio)\n");
+        rc = rtw_radio_init(ch[i]);
+        if (rc == 0) iniciado = 1;
+      } else {
+        rtw_log(" (troca)\n");
+        rc = rtw_radio_channel(ch[i]);
+        if (rc == 0) net_delay(60);  /* deixa o sintetizador assentar */
+      }
+      if (rc != 0) {
+        puts_k(": sem radio (");
+        puts_k(rtw_error());
+        puts_k(")\n");
+        rtw_log("[wifi] scan: canal sem radio: ");
+        rtw_log(rtw_error());
+        rtw_log("\n");
+        continue;
+      }
       puts_k("\n");
-      continue;
+      listen_beacons(400, ch[i]);
+      total += bcn_bssids;
     }
-    listen_beacons(250, ch[i]);
+    rtw_log("[wifi] scan: fim, ");
+    rtw_log_hex((uint32_t)total);
+    rtw_log(" bssid(s)\n");
   }
   scan_on = 0;
   rtw_power_off();

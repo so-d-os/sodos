@@ -1676,6 +1676,16 @@ int rtw_radio_init(int channel) {
   return 0;
 }
 
+/* So troca o canal: o scan usa depois do primeiro rtw_radio_init. RCK/DACK sao
+ * por banda, entao aqui so vao BB/RF (set_channel) e o filtro de beacons. */
+int rtw_radio_channel(int channel) {
+  if (!mmio || !dma_ready) return fail("MAC nao inicializada");
+  set_channel(channel);
+  clr32(R_AX_RX_FLTR_OPT, B_AX_A1_MATCH | B_AX_A_BC | B_AX_A_BCN_CHK_EN);
+  rlog_hex("[rtw] radio no canal ", (uint32_t)channel);
+  return 0;
+}
+
 /* ---------- etapa 5: estacao no firmware, potencia e TX de gerencia ---------- */
 
 #define TXCH_B0MG 4      /* indice de CH8 em txchs */

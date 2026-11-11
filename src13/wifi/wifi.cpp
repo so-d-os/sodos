@@ -350,6 +350,7 @@ static char cfg_path[32] = "U:\\NET\\WIFI.CFG";
 static char log_path[32] = "U:\\NET\\WIFI.LOG";
 static char msg[80] = "escolha uma rede e tecle 2 para conectar";
 static int aba;
+static int log_scan;   /* o WIFI.LOG tem "[wifi] scan:": o kernel rodou o scan */
 
 /* ---------- utilidades de texto ---------- */
 static void copia(char* d, const char* s, int max) {
@@ -517,12 +518,15 @@ static int grava_cfg(void) {
 
 /* ---------- WIFI.LOG: o que a varredura viu ---------- */
 
-/* Uma rede vista; o mesmo BSSID em outro canal atualiza a entrada. */
-static void add_vista(const char* bssid, const char* ssid, int canal, unsigned beacons, int casa) {
+/* Uma rede vista; o mesmo BSSID em outro canal atualiza a entrada.
+ * canal = o que o DS do beacon diz (o do channel=); 0 = usa o canal escutado. */
+static void add_vista(const char* bssid, const char* ssid, int canal, int ch, unsigned beacons,
+                      int casa) {
   int i;
+  int usa = ch > 0 ? ch : canal;
   for (i = 0; i < n_vistas; i++)
     if (!strcmp(vistas[i].bssid, bssid)) {
-      vistas[i].canal = canal;
+      vistas[i].canal = usa;
       vistas[i].beacons = beacons;
       return;
     }
@@ -532,7 +536,7 @@ static void add_vista(const char* bssid, const char* ssid, int canal, unsigned b
     memset(v, 0, sizeof(*v));
     copia(v->bssid, bssid, (int)sizeof(v->bssid));
     copia(v->ssid, ssid, (int)sizeof(v->ssid));
-    v->canal = canal;
+    v->canal = usa;
     v->beacons = beacons;
     v->casa = casa;
   }
@@ -549,13 +553,16 @@ static void carrega_log(void) {
     return;
   }
   copia(log_path, "U:\\NET\\WIFI.LOG", (int)sizeof(log_path));
+  log_scan = 0;
   p = texto_log;
   while (*p) {
     char* l = p;
     while (*p && *p != '\n') p++;
     if (*p == '\n') *p++ = 0;
     if (l[0] == '[') {
-      if (!strncmp(l, "[rtw] radio no canal ", 21)) {
+      if (!strncmp(l, "[wifi] scan:", 12)) {
+        log_scan = 1;
+      } else if (!strncmp(l, "[rtw] radio no canal ", 21)) {
         canal = (int)strtoul(l + 21, 0, 16);
       } else if (!strncmp(l, "[wifi] ", 7) && (l[7] == '*' || l[7] == ' ')) {
         const char* b = l + 9;
@@ -577,7 +584,17 @@ static void carrega_log(void) {
           if (*q == '"') q++;
         }
         while (*q == ' ') q++;
-        add_vista(mac, nome, canal, (unsigned)strtoul(q, 0, 16), l[7] == '*');
+        {
+          char* fim = 0;
+          unsigned bcn = (unsigned)strtoul(q, &fim, 16);
+          int ch = 0;
+          if (fim) {
+            while (*fim == ' ') fim++;
+            if (fim[0] == 'c' && fim[1] == 'h' && fim[2] == ' ')
+              ch = (int)strtoul(fim + 3, 0, 16);
+          }
+          add_vista(mac, nome, canal, ch, bcn, l[7] == '*');
+        }
       }
     }
   }
@@ -602,21 +619,21 @@ static void desenha_rede_linha(int r, int i, int selecionada) {
 
 static void desenha_redes(void) {
   char b[128];
-  int i, prim, linhas = 12;
+  int i, prim, linhas = 11;
   fundo();
   janela(1, 1, 15, 78, "Redes do WIFI.CFG (a 1a no ar vence)");
   texto(2, 3, "#", C_CABECA);
   texto(2, 6, "SSID", C_CABECA);
   texto(2, 39, "CANAL", C_CABECA);
   texto(2, 45, "BSSID", C_CABECA);
-  separador(2, 2, 76);
+  separador(3, 2, 76);
   if (n_redes == 0) {
-    texto(4, 4, "nenhuma rede no arquivo - tecle 4 para criar", C_FRACO);
+    texto(5, 4, "nenhuma rede no arquivo - tecle 4 para criar", C_FRACO);
   }
   prim = 0;
   if (sel >= linhas) prim = sel - linhas + 1;
   for (i = prim; i < n_redes && i < prim + linhas; i++)
-    desenha_rede_linha(3 + (i - prim), i, i == sel);
+    desenha_rede_linha(4 + (i - prim), i, i == sel);
 
   janela(16, 1, 7, 78, "Detalhe");
   if (n_redes > 0) {
@@ -650,26 +667,27 @@ static void desenha_no_ar(void) {
   janela(1, 1, 19, 78, "No ar - beacons do ultimo net wifi scan");
   texto(2, 3, "BSSID", C_CABECA);
   texto(2, 22, "SSID", C_CABECA);
-  texto(2, 52, "CANAL", C_CABECA);
-  texto(2, 59, "QUADROS", C_CABECA);
-  separador(2, 2, 76);
+  texto(2, 50, "channel=", C_CABECA);
+  texto(2, 64, "BEACONS", C_CABECA);
+  separador(3, 2, 76);
   if (n_vistas == 0) {
-    texto(4, 4, "nada no WIFI.LOG - tecle 9 (Buscar) para varrer", C_FRACO);
+    texto(5, 4, "nada no WIFI.LOG - tecle 9 (Buscar) para varrer", C_FRACO);
   }
   prim = 0;
   if (sel_vista >= linhas) prim = sel_vista - linhas + 1;
   for (i = prim; i < n_vistas && i < prim + linhas; i++) {
     const struct vista* v = &vistas[i];
-    int r = 3 + (i - prim);
+    int r = 4 + (i - prim);
     int cor = i == sel_vista ? C_SELECAO : C_JANELA;
     if (i == sel_vista) textow(r, 2, "", 76, cor);
     texto(r, 3, v->casa ? "*" : " ", i == sel_vista ? cor : C_FORTE);
     texto(r, 4, v->bssid, cor);
-    textow(r, 22, v->ssid[0] ? v->ssid : "(oculta)", 28, cor);
-    sprintf(b, "%d", v->canal);
-    texto(r, 52, b, i == sel_vista ? cor : C_FRACO);
+    textow(r, 22, v->ssid[0] ? v->ssid : "(oculta)", 26, cor);
+    if (v->canal > 0) sprintf(b, "channel=%d", v->canal);
+    else copia(b, "channel=?", 12);
+    texto(r, 50, b, i == sel_vista ? cor : C_FRACO);
     sprintf(b, "%u", v->beacons);
-    texto(r, 60, b, cor);
+    texto(r, 64, b, cor);
   }
   janela(20, 1, 3, 78, "Dica");
   texto(21, 3, "Enter traz a rede vista para o WIFI.CFG   9 busca de novo", C_JANELA);
@@ -969,6 +987,16 @@ static void roda_scan(void) {
   k_shell(cmd);
   tela_suja();
   carrega_log();
+  if (!log_scan) {
+    /* o comando pode nao existir (kernel antigo) ou ter parado antes do log */
+    diz("o kernel nao gravou [wifi] scan: no log - build antigo? veja a tela");
+  } else if (n_vistas) {
+    char b[80];
+    sprintf(b, "scan ok: %d BSSID(s) - escolha com as setas e Enter", n_vistas);
+    diz(b);
+  } else {
+    diz("scan ok, mas nenhum beacon: veja os quadros= por canal no WIFI.LOG");
+  }
 }
 
 static void conecta(void) {
@@ -1010,7 +1038,6 @@ static void nova_rede(void) {
     }
     return;
   }
-  diz("escolha a rede no ar e Enter: a Nova ja vem preenchida");
 }
 
 static void acao(int n) {
@@ -1018,8 +1045,6 @@ static void acao(int n) {
   if (n == 9) {
     roda_scan();
     aba = 1;
-    diz(n_vistas ? "escolha com as setas; Enter leva a rede para o cfg"
-                 : "nada no ar (veja a saida do scan acima)");
     return;
   }
   if (n == 4) {

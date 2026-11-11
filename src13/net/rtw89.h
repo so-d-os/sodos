@@ -46,6 +46,9 @@ int rtw_mac_init(void);
 /* Etapa 4: tabelas BB/RF, NCTL, caminhos de RX e o canal (20 MHz); deixa o
  * filtro aberto para beacons de qualquer rede. 0 = radio ligado. */
 int rtw_radio_init(int channel);
+/* So troca o canal (BB/RF e filtro), sem recalibrar: e o que o scan usa
+ * depois do primeiro canal. 0 = radio no canal. */
+int rtw_radio_channel(int channel);
 
 /* RCK e DACK (calibracoes de inicio; rtw_radio_init ja chama). */
 void rtw_rfk_init(void);
