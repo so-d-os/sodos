@@ -32,6 +32,10 @@ struct wifi_cfg {
 int wifi_cfg_load(const char* path, struct wifi_cfg* list, int max);
 /* 0 = ok; <0 parou numa etapa (a mensagem ja saiu na tela). */
 int wifi_start(const char* cfg_path);
+/* Procura redes no ar sem conectar: arg = 0/"" (5 GHz todo), "2g" ou lista
+ * "36,52". Lista os beacons na tela e grava a varredura no WIFI.LOG.
+ * 0 = ok; <0 = sem placa, canais invalidos ou WiFi ja conectado. */
+int wifi_scan(const char* arg);
 void wifi_stop(void);
 void wifi_status(void);
 /* Pinga o gateway por secs segundos anotando o RX no WIFI.LOG. Pings ok. */

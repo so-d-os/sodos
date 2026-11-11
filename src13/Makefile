@@ -484,6 +484,7 @@ grow-disk:
 MC_SRC = mc/mc.h mc/mc.c mc/scr.c mc/panel.c mc/ops.c mc/view.c mc/BUILD.BAT
 TOP_SRC = top/top.h top/top.c top/tela.c top/dados.c top/procs.c top/mapa.c top/video.c top/cpu.c top/BUILD.BAT
 GIT_SRC = git/git.h git/git.c git/http.c git/pack.c git/sha1.c git/zinf.c git/BUILD.BAT git/GETSODOS.BAT
+WIFI_SRC = wifi/wifi.cpp wifi/BUILD.BAT
 
 DISK_FILES = c_compiler/out/*.EXE c_compiler/out/*.DLL c_compiler/out/*.OBJ \
 	c_compiler/out/*.IMP c_compiler/include/*.h c_compiler/include/sys/*.h \
@@ -577,6 +578,10 @@ disk-files: disk.img
 	@for f in $(GIT_SRC); do \
 	  mcopy -o -i $(DISK)@@512 "$$f" "::/SRC/GIT/$$(basename "$$f" | tr 'a-z' 'A-Z')" || exit 1; \
 	done
+	@if ! mdir -i $(DISK)@@512 ::/SRC/WIFI >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SRC/WIFI; fi
+	@for f in $(WIFI_SRC); do \
+	  mcopy -o -i $(DISK)@@512 "$$f" "::/SRC/WIFI/$$(basename "$$f" | tr 'a-z' 'A-Z')" || exit 1; \
+	done
 	@# AGENT.CFG tem a chave da API: fica fora do git, vai so para o disco
 	@if [ -f AGENT.CFG ]; then mcopy -o -i $(DISK)@@512 AGENT.CFG ::/AGENT.CFG || exit 1; fi
 	@sh firefox/sodos/scripts/copy-firefox-disk.sh $(DISK)
@@ -584,6 +589,7 @@ disk-files: disk.img
 	@sh qemu/scripts/copy-qemu-disk.sh $(DISK)
 	@mdir -i $(DISK)@@512 -w ::/
 	@sh tools/usb-docs.sh
+	@sh tools/usb-wifi.sh
 
 # Sobe o QEMU e mostra os comandos para formatar o disco (digite no prompt do QEMU)
 run-format: os.img disk.img disk2.img

@@ -7,6 +7,7 @@ static int usage(void) {
   puts_k("Uso: net [status]          placa e endereco atuais\n");
   puts_k("     net dhcp              pede endereco por DHCP\n");
   puts_k("     net wifi start [cfg]  conecta usando " WIFI_CFG_PATH "\n");
+  puts_k("     net wifi scan [canal] procura redes no ar (auto = 5 GHz todo)\n");
   puts_k("     net wifi stop | status | test | watch [s]\n");
   puts_k("     net wifi drop [placa] simula uma queda (o vigia reconecta)\n");
   puts_k("     net dhcp renew        pede de novo o mesmo IP (INIT-REBOOT)\n");
@@ -55,6 +56,7 @@ static int do_wifi(int argc, char** argv) {
     return 0;
   }
   if (name_eq(argv[2], "start")) return wifi_start(argc > 3 ? argv[3] : 0) == 0 ? 0 : 1;
+  if (name_eq(argv[2], "scan")) return wifi_scan(argc > 3 ? argv[3] : 0) == 0 ? 0 : 1;
   if (name_eq(argv[2], "stop")) {
     wifi_stop();
     return 0;

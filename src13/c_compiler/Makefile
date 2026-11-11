@@ -43,7 +43,8 @@ all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/H
 	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE $(O)/VIDEOCFG.EXE $(O)/IMGBIG.DLL $(O)/AIPANEL.EXE $(O)/MENUCFG.EXE \
 	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
 	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
-	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/TOP.EXE $(O)/COBRA.EXE $(O)/GIT.EXE $(O)/AGENT.EXE $(O)/LLAMA.EXE \
+	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/TOP.EXE $(O)/COBRA.EXE $(O)/WIFI.EXE $(O)/GIT.EXE \
+	$(O)/AGENT.EXE $(O)/LLAMA.EXE \
 	drivers
 
 # GUI.DLL (janela canvas do WIN) e o navegador, em varios arquivos
@@ -201,6 +202,11 @@ $(O)/TOP.EXE: $(TOP_SRC) ../top/top.h $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIB
 # COBRA.EXE (../cobra): jogo da cobrinha em modo texto. BUILD.BAT idem.
 $(O)/COBRA.EXE: ../cobra/cobra.cpp $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
 	$(HCC) -o $@ ../cobra/cobra.cpp
+
+# WIFI.EXE (../wifi): as redes do WIFI.CFG numa tela no padrao do TOP.
+# Modo texto, so KERNEL e LIBC.DLL (sem GUI.DLL). BUILD.BAT idem.
+$(O)/WIFI.EXE: ../wifi/wifi.cpp $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
+	$(HCC) -o $@ ../wifi/wifi.cpp
 
 # GIT.EXE (../git): clone/pull raso por HTTPS, status e log. BUILD.BAT idem.
 GIT_SRC = ../git/git.c ../git/http.c ../git/pack.c ../git/sha1.c ../git/zinf.c

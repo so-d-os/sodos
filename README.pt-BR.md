@@ -786,12 +786,21 @@ Driver próprio da placa RTL8852BE do notebook (`net/rtw89.c`, port do `rtw89` d
 
 ```text
 net wifi start [cfg]     conecta (lê WIFI.CFG, firmware, escuta, autentica, associa, WPA2, DHCP)
+net wifi scan [canal]    varre os canais (auto = 5 GHz todo) e lista os beacons no WIFI.LOG
 net wifi status          etapa, rede, MAC, vigia, quedas e reconexões
 net wifi watch [s]       pinga o gateway a cada 2 s e anota os contadores no log
 net wifi drop [placa]    simula uma queda para testar a reconexão
 net wifi stop            desliga a placa
 net wifi test            autoteste do WPA2 (SHA1, HMAC, AES, CCMP, PBKDF2)
 ```
+
+#### Tela do WiFi (WIFI.EXE)
+
+`WIFI.EXE` (fontes em `U:\SRC\WIFI`, compilados pelo `BUILD.BAT`) tem a cara do TOP e mexe no `WIFI.CFG` sem editor de texto:
+
+- **Redes**: lista as redes na ordem do arquivo (a primeira no ar vence), com canal e BSSID. `Enter` edita SSID, senha, canal, BSSID e IP; `4` cria, `5` apaga, `7`/`8` mudam a prioridade e `3` grava o `WIFI.CFG`.
+- **No ar**: os beacons e o canal que a última varredura gravou no `WIFI.LOG`. `Enter` traz a rede vista para o arquivo — é o jeito rápido de acertar o `ssid=`/`channel=` quando o AP muda de nome ou de canal.
+- **Conectar** (`2`): roda `net wifi start` e mostra a saída na tela, sem sair do programa.
 
 #### Quedas e reconexão automática
 

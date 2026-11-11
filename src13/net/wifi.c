@@ -16,6 +16,7 @@ static uint8_t pmk[32];
 static int stage;  /* ultima etapa que deu certo */
 static uint8_t* fw_buf;
 static uint32_t fw_len;
+static int scan_on;   /* net wifi scan: a lista nao e "do WIFI.CFG" */
 
 static const char* stage_name[] = {
   "parado", "configuracao lida", "autoteste WPA2 e firmware prontos", "placa encontrada",
@@ -313,7 +314,7 @@ static int listen_beacons(uint32_t ms, int ch) {
     puts_k("  nenhum quadro recebido do ar\n");
     return -2;
   }
-  if (found < 0) puts_k("  nenhuma rede do WIFI.CFG neste canal\n");
+  if (found < 0 && !scan_on) puts_k("  nenhuma rede do WIFI.CFG neste canal\n");
   return found;
 }
 
@@ -1321,6 +1322,90 @@ int wifi_start(const char* path) {
   rc = start_steps(path);
   save_log();
   return rc;
+}
+
+/* ---------- scan: procura redes no ar sem conectar ---------- */
+
+/* 5 GHz no Brasil: UNII-1, UNII-2A, UNII-2C e UNII-3. */
+static const uint8_t canais_5g[] = {
+  36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128,
+  132, 136, 140, 144, 149, 153, 157, 161, 165
+};
+
+/* Le a lista de canais do argumento: 0/"" ou "auto" = todo o 5 GHz, "2g" =
+ * 1..13, senao numeros separados por virgula. Devolve quantos canais. */
+static int scan_canais(const char* arg, int* ch, int max) {
+  int n = 0, i;
+  if (arg && *arg && !name_eq(arg, "auto")) {
+    if (name_eq(arg, "2g")) {
+      for (i = 1; i <= 13 && n < max; i++) ch[n++] = i;
+      return n;
+    }
+    while (*arg && n < max) {
+      int v = 0;
+      while (*arg >= '0' && *arg <= '9') v = v * 10 + (*arg++ - '0');
+      if (v >= 1 && v <= 196) ch[n++] = v;
+      if (*arg == ',' || *arg == ' ') arg++;
+      else if (*arg) break;
+    }
+    return n;
+  }
+  for (i = 0; i < (int)sizeof(canais_5g) && n < max; i++) ch[n++] = canais_5g[i];
+  return n;
+}
+
+/* Varre os canais e lista os beacons na tela e no WIFI.LOG, sem autenticar.
+ * O log sai so com esta varredura (rtw_log_clear), entao o WIFI.EXE le a
+ * lista fresca. 0 = ok; <0 = placa, canais ou WiFi ja conectado. */
+int wifi_scan(const char* arg) {
+  int ch[32];
+  int n = scan_canais(arg, ch, 32);
+  int i;
+  if (n <= 0) {
+    puts_k("net wifi scan: canais invalidos (ex.: 36,52 ou auto)\n");
+    return -1;
+  }
+  if (connected) {
+    puts_k("net wifi scan: o WiFi esta conectado; use net wifi stop antes\n");
+    return -1;
+  }
+  if (w_state != W_OFF) wifi_stop();
+
+  /* marca com "*" no log as redes do cfg que aparecerem no ar */
+  nets_n = wifi_cfg_load(WIFI_CFG_PATH, nets, WIFI_CFG_MAX);
+  if (nets_n < 0) nets_n = 0;
+
+  puts_k("WiFi: procurando em ");
+  put_u((uint32_t)n);
+  puts_k(" canal(is); a lista sai no fim\n");
+  rtw_log_clear();
+  if (load_firmware() != 0) {
+    save_log();
+    return -1;
+  }
+  if (chip_up() != 0) {
+    save_log();
+    return -1;
+  }
+  scan_on = 1;
+  for (i = 0; i < n; i++) {
+    puts_k("  canal ");
+    put_u((uint32_t)ch[i]);
+    puts_k("\n");
+    if (rtw_radio_init(ch[i]) != 0) {
+      puts_k("  ligar o radio falhou: ");
+      puts_k(rtw_error());
+      puts_k("\n");
+      continue;
+    }
+    listen_beacons(250, ch[i]);
+  }
+  scan_on = 0;
+  rtw_power_off();
+  stage = 0;
+  save_log();
+  puts_k("  varredura gravada em " WIFI_LOG_PATH "\n");
+  return 0;
 }
 
 void wifi_stop(void) {

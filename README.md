@@ -785,12 +785,21 @@ Own driver for the laptop's RTL8852BE card (`net/rtw89.c`, a port of Linux `rtw8
 
 ```text
 net wifi start [cfg]     connect (reads WIFI.CFG, firmware, listens, authenticates, associates, WPA2, DHCP)
+net wifi scan [channel]  scans the channels (auto = all 5 GHz) and lists the beacons in WIFI.LOG
 net wifi status          stage, network, MAC, watchdog, drops and reconnections
 net wifi watch [s]       pings the gateway every 2 s and logs the counters
 net wifi drop [placa]    simulates a drop to test reconnection
 net wifi stop            turns the card off
 net wifi test            WPA2 self-test (SHA1, HMAC, AES, CCMP, PBKDF2)
 ```
+
+#### WiFi screen (WIFI.EXE)
+
+`WIFI.EXE` (sources in `U:\SRC\WIFI`, built by `BUILD.BAT`) looks like TOP and edits `WIFI.CFG` without a text editor:
+
+- **Redes**: lists the networks in file order (the first one on the air wins), with channel and BSSID. `Enter` edits SSID, password, channel, BSSID and IP; `4` creates, `5` deletes, `7`/`8` change the priority and `3` writes `WIFI.CFG`.
+- **No ar**: the beacons and channel that the last scan wrote to `WIFI.LOG`. `Enter` brings the network seen on air into the file — the quick way to fix `ssid=`/`channel=` when the AP changes its name or channel.
+- **Conectar** (`2`): runs `net wifi start` and shows the output on screen, without leaving the program.
 
 #### Drops and automatic reconnection
 
