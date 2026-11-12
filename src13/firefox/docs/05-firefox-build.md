@@ -810,3 +810,26 @@ implementar as travas `fcntl` na posix-lite.
   uma ordem de grandeza mais lento).
 - **Servicos em segundo plano** (remote settings, IndexedDB) falham e repetem,
   gastando tempo de inicializacao.
+
+### Mouse e teclado lentos com o Firefox aberto
+
+Medido no QEMU/KVM com `-smp 4`: **so o desktop, sem Firefox, ja usa ~92% de um
+vCPU**. O laco do WIN (`win_wm_run`, `video/visual.c`) e um *busy-poll*: nao ha
+`hlt`/espera quando nada acontece. Com o Firefox aberto o total fica em ~97%,
+mas o ponto importante e que **todas as threads cooperativas do browser rodam
+no mesmo vCPU do laco do WIN** e nao ha preempcao. Cada tarefa do browser (JS,
+layout, GC/CC, timers, socket) roda ate ceder; o mouse e o teclado so sao
+lidos nas voltas do laco do WIN. Por isso a entrada fica lenta mesmo com a
+pagina "parada" — um browser ocioso ainda tem timers e threads acordando.
+
+Agravantes:
+
+- **Duas instancias do FIREFOX.EXE** abertas ao mesmo tempo. O lock de perfil
+  do Firefox nao funciona (o `fcntl` do port nao implementa travas), entao a
+  segunda instancia abre o mesmo perfil: dobra as tarefas cooperativas e e a
+  causa direta do `places.sqlite` corrompido. Confira com
+  `GET http://127.0.0.1:8797/win/windows` e feche as extras.
+- Repintura por software em 1920x1080 (cursor + janela) e o AIPANEL rodando.
+- Sem preempcao no kernel: nao ha como interromper uma thread do browser no
+  meio; o conserto estrutural e preempcao (ou um `hlt`/fatiamento no laco do
+  WIN) e as travas `fcntl` para o lock de perfil.
