@@ -201,6 +201,15 @@ char* realpath(const char* path, char* out) {
   if (path[0] && path[1] == ':') {
     strncpy(tmp, path, sizeof(tmp) - 1);
     tmp[sizeof(tmp) - 1] = 0;
+  } else if (path[0] == '/' &&
+             ((path[1] >= 'A' && path[1] <= 'Z') || (path[1] >= 'a' && path[1] <= 'z')) &&
+             (path[2] == '/' || path[2] == 0)) {
+    /* "/D/USER" de programa portado e D:\USER, como no fopen e na posix-lite
+     * (o HOME do Firefox e /D/USER/DEFAULT). Sem isto virava C:\D\USER. */
+    tmp[0] = path[1];
+    tmp[1] = ':';
+    strncpy(tmp + 2, path + 2, sizeof(tmp) - 3);
+    tmp[sizeof(tmp) - 1] = 0;
   } else {
     k_pwd(tmp, (int)sizeof(tmp));
     if (path[0] == '\\' || path[0] == '/') tmp[2] = 0;

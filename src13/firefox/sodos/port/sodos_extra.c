@@ -24,12 +24,17 @@ int prctl(int option, ...) {
 /* Limites da pilha do programa: o crt0 registra o rsp inicial e o linker
  * define __sodos_stack_size (simbolo absoluto) com o tamanho pedido ao
  * loader. O SpiderMonkey usa isto para o limite de recursao. */
+#if !defined(__SIZEOF_POINTER__) || __SIZEOF_POINTER__ != 8
+/* x32: o SODOS.DLL nao enxerga o crt0 do EXE; usa o padrao do kernel. */
+#define __sodos_stack_top ((char*)0)
+#define SO_STACK_SIZE ((size_t)0)
+#elif defined(SODOS_DYNAMIC)
 extern char* __sodos_stack_top;
-#ifdef SODOS_DYNAMIC
 /* libc.so.6: o tamanho vem do kernel (PT_GNU_STACK), lido em libs/dso/start.c. */
 extern unsigned long __sodos_stack_size_v;
 #define SO_STACK_SIZE ((size_t)__sodos_stack_size_v)
 #else
+extern char* __sodos_stack_top;
 extern char __sodos_stack_size[];
 #define SO_STACK_SIZE ((size_t)(uintptr_t)__sodos_stack_size)
 #endif
@@ -70,8 +75,84 @@ int setjmp_mangled(void* b) { return setjmp(*(jmp_buf*)b); }
 #ifndef SODOS_DYNAMIC
 /* Tudo esta no proprio executavel: dlopen(NULL) e o programa, o resto nao existe.
  * Na libc.so.6 o dlopen de verdade fica em libs/dso/dl.c. */
-void* dlopen(const char* f, int m) { (void)m; return f ? 0 : (void*)1; }
-void* dlsym(void* h, const char* n) { (void)h; (void)n; return 0; }
+#include <netdb.h>
+#include <string.h>
+
+/* O NSS abre o softoken e o freebl por dlopen. No FIREFOX.EXE eles estao
+ * ligados dentro (sodos/scripts/link-firefox64.sh): o dlopen devolve um
+ * handle falso e o dlsym, as funcoes de entrada. Weak: outro programa liga
+ * sem eles. */
+/* Do softoken: sdb_measureAccess cria uma pasta temporaria; a auditoria
+ * FIPS escreve no syslog (nao ha). */
+#include <errno.h>
+#include <sys/stat.h>
+#include <stdarg.h>
+extern unsigned k_ms(void);
+char* mkdtemp(char* tpl) {
+  static unsigned seq;
+  size_t n = tpl ? strlen(tpl) : 0;
+  int tries;
+  if (n < 6 || strcmp(tpl + n - 6, "XXXXXX") != 0) {
+    errno = EINVAL;
+    return 0;
+  }
+  for (tries = 0; tries < 100; tries++) {
+    unsigned v = k_ms() * 2654435761u + ++seq;
+    int i;
+    for (i = 0; i < 6; i++) {
+      tpl[n - 6 + i] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[v % 36u];
+      v /= 36u;
+    }
+    if (mkdir(tpl, 0700) == 0) return tpl;
+  }
+  return 0;
+}
+void syslog(int pri, const char* fmt, ...) {
+  (void)pri;
+  (void)fmt;
+}
+
+#define DL_SELF ((void*)1)
+#define DL_SOFTOKN ((void*)2)
+#define DL_FREEBL ((void*)3)
+extern void* NSC_GetFunctionList(void*) __attribute__((weak));
+extern void* FC_GetFunctionList(void*) __attribute__((weak));
+extern void* NSC_GetInterface(void*, void*, void*, unsigned long) __attribute__((weak));
+extern void* FC_GetInterface(void*, void*, void*, unsigned long) __attribute__((weak));
+extern void* NSC_ModuleDBFunc(unsigned long, char*, void*) __attribute__((weak));
+extern const void* FREEBL_GetVector(void) __attribute__((weak));
+
+void* dlopen(const char* f, int m) {
+  (void)m;
+  if (!f) return DL_SELF;
+  if (strstr(f, "softokn3") && NSC_GetFunctionList) return DL_SOFTOKN;
+  if (strstr(f, "freebl") && FREEBL_GetVector) return DL_FREEBL;
+  return 0;
+}
+
+/* O NSPR do Firefox (_PR_INET6_PROBE) procura o getaddrinfo por dlsym; sem
+ * ele cai no gethostbyname_r e todo nome falha. So o que alguem procura por
+ * nome entra aqui. */
+void* dlsym(void* h, const char* n) {
+  if (!n) return 0;
+  if (h == DL_SOFTOKN) {
+    if (!strcmp(n, "NSC_GetFunctionList")) return (void*)NSC_GetFunctionList;
+    if (!strcmp(n, "FC_GetFunctionList")) return (void*)FC_GetFunctionList;
+    if (!strcmp(n, "NSC_GetInterface")) return (void*)NSC_GetInterface;
+    if (!strcmp(n, "FC_GetInterface")) return (void*)FC_GetInterface;
+    if (!strcmp(n, "NSC_ModuleDBFunc")) return (void*)NSC_ModuleDBFunc;
+    return 0;
+  }
+  if (h == DL_FREEBL) {
+    if (!strcmp(n, "FREEBL_GetVector")) return (void*)FREEBL_GetVector;
+    return 0;
+  }
+  if (!strcmp(n, "getaddrinfo")) return (void*)getaddrinfo;
+  if (!strcmp(n, "freeaddrinfo")) return (void*)freeaddrinfo;
+  if (!strcmp(n, "getnameinfo")) return (void*)getnameinfo;
+  if (!strcmp(n, "gai_strerror")) return (void*)gai_strerror;
+  return 0;
+}
 char* dlerror(void) { return (char*)"no dynamic loader"; }
 int dlclose(void* h) { (void)h; return 0; }
 #endif

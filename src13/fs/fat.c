@@ -501,9 +501,124 @@ static int next_comp(const char* path, int* pos, char* out, int max) {
   return i > 0;
 }
 
+/* ---- Cache de pastas ------------------------------------------------------
+ * Cada subpasta lida do disco fica na arena alta (ate a entrada de fim), por
+ * disco, particao, volume e cluster inicial: abrir um arquivo nao relê mais
+ * um cluster (64 KB em PIO) por nivel do caminho. A raiz e a FAT ja ficam em
+ * memoria. O cache acompanha o disco porque toda escrita de pasta passa por
+ * dir_flush (que o atualiza), dir_grow e format_new_dir (que o descartam). */
+#define DC_SLOTS 16384u
+struct dc_ent {
+  uint32_t drive;
+  uint32_t part;
+  uint32_t vol;
+  uint16_t cluster;  /* 0 = slot livre */
+  uint16_t pad;
+  uint32_t full;     /* bytes da cadeia inteira (v->bytes no disco) */
+  uint32_t used;     /* bytes guardados: ate a entrada de fim, inclusive */
+  uint32_t cap;
+  uint8_t* data;     /* 0 = pasta nao guardada (o slot continua dela) */
+};
+static struct dc_ent* dc_tab;
+static int dc_off;   /* 1 = sem memoria para a tabela: so o disco */
+
+extern int um_ready(void);
+extern void* umalloc_owned(uint32_t nbytes, uint32_t owner);
+extern void ufree(void* ptr);
+
+static uint32_t dc_vol(void) {
+  return boot_sector->volume_id ^ boot_sector->total_sectors_32 ^
+         ((uint32_t)boot_sector->total_sectors_16 << 16);
+}
+
+static void dc_copy(void* d, const void* s, uint32_t n) {
+  uint32_t* dw = (uint32_t*)d;
+  const uint32_t* sw = (const uint32_t*)s;
+  uint32_t i;
+  for (i = 0; i < n / 4u; i++) dw[i] = sw[i];
+}
+
+static struct dc_ent* dc_slot(uint16_t cluster, int create) {
+  uint32_t vol, h, i;
+  if (dc_off || cluster < 2) return 0;
+  if (!dc_tab) {
+    if (!um_ready()) return 0;
+    dc_tab = (struct dc_ent*)umalloc_owned(DC_SLOTS * (uint32_t)sizeof(struct dc_ent), 0);
+    if (!dc_tab) {
+      dc_off = 1;
+      return 0;
+    }
+    mem_zero(dc_tab, DC_SLOTS * (uint32_t)sizeof(struct dc_ent));
+  }
+  vol = dc_vol();
+  h = ((uint32_t)cluster * 2654435761u) ^ (current_drive * 0x9E3779B1u) ^ partition_offset ^ vol;
+  for (i = 0; i < DC_SLOTS; i++) {
+    struct dc_ent* e = &dc_tab[(h + i) & (DC_SLOTS - 1u)];
+    if (e->cluster == 0) {
+      if (!create) return 0;
+      e->drive = current_drive;
+      e->part = partition_offset;
+      e->vol = vol;
+      e->cluster = cluster;
+      return e;
+    }
+    if (e->cluster == cluster && e->drive == current_drive && e->part == partition_offset &&
+        e->vol == vol)
+      return e;
+  }
+  return 0; /* tabela cheia: essa pasta fica so no disco */
+}
+
+/* Guarda (ou atualiza) a pasta que esta em v. */
+static void dc_store(const struct dir_view* v) {
+  struct dc_ent* e;
+  uint32_t used, i;
+  if (!v || v->cluster < 2 || !v->ents || v->bytes <= 0) return;
+  e = dc_slot(v->cluster, 1);
+  if (!e) return;
+  used = (uint32_t)v->bytes;
+  for (i = 0; i < (uint32_t)v->count; i++) {
+    if (v->ents[i].name[0] == 0x00) {
+      used = (i + 1u) * 32u;
+      break;
+    }
+  }
+  if (!e->data || e->cap < used) {
+    uint32_t cap = (used + 511u) & ~511u;
+    uint8_t* p = (uint8_t*)umalloc_owned(cap, 0);
+    if (e->data) ufree(e->data);
+    e->data = p;
+    e->cap = p ? cap : 0;
+    if (!p) return;
+  }
+  if ((uint8_t*)v->ents != e->data) dc_copy(e->data, v->ents, used);
+  e->used = used;
+  e->full = (uint32_t)v->bytes;
+}
+
+/* Esquece a pasta que comeca em cluster (o disco mudou por fora do dir_flush). */
+static void dc_drop(uint16_t cluster) {
+  struct dc_ent* e = dc_slot(cluster, 0);
+  if (e && e->data) {
+    ufree(e->data);
+    e->data = 0;
+    e->cap = 0;
+  }
+}
+
+/* Disco formatado (o volume_id do format e sempre o mesmo): esquece tudo. */
+void fat_dcache_reset(void) {
+  uint32_t i;
+  if (!dc_tab) return;
+  for (i = 0; i < DC_SLOTS; i++)
+    if (dc_tab[i].data) ufree(dc_tab[i].data);
+  mem_zero(dc_tab, DC_SLOTS * (uint32_t)sizeof(struct dc_ent));
+}
+
 static int dir_load(uint16_t cluster, struct dir_view* v) {
   uint8_t* dst;
   int guard = 0;
+  struct dc_ent* ce;
   v->cluster = cluster;
   v->bytes = 0;
   v->count = 0;
@@ -517,6 +632,15 @@ static int dir_load(uint16_t cluster, struct dir_view* v) {
   if (bytes_per_sector != 512 || sectors_per_cluster == 0) return -1;
   v->ents = sub_dir;
   dst = (uint8_t*)sub_dir;
+  /* Copia gravavel a partir do cache: o que vem depois do fim e livre (zero). */
+  ce = dc_slot(cluster, 0);
+  if (ce && ce->data && ce->full <= SUBDIR_MAX) {
+    dc_copy(dst, ce->data, ce->used);
+    mem_zero(dst + ce->used, ce->full - ce->used);
+    v->bytes = (int)ce->full;
+    v->count = v->bytes / 32;
+    return 0;
+  }
   while (!cluster_end(cluster) && guard++ < 64) {
     uint32_t lba = first_data_sector + ((uint32_t)(cluster - 2) * sectors_per_cluster);
     /* O cluster inteiro de uma vez: abrir um arquivo percorre uma pasta por
@@ -528,6 +652,38 @@ static int dir_load(uint16_t cluster, struct dir_view* v) {
     cluster = get_next_cluster(cluster);
   }
   v->count = v->bytes / 32;
+  dc_store(v);
+  return 0;
+}
+
+/* So para ler (abrir, stat, listar): a vista aponta direto para o cache,
+ * sem copiar. Quem vai alterar a pasta e dar dir_flush usa dir_load. */
+static int dir_load_ro(uint16_t cluster, struct dir_view* v) {
+  struct dc_ent* ce;
+  if (cluster < 2) return dir_load(cluster, v);
+  ce = dc_slot(cluster, 0);
+  if (!ce || !ce->data) {
+    if (dir_load(cluster, v) != 0) return -1;
+    ce = dc_slot(cluster, 0);
+    if (!ce || !ce->data) return 0; /* sem cache: fica a copia do sub_dir */
+  }
+  v->cluster = cluster;
+  v->ents = (struct fat_dir_entry*)ce->data;
+  v->bytes = (int)ce->used;
+  v->count = v->bytes / 32;
+  return 0;
+}
+
+/* 1 se o setor sec da pasta em v difere do que o cache diz estar no disco
+ * (o cache guarda ate a entrada de fim; o resto e zero). */
+static int dc_sector_differs(const struct dc_ent* ce, const uint8_t* now, uint32_t sec) {
+  uint32_t a = sec * 512u, i;
+  const uint32_t* n = (const uint32_t*)(now + a);
+  for (i = 0; i < 128u; i++) {
+    uint32_t off = a + i * 4u;
+    uint32_t old = off < ce->used ? *(const uint32_t*)(ce->data + off) : 0u;
+    if (n[i] != old) return 1;
+  }
   return 0;
 }
 
@@ -535,10 +691,28 @@ static int dir_flush(struct dir_view* v) {
   uint16_t cluster;
   uint32_t off;
   int guard = 0;
+  struct dc_ent* ce;
+  uint32_t end_sec = 0xFFFFFFFFu;
+  int i;
   if (!v || !v->ents) return -1;
   if (v->cluster < 2) {
     flush_root_dir();
     return 0;
+  }
+  /* Com a pasta no cache (o que esta no disco), so os setores que mudaram vao
+   * para o disco: gravar um arquivo mexe em uma ou duas entradas, e regravar
+   * a pasta inteira (128 setores em PIO, clusters de 64 KB) dominava cada
+   * gravacao. O setor da entrada de fim sempre vai: no disco, depois do fim,
+   * pode haver lixo que o cache supoe zero. */
+  ce = dc_slot(v->cluster, 0);
+  if (ce && (!ce->data || ce->full != (uint32_t)v->bytes)) ce = 0;
+  if (ce) {
+    for (i = 0; i < v->count; i++) {
+      if (v->ents[i].name[0] == 0x00) {
+        end_sec = (uint32_t)i * 32u / 512u;
+        break;
+      }
+    }
   }
   cluster = v->cluster;
   off = 0;
@@ -547,11 +721,40 @@ static int dir_flush(struct dir_view* v) {
     uint32_t n = ((uint32_t)v->bytes - off) / 512u;
     if (n > sectors_per_cluster) n = sectors_per_cluster;
     if (n == 0) break;
-    if (write_run(lba, n, (uint8_t*)v->ents + off) != 0) return -1;
+    if (!ce) {
+      if (write_run(lba, n, (uint8_t*)v->ents + off) != 0) {
+        dc_drop(v->cluster);
+        return -1;
+      }
+    } else {
+      uint32_t s = 0;
+      while (s < n) {
+        uint32_t base = off / 512u;
+        uint32_t r;
+        if (base + s != end_sec && !dc_sector_differs(ce, (const uint8_t*)v->ents, base + s)) {
+          s++;
+          continue;
+        }
+        r = s + 1;
+        while (r < n && (base + r == end_sec ||
+                         dc_sector_differs(ce, (const uint8_t*)v->ents, base + r)))
+          r++;
+        if (write_run(lba + s, r - s, (uint8_t*)v->ents + off + s * 512u) != 0) {
+          dc_drop(v->cluster);
+          return -1;
+        }
+        s = r;
+      }
+    }
     off += n * 512u;
     cluster = get_next_cluster(cluster);
   }
-  return off == (uint32_t)v->bytes ? 0 : -1;
+  if (off != (uint32_t)v->bytes) {
+    dc_drop(v->cluster);
+    return -1;
+  }
+  dc_store(v);
+  return 0;
 }
 
 static uint8_t sum11(const uint8_t* p) {
@@ -693,6 +896,7 @@ static int dir_grow(struct dir_view* v) {
   int guard = 0;
   if (v->cluster < 2 || fat_type != 16) return -1;
   if ((uint32_t)v->bytes + sectors_per_cluster * 512u > SUBDIR_MAX) return -1;
+  dc_drop(v->cluster); /* a cadeia muda; o dir_flush de quem cresceu guarda de novo */
   cluster = v->cluster;
   while (!cluster_end(cluster) && guard++ < 64) {
     uint16_t n = get_next_cluster(cluster);
@@ -947,6 +1151,7 @@ static int format_new_dir(uint16_t self, uint16_t parent_cluster) {
   uint32_t lba = first_data_sector + ((uint32_t)(self - 2) * sectors_per_cluster);
   uint32_t s;
   struct fat_dir_entry dots[2];
+  dc_drop(self); /* o cluster pode ter sido de uma pasta apagada */
   put_dot(&dots[0], 1, self);
   put_dot(&dots[1], 2, parent_cluster < 2 ? 0 : parent_cluster);
   for (s = 0; s < sectors_per_cluster; s++) {
@@ -990,7 +1195,9 @@ static int mkdir_in(struct dir_view* parent, const char* name, uint16_t* outc) {
 
 /* parent fica com o diretorio que contem o arquivo e leaf (FAT_NAME_MAX)
  * com o ultimo nome. create cria as pastas do meio. */
-static int open_parent(const char* path, struct dir_view* parent, char* leaf, int create) {
+/* ro: a pasta final so vai ser lida (vista direto no cache de pastas). */
+static int open_parent_mode(const char* path, struct dir_view* parent, char* leaf, int create,
+                            int ro) {
   static char next[FAT_NAME_MAX];
   int pos = 0;
   int depth = 0;
@@ -1013,10 +1220,14 @@ static int open_parent(const char* path, struct dir_view* parent, char* leaf, in
       child = e->cluster;
       if (child < 2) return -1;
     }
-    if (dir_load(child, parent) != 0) return -1;
+    if ((ro ? dir_load_ro(child, parent) : dir_load(child, parent)) != 0) return -1;
     for (k = 0; next[k]; k++) leaf[k] = next[k];
     leaf[k] = 0;
   }
+}
+
+static int open_parent(const char* path, struct dir_view* parent, char* leaf, int create) {
+  return open_parent_mode(path, parent, leaf, create, 0);
 }
 
 static int lookup_file(const char* filename, uint16_t* cluster, uint32_t* size) {
@@ -1024,7 +1235,7 @@ static int lookup_file(const char* filename, uint16_t* cluster, uint32_t* size) 
   char leaf[FAT_NAME_MAX];
   struct fat_dir_entry* e;
   if (fat_type == 0) return -1;
-  if (open_parent(filename, &parent, leaf, 0) != 0) return -1;
+  if (open_parent_mode(filename, &parent, leaf, 0, 1) != 0) return -1;
   e = dir_find(&parent, leaf, 0, 0);
   if (!e) return -1;
   *cluster = e->cluster;
@@ -1228,10 +1439,10 @@ static int dir_at(const char* path, struct dir_view* v) {
   char leaf[FAT_NAME_MAX];
   struct fat_dir_entry* e;
   if (!path || !path[0]) return dir_load(0, v);
-  if (open_parent(path, &parent, leaf, 0) != 0) return -1;
+  if (open_parent_mode(path, &parent, leaf, 0, 1) != 0) return -1;
   e = dir_find(&parent, leaf, 1, 0);
   if (!e || e->cluster < 2) return -1;
-  return dir_load(e->cluster, v);
+  return dir_load_ro(e->cluster, v);
 }
 
 /* 1 se path e uma pasta. Vazio e a raiz. */
@@ -1292,6 +1503,7 @@ int fat_rmdir(const char* path) {
   if (dir_flush(&parent) != 0) return -1;
   free_chain(cluster);
   flush_fat();
+  dc_drop(cluster);
   return 0;
 }
 
@@ -1370,7 +1582,7 @@ int fat_long_name(const char* path, char* out, int max) {
   char leaf[FAT_NAME_MAX];
   int i;
   if (fat_type == 0 || !out || max < 2) return -1;
-  if (open_parent(path, &parent, leaf, 0) != 0) return -1;
+  if (open_parent_mode(path, &parent, leaf, 0, 1) != 0) return -1;
   if (!dir_find(&parent, leaf, 0, 0) && !dir_find(&parent, leaf, 1, 0)) return -1;
   for (i = 0; found_name[i] && i < max - 1; i++) out[i] = found_name[i];
   out[i] = 0;

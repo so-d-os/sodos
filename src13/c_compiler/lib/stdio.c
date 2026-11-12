@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <so.h>
 
 #define F_READ 1
@@ -14,6 +16,7 @@
 #define K_STDOUT 1
 #define K_STDERR 2
 #define K_MEM 3
+#define K_RANDOM 4
 
 struct __so_file {
   int kind;
@@ -27,6 +30,7 @@ struct __so_file {
   int unget;
   struct __so_file* next;
   char path[FILENAME_MAX];
+  int fd; /* K_RANDOM: fd da posix-lite que gera os bytes em cada read */
 };
 
 struct io_state {
@@ -117,6 +121,7 @@ FILE* fopen_mem(char* data, int size) {
   f->size = (unsigned)size;
   f->cap = (unsigned)size;
   f->unget = -1;
+  f->fd = -1;
   f->next = io.open_list;
   io.open_list = f;
   return f;
@@ -136,6 +141,27 @@ static void dos_path(const char* path, char* out) {
   for (; path[i] && j < FILENAME_MAX - 1; i++) out[j++] = path[i] == '/' ? '\\' : path[i];
   out[j] = 0;
 }
+
+#if __SIZEOF_POINTER__ == 8
+/* "/dev/urandom" e "/dev/random" nao existem no SODOS. No LP64 o fopen cria o
+ * FILE sobre um fd da posix-lite, que gera bytes pseudo-aleatorios em cada
+ * read: e assim que o NSS (fopen + fileno + read) semeia o DRBG. */
+static int dev_random_path(const char* p) {
+  char low[32];
+  int i = 0;
+  if (!p) return 0;
+  if (p[0] && p[1] == ':') p += 2;
+  while (*p == '\\' || *p == '/') p++;
+  for (; p[i] && i < (int)sizeof(low) - 1; i++) {
+    char c = p[i];
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    if (c == '/') c = '\\';
+    low[i] = c;
+  }
+  low[i] = 0;
+  return strcmp(low, "dev\\urandom") == 0 || strcmp(low, "dev\\random") == 0;
+}
+#endif
 
 FILE* fopen(const char* upath, const char* mode) {
   FILE* f;
@@ -165,11 +191,34 @@ FILE* fopen(const char* upath, const char* mode) {
     errno = EINVAL;
     return NULL;
   }
+#if __SIZEOF_POINTER__ == 8
+  if (dev_random_path(path)) {
+    int rfd = open("/dev/urandom", O_RDONLY);
+    if (rfd < 0) {
+      errno = EIO;
+      return NULL;
+    }
+    f = (FILE*)calloc(1, sizeof(FILE));
+    if (!f) {
+      close(rfd);
+      errno = ENOMEM;
+      return NULL;
+    }
+    f->kind = K_RANDOM;
+    f->flags = F_READ;
+    f->fd = rfd;
+    f->unget = -1;
+    f->next = io.open_list;
+    io.open_list = f;
+    return f;
+  }
+#endif
   f = (FILE*)calloc(1, sizeof(FILE));
   if (!f) return NULL;
   f->kind = K_MEM;
   f->flags = fl;
   f->unget = -1;
+  f->fd = -1;
   strcpy(f->path, path);
   if (load) {
     int sz = k_fsize(path);
@@ -206,6 +255,19 @@ int fclose(FILE* f) {
   FILE** pp;
   int rc = 0;
   if (!f) return EOF;
+#if __SIZEOF_POINTER__ == 8
+  if (f->kind == K_RANDOM) {
+    close(f->fd);
+    for (pp = &io.open_list; *pp; pp = &(*pp)->next) {
+      if (*pp == f) {
+        *pp = f->next;
+        break;
+      }
+    }
+    free(f);
+    return 0;
+  }
+#endif
   if (f->kind != K_MEM) {
     fflush(f);
     return 0;
@@ -277,6 +339,16 @@ int fgetc(FILE* f) {
     }
     return (unsigned char)io.inbuf[io.inpos++];
   }
+#if __SIZEOF_POINTER__ == 8
+  if (f->kind == K_RANDOM) {
+    unsigned char c;
+    if (read(f->fd, &c, 1) != 1) {
+      f->eof = 1;
+      return EOF;
+    }
+    return c;
+  }
+#endif
   if (f->kind != K_MEM || !(f->flags & F_READ)) {
     f->err = 1;
     return EOF;
@@ -317,6 +389,16 @@ size_t fread(void* buf, size_t sz, size_t n, FILE* f) {
   size_t got = 0;
   char* d = (char*)buf;
   if (!f || total == 0) return 0;
+#if __SIZEOF_POINTER__ == 8
+  if (f->kind == K_RANDOM) {
+    ssize_t n = read(f->fd, d, total);
+    if (n <= 0) {
+      f->eof = 1;
+      return 0;
+    }
+    return (size_t)n / sz;
+  }
+#endif
   if (f->kind == K_MEM && f->unget < 0) {
     unsigned avail;
     if (!(f->flags & F_READ)) {
@@ -535,4 +617,13 @@ FILE* fdopen(int fd, const char* mode) { (void)fd; (void)mode; errno = EINVAL; r
 int fseeko(FILE* f, off_t off, int whence) { return fseek(f, (long)off, whence); }
 off_t ftello(FILE* f) { return (off_t)ftell(f); }
 
-int fileno(FILE* f) { (void)f; return -1; }
+int fileno(FILE* f) {
+  if (!f) return -1;
+  if (f->kind == K_STDIN) return 0;
+  if (f->kind == K_STDOUT) return 1;
+  if (f->kind == K_STDERR) return 2;
+#if __SIZEOF_POINTER__ == 8
+  if (f->kind == K_RANDOM) return f->fd;
+#endif
+  return -1;
+}

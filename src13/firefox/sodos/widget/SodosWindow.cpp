@@ -277,6 +277,15 @@ void PumpEvents() {
       continue;
     }
     RefPtr<nsIWidget> kungFuDeathGrip(sMain);
+    // O WIN so entrega eventos a janela que o usuario esta usando: ela tem de
+    // ser a ativa do Gecko, ou o foco (e o teclado) fica com a ultima janela
+    // de topo mostrada, que nao e esta. Nao faz nada se ja for a ativa.
+    if (type == GUI_EV_DOWN || type == GUI_EV_KEY) {
+      sMain->SetFocus(nsIWidget::Raise::Yes, mozilla::dom::CallerType::System);
+      if (!sMain) {
+        continue;
+      }
+    }
     switch (type) {
       case GUI_EV_DOWN:
         sMouse = LayoutDeviceIntPoint(ev[1], ev[2]);

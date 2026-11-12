@@ -602,6 +602,8 @@ disk-files: disk.img
 	@if ! mdir -i $(DISK)@@512 ::/NET >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/NET; fi
 	@mcopy -o -i $(DISK)@@512 wifi/WIFI.SIM ::/NET/WIFI.SIM || exit 1
 	@sh firefox/sodos/scripts/copy-firefox-disk.sh $(DISK)
+	@# Atalho no desktop: o FFLAUNCH.EXE pede ao WIN o D:\FIREFOX\FIREFOX.EXE.
+	@mcopy -o -i $(DISK)@@512 c_compiler/out/FFLAUNCH.EXE ::/USER/DEFAULT/DESKTOP/FIREFOX.EXE
 	@# QEMU (qemu/): QEMU.EXE, firmware, guests de teste e .BAT em D:\UTILS\QEMU
 	@sh qemu/scripts/copy-qemu-disk.sh $(DISK)
 	@mdir -i $(DISK)@@512 -w ::/

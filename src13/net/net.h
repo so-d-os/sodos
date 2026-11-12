@@ -27,6 +27,19 @@ int net_tcp_recv(void* data, int cap);
 int net_tcp_pending(void);
 void net_tcp_close(void);
 
+/* Soquetes TCP nao bloqueantes, varios ao mesmo tempo (IPs em ordem de host).
+ * connect: 1..16 ou < 0. poll: bits 1 ler, 2 escrever, 4 erro, 8 conectado.
+ * send: aceitos, -1 EAGAIN, -2 erro. recv: lidos, 0 fim, -1 EAGAIN, -2 erro.
+ * err: errno do Linux. pump: retransmite e anda as filas (o poll ja chama). */
+int net_sock_connect(uint32_t ip, int port, uint32_t owner);
+int net_sock_poll(int h);
+int net_sock_err(int h);
+int net_sock_send(int h, const void* data, int len);
+int net_sock_recv(int h, void* data, int cap, int peek);
+void net_sock_close(int h);
+int net_sock_info(int h, uint32_t* lip, int* lport, uint32_t* rip, int* rport);
+void net_sock_pump(void);
+
 /* Drena a placa. O servidor HTTP anda junto. */
 void net_poll(void);
 /* Segunda conexao: escuta. Nao usa o cliente do navegador. */

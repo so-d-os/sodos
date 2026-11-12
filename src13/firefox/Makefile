@@ -35,10 +35,11 @@ $(OBJ)/%.o: sodos/port/%.c sodos/port/sodos_internal.h sodos/include/sodos.h
 	@mkdir -p $(OBJ)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OUT)/SODOS.DLL: $(PORT_OBJ) $(C)/out/LIBCX.DLL $(C)/out/KERNEL.IMP
+# POSIXX.DLL: stat e sodos_stdin_ready (libs/posix-lite).
+$(OUT)/SODOS.DLL: $(PORT_OBJ) $(C)/out/POSIXX.DLL $(C)/out/LIBCX.DLL $(C)/out/KERNEL.IMP
 	@mkdir -p $(OUT)
 	$(LINK) /dll /exportall /out:$@ $(PORT_OBJ) \
-	  $(C)/out/LIBCX.DLL $(C)/out/KERNEL.IMP
+	  $(C)/out/POSIXX.DLL $(C)/out/LIBCX.DLL $(C)/out/KERNEL.IMP
 
 $(OBJ)/t_fboot.o: sodos/tests/t_fboot.c sodos/include/sodos.h
 	@mkdir -p $(OBJ)
@@ -46,11 +47,11 @@ $(OBJ)/t_fboot.o: sodos/tests/t_fboot.c sodos/include/sodos.h
 
 $(OUT)/FBOOT.EXE: $(OBJ)/t_fboot.o $(OUT)/SODOS.DLL
 	$(LINK) /out:$@ $(C)/build/x_crt0.o $(OBJ)/t_fboot.o \
-	  $(OUT)/SODOS.DLL $(C)/out/LIBCX.DLL $(C)/out/KERNEL.IMP
+	  $(OUT)/SODOS.DLL $(C)/out/POSIXX.DLL $(C)/out/LIBCX.DLL $(C)/out/KERNEL.IMP
 
 test: $(OUT)/FBOOT.EXE
 	@mkdir -p $(RUN)
-	cp $(OUT)/FBOOT.EXE $(OUT)/SODOS.DLL $(C)/out/LIBCX.DLL $(C)/out/KERNEL.IMP $(RUN)/
+	cp $(OUT)/FBOOT.EXE $(OUT)/SODOS.DLL $(C)/out/POSIXX.DLL $(C)/out/LIBCX.DLL $(C)/out/KERNEL.IMP $(RUN)/
 	$(C)/build/soxrun -C $(RUN) FBOOT.EXE $(ARGS)
 
 # ---- NSPR 4.35 (M1) -------------------------------------------------------

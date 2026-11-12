@@ -248,8 +248,13 @@ int pthread_cond_timedwait(pthread_cond_t* c, pthread_mutex_t* m,
   q_push(&c->head, &c->tail, &cw);
 
   while (!cw.signaled) {
-    uint64_t now = (uint64_t)time(NULL) * 1000ULL + (sodos__ms() % 1000ULL);
-    uint64_t left;
+    /* O prazo vem do relogio que o chamador usou: o Gecko pede CLOCK_MONOTONIC
+     * (o pthread_condattr_setclock daqui nao guarda o relogio), o NSPR a hora
+     * de parede. Um prazo pequeno (antes de 2001) so pode ser o monotonico. */
+    struct timespec ts;
+    uint64_t now, left;
+    clock_gettime(abstime->tv_sec < 1000000000L ? CLOCK_MONOTONIC : CLOCK_REALTIME, &ts);
+    now = (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)(ts.tv_nsec / 1000000L);
     if (now >= deadline) {
       cond_unlink(c, &cw);
       cond_reacquire(m, saved);

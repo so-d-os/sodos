@@ -716,3 +716,41 @@ Um teste separado confirmou TLS com valor inicial e por thread. `HELLO64.EXE` na
 (`__sodos_ctors` no `crt0_64`), o que nao vem destas mudancas. Os demais programas do
 SODOS nao foram retestados; as mudancas de layout em `struct stat`, `struct tm` e
 `siginfo_t` valem so para LP64.
+
+## Estado em 2026-11-12: google.com
+
+O `FIREFOX.EXE` abre em `D:\FIREFOX`, inicializa o XPCOM, cria o perfil,
+inicializa o NSS e carrega **https://www.google.com/** na janela do WIN
+(HTTP/2 + TLS 1.3; a pagina pinta em ~2 min no QEMU/TCG). Captura:
+[firefox-google-sodos.png](img/firefox-google-sodos.png).
+
+O que faltava e como ficou:
+
+1. **NSS `-8023` (`SEC_ERROR_PKCS11_DEVICE_ERROR`)**. O softoken e o freebl
+   estao ligados no executavel, mas o `FREEBL_GetVector` do freeblpriv3
+   chamava `FREEBL_InitStubs`, que procura `libnspr4.so`/`libnssutil3.so` por
+   `dlopen` (o port nao tem) e devolvia NULL -> `BL_Init` falhava.
+   - `patches/0011`: no SODOS o `stubs.c` nao define mais `FREEBL_NO_WEAK`;
+     os simbolos fracos resolvem direto no executavel. O ramo fraco nao tinha
+     `STUB_SAFE_CALL5` (usado por `NSS_SecureSelect`) e ganhou a macro.
+   - `link-firefox64.sh` poe a lista do **freeblpriv3 antes** das listas do
+     NSS: o `loader.o` (que define `BL_Init` e vem em `libssl3`/`softokn3`)
+     vencia o `blinit.o`, e o vetor do freebl apontava para o proprio loader,
+     recursando ate resetar a maquina.
+2. **Prefs padrao**. `sodos/prefs/sodos.js` vai para
+   `D:\FIREFOX\browser\defaults\preferences\sodos.js`: essa pasta e lida
+   **depois** de `defaults/pref`, entao sobrepoe o `firefox.js` do upstream
+   (que fixa `browser.startup.homepage=about:home`). `defaults/pref` e lido
+   antes e perde.
+3. **`fopen("/dev/urandom")` no LP64** (`c_compiler/lib/stdio.c`): o freebl
+   usa `open()` (que a posix-lite ja atende), mas o `fopen` sintetico cobre
+   componentes que leiam o dispositivo por stdio. `fileno()` agora devolve o
+   fd real para esse FILE.
+4. **Teste**: `make grow-disk` + `make disk-files` (copia as prefs), QEMU com
+   `-netdev user,hostfwd=tcp::8797-:8797`, `GET /win/launch?path=D:\FIREFOX\FIREFOX.EXE`
+   e `GET /win/printscreen.png` depois de ~2 min. Sem `MOZ_LOG` o download
+   termina bem mais rapido: o log por leitura do `nsHttp` domina o tempo.
+
+Ainda lento e sem e10s: o download de 452 KB e o layout rodam no processo
+unico e no escalonador cooperativo; os servicos em segundo plano (detector de
+portal, `location.services.mozilla.com`) tambem aparecem no log.

@@ -1,0 +1,52 @@
+Fase M4: freebl estatico dentro do FIREFOX.EXE (NSS inicializa).
+O freeblpriv3 e compilado com -DFREEBL_NO_DEPEND e stubs.c define
+FREEBL_NO_WEAK: FREEBL_InitStubs procura libnspr4.so/libnssutil3.so por
+dlopen, que o port nao tem, entao FREEBL_GetVector devolvia NULL e o
+softoken parava em SEC_ERROR_PKCS11_DEVICE_ERROR (-8023) no BL_Init.
+Com __SODOS__ desliga-se o FREEBL_NO_WEAK: o stubs.c usa os simbolos fracos
+do link estatico (NSPR e NSSUTIL ja estao no executavel). O ramo fraco
+tambem nao tinha STUB_SAFE_CALL5 (usado por NSS_SecureSelect); entra aqui.
+Aplicar depois do 0010. O link (sodos/scripts/link-firefox64.sh) poe a
+lista do freebl antes das do NSS para o blinit.o vencer o loader.o.
+
+Teste: https://www.google.com/ carrega no FIREFOX.EXE.
+
+--- a/security/nss/lib/freebl/stubs.c
++++ b/security/nss/lib/freebl/stubs.c
+@@ -41,13 +41,19 @@
+ 
+ /* Android API < 21 doesn't define RTLD_NOLOAD */
+ #ifndef RTLD_NOLOAD
+ #define RTLD_NOLOAD 0
+ #endif
+ 
++/* SODOS: o NSPR e o NSSUTIL estao ligados no proprio FIREFOX.EXE e nao ha
++ * dlopen de verdade; o caminho FREEBL_NO_WEAK procuraria libnspr4.so e
++ * libnssutil3.so e falharia. Com os simbolos fracos, as chamadas resolvem
++ * direto no executavel. */
++#ifndef __SODOS__
+ #define FREEBL_NO_WEAK 1
++#endif
+ 
+ #define WEAK __attribute__((weak))
+ 
+ #ifdef FREEBL_NO_WEAK
+ 
+ /*
+@@ -127,12 +133,16 @@
+     if (fn) {                           \
+         return fn(a1, a2, a3);          \
+     }
+ #define STUB_SAFE_CALL4(fn, a1, a2, a3, a4) \
+     if (fn) {                               \
+         return fn(a1, a2, a3, a4);          \
++    }
++#define STUB_SAFE_CALL5(fn, a1, a2, a3, a4, a5) \
++    if (fn) {                                   \
++        return fn(a1, a2, a3, a4, a5);          \
+     }
+ #define STUB_SAFE_CALL6(fn, a1, a2, a3, a4, a5, a6) \
+     if (fn) {                                       \
+         return fn(a1, a2, a3, a4, a5, a6);          \
+     }
+ #endif

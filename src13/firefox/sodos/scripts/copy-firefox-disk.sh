@@ -6,6 +6,7 @@
 # Vai a arvore solta de dist/bin (chrome, modules, res, ...), com nomes longos:
 # o build nao empacota o omni.ja. Os links simbolicos de dist/bin sao seguidos.
 DISK=$(realpath "$1")  # o script muda de diretorio
+S=$(cd "$(dirname "$0")/../.." && pwd)
 O=${FIREFOX_OBJ:-$HOME/ffsrc/obj-browser64}
 BIN=$O/dist/bin
 EXE=$BIN/FIREFOX.EXE
@@ -38,6 +39,15 @@ n=$(find "$T" -type f | wc -l)
 if [ "$n" -gt 0 ]; then
   (cd "$T" && mcopy -s -o -Q -i "$DISK@@512" * ::/FIREFOX/) || exit 1
 fi
+# As prefs do port vao em browser/defaults/preferences: essa pasta e lida
+# DEPOIS de defaults/pref, entao sobrepoe o firefox.js do upstream (que fixa
+# browser.startup.homepage=about:home, por exemplo). Os arquivos entram em
+# ordem alfabetica: "sodos.js" vem depois de "firefox.js".
+mkdir_d FIREFOX/BROWSER/DEFAULTS
+mkdir_d FIREFOX/BROWSER/DEFAULTS/PREFERENCES
+mcopy -o -i "$DISK@@512" "$S/sodos/prefs/sodos.js" \
+  ::/FIREFOX/BROWSER/DEFAULTS/PREFERENCES/SODOS.JS || exit 1
 echo "Firefox: FIREFOX.EXE e $n arquivos de recursos em D:\\FIREFOX."
+echo "Firefox: preferencias padrao em D:\\FIREFOX\\browser\\defaults\\preferences\\sodos.js."
 [ "$n" -lt 5000 ] && echo "Firefox: poucos recursos; rode build-browser64.sh build misc e depois build libs."
 exit 0

@@ -13,14 +13,25 @@
 #if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
 extern int sodos_pipe_is(int fd);
 extern short sodos_pipe_poll(int fd, short events);
+extern int sodos_sock_is(int fd);                    /* sodos_sock.c */
+extern short sodos_sock_poll(int fd, short events);
 #else
 #define sodos_pipe_is(fd) 0
 #define sodos_pipe_poll(fd, events) 0
+#define sodos_sock_is(fd) 0
+#define sodos_sock_poll(fd, events) 0
 #endif
 
 extern int __so_stdin_raw;           /* c_compiler/lib/misc.c */
 extern void sodos_coop_yield(void);  /* sodos_thread.c */
 extern int sodos_stdin_ready(void);   /* libs/posix-lite/posix.c */
+
+int poll(struct pollfd* fds, nfds_t nfds, int timeout_ms);
+
+/* O _MD_POLL do NSPR no Linux (patch 0010). */
+int __syscall_poll(struct pollfd* fds, unsigned long nfds, int timeout_ms) {
+  return poll(fds, (nfds_t)nfds, timeout_ms);
+}
 
 int poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
   uint64_t start = sodos_now_ms();
@@ -57,6 +68,9 @@ int poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
         if ((fds[i].events & POLLOUT) && fd > 0) ev |= POLLOUT;
         if ((fds[i].events & POLLIN) && fd == 0 && __so_stdin_raw && sodos_stdin_ready() > 0)
           ev |= POLLIN;
+      } else if (sodos_sock_is(fd)) {
+        /* k_sock_poll tambem le a placa e anda as retransmissoes */
+        ev = sodos_sock_poll(fd, fds[i].events);
       } else if (sodos_pipe_is(fd)) {
         ev = sodos_pipe_poll(fd, fds[i].events);
       } else {

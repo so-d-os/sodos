@@ -308,4 +308,13 @@ int sodos_shm_unmap(void* addr, size_t len) {
   return 0;
 }
 
+#else /* x32: sem shm_open; sodos_mmap.c cai no caminho normal. */
+
+#include <stddef.h>
+#include <sys/types.h>
+
+int sodos_shm_is(int fd) { (void)fd; return 0; }
+void* sodos_shm_map(int fd, size_t len, off_t off) { (void)fd; (void)len; (void)off; return (void*)-1; }
+int sodos_shm_unmap(void* addr, size_t len) { (void)addr; (void)len; return 0; }
+
 #endif

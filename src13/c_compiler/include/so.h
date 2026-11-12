@@ -233,6 +233,21 @@ int k_tcp_recv(void* data, int cap);
 int k_net_pending(void);
 void k_tcp_close(void);
 
+/* rede: varios soquetes TCP nao bloqueantes (IP em ordem de host).
+ * k_sock_connect: 1..16 ou < 0 (a conexao segue sozinha; veja k_sock_poll).
+ * k_sock_poll: bits 1 ler, 2 escrever, 4 erro, 8 conectado.
+ * k_sock_send: aceitos, -1 EAGAIN, -2 erro. k_sock_recv: lidos, 0 fim,
+ * -1 EAGAIN, -2 erro (peek != 0 nao consome). k_sock_err: errno do Linux.
+ * k_net_pump: le a placa e anda retransmissoes e filas. */
+int k_sock_connect(unsigned ip, int port);
+int k_sock_poll(int h);
+int k_sock_err(int h);
+int k_sock_send(int h, const void* data, int len);
+int k_sock_recv(int h, void* data, int cap, int peek);
+void k_sock_close(int h);
+int k_sock_info(int h, unsigned* lip, int* lport, unsigned* rip, int* rport);
+void k_net_pump(void);
+
 /* janela canvas: so funciona num .EXE aberto pelo WIN. Cores 0xRRGGBB.
  * Use gui.h (GUI.DLL), que tem as constantes de eventos e teclas. */
 int k_gui_open(const char* title);

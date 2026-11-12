@@ -18,6 +18,12 @@ void free(void* p);
 void k_exit(int code);
 /* libsodos (sodos_linux_abi.c): enderecos da pilha na serial, para simbolizar. */
 void sodos_dump_stack(void) __attribute__((weak));
+#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+#define SODOS_DUMP_STACK() do { if (sodos_dump_stack) sodos_dump_stack(); } while (0)
+#else
+/* x32: nao existe, e o link do SODOS recusa call relativo para weak nao resolvido. */
+#define SODOS_DUMP_STACK() ((void)0)
+#endif
 
 #ifndef SODOS_DYNAMIC
 /* Na libc++.so.1 nada disto entra: os construtores quem roda e a libc.so.6
@@ -87,7 +93,7 @@ void __cxa_guard_abort(uint64_t* guard) {
 }
 
 void __cxa_pure_virtual(void) {
-  if (sodos_dump_stack) sodos_dump_stack();
+  SODOS_DUMP_STACK();
   k_exit(4);
   for (;;) {}
 }
@@ -107,7 +113,7 @@ char* __cxa_demangle(const char*, char*, size_t*, int* status) {
 
 #ifndef SODOS_DYNAMIC
 void __stack_chk_fail(void) {
-  if (sodos_dump_stack) sodos_dump_stack();
+  SODOS_DUMP_STACK();
   k_exit(5);
   for (;;) {}
 }

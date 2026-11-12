@@ -72,7 +72,15 @@ static void put_ring(struct ring* r) {
 }
 
 /* sodos_shm.c: a posix-lite manda para ca tudo o que e >= 2000. */
-#define SHM_FD(fd) ((fd) >= 3000)
+#define SHM_FD(fd) ((fd) >= 3000 && (fd) < 4000)
+/* sodos_sock.c: soquetes TCP em 4000.. */
+#define SOCK_FD(fd) ((fd) >= 4000)
+int sodos_sock_close(int fd);
+ssize_t sodos_sock_read(int fd, void* buf, size_t n);
+ssize_t sodos_sock_write(int fd, const void* buf, size_t n);
+ssize_t sodos_sock_recv(int fd, void* buf, size_t n, int flags);
+ssize_t sodos_sock_send(int fd, const void* buf, size_t n, int flags);
+int sodos_sock_fcntl(int fd, int cmd, long arg);
 int sodos_shm_close(int fd);
 int dup(int fd);
 ssize_t sodos_shm_read(int fd, void* buf, size_t n);
@@ -82,6 +90,7 @@ int sodos_pipe_close(int fd) {
   struct pipe_end* e = get_end(fd);
   struct ring* rx;
   struct ring* tx;
+  if (SOCK_FD(fd)) return sodos_sock_close(fd);
   if (SHM_FD(fd)) return sodos_shm_close(fd);
   if (!e) {
     errno = EBADF;
@@ -101,6 +110,7 @@ ssize_t sodos_pipe_read(int fd, void* buf, size_t n) {
   struct pipe_end* e = get_end(fd);
   struct ring* r;
   size_t i;
+  if (SOCK_FD(fd)) return sodos_sock_read(fd, buf, n);
   if (SHM_FD(fd)) return sodos_shm_read(fd, buf, n);
   if (!e || !e->rx) {
     errno = EBADF;
@@ -132,6 +142,7 @@ ssize_t sodos_pipe_write(int fd, const void* buf, size_t n) {
   struct pipe_end* e = get_end(fd);
   struct ring* r;
   size_t done = 0;
+  if (SOCK_FD(fd)) return sodos_sock_write(fd, buf, n);
   if (SHM_FD(fd)) return sodos_shm_write(fd, buf, n);
   if (!e || !e->tx) {
     errno = EBADF;
@@ -244,6 +255,7 @@ int fcntl(int fd, int cmd, ...) {
   va_start(ap, cmd);
   arg = va_arg(ap, long);
   va_end(ap);
+  if (SOCK_FD(fd)) return sodos_sock_fcntl(fd, cmd, arg);
   switch (cmd) {
     case F_GETFD:
     case F_SETFD:
@@ -278,7 +290,7 @@ int fcntl(int fd, int cmd, ...) {
 /* ---- operacoes de soquete sobre o par ------------------------------------ */
 
 ssize_t recv(int fd, void* buf, size_t n, int flags) {
-  (void)flags;
+  if (SOCK_FD(fd)) return sodos_sock_recv(fd, buf, n, flags);
   if (!get_end(fd)) {
     errno = ENOSYS;
     return -1;
@@ -287,7 +299,7 @@ ssize_t recv(int fd, void* buf, size_t n, int flags) {
 }
 
 ssize_t send(int fd, const void* buf, size_t n, int flags) {
-  (void)flags;
+  if (SOCK_FD(fd)) return sodos_sock_send(fd, buf, n, flags);
   if (!get_end(fd)) {
     errno = ENOSYS;
     return -1;

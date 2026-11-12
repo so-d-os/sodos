@@ -20,6 +20,12 @@ add_list() {
   echo >> "$T/objs.list"  # as listas nao terminam em quebra de linha
 }
 
+# O freebl vem PRIMEIRO: varias listas do NSS trazem o loader.o (libssl3 e
+# softoken) e o freeblpriv3 traz o blinit.o; as duas definem BL_Init. Com o
+# loader na frente, o vetor do freebl apontava para o proprio loader e BL_Init
+# chamava a si mesmo em recursao ate derrubar a maquina. Vale a primeira
+# definicao (--allow-multiple-definition), entao o freebl real abre a lista.
+add_list security/nss/lib/freebl/freebl_freeblpriv3/libfreeblpriv3_so.list
 add_list browser/app/firefox.list
 add_list toolkit/library/build/libxul_so.list
 add_list js/src/build/libjs_static_a.list
@@ -32,6 +38,9 @@ add_list security/nss/lib/nss/nss_nss3/libnss3_so.list
 add_list security/nss/lib/ssl/ssl_ssl3/libssl3_so.list
 add_list security/nss/lib/smime/smime_smime3/libsmime3_so.list
 add_list security/nss/lib/util/util_nssutil3/libnssutil3_so.list
+# softoken: o NSS o abre por dlopen; aqui entra no executavel e o dlopen/dlsym
+# do port (sodos/port/sodos_extra.c) devolve as funcoes de entrada.
+add_list security/nss/lib/softoken/softoken_softokn3/libsoftokn3_so.list
 for d in config/external/nspr/pr config/external/nspr/ds config/external/nspr/libc; do
   find "$O/$d" -maxdepth 1 -name '*.o' >> "$T/objs.list"
 done

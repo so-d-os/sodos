@@ -284,8 +284,22 @@ int clock_gettime(clockid_t id, struct timespec* ts) {
     ts->tv_nsec = (long)(ms % 1000) * 1000000L;
     return 0;
   }
-  ts->tv_sec = time(0);
-  ts->tv_nsec = (long)(ms % 1000) * 1000000L;
+  {
+    /* Hora de parede = hora do RTC no primeiro pedido + o contador de ms.
+     * Antes eram os segundos do RTC com os ms do contador (ms % 1000): os dois
+     * nao viram o segundo juntos e o relogio voltava ate 1 s, o que fazia uma
+     * espera de 10 ms (pthread_cond_timedwait) durar 1 s. */
+    static long long base_ms;
+    static int have_base;
+    long long now;
+    if (!have_base) {
+      base_ms = (long long)time(0) * 1000LL - (long long)ms;
+      have_base = 1;
+    }
+    now = base_ms + (long long)ms;
+    ts->tv_sec = (time_t)(now / 1000LL);
+    ts->tv_nsec = (long)(now % 1000LL) * 1000000L;
+  }
   return 0;
 }
 

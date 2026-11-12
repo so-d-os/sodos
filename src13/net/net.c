@@ -28,6 +28,12 @@
 #define ST_EST       2
 #define ST_CLOSEWAIT 3
 
+/* errno do Linux, para os soquetes k_sock_* (o kernel nao tem errno.h) */
+#define ECONNRESET_K   104
+#define ENOTCONN_K     107
+#define ETIMEDOUT_K    110
+#define ECONNREFUSED_K 111
+
 static inline void outb(uint16_t port, uint8_t v) {
   __asm__ volatile ("outb %0, %1" : : "a"(v), "Nd"(port));
 }
@@ -1642,6 +1648,9 @@ int net_srv_send(const void* data, int len) {
   return net_srv_write(data, len, 1);
 }
 
+static int ks_rx(uint32_t src, const uint8_t* seg, int len);
+static int ks_busy(void);
+
 static void ip_rx(const uint8_t* p, int len) {
   int ihl;
   int total;
@@ -1669,7 +1678,9 @@ static void ip_rx(const uint8_t* p, int len) {
   plen = total - ihl;
   if (p[9] == 17) udp_rx(src, p + ihl, plen);
   else if (p[9] == 6) {
-    tcp_input(src, p + ihl, plen);
+    /* Os soquetes k_sock_* tem TCB proprio; o resto vai para o TCB da API
+     * bloqueante (as globais tcp_*), que so vale fora de um soquete. */
+    if (!ks_rx(src, p + ihl, plen) && !ks_busy()) tcp_input(src, p + ihl, plen);
     srv_input(src, p + ihl, plen);
   }
   else if (p[9] == 1) icmp_rx(src, p[8], p + ihl, plen);
@@ -2021,6 +2032,334 @@ int net_tcp_pending(void) {
     return 0;
   }
   return -1;
+}
+
+/* ---- Soquetes TCP nao bloqueantes (k_sock_*) ------------------------------
+ * Varias conexoes ao mesmo tempo para programas com laco de eventos (o
+ * Firefox). Cada soquete guarda o proprio TCB (as mesmas variaveis tcp_* da
+ * API bloqueante) e o carrega nas globais so enquanto trabalha nele: a logica
+ * TCP (tcp_raw, tcp_input, tcp_rx_segment) e a mesma. Nada aqui espera: o
+ * envio vai para uma fila, um segmento por vez (como a API bloqueante), e a
+ * retransmissao anda em net_sock_pump, que quem faz poll chama. */
+#define KS_MAX 16
+#define KS_RX (128 * 1024)   /* potencia de 2: o anel usa mascara */
+#define KS_TXQ (64 * 1024)
+
+struct tcb_ctx {
+  int state, rst, fin;
+  uint16_t sport, dport;
+  uint32_t dip, snd_una, snd_nxt, rcv_nxt;
+  uint8_t* rx;
+  int rx_cap, rx_head, rx_len, ws_ok, sack_ok;
+  uint32_t ooo_s[TCP_OOO_MAX], ooo_e[TCP_OOO_MAX];
+  int ooo_n, fin_pending;
+  uint32_t fin_seq;
+  uint8_t last[1000];
+  int last_len;
+  uint8_t last_flags;
+  uint32_t last_seq;
+};
+
+struct ksock {
+  int used;
+  uint32_t owner;      /* programa que abriu (mod_current_pid) */
+  struct tcb_ctx t;
+  uint8_t* rxbuf;      /* KS_RX, fica com o slot entre usos */
+  uint8_t* txq;        /* KS_TXQ */
+  int txq_off, txq_len;
+  uint32_t tx_ms;      /* ultimo envio que espera ACK */
+  int tries;
+  int err;             /* errno do Linux, 0 = nenhum */
+  int est;             /* ja chegou a ESTABLISHED */
+  int closing, fin_sent;
+  uint32_t close_ms;
+};
+
+static struct ksock ks[KS_MAX];
+static struct tcb_ctx ks_legacy;   /* o TCB da API bloqueante enquanto um soquete ocupa as globais */
+static struct ksock* ks_cur;
+
+static void ctx_save(struct tcb_ctx* c) {
+  int i;
+  c->state = tcp_state; c->rst = tcp_rst; c->fin = tcp_fin;
+  c->sport = tcp_sport; c->dport = tcp_dport; c->dip = tcp_dip;
+  c->snd_una = tcp_snd_una; c->snd_nxt = tcp_snd_nxt; c->rcv_nxt = tcp_rcv_nxt;
+  c->rx = tcp_rx; c->rx_cap = tcp_rx_cap; c->rx_head = tcp_rx_head; c->rx_len = tcp_rx_len;
+  c->ws_ok = tcp_ws_ok; c->sack_ok = tcp_sack_ok;
+  for (i = 0; i < TCP_OOO_MAX; i++) { c->ooo_s[i] = tcp_ooo_s[i]; c->ooo_e[i] = tcp_ooo_e[i]; }
+  c->ooo_n = tcp_ooo_n; c->fin_pending = tcp_fin_pending; c->fin_seq = tcp_fin_seq;
+  c->last_len = tcp_last_len; c->last_flags = tcp_last_flags; c->last_seq = tcp_last_seq;
+  mem_copy(c->last, tcp_last, tcp_last_len > 0 ? tcp_last_len : 0);
+}
+
+static void ctx_load(const struct tcb_ctx* c) {
+  int i;
+  tcp_state = c->state; tcp_rst = c->rst; tcp_fin = c->fin;
+  tcp_sport = c->sport; tcp_dport = c->dport; tcp_dip = c->dip;
+  tcp_snd_una = c->snd_una; tcp_snd_nxt = c->snd_nxt; tcp_rcv_nxt = c->rcv_nxt;
+  tcp_rx = c->rx; tcp_rx_cap = c->rx_cap; tcp_rx_head = c->rx_head; tcp_rx_len = c->rx_len;
+  tcp_ws_ok = c->ws_ok; tcp_sack_ok = c->sack_ok;
+  for (i = 0; i < TCP_OOO_MAX; i++) { tcp_ooo_s[i] = c->ooo_s[i]; tcp_ooo_e[i] = c->ooo_e[i]; }
+  tcp_ooo_n = c->ooo_n; tcp_fin_pending = c->fin_pending; tcp_fin_seq = c->fin_seq;
+  tcp_last_len = c->last_len; tcp_last_flags = c->last_flags; tcp_last_seq = c->last_seq;
+  mem_copy(tcp_last, c->last, c->last_len > 0 ? c->last_len : 0);
+}
+
+static void ks_enter(struct ksock* s) {
+  ctx_save(&ks_legacy);
+  ctx_load(&s->t);
+  ks_cur = s;
+}
+
+static void ks_leave(struct ksock* s) {
+  ctx_save(&s->t);
+  ctx_load(&ks_legacy);
+  ks_cur = 0;
+}
+
+static int ks_busy(void) { return ks_cur != 0; }
+
+/* Segmento TCP de um soquete: 1 se tratou (ou descartou). Com um soquete nas
+ * globais (o ARP de um envio pode ler a placa no meio), so ele recebe: os
+ * outros perdem o segmento e o par manda de novo. */
+static int ks_rx(uint32_t src, const uint8_t* seg, int len) {
+  uint16_t sport, dport;
+  int i;
+  if (len < 20) return 0;
+  sport = rd16(seg);
+  dport = rd16(seg + 2);
+  if (ks_cur) {
+    if (dport == tcp_sport && sport == tcp_dport && src == tcp_dip) {
+      tcp_input(src, seg, len);
+      return 1;
+    }
+    for (i = 0; i < KS_MAX; i++)
+      if (ks[i].used && ks[i].t.sport == dport && ks[i].t.dport == sport && ks[i].t.dip == src)
+        return 1;
+    return 0;
+  }
+  for (i = 0; i < KS_MAX; i++) {
+    struct ksock* s = &ks[i];
+    if (!s->used || s->t.state == ST_CLOSED) continue;
+    if (s->t.sport != dport || s->t.dport != sport || s->t.dip != src) continue;
+    ks_enter(s);
+    tcp_input(src, seg, len);
+    ks_leave(s);
+    return 1;
+  }
+  return 0;
+}
+
+static struct ksock* ks_get(int h) {
+  if (h < 1 || h > KS_MAX || !ks[h - 1].used) return 0;
+  return &ks[h - 1];
+}
+
+static void ks_free(struct ksock* s) {
+  s->used = 0;
+  s->t.state = ST_CLOSED;
+}
+
+/* Retransmissao, fila de envio e fechamento de todos os soquetes. */
+void net_sock_pump(void) {
+  int i;
+  if (!nic_ok || ks_cur) return;
+  nic_poll();
+  time_poll();
+  for (i = 0; i < KS_MAX; i++) {
+    struct ksock* s = &ks[i];
+    int done = 0;
+    if (!s->used) continue;
+    ks_enter(s);
+    if (tcp_state == ST_EST || tcp_state == ST_CLOSEWAIT) s->est = 1;
+    if (!s->err && tcp_rst) s->err = s->est ? ECONNRESET_K : ECONNREFUSED_K;
+    if (!s->err && tcp_state == ST_CLOSED && !s->est) s->err = ECONNREFUSED_K;
+    if (!s->err && (tcp_state == ST_SYN_SENT ||
+                    ((tcp_state == ST_EST || tcp_state == ST_CLOSEWAIT) &&
+                     tcp_snd_una != tcp_snd_nxt))) {
+      uint32_t rto = 300u << (s->tries > 4 ? 4 : s->tries);
+      if (ms_now - s->tx_ms >= rto) {
+        if (++s->tries > 8) {
+          s->err = ETIMEDOUT_K;
+          tcp_state = ST_CLOSED;
+        } else {
+          tcp_retransmit();
+          s->tx_ms = ms_now;
+        }
+      }
+    } else if (!s->err && (tcp_state == ST_EST || tcp_state == ST_CLOSEWAIT)) {
+      s->tries = 0;
+      if (s->txq_len > 0) {
+        int n = s->txq_len > 1000 ? 1000 : s->txq_len;
+        tcp_raw(0x18, s->txq + s->txq_off, n, tcp_snd_nxt, 1);
+        s->txq_off += n;
+        s->txq_len -= n;
+        if (s->txq_len == 0) s->txq_off = 0;
+        s->tx_ms = ms_now;
+      } else if (s->closing && !s->fin_sent) {
+        tcp_raw(0x11, 0, 0, tcp_snd_nxt, 1);
+        s->fin_sent = 1;
+        s->tx_ms = ms_now;
+      }
+    }
+    if (s->closing)
+      done = s->err || tcp_state == ST_CLOSED ||
+             (s->fin_sent && tcp_snd_una == tcp_snd_nxt) || ms_now - s->close_ms > 5000u;
+    ks_leave(s);
+    if (done) ks_free(s);
+  }
+}
+
+/* Comeca a conexao e volta na hora: 1..KS_MAX, ou < 0. */
+int net_sock_connect(uint32_t ip, int port, uint32_t owner) {
+  struct ksock* s = 0;
+  uint8_t mac[6];
+  uint32_t hop;
+  int i;
+  if (!nic_ok || ks_cur || port <= 0 || port > 65535) return -1;
+  for (i = 0; i < KS_MAX && !s; i++)
+    if (!ks[i].used) s = &ks[i];
+  /* Sem vaga: o que sobrou de um programa que ja saiu volta para a lista. */
+  for (i = 0; i < KS_MAX && !s; i++)
+    if (ks[i].owner != owner) {
+      ks_free(&ks[i]);
+      s = &ks[i];
+    }
+  if (!s) return -2;
+  if (!s->rxbuf) s->rxbuf = (uint8_t*)umalloc_owned(KS_RX, 0);
+  if (!s->txq) s->txq = (uint8_t*)umalloc_owned(KS_TXQ, 0);
+  if (!s->rxbuf || !s->txq) return -2;
+  /* O ARP antes de carregar o TCB: ele le a placa e entrega segmentos. */
+  hop = ((ip ^ our_ip) & our_mask) ? our_gw : ip;
+  if (arp_resolve(hop, mac) < 0) return -3;
+  s->used = 1;
+  s->owner = owner;
+  s->txq_off = s->txq_len = 0;
+  s->tries = 0;
+  s->err = 0;
+  s->est = 0;
+  s->closing = s->fin_sent = 0;
+  mem_set(&s->t, 0, (int)sizeof(s->t));
+  ks_enter(s);
+  tcp_rst = 0;
+  tcp_fin = 0;
+  tcp_rx = s->rxbuf;
+  tcp_rx_cap = KS_RX;
+  tcp_rx_len = 0;
+  tcp_rx_head = 0;
+  tcp_ooo_n = 0;
+  tcp_ws_ok = 0;
+  tcp_sack_ok = 0;
+  tcp_fin_pending = 0;
+  tcp_last_len = 0;
+  tcp_dip = ip;
+  tcp_dport = (uint16_t)port;
+  tcp_sport = tcp_new_port();
+  tcp_snd_una = tcp_new_isn();
+  tcp_snd_nxt = tcp_snd_una;
+  tcp_rcv_nxt = 0;
+  tcp_state = ST_SYN_SENT;
+  tcp_raw(0x02, 0, 0, tcp_snd_nxt, 1);
+  s->tx_ms = ms_now;
+  ks_leave(s);
+  return (int)(s - ks) + 1;
+}
+
+/* Bits: 1 ha o que ler (dado, fim ou erro), 2 cabe envio, 4 erro, 8 conectado. */
+int net_sock_poll(int h) {
+  struct ksock* s;
+  int st, m = 0;
+  net_sock_pump();
+  s = ks_get(h);
+  if (!s) return 1 | 4;
+  if (s->err) return 1 | 2 | 4;
+  st = s->t.state;
+  if (st == ST_EST || st == ST_CLOSEWAIT || s->est) m |= 8;
+  if (s->t.rx_len > 0 || s->t.fin || st == ST_CLOSEWAIT || (s->est && st == ST_CLOSED)) m |= 1;
+  if ((st == ST_EST || st == ST_CLOSEWAIT) && !s->closing && s->txq_len < KS_TXQ) m |= 2;
+  return m;
+}
+
+int net_sock_err(int h) {
+  struct ksock* s = ks_get(h);
+  return s ? s->err : ENOTCONN_K;
+}
+
+/* Bytes aceitos na fila; -1 = cheia/conectando (EAGAIN), -2 = erro. */
+int net_sock_send(int h, const void* data, int len) {
+  struct ksock* s;
+  int room;
+  net_sock_pump();
+  s = ks_get(h);
+  if (!s || s->err || s->closing) return -2;
+  if (s->t.state == ST_SYN_SENT) return -1;
+  if (s->t.state != ST_EST && s->t.state != ST_CLOSEWAIT) return -2;
+  if (len <= 0) return 0;
+  if (s->txq_off > 0) {
+    mem_copy(s->txq, s->txq + s->txq_off, s->txq_len);
+    s->txq_off = 0;
+  }
+  room = KS_TXQ - s->txq_len;
+  if (room <= 0) return -1;
+  if (len > room) len = room;
+  mem_copy(s->txq + s->txq_len, data, len);
+  s->txq_len += len;
+  net_sock_pump();
+  return len;
+}
+
+/* Bytes lidos; 0 = fim do fluxo; -1 = nada ainda (EAGAIN); -2 = erro.
+ * peek: le sem consumir (MSG_PEEK). */
+int net_sock_recv(int h, void* data, int cap, int peek) {
+  struct ksock* s;
+  uint8_t* dst = (uint8_t*)data;
+  int n, i;
+  net_sock_pump();
+  s = ks_get(h);
+  if (!s || cap <= 0) return -2;
+  if (s->t.rx_len > 0) {
+    int mask, was_small;
+    ks_enter(s);
+    mask = tcp_rx_cap - 1;
+    was_small = tcp_rx_cap - tcp_rx_len < 2 * 1460;
+    n = tcp_rx_len < cap ? tcp_rx_len : cap;
+    for (i = 0; i < n; i++) dst[i] = tcp_rx[(tcp_rx_head + i) & mask];
+    if (!peek) {
+      tcp_rx_head = (tcp_rx_head + n) & mask;
+      tcp_rx_len -= n;
+      if (was_small && (tcp_state == ST_EST || tcp_state == ST_CLOSEWAIT)) tcp_ack();
+    }
+    ks_leave(s);
+    return n;
+  }
+  if (s->err) return s->err == ECONNRESET_K && s->t.fin ? 0 : -2;
+  if (s->t.fin || s->t.state == ST_CLOSEWAIT || (s->est && s->t.state == ST_CLOSED)) return 0;
+  return -1;
+}
+
+/* Fecha: o que esta na fila ainda vai, depois o FIN; o slot volta sozinho. */
+void net_sock_close(int h) {
+  struct ksock* s = ks_get(h);
+  if (!s) return;
+  if (s->err || !s->est || s->t.state == ST_CLOSED) {
+    ks_free(s);
+    return;
+  }
+  time_poll();
+  s->closing = 1;
+  s->close_ms = ms_now;
+  net_sock_pump();
+}
+
+/* Enderecos do soquete (ordem de host): local e remoto. */
+int net_sock_info(int h, uint32_t* lip, int* lport, uint32_t* rip, int* rport) {
+  struct ksock* s = ks_get(h);
+  if (!s) return -1;
+  if (lip) *lip = our_ip;
+  if (lport) *lport = s->t.sport;
+  if (rip) *rip = s->t.dip;
+  if (rport) *rport = s->t.dport;
+  return 0;
 }
 
 void net_init(void) {

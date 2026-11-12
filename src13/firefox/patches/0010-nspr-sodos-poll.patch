@@ -1,0 +1,19 @@
+Fase M4: NSPR com poll() de verdade no SODOS.
+Sem __GLIBC__ o NSPR emulava poll() com select(), que so ve fds < 1024: os
+pipes (2000..) e soquetes (4000..) do port ficavam de fora e a thread de
+soquetes do Firefox parava no PR_Poll. Aplicar depois do 0009.
+Teste: o Firefox abre http://example.com (D:\FIREFOX\defaults\pref).
+
+--- a/nsprpub/pr/include/md/_linux.h
++++ b/nsprpub/pr/include/md/_linux.h
+@@ -324,7 +324,9 @@
+ #endif /* __arm__ */
+ 
+ #define USE_SETJMP
+-#if (defined(__GLIBC__) && __GLIBC__ >= 2) || defined(ANDROID)
++/* SODOS: poll() de verdade (o select so ve fds < 1024 e os pipes e
++ * soquetes do port comecam em 2000). */
++#if (defined(__GLIBC__) && __GLIBC__ >= 2) || defined(ANDROID) || defined(__SODOS__)
+ #define _PR_POLL_AVAILABLE
+ #endif
+ #undef _PR_USE_POLL

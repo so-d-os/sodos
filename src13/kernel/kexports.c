@@ -468,6 +468,20 @@ static void k_tcp_close(void) {
   tcp_pid = 0;
 }
 
+/* Soquetes nao bloqueantes (varias conexoes): ver net.h. */
+static int k_sock_connect(uint32_t ip, int port) {
+  return net_sock_connect(ip, port, mod_current_pid());
+}
+static int k_sock_poll(int h) { return net_sock_poll(h); }
+static int k_sock_err(int h) { return net_sock_err(h); }
+static int k_sock_send(int h, const void* d, int n) { return net_sock_send(h, d, n); }
+static int k_sock_recv(int h, void* d, int cap, int peek) { return net_sock_recv(h, d, cap, peek); }
+static void k_sock_close(int h) { net_sock_close(h); }
+static int k_sock_info(int h, uint32_t* lip, int* lport, uint32_t* rip, int* rport) {
+  return net_sock_info(h, lip, lport, rip, rport);
+}
+static void k_net_pump(void) { net_sock_pump(); }
+
 void kexp_release_pid(uint32_t pid) {
   if (!pid) return;
   /* Ao fundo, a fonte e o piscar na tela sao de outra tela: nao mexe. */
@@ -880,6 +894,14 @@ static const struct kexp table[] = {
   EXP(k_tcp_recv),
   EXP(k_net_pending),
   EXP(k_tcp_close),
+  EXP(k_sock_connect),
+  EXP(k_sock_poll),
+  EXP(k_sock_err),
+  EXP(k_sock_send),
+  EXP(k_sock_recv),
+  EXP(k_sock_close),
+  EXP(k_sock_info),
+  EXP(k_net_pump),
   EXP(k_gui_open),
   EXP(k_gui_close),
   EXP(k_gui_title),

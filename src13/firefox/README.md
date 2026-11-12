@@ -16,6 +16,11 @@ O código do Firefox em si não é copiado para o repositório; `setup.sh` baixa
 > **Estado em 2026-11-06:** o browser compila inteiro e liga em um executavel:
 > `FIREFOX.EXE --version` roda no SODOS. Ainda nao ha janela, perfil nem navegacao.
 > Ver [docs/05-firefox-build.md](docs/05-firefox-build.md#build-do-browser-estado-em-2026-11-06).
+>
+> **Estado em 2026-11-12:** o FIREFOX.EXE abre a janela no WIN, cria o perfil,
+> inicializa o NSS e **carrega https://www.google.com/** (HTTP/2 + TLS 1.3).
+> Ver [docs/05-firefox-build.md](docs/05-firefox-build.md#estado-em-2026-11-12-googlecom)
+> e a captura [docs/img/firefox-google-sodos.png](docs/img/firefox-google-sodos.png).
 
 ## O que já funciona
 

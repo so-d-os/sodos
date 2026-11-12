@@ -44,7 +44,7 @@ all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/H
 	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
 	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
 	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/TOP.EXE $(O)/COBRA.EXE $(O)/WIFI.EXE $(O)/GIT.EXE \
-	$(O)/AGENT.EXE $(O)/LLAMA.EXE \
+	$(O)/AGENT.EXE $(O)/LLAMA.EXE $(O)/FFLAUNCH.EXE \
 	drivers
 
 # GUI.DLL (janela canvas do WIN) e o navegador, em varios arquivos
@@ -107,6 +107,10 @@ $(O)/VIDEOCFG.EXE: ../utils/video_cfg.c $(O)/GUI.DLL $(O)/IMGBIG.DLL include/wid
 # Prompt de comando. A janela preta e desenhada pelo WIN; o EXE abre outra copia.
 $(O)/COMMAND.EXE: examples/command.c $(HCC) $(HEADERS)
 	$(HCC) -o $@ examples/command.c
+
+# Atalho do Firefox no desktop (vai como FIREFOX.EXE): abre D:\FIREFOX\FIREFOX.EXE.
+$(O)/FFLAUNCH.EXE: ../utils/fflaunch.c $(HCC) $(HEADERS)
+	$(HCC) -o $@ ../utils/fflaunch.c
 
 $(O)/HTTPD.EXE: examples/httpd.c $(HCC) $(HEADERS)
 	$(HCC) -o $@ examples/httpd.c

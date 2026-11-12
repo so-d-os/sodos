@@ -473,7 +473,7 @@ ENOSYS_STUB(chroot, const char* a)
 ENOSYS_STUB(dirfd, void* a)
 ENOSYS_STUB(futimens, int a, const void* b)
 ENOSYS_STUB(utimensat, int a, const char* b, const void* c, int d)
-ENOSYS_STUB(ioctl, int a, unsigned long b, ...)
+/* ioctl: sodos_sock.c */
 ENOSYS_STUB(pause, void)
 ENOSYS_STUB(killpg, int a, int b)
 ENOSYS_STUB(setgid, unsigned a)
@@ -482,16 +482,16 @@ ENOSYS_STUB(setgroups, size_t a, const unsigned* b)
 ENOSYS_STUB(setpgid, int a, int b)
 ENOSYS_STUB(setsid, void)
 ENOSYS_STUB(waitid, int a, unsigned b, void* c, int d)
-ENOSYS_STUB(socket, int a, int b, int c)
+/* socket: sodos_sock.c */
 ENOSYS_STUB(bind, int a, const void* b, unsigned c)
-ENOSYS_STUB(connect, int a, const void* b, unsigned c)
+/* connect: sodos_sock.c */
 ENOSYS_STUB(listen, int a, int b)
 ENOSYS_STUB(accept4, int a, void* b, unsigned* c, int d)
-ENOSYS_STUB(getpeername, int a, void* b, unsigned* c)
-ENOSYS_STUB(getsockname, int a, void* b, unsigned* c)
-ENOSYS_STUB(getsockopt, int a, int b, int c, void* d, unsigned* e)
-ENOSYS_STUB(setsockopt, int a, int b, int c, const void* d, unsigned e)
-ENOSYS_STUB(shutdown, int a, int b)
+/* getpeername: sodos_sock.c */
+/* getsockname: sodos_sock.c */
+/* getsockopt: sodos_sock.c */
+/* setsockopt: sodos_sock.c */
+/* shutdown: sodos_sock.c */
 #ifndef SODOS_DYNAMIC /* na libc.so.6: libs/dso/dl.c */
 ENOSYS_STUB(dl_iterate_phdr, void* a, void* b)
 #endif
@@ -528,20 +528,7 @@ void* fdopendir(int fd) {
   return NULL;
 }
 
-/* getaddrinfo: EAI_SYSTEM, com errno. */
-int getaddrinfo(const char* a, const char* b, const void* c, void** d) {
-  (void)a;
-  (void)b;
-  (void)c;
-  (void)d;
-  errno = ENOSYS;
-  return -11;
-}
-void freeaddrinfo(void* a) { (void)a; }
-const char* gai_strerror(int e) {
-  (void)e;
-  return "getaddrinfo indisponivel no SODOS";
-}
+/* getaddrinfo, freeaddrinfo e gai_strerror: sodos_sock.c */
 
 /* posix_spawn devolve o erro, sem usar errno. */
 #define SPAWN_NOP(name, ...) \
@@ -768,11 +755,7 @@ const char* inet_ntop(int af, const void* src, char* dst, unsigned n) {
 }
 
 int h_errno;
-void* gethostbyname(const char* name) {
-  (void)name;
-  h_errno = 3; /* NO_RECOVERY */
-  return NULL;
-}
+/* gethostbyname e gethostbyname*_r: sodos_sock.c */
 void* gethostbyaddr(const void* a, unsigned n, int t) {
   (void)a;
   (void)n;
@@ -1046,5 +1029,24 @@ const struct {
   int features;
   size_t fdinfo_len;
 } epollops = {"epoll", no_epoll_init, NULL, NULL, NULL, NULL, 0, 0, 0};
+
+#else /* x32 (SODOS.DLL legado) */
+
+/* O shim x32 so precisa de pread e htonl daqui: sodos_mmap.c e
+ * sodos_posix_extra.c os usam e a LIBCX/POSIXX x32 nao os exportam. */
+#include <stdint.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+ssize_t pread(int fd, void* buf, size_t n, off_t off) {
+  off_t cur = lseek(fd, 0, SEEK_CUR);
+  ssize_t r;
+  if (cur < 0 || lseek(fd, off, SEEK_SET) < 0) return -1;
+  r = read(fd, buf, n);
+  lseek(fd, cur, SEEK_SET);
+  return r;
+}
+
+uint32_t htonl(uint32_t v) { return __builtin_bswap32(v); }
 
 #endif /* LP64 */

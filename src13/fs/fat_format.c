@@ -35,6 +35,8 @@ struct fat_boot_sector {
 #define MIN_PART_SECTORS  (1u + 32u)  /* reserved + root_dir mínimo */
 
 // Formata partição em FAT16 (usa format_buf para I/O; não usa pilha)
+void fat_dcache_reset(void);
+
 int format_fat16(uint32_t drive, uint32_t lba_start, uint32_t total_sectors, const char* volume_label) {
   uint16_t bytes_per_sector = 512;
   uint8_t sectors_per_cluster = 1;
@@ -128,5 +130,7 @@ int format_fat16(uint32_t drive, uint32_t lba_start, uint32_t total_sectors, con
       return -3;
   }
 
+  /* O volume_id e sempre o mesmo: o cache de pastas do fat.c nao perceberia. */
+  fat_dcache_reset();
   return 0;
 }
