@@ -1,0 +1,103 @@
+Fase M5: janela do Gecko no desktop do SODOS e navegacao sem processos filhos.
+O HeadlessWidget de topo entrega o quadro composto e recebe os eventos de
+widget/sodos/SodosWindow.cpp; sem e10s nenhuma carga pede troca de processo.
+Aplicar depois do 0008. Teste: abrir D:\FIREFOX\FIREFOX.EXE pelo WIN.
+
+--- a/netwerk/ipc/DocumentLoadListener.cpp
++++ b/netwerk/ipc/DocumentLoadListener.cpp
+@@ -4,6 +4,8 @@
+ 
+ #include "DocumentLoadListener.h"
+ 
++#include "nsIXULRuntime.h"  // BrowserTabsRemoteAutostart
++
+ #include "imgLoader.h"
+ #include "NeckoCommon.h"
+ #include "nsLoadGroup.h"
+@@ -1965,6 +1967,14 @@
+            this, GetChannelCreationURI()->GetSpecOrDefault().get(),
+            GetLoadingBrowsingContext()->Top()->BrowserId()));
+ 
++  // Sem e10s (SODOS: nao ha processos filhos) tudo carrega no processo
++  // principal; pedir a troca deixaria a carga esperando um filho para sempre.
++  if (!BrowserTabsRemoteAutostart()) {
++    MOZ_LOG(gProcessIsolationLog, LogLevel::Warning,
++            ("Process Switch Abort: e10s disabled"));
++    return false;
++  }
++
+   // Check if we should handle this load in a different tab or window.
+   int32_t where = GetWhereToOpen(mChannel, mIsDocumentLoad);
+   bool switchToNewTab = where != nsIBrowserDOMWindow::OPEN_CURRENTWINDOW;
+--- a/widget/headless/HeadlessWidget.cpp
++++ b/widget/headless/HeadlessWidget.cpp
+@@ -1,6 +1,9 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++#ifdef MOZ_WIDGET_SODOS
++#  include "../sodos/SodosWindow.h"
++#endif
+ #include "InputData.h"
+ #include "HeadlessWidget.h"
+ #include "ErrorList.h"
+@@ -96,6 +99,9 @@
+   }
+   LOG(("HeadlessWidget::Destroy [%p]\n", (void*)this));
+   mDestroyed = true;
++#ifdef MOZ_WIDGET_SODOS
++  widget::sodos::WindowDestroyed(this);
++#endif
+ 
+   if (sActiveWindows) {
+     int32_t index = sActiveWindows->IndexOf(this);
+@@ -176,6 +182,12 @@
+   }
+ 
+   ApplySizeModeSideEffects();
++
++#ifdef MOZ_WIDGET_SODOS
++  // A primeira janela de topo vira a janela do programa no WIN.
++  widget::sodos::WindowShown(this, aState,
++                             mWindowType == WindowType::TopLevel);
++#endif
+ }
+ 
+ bool HeadlessWidget::IsVisible() const { return mVisible; }
+@@ -236,6 +248,18 @@
+   return nsIWidget::GetWindowRenderer();
+ }
+ 
++#ifdef MOZ_WIDGET_SODOS
++already_AddRefed<gfx::DrawTarget> HeadlessWidget::StartRemoteDrawingInRegion(
++    const LayoutDeviceIntRegion& aInvalidRegion) {
++  return widget::sodos::StartDrawing(this);
++}
++
++void HeadlessWidget::EndRemoteDrawingInRegion(
++    gfx::DrawTarget* aDrawTarget, const LayoutDeviceIntRegion& aInvalidRegion) {
++  widget::sodos::EndDrawing(this, aInvalidRegion);
++}
++#endif
++
+ void HeadlessWidget::SetCompositorWidgetDelegate(
+     CompositorWidgetDelegate* delegate) {
+   if (delegate) {
+--- a/widget/headless/HeadlessWidget.h
++++ b/widget/headless/HeadlessWidget.h
+@@ -85,6 +85,15 @@
+ 
+   WindowRenderer* GetWindowRenderer() override;
+ 
++#ifdef MOZ_WIDGET_SODOS
++  // No SODOS o quadro composto vai para a janela do WIN (widget/sodos).
++  already_AddRefed<gfx::DrawTarget> StartRemoteDrawingInRegion(
++      const LayoutDeviceIntRegion& aInvalidRegion) override;
++  void EndRemoteDrawingInRegion(
++      gfx::DrawTarget* aDrawTarget,
++      const LayoutDeviceIntRegion& aInvalidRegion) override;
++#endif
++
+   void SetCompositorWidgetDelegate(CompositorWidgetDelegate* delegate) override;
+ 
+   [[nodiscard]] nsresult AttachNativeKeyEvent(
