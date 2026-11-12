@@ -122,11 +122,29 @@ FILE* fopen_mem(char* data, int size) {
   return f;
 }
 
-FILE* fopen(const char* path, const char* mode) {
+/* Caminho no estilo Unix de programa portado: "/D/SODOS/X.TTF" vira
+ * "D:\\SODOS\\X.TTF", como na posix-lite. */
+static void dos_path(const char* path, char* out) {
+  int i = 0, j = 0;
+  if (path[0] == '/' && ((path[1] >= 'A' && path[1] <= 'Z') || (path[1] >= 'a' && path[1] <= 'z')) &&
+      (path[2] == '/' || path[2] == 0)) {
+    out[j++] = path[1];
+    out[j++] = ':';
+    if (!path[2]) out[j++] = '\\';
+    i = 2;
+  }
+  for (; path[i] && j < FILENAME_MAX - 1; i++) out[j++] = path[i] == '/' ? '\\' : path[i];
+  out[j] = 0;
+}
+
+FILE* fopen(const char* upath, const char* mode) {
   FILE* f;
   int fl = 0;
   int load = 0;
-  if (!path || !mode) {
+  char path[FILENAME_MAX];
+  if (upath && strlen(upath) < FILENAME_MAX) dos_path(upath, path);
+  else upath = NULL;
+  if (!upath || !mode) {
     errno = EINVAL;
     return NULL;
   }

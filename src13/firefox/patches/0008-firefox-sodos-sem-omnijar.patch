@@ -1,0 +1,43 @@
+Fase M5: partida do browser sem omni.ja (arvore solta em dist/bin) e sem
+processos de conteudo.
+Aplicar depois do 0007. Teste: FIREFOX.EXE --screenshot /D/SHOT.PNG file:///D/TESTE.HTM
+no SODOS grava o PNG.
+
+--- a/browser/components/shell/HeadlessShell.sys.mjs
++++ b/browser/components/shell/HeadlessShell.sys.mjs
+@@ -89,13 +89,20 @@
+ 
+     let doc = windowlessBrowser.document;
+     let browser = doc.createXULElement("browser");
+-    browser.setAttribute("remote", "true");
++    // Sem processos de conteudo (SODOS, MOZ_FORCE_DISABLE_E10S) a pagina roda
++    // no processo principal; um browser remoto esperaria um filho para sempre.
++    let e10s = Services.appinfo.browserTabsRemoteAutostart;
++    if (e10s) {
++      browser.setAttribute("remote", "true");
++    }
+     browser.setAttribute("type", "content");
+     browser.style.width = `${contentWidth}px`;
+     browser.style.minWidth = `${contentWidth}px`;
+     browser.style.height = `${contentHeight}px`;
+     browser.style.minHeight = `${contentHeight}px`;
+-    browser.setAttribute("maychangeremoteness", "true");
++    if (e10s) {
++      browser.setAttribute("maychangeremoteness", "true");
++    }
+     // Suppress initial about:blank so it can't race any explicit load below.
+     browser.setAttribute("nodefaultsrc", "true");
+     doc.documentElement.appendChild(browser);
+--- a/gfx/thebes/gfxFT2FontList.cpp
++++ b/gfx/thebes/gfxFT2FontList.cpp
+@@ -1231,6 +1231,10 @@
+ }
+ 
+ void gfxFT2FontList::FindFontsInOmnijar(FontNameCache* aCache) {
++  if (RefPtr<nsZipArchive> gre = Omnijar::GetReader(Omnijar::Type::GRE); !gre) {
++    // Sem omni.ja (arvore solta em dist/bin): nao ha fontes empacotadas.
++    return;
++  }
+   bool jarChanged = false;
+ 
+   mozilla::scache::StartupCache* cache =

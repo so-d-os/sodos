@@ -112,6 +112,90 @@ static void make_ready(struct sodos_thread* t) {
   q_push(&run_h, &run_t, t);
 }
 
+/* ---------- depuracao: pilhas de todas as threads ----------
+ * SODOS_STACKS_AT=<segundos> no ambiente (ou no arquivo D:\\SODOS\\STACKS.AT):
+ * passado esse tempo desde a primeira
+ * thread, lista na serial os enderecos de codigo da pilha de cada thread (para
+ * simbolizar com o ELF). Serve para ver onde um programa portado ficou parado. */
+#define ALL_MAX 256
+static struct sodos_thread* all_thr[ALL_MAX];
+static uint64_t stacks_at;
+extern char __executable_start[] __attribute__((weak));
+extern char etext[] __attribute__((weak));
+
+static void all_add(struct sodos_thread* t) {
+  int i;
+  for (i = 0; i < ALL_MAX; i++) {
+    if (!all_thr[i]) {
+      all_thr[i] = t;
+      return;
+    }
+  }
+}
+
+static void all_del(struct sodos_thread* t) {
+  int i;
+  for (i = 0; i < ALL_MAX; i++)
+    if (all_thr[i] == t) all_thr[i] = NULL;
+}
+
+static void ser_txt(const char* s) {
+  for (; *s; s++) __asm__ volatile("outb %0, %1" :: "a"((unsigned char)*s), "d"((unsigned short)0x3F8));
+}
+
+static void ser_hex(uint64_t v) {
+  char b[17];
+  int i;
+  for (i = 0; i < 16; i++) b[i] = "0123456789abcdef"[(v >> (60 - 4 * i)) & 15];
+  b[16] = 0;
+  ser_txt(b + 7);
+}
+
+static void dump_one(struct sodos_thread* t, uintptr_t* sp, uintptr_t* end) {
+  int shown = 0;
+  ser_txt("[thr] ");
+  ser_hex((uintptr_t)t);
+  ser_txt(t == cur ? " atual" : t->state == ST_SLEEP ? " dorme" : t->state == ST_BLOCK ? " bloqueada" :
+          t->state == ST_READY ? " pronta" : " morta");
+  ser_txt(" fn=");
+  ser_hex((uintptr_t)t->fn);
+  ser_txt("\n");
+  for (; sp < end && shown < 28; sp++) {
+    if ((char*)*sp >= __executable_start && (char*)*sp < etext) {
+      ser_txt("[stk] ");
+      ser_hex(*sp);
+      ser_txt("\n");
+      shown++;
+    }
+  }
+}
+
+static void dump_all(void) {
+  int i;
+  uintptr_t* here = (uintptr_t*)__builtin_frame_address(0);
+  ser_txt("[thr] base ");
+  ser_hex((uintptr_t)__executable_start);
+  ser_txt("\n");
+  dump_one(&main_thread, cur == &main_thread ? here : (uintptr_t*)(uintptr_t)main_thread.rsp,
+           (cur == &main_thread ? here : (uintptr_t*)(uintptr_t)main_thread.rsp) + 60000);
+  for (i = 0; i < ALL_MAX; i++) {
+    struct sodos_thread* t = all_thr[i];
+    uintptr_t* sp;
+    uintptr_t* end;
+    if (!t || t->state == ST_DEAD) continue;
+    sp = t == cur ? here : (uintptr_t*)(uintptr_t)t->rsp;
+    end = (uintptr_t*)(uintptr_t)(t->stack + t->stack_size);
+    if (sp < (uintptr_t*)(uintptr_t)t->stack || sp > end) continue;
+    dump_one(t, sp, end);
+  }
+}
+
+static void stacks_check(void) {
+  if (!stacks_at || sodos__ms() < stacks_at) return;
+  stacks_at = 0;
+  dump_all();
+}
+
 static void reap_zombies(void) {
   /* Nunca no proprio resched da thread que morreu: a pilha dela ainda e a
    * pilha em uso. Quem reaproveita e a proxima thread que escalonar. */
@@ -121,6 +205,7 @@ static void reap_zombies(void) {
     zombie_h = z->qnext;
     if (z->alloc) k_free((void*)(uintptr_t)z->alloc);
     z->magic = 0;
+    all_del(z);
     free(z);
   }
 }
@@ -156,6 +241,7 @@ static void idle_wait(void) {
  * prontos (BLOCK/SLEEP/DEAD) ou marcada READY (yield). */
 static void resched(void) {
   reap_zombies();
+  stacks_check();
   /* Acorda quem ja venceu o prazo antes de escolher: sem isto, uma thread
    * que so cede a vez (sched_yield em laco, ex.: espera de futex) sempre se
    * reencontra na fila e as que dormem (poll, nanosleep) nunca acordam. */
@@ -186,6 +272,7 @@ static void resched(void) {
       for (;;) {}
     }
     idle_wait();
+    stacks_check();
   }
 }
 
@@ -196,6 +283,18 @@ void sodos__sched_init(void) {
   main_thread.magic = MAIN_MAGIC;
   main_thread.state = ST_RUN;
   cur = &main_thread;
+  {
+    /* Nao ha como passar ambiente pela linha de comando: vale tambem o
+     * arquivo D:\\SODOS\\STACKS.AT com o numero de segundos. */
+    char buf[16];
+    const char* e = getenv("SODOS_STACKS_AT");
+    int n = e ? -1 : k_fload("D:\\SODOS\\STACKS.AT", buf, (int)sizeof(buf) - 1);
+    if (n > 0) {
+      buf[n] = 0;
+      e = buf;
+    }
+    if (e && atoi(e) > 0) stacks_at = sodos__ms() + (uint64_t)atoi(e) * 1000u;
+  }
   sodos__sync_init();
 }
 
@@ -312,6 +411,7 @@ int pthread_create(pthread_t* out, const pthread_attr_t* attr,
   }
   t->tls_tp = sodos__tls_new(&t->tls_raw);
   t->state = ST_READY;
+  all_add(t);
   q_push(&run_h, &run_t, t);
   if (out) *out = t;
   return 0;
@@ -351,6 +451,7 @@ int pthread_join(pthread_t t, void** retval) {
   if (t->alloc) k_free((void*)(uintptr_t)t->alloc);
   free(t->tls_raw);
   t->magic = 0;
+  all_del(t);
   free(t);
   return 0;
 }

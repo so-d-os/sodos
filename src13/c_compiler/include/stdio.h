@@ -22,7 +22,7 @@ typedef long fpos_t;
 #define _IOFBF 0
 #define _IOLBF 1
 #define _IONBF 2
-#define FILENAME_MAX 64
+#define FILENAME_MAX 260
 
 /* Sem import de dados entre DLLs: stdin/stdout/stderr vem de uma funcao. */
 FILE* __so_stdio(int which);

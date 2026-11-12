@@ -8,7 +8,7 @@
 # no mesmo gmake -j, o compile nao espera os headers gerados pelo export.
 #
 # Copia sodos/widget para widget/sodos na arvore antes de cada passo. A arvore
-# precisa dos patches 0001 a 0006 (patches/README.md) e do std do Rust instalado
+# precisa dos patches 0001 a 0008 (patches/README.md) e do std do Rust instalado
 # (make js64-std).
 #
 # Variaveis: FIREFOX_DIR (fonte), FIREFOX_OBJ (objdir), GCC13 (prefixo de um

@@ -230,6 +230,87 @@ static int disk_read_sector_locked(uint32_t drive, uint32_t lba, void* buffer) {
   return 0;
 }
 
+// Setores por bloco do READ MULTIPLE em cada drive ATA: 0 ainda nao perguntei,
+// -1 o drive recusou (le com READ SECTORS, um setor por DRQ).
+#define ATA_MULT 16
+static int8_t ata_mult[4];
+
+static int ata_mult_setup(uint32_t drive, uint16_t base_port, uint8_t drive_bit) {
+  uint16_t status_port = base_port + 7;
+  if (ata_mult[drive]) return ata_mult[drive];
+  ata_mult[drive] = -1;
+  outb(base_port + 6, drive_bit);
+  io_wait_400ns(status_port);
+  if (ata_wait(status_port, 0x80, 0x00, 1000000, "disk_mult_bsy", drive, 0) < 0) return -1;
+  outb(base_port + 2, ATA_MULT);
+  outb(status_port, 0xC6); /* SET MULTIPLE MODE */
+  io_wait_400ns(status_port);
+  if (ata_wait(status_port, 0x80, 0x00, 1000000, "disk_mult", drive, 0) < 0) return -1;
+  ata_mult[drive] = ATA_MULT;
+  return ATA_MULT;
+}
+
+// Le count setores seguidos (1..256) num so comando ATA, em blocos (READ
+// MULTIPLE) e com "rep insw": setor a setor e palavra a palavra, um arquivo
+// grande levava minutos num emulador.
+// O buffer fica no heap (acima de 1 MB) ou na janela baixa de disk_read_sector.
+static int disk_read_sectors_locked(uint32_t drive, uint32_t lba, uint32_t count, void* buffer) {
+  uint64_t buf_addr = (uint64_t)(uintptr_t)buffer;
+  uint64_t bytes = (uint64_t)count * 512u;
+  uint32_t s;
+  if (buffer == 0 || count == 0 || count > 256) return -2;
+  if (drive == DISK_USB) {
+    for (s = 0; s < count; s++)
+      if (xhci_disk_read(lba + s, (uint8_t*)buffer + s * 512u) != 0) return -3;
+    return 0;
+  }
+  if (buf_addr < 0x100000u) {
+    if (buf_addr < 0x60000u || buf_addr + bytes > 0x100000u) return -1;
+    if (buf_addr < 0xA0000u && buf_addr + bytes > 0x90000u) return -1; /* nunca pilha */
+  }
+  if (lba + count > 0x10000000u) return -1; /* LBA28 */
+  uint16_t base_port = (drive <= 1) ? 0x1F0 : 0x170;
+  uint8_t drive_bit = (drive == 0 || drive == 2) ? 0xE0 : 0xF0;
+  uint16_t status_port = base_port + 7;
+  int mult;
+  uint32_t blk;
+  if (drive > 3) return -2;
+  mult = count > 1 ? ata_mult_setup(drive, base_port, drive_bit) : -1;
+  blk = mult > 0 ? (uint32_t)mult : 1u;
+  outb(base_port + 6, drive_bit | ((lba >> 24) & 0x0F));
+  io_wait_400ns(status_port);
+  if (ata_wait(status_port, 0x80, 0x00, 1000000, "disk_rd_bsy", drive, lba) < 0) {
+    ata_set_last(drive, lba, status_port, base_port);
+    return -3;
+  }
+  outb(base_port + 2, (unsigned char)count); /* 0 = 256 */
+  outb(base_port + 3, (unsigned char)lba);
+  outb(base_port + 4, (unsigned char)(lba >> 8));
+  outb(base_port + 5, (unsigned char)(lba >> 16));
+  outb(status_port, mult > 0 ? 0xC4 : 0x20);
+  for (s = 0; s < count; s += blk) {
+    void* dst = (uint8_t*)buffer + s * 512u;
+    uint64_t n = (count - s < blk ? count - s : blk) * 256u;
+    if (s) io_wait_400ns(status_port);
+    if (ata_wait(status_port, 0x88, 0x08, 1000000, "disk_rd_drq", drive, lba + s) < 0) {
+      ata_set_last(drive, lba + s, status_port, base_port);
+      return -3;
+    }
+    __asm__ volatile ("cld; rep insw" : "+D"(dst), "+c"(n) : "d"(base_port) : "memory");
+  }
+  return 0;
+}
+
+int disk_read_sectors(uint32_t drive, uint32_t lba, uint32_t count, void* buffer) {
+  uint64_t fl;
+  int rc;
+  __asm__ volatile ("pushfq; pop %0" : "=r"(fl));
+  __asm__ volatile ("cli" ::: "memory");
+  rc = disk_read_sectors_locked(drive, lba, count, buffer);
+  if (fl & 0x200u) __asm__ volatile ("sti" ::: "memory");
+  return rc;
+}
+
 int disk_read_sector(uint32_t drive, uint32_t lba, void* buffer) {
   uint64_t fl;
   int rc;
@@ -282,6 +363,72 @@ static int disk_write_sector_locked(uint32_t drive, uint32_t lba, void* buffer) 
     return -3;
   }
   return 0;
+}
+
+// Grava count setores seguidos (1..256) num so comando, em blocos (WRITE
+// MULTIPLE) e com "rep outsw". As mesmas regras de buffer de disk_read_sectors.
+static int disk_write_sectors_locked(uint32_t drive, uint32_t lba, uint32_t count, const void* buffer) {
+  uint64_t buf_addr = (uint64_t)(uintptr_t)buffer;
+  uint64_t bytes = (uint64_t)count * 512u;
+  uint32_t s;
+  if (buffer == 0 || count == 0 || count > 256) return -2;
+  if (drive == DISK_USB) {
+    for (s = 0; s < count; s++)
+      if (xhci_disk_write(lba + s, (uint8_t*)buffer + s * 512u) != 0) return -3;
+    return 0;
+  }
+  if (drive > 3) return -2;
+  if (buf_addr < 0x100000u) {
+    if (buf_addr < 0x60000u || buf_addr + bytes > 0x100000u) return -1;
+    if (buf_addr < 0xA0000u && buf_addr + bytes > 0x90000u) return -1;
+  }
+  if (lba + count > 0x10000000u) return -1; /* LBA28 */
+  uint16_t base_port = (drive <= 1) ? 0x1F0 : 0x170;
+  uint8_t drive_bit = (drive == 0 || drive == 2) ? 0xE0 : 0xF0;
+  uint16_t status_port = base_port + 7;
+  int mult = count > 1 ? ata_mult_setup(drive, base_port, drive_bit) : -1;
+  uint32_t blk = mult > 0 ? (uint32_t)mult : 1u;
+  outb(base_port + 6, drive_bit | ((lba >> 24) & 0x0F));
+  io_wait_400ns(status_port);
+  if (ata_wait(status_port, 0x80, 0x00, 1000000, "disk_wr_bsy", drive, lba) < 0) {
+    ata_set_last(drive, lba, status_port, base_port);
+    return -3;
+  }
+  outb(base_port + 2, (unsigned char)count); /* 0 = 256 */
+  outb(base_port + 3, (unsigned char)lba);
+  outb(base_port + 4, (unsigned char)(lba >> 8));
+  outb(base_port + 5, (unsigned char)(lba >> 16));
+  outb(status_port, mult > 0 ? 0xC5 : 0x30);
+  for (s = 0; s < count; s += blk) {
+    const void* src = (const uint8_t*)buffer + s * 512u;
+    uint64_t n = (count - s < blk ? count - s : blk) * 256u;
+    if (s) io_wait_400ns(status_port);
+    if (ata_wait(status_port, 0x88, 0x08, 1000000, "disk_wr_drq", drive, lba + s) < 0) {
+      ata_set_last(drive, lba + s, status_port, base_port);
+      return -3;
+    }
+    __asm__ volatile ("cld; rep outsw" : "+S"(src), "+c"(n) : "d"(base_port) : "memory");
+  }
+  io_wait_400ns(status_port);
+  if (ata_wait(status_port, 0x80, 0x00, 1000000, "disk_wr_done", drive, lba) < 0) {
+    ata_set_last(drive, lba, status_port, base_port);
+    return -3;
+  }
+  if (inb(status_port) & 0x01) {
+    ata_set_last(drive, lba, status_port, base_port);
+    return -3;
+  }
+  return 0;
+}
+
+int disk_write_sectors(uint32_t drive, uint32_t lba, uint32_t count, const void* buffer) {
+  uint64_t fl;
+  int rc;
+  __asm__ volatile ("pushfq; pop %0" : "=r"(fl));
+  __asm__ volatile ("cli" ::: "memory");
+  rc = disk_write_sectors_locked(drive, lba, count, buffer);
+  if (fl & 0x200u) __asm__ volatile ("sti" ::: "memory");
+  return rc;
 }
 
 int disk_write_sector(uint32_t drive, uint32_t lba, void* buffer) {

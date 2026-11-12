@@ -355,12 +355,15 @@ iso: os.img
 	  exit 1; \
 	fi
 
-# Disco secundario de 2 GB (drive 1), criado no primeiro run se nao existir. O FAT16
-# vai ate perto disso; o kernel nao le FAT32. Cabem o content/ e o FIREFOX.EXE.
-DISK_SECTORS := 4096000
+# Disco secundario de 3 GB (drive 1), criado no primeiro run se nao existir. O kernel
+# nao le FAT32. Cabem o content/ e o FIREFOX.EXE.
+# 3 GB: o FIREFOX.EXE estatico passa de 190 MB. FAT16 acima de 2 GB pede
+# clusters de 64 KB (128 setores), que o kernel e o mtools aceitam.
+DISK_SECTORS := 6291456
+FAT_SPC := 128
 disk.img: os.img
 	@if [ ! -f disk.img ]; then \
-	  echo "Creating 2 GB secondary disk (disk.img)..."; \
+	  echo "Creating 3 GB secondary disk (disk.img)..."; \
 	  truncate -s $$(( $(DISK_SECTORS) * 512 )) disk.img || \
 	  (echo "Error: Could not create disk.img"; exit 1); \
 	fi
@@ -422,9 +425,9 @@ vbox-update: os.img disk.img disk2.img
 	}
 	$(VBOX_CMD)
 
-# Formata disk.img (2 GB) como FAT16 pelo Linux: MBR + partição 0 + mkfs.fat
+# Formata disk.img (3 GB) como FAT16 pelo Linux: MBR + partição 0 + mkfs.fat
 # Uso: make format-disk [DISK=disk.img] [FAT_LABEL=MYDISK]
-# Cluster de 32KB: 2 GB continua FAT16 (o kernel recusa FAT32).
+# Cluster de 64KB: 3 GB continua FAT16 (o kernel recusa FAT32).
 # Requer: dosfstools (mkfs.fat ou mkfs.vfat), util-linux (sfdisk)
 DISK ?= disk.img
 FAT_LABEL ?= MYDISK
@@ -435,7 +438,7 @@ MKFSFAT := $(shell PATH="$(PATH_SBIN)" command -v mkfs.fat 2>/dev/null || PATH="
 format-disk:
 	@echo "Formatando $(DISK) como FAT16 (rótulo $(FAT_LABEL))..."
 	@if [ ! -f $(DISK) ]; then \
-	  echo "Criando $(DISK) de 2 GB..."; \
+	  echo "Criando $(DISK) de 3 GB..."; \
 	  truncate -s $$(( $(DISK_SECTORS) * 512 )) $(DISK); \
 	fi
 	@if [ "$$(wc -c < $(DISK))" -lt $$(( $(DISK_SECTORS) * 512 )) ]; then \
@@ -450,32 +453,32 @@ format-disk:
 	@if [ -z "$(MKFSFAT)" ]; then \
 	  echo "Erro: mkfs.fat não encontrado. Instale dosfstools: sudo apt install dosfstools"; rm -f $(DISK).part; exit 1; \
 	fi
-	@$(MKFSFAT) -F 16 -s 64 -n $(FAT_LABEL) $(DISK).part || \
+	@$(MKFSFAT) -F 16 -s $(FAT_SPC) -n $(FAT_LABEL) $(DISK).part || \
 	  (echo "Erro: formatação falhou (veja acima). Se faltar o comando: sudo apt install dosfstools"; rm -f $(DISK).part; exit 1)
 	@dd if=$(DISK).part of=$(DISK) bs=512 seek=1 conv=notrunc 2>/dev/null
 	@rm -f $(DISK).part
 	@echo "Pronto. $(DISK) está com MBR + partição FAT16. No SO: mount 0"
 
-# Aumenta um disk.img antigo para 2 GB sem perder os arquivos. O disco atual fica
-# guardado em disk-256mb.img, que so voce apaga depois de conferir o novo.
+# Aumenta um disk.img antigo para 3 GB sem perder os arquivos. O disco atual fica
+# guardado em disk-antigo.img, que so voce apaga depois de conferir o novo.
 .PHONY: grow-disk
 grow-disk:
 	@if pgrep -f "[q]emu-system.*file=$(DISK)" >/dev/null; then \
 	  echo "Feche o QEMU antes de aumentar o disco."; exit 1; fi
 	@if [ "$$(wc -c < $(DISK))" -ge $$(( $(DISK_SECTORS) * 512 )) ]; then \
-	  echo "$(DISK) ja tem 2 GB."; exit 0; fi; \
-	if [ -e disk-256mb.img ]; then \
-	  echo "disk-256mb.img ja existe; mova-o antes de continuar."; exit 1; fi; \
+	  echo "$(DISK) ja tem 3 GB."; exit 0; fi; \
+	if [ -e disk-antigo.img ]; then \
+	  echo "disk-antigo.img ja existe; mova-o antes de continuar."; exit 1; fi; \
 	T=$$(mktemp -d /tmp/sodos-grow-XXXXXX); \
 	mcopy -s -n -m -i $(DISK)@@512 ::/ "$$T/" || { rm -rf "$$T"; exit 1; }; \
 	antes=$$(find "$$T" -type f | wc -l); \
-	mv $(DISK) disk-256mb.img; \
-	$(MAKE) format-disk DISK=$(DISK) || { mv disk-256mb.img $(DISK); rm -rf "$$T"; exit 1; }; \
+	mv $(DISK) disk-antigo.img; \
+	$(MAKE) format-disk DISK=$(DISK) || { mv disk-antigo.img $(DISK); rm -rf "$$T"; exit 1; }; \
 	cd "$$T" && mcopy -s -n -m -i "$(CURDIR)/$(DISK)@@512" * ::/ || exit 1; \
 	cd "$(CURDIR)"; \
 	depois=$$(mdir -/ -b -i $(DISK)@@512 ::/ | grep -vc '/$$'); \
 	rm -rf "$$T"; \
-	echo "Migrados: $$antes arquivos; no disco novo: $$depois. Antigo em disk-256mb.img."; \
+	echo "Migrados: $$antes arquivos; no disco novo: $$depois. Antigo em disk-antigo.img."; \
 	if [ "$$antes" != "$$depois" ]; then echo "ATENCAO: as contagens diferem."; exit 1; fi
 
 # Copia compilador, linker, libc, headers e exemplos para a raiz do disk.img
@@ -545,6 +548,13 @@ disk-files: disk.img
 	  fi; \
 	done
 	@mcopy -o -i $(DISK)@@512 utils/image_view.c ::/IMAGEVW.C
+	@# Bibliotecas dinamicas (make -C libs/dso all cxx): D:\LIB e onde o kernel procura.
+	@if ls libs/dso/build/sysroot/lib/*.so.* >/dev/null 2>&1; then \
+	  if ! mdir -i $(DISK)@@512 ::/LIB >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/LIB; fi; \
+	  for f in libs/dso/build/sysroot/lib/*.so.*; do \
+	    mcopy -o -i $(DISK)@@512 "$$f" "::/LIB/$$(basename "$$f")" || exit 1; \
+	  done; \
+	else echo "libs/dso nao compilado: D:\\LIB fica sem as bibliotecas dinamicas"; fi
 	@if ! mdir -i $(DISK)@@512 ::/SODOS >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS; fi
 	@if ! mdir -i $(DISK)@@512 ::/SODOS/FONTS >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS/FONTS; fi
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/FONTADV.EXE ::/SODOS/FONTADV.EXE
@@ -805,3 +815,73 @@ clean:
 
 clean-all: clean
 	rm -f disk.img disk2.img so.iso so-grub.iso
+
+# Browser Firefox LP64/SOX2. Executar em Linux/WSL, na pasta src13.
+# Integra scripts existentes no commit 7bda28cc0e3d24e40c1b9e518555ea1ddc59f787.
+# Fonte deve conter os patches 0001..0006 de firefox/patches.
+# Nao confundir o alvo legado "firefox" (shim x32) com firefox-browser.
+FIREFOX_PORT ?= $(CURDIR)/firefox
+FIREFOX_DIR ?= $(HOME)/ffsrc/firefox-153.6.0esr
+FIREFOX_OBJ ?= $(HOME)/ffsrc/obj-browser64
+# O script usa nproc; -j aqui, depois do -j dele, limita o paralelismo.
+FIREFOX_JOBS ?= 2
+FIREFOX_ALLOW_COMPILE_FAILURE ?= 0
+export FIREFOX_DIR FIREFOX_OBJ
+FIREFOX_TOP_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
+
+.PHONY: firefox-browser-check firefox-browser-setup firefox-browser-prepare \
+ firefox-browser-configure firefox-browser-export firefox-browser-compile \
+ firefox-browser-link firefox-browser firefox-browser-help
+
+firefox-browser-help:
+	@echo 'Na pasta src13: make firefox-browser'
+	@echo 'Primeira preparacao: make firefox-browser-setup firefox-browser-prepare'
+	@echo 'Requer fonte com patches 0001..0006, toolchain e dependencias do port.'
+	@echo 'Configure caminhos com FIREFOX_DIR=... FIREFOX_OBJ=... FIREFOX_JOBS=2'
+	@echo 'Etapas: firefox-browser-configure/export/compile/link'
+	@echo 'Erro de compile interrompe. Examine build.log antes de liberar o link.'
+	@echo 'Excecao consciente: make firefox-browser FIREFOX_ALLOW_COMPILE_FAILURE=1'
+	@echo 'Saida: $(FIREFOX_OBJ)/dist/bin/FIREFOX.EXE'
+
+firefox-browser-check:
+	@test -f "$(FIREFOX_PORT)/sodos/scripts/build-browser64.sh" || { echo 'Port ausente: use este Makefile em src13 ou ajuste FIREFOX_PORT.'; exit 1; }
+	@test -f "$(FIREFOX_DIR)/configure" || { echo 'Fonte ausente: ajuste FIREFOX_DIR; aplique os patches do port antes de configurar.'; exit 1; }
+	@command -v gmake >/dev/null || { echo 'Instale GNU make (gmake), exigido pelo script.'; exit 1; }
+	@case '$(FIREFOX_JOBS)' in ''|*[!0-9]*|0) echo 'FIREFOX_JOBS deve ser inteiro positivo.'; exit 1;; esac
+
+# Preparacao explicita: baixa dependencias e modifica o rust-src local.
+# Nao baixa nem aplica patches automaticamente na arvore do Firefox.
+firefox-browser-setup:
+	cd "$(FIREFOX_PORT)" && sh setup.sh
+
+firefox-browser-prepare:
+	$(MAKE) -C "$(FIREFOX_PORT)" libcxx64
+	$(MAKE) -C "$(FIREFOX_PORT)" js64-std
+
+firefox-browser-configure: firefox-browser-check
+	cd "$(FIREFOX_PORT)" && sh sodos/scripts/build-browser64.sh configure
+
+firefox-browser-export: firefox-browser-check
+	cd "$(FIREFOX_PORT)" && MAKE_ARGS='-k -j$(FIREFOX_JOBS)' sh sodos/scripts/build-browser64.sh build pre-export export
+
+firefox-browser-compile: firefox-browser-check
+	@cd "$(FIREFOX_PORT)" && \
+	if MAKE_ARGS='-k -j$(FIREFOX_JOBS)' sh sodos/scripts/build-browser64.sh build compile; then :; \
+	else \
+	  if [ "$(FIREFOX_ALLOW_COMPILE_FAILURE)" = 1 ]; then \
+	    echo 'AVISO: compile falhou; continuacao solicitada. Confira $(FIREFOX_OBJ)/build.log.'; \
+	  else \
+	    echo 'Compilacao interrompida. Confira $(FIREFOX_OBJ)/build.log.'; exit 1; \
+	  fi; \
+	fi
+
+firefox-browser-link: firefox-browser-check
+	cd "$(FIREFOX_PORT)" && sh sodos/scripts/link-firefox64.sh
+	@test -s "$(FIREFOX_OBJ)/dist/bin/FIREFOX.EXE" || { echo 'Link nao gerou FIREFOX.EXE.'; exit 1; }
+
+# Receitas sequenciais: make -j nao pode antecipar compile nem link.
+firefox-browser:
+	$(MAKE) -f "$(FIREFOX_TOP_MAKEFILE)" firefox-browser-configure
+	$(MAKE) -f "$(FIREFOX_TOP_MAKEFILE)" firefox-browser-export
+	$(MAKE) -f "$(FIREFOX_TOP_MAKEFILE)" firefox-browser-compile
+	$(MAKE) -f "$(FIREFOX_TOP_MAKEFILE)" firefox-browser-link

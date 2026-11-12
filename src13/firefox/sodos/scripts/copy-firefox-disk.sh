@@ -3,8 +3,8 @@
 #
 # Chamado por "make disk-files". Sem build do browser, avisa e nao falha.
 #
-# So entram os nomes que cabem em 8.3: o kernel nao le nomes longos do FAT. Os
-# demais sao listados no final; eles so vao funcionar com o omni.ja empacotado.
+# Vai a arvore solta de dist/bin (chrome, modules, res, ...), com nomes longos:
+# o build nao empacota o omni.ja. Os links simbolicos de dist/bin sao seguidos.
 DISK=$(realpath "$1")  # o script muda de diretorio
 O=${FIREFOX_OBJ:-$HOME/ffsrc/obj-browser64}
 BIN=$O/dist/bin
@@ -29,56 +29,15 @@ mkdir_d() {
 mkdir_d FIREFOX
 mcopy -o -i "$DISK@@512" "$EXE" ::/FIREFOX/FIREFOX.EXE || exit 1
 
-fits_83() {
-  case "$1" in
-    .*|*.*.*) return 1 ;;
-  esac
-  b=${1%%.*}
-  e=
-  case "$1" in *.*) e=${1#*.} ;; esac
-  [ ${#b} -ge 1 ] && [ ${#b} -le 8 ] && [ ${#e} -le 3 ] || return 1
-  case "$1" in *[!A-Za-z0-9_.-]*) return 1 ;; esac
-  return 0
-}
-
-copied=1
-skipped=0
-skipped_list=$(mktemp)
-cd "$BIN" || exit 1
-for f in $(find -L . -type f ! -name FIREFOX.EXE ! -name '*.elf' ! -name nsinstall ! -name pingsender \
-           ! -name '.*' ! -path './gmp-*' | sed 's#^\./##'); do
-  ok=1
-  old_ifs=$IFS
-  IFS=/
-  for part in $f; do
-    fits_83 "$part" || ok=0
-  done
-  IFS=$old_ifs
-  if [ "$ok" = 0 ]; then
-    skipped=$((skipped + 1))
-    echo "$f" >> "$skipped_list"
-    continue
-  fi
-  up=$(printf '%s' "$f" | tr 'a-z' 'A-Z')
-  d=$(dirname "$up")
-  if [ "$d" != "." ]; then
-    p=FIREFOX
-    old_ifs=$IFS
-    IFS=/
-    for part in $d; do
-      p=$p/$part
-      IFS=$old_ifs
-      mkdir_d "$p"
-      IFS=/
-    done
-    IFS=$old_ifs
-  fi
-  mcopy -o -i "$DISK@@512" "$f" "::/FIREFOX/$up" || exit 1
-  copied=$((copied + 1))
-done
-
-echo "Firefox: $copied arquivos em D:\\FIREFOX; $skipped fora, com nome maior que 8.3."
-if [ "$skipped" -gt 0 ]; then
-  head -8 "$skipped_list" | sed 's/^/  fora: /'
+# mcopy nao segue links: monta uma copia de verdade e manda a arvore inteira.
+T=$(mktemp -d /tmp/sodos-ffdisk-XXXXXX)
+trap 'rm -rf "$T"' EXIT
+(cd "$BIN" && tar -ch --exclude='*.elf' --exclude=FIREFOX.EXE --exclude=nsinstall \
+   --exclude=pingsender --exclude='gmp-*' . 2>/dev/null) | tar -x -C "$T"
+n=$(find "$T" -type f | wc -l)
+if [ "$n" -gt 0 ]; then
+  (cd "$T" && mcopy -s -o -Q -i "$DISK@@512" * ::/FIREFOX/) || exit 1
 fi
-rm -f "$skipped_list"
+echo "Firefox: FIREFOX.EXE e $n arquivos de recursos em D:\\FIREFOX."
+[ "$n" -lt 5000 ] && echo "Firefox: poucos recursos; rode build-browser64.sh build misc e depois build libs."
+exit 0

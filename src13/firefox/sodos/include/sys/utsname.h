@@ -12,6 +12,7 @@ struct utsname {
   char release[65];
   char version[65];
   char machine[65];
+  char domainname[65]; /* como no Linux: uname() preenche os seis campos */
 };
 
 int uname(struct utsname* u);

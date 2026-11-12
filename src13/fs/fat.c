@@ -83,6 +83,7 @@ static struct fat_dir_entry* sub_dir = (struct fat_dir_entry*)0xA51000;
 static uint8_t fat_dirty[FAT_TABLE_MAX / 512u / 8u];
 
 static void mem_zero(void* p, uint32_t n);
+static int read_run(uint32_t lba, uint32_t n, uint8_t* dst);
 
 static void fat_mark(uint32_t byte_off) {
   uint32_t s = byte_off / 512u;
@@ -117,10 +118,20 @@ static int sector_direct(const void* buffer) {
 }
 
 /* A cada poucos setores o desktop volta a ler teclado e rato. */
+static int fat_breath_n;
+
 static void fat_breathe(void) {
-  static int n;
-  if (++n < 4) return;
-  n = 0;
+  if (++fat_breath_n < 4) return;
+  fat_breath_n = 0;
+  sched_yield();
+}
+
+/* O mesmo, depois de ler nsec setores de uma vez: em blocos o disco rende
+ * muito mais, e cada volta ao desktop custa mais que a leitura. */
+static void fat_breathe_run(uint32_t nsec) {
+  fat_breath_n += (int)nsec;
+  if (fat_breath_n < 512) return;
+  fat_breath_n = 0;
   sched_yield();
 }
 
@@ -146,19 +157,29 @@ static int write_sector(uint32_t lba, const void* buffer) {
 static int read_sectors(uint32_t lba, uint32_t count, void* buffer) {
   uint8_t* buf = (uint8_t*)buffer;
   uint32_t i;
-  uint32_t step = bytes_per_sector ? bytes_per_sector : 512u;
-  for (i = 0; i < count; i++) {
-    if (read_sector(lba + i, buf + (i * step)) != 0) return -1;
+  for (i = 0; i < count; i += 128u) {
+    uint32_t n = count - i < 128u ? count - i : 128u;
+    if (read_run(lba + i, n, buf + i * 512u) != 0) return -1;
   }
+  return 0;
+}
+
+/* n setores inteiros de src, que pode estar em qualquer lugar. */
+static int write_run(uint32_t lba, uint32_t n, const uint8_t* src) {
+  uint32_t s;
+  if ((uintptr_t)src >= 0x100000u)
+    return disk_write_sectors(current_drive, lba, n, src) != 0 ? -1 : 0;
+  for (s = 0; s < n; s++)
+    if (write_sector(lba + s, src + s * 512u) != 0) return -1;
   return 0;
 }
 
 static int write_sectors(uint32_t lba, uint32_t count, const void* buffer) {
   const uint8_t* buf = (const uint8_t*)buffer;
   uint32_t i;
-  uint32_t step = bytes_per_sector ? bytes_per_sector : 512u;
-  for (i = 0; i < count; i++) {
-    if (write_sector(lba + i, buf + (i * step)) != 0) return -1;
+  for (i = 0; i < count; i += 128u) {
+    uint32_t n = count - i < 128u ? count - i : 128u;
+    if (write_run(lba + i, n, buf + i * 512u) != 0) return -1;
   }
   return 0;
 }
@@ -498,12 +519,12 @@ static int dir_load(uint16_t cluster, struct dir_view* v) {
   dst = (uint8_t*)sub_dir;
   while (!cluster_end(cluster) && guard++ < 64) {
     uint32_t lba = first_data_sector + ((uint32_t)(cluster - 2) * sectors_per_cluster);
-    uint32_t s;
-    for (s = 0; s < sectors_per_cluster; s++) {
-      if ((uint32_t)v->bytes + 512u > SUBDIR_MAX) return -1;
-      if (read_sector(lba + s, dst + v->bytes) != 0) return -1;
-      v->bytes += 512;
-    }
+    /* O cluster inteiro de uma vez: abrir um arquivo percorre uma pasta por
+     * nivel do caminho, e setor a setor isso domina a partida de um programa
+     * que consulta muitos arquivos. */
+    if ((uint32_t)v->bytes + sectors_per_cluster * 512u > SUBDIR_MAX) return -1;
+    if (read_run(lba, sectors_per_cluster, dst + v->bytes) != 0) return -1;
+    v->bytes += (int)(sectors_per_cluster * 512u);
     cluster = get_next_cluster(cluster);
   }
   v->count = v->bytes / 32;
@@ -523,11 +544,11 @@ static int dir_flush(struct dir_view* v) {
   off = 0;
   while (!cluster_end(cluster) && off < (uint32_t)v->bytes && guard++ < 64) {
     uint32_t lba = first_data_sector + ((uint32_t)(cluster - 2) * sectors_per_cluster);
-    uint32_t s;
-    for (s = 0; s < sectors_per_cluster && off < (uint32_t)v->bytes; s++) {
-      if (write_sector(lba + s, (uint8_t*)v->ents + off) != 0) return -1;
-      off += 512;
-    }
+    uint32_t n = ((uint32_t)v->bytes - off) / 512u;
+    if (n > sectors_per_cluster) n = sectors_per_cluster;
+    if (n == 0) break;
+    if (write_run(lba, n, (uint8_t*)v->ents + off) != 0) return -1;
+    off += n * 512u;
     cluster = get_next_cluster(cluster);
   }
   return off == (uint32_t)v->bytes ? 0 : -1;
@@ -1038,7 +1059,16 @@ static int write_chain(struct fat_dir_entry* entry, const void* data, uint32_t s
     }
     if (prev_cluster != 0) write_fat16_cluster(prev_cluster, cluster);
     lba = first_data_sector + ((uint32_t)(cluster - 2) * sectors_per_cluster);
-    for (s = 0; s < sectors_per_cluster; s++) {
+    /* Os setores cheios do cluster vao direto do buffer do arquivo, de uma vez. */
+    s = (size - bytes_written) / 512u;
+    if (s > sectors_per_cluster) s = sectors_per_cluster;
+    if (s && (uintptr_t)file_data < 0x100000u) s = 0;
+    if (s) {
+      if (write_run(lba, s, (const uint8_t*)file_data + bytes_written) != 0) return -1;
+      bytes_written += s * 512u;
+      fat_breathe_run(s);
+    }
+    for (; s < sectors_per_cluster; s++) {
       uint32_t left = size - bytes_written;
       uint32_t i;
       if (left > bytes_per_sector) left = bytes_per_sector;
@@ -1056,6 +1086,36 @@ static int write_chain(struct fat_dir_entry* entry, const void* data, uint32_t s
   return 0;
 }
 
+/* Leitura em blocos: um comando de disco por trecho de clusters vizinhos. */
+#define FAT_RUN_MAX 128u
+
+/* Trecho continuo que comeca em *cluster: devolve o LBA e, em *nsec, quantos
+ * setores (ate cobrir want); *cluster passa a ser o cluster depois do trecho. */
+static uint32_t fat_run(uint16_t* cluster, uint32_t want, uint32_t* nsec) {
+  uint16_t c = *cluster;
+  uint16_t next = get_next_cluster(c);
+  uint32_t n = sectors_per_cluster;
+  uint32_t lba = first_data_sector + ((uint32_t)(c - 2) * sectors_per_cluster);
+  while (n < want && n + sectors_per_cluster <= FAT_RUN_MAX && next == (uint16_t)(c + 1) && !cluster_end(next)) {
+    c = next;
+    next = get_next_cluster(c);
+    n += sectors_per_cluster;
+  }
+  *cluster = next;
+  *nsec = n;
+  return lba;
+}
+
+/* n setores inteiros para dst, que pode estar em qualquer lugar. */
+static int read_run(uint32_t lba, uint32_t n, uint8_t* dst) {
+  uint32_t s;
+  if ((uintptr_t)dst >= 0x100000u || (n == 1 && sector_direct(dst)))
+    return disk_read_sectors(current_drive, lba, n, dst) != 0 ? -1 : 0;
+  for (s = 0; s < n; s++)
+    if (read_sector(lba + s, dst + s * 512u) != 0) return -1;
+  return 0;
+}
+
 // Lê arquivo completo. filename pode ser "temp\\net\\ARQ.EXT".
 int fat_read_file(const char* filename, void* buffer, uint32_t max_size) {
   uint16_t cluster;
@@ -1066,30 +1126,29 @@ int fat_read_file(const char* filename, void* buffer, uint32_t max_size) {
   }
   uint8_t* buf = (uint8_t*)buffer;
   uint32_t bytes_read = 0;
-  
-  while (cluster >= 2 && bytes_read < file_size) {
-    uint32_t lba = first_data_sector + ((cluster - 2) * sectors_per_cluster);
-    uint32_t s;
-    /* Setor a setor: o ultimo vai pelo bounce para nao passar de max_size. */
-    for (s = 0; s < sectors_per_cluster && bytes_read < file_size; s++) {
-      uint32_t left = file_size - bytes_read;
-      if (left >= bytes_per_sector) {
-        if (read_sector(lba + s, buf + bytes_read) != 0) return -1;
-        bytes_read += bytes_per_sector;
-      } else {
-        uint32_t i;
-        if (disk_read_sector(current_drive, lba + s, fat_bounce) != 0) return -1;
-        for (i = 0; i < left; i++) buf[bytes_read + i] = fat_bounce[i];
-        bytes_read += left;
-      }
-      fat_breathe();
+  if (bytes_per_sector != 512 || sectors_per_cluster == 0) return -1;
+
+  while (!cluster_end(cluster) && bytes_read < file_size) {
+    uint32_t left = file_size - bytes_read;
+    uint32_t nsec;
+    uint32_t lba = fat_run(&cluster, (left + 511u) / 512u, &nsec);
+    uint32_t full = left / 512u;
+    if (full > nsec) full = nsec;
+    if (full) {
+      if (read_run(lba, full, buf + bytes_read) != 0) return -1;
+      bytes_read += full * 512u;
+      left -= full * 512u;
     }
-    
-    cluster = get_next_cluster(cluster);
-    if (fat_type == 12 && cluster >= 0xFF8) break;
-    if (fat_type == 16 && cluster >= 0xFFF8) break;
+    /* O resto do ultimo setor vai pelo bounce para nao passar de max_size. */
+    if (full < nsec && left > 0) {
+      uint32_t i;
+      if (disk_read_sector(current_drive, lba + full, fat_bounce) != 0) return -1;
+      for (i = 0; i < left; i++) buf[bytes_read + i] = fat_bounce[i];
+      bytes_read += left;
+    }
+    fat_breathe_run(nsec);
   }
-  
+
   return bytes_read;
 }
 
@@ -1106,6 +1165,7 @@ int fat_read_span(const char* filename, uint32_t offset, void* buffer, uint32_t 
   if (lookup_file(filename, &cluster, &file_size) != 0) return -1;
   if (offset >= file_size) return 0;
   if (offset + len > file_size) len = file_size - offset;
+  if (bytes_per_sector != 512) return -1;
   cluster_bytes = bytes_per_sector * sectors_per_cluster;
   if (cluster_bytes == 0) return -1;
   skip = offset / cluster_bytes;
@@ -1117,27 +1177,35 @@ int fat_read_span(const char* filename, uint32_t offset, void* buffer, uint32_t 
     if (fat_type == 12 && cluster >= 0xFF8) return -1;
   }
   buf = (uint8_t*)buffer;
-  while (cluster >= 2 && bytes_read < len) {
-    uint32_t lba = first_data_sector + ((uint32_t)(cluster - 2) * sectors_per_cluster);
-    uint32_t s0 = so / bytes_per_sector;
-    uint32_t off = so % bytes_per_sector;
-    uint32_t s;
+  while (!cluster_end(cluster) && bytes_read < len) {
+    uint32_t left = len - bytes_read;
+    uint32_t nsec;
+    uint32_t lba = fat_run(&cluster, (so + left + 511u) / 512u, &nsec);
+    uint32_t s = so / 512u;
+    uint32_t off = so % 512u;
     so = 0;
-    for (s = s0; s < sectors_per_cluster && bytes_read < len; s++) {
-      uint32_t left = len - bytes_read;
-      uint32_t take;
+    while (s < nsec && bytes_read < len) {
       uint32_t i;
+      uint32_t take;
+      left = len - bytes_read;
+      if (off == 0 && left >= 512u) {
+        /* Miolo: setores inteiros direto no destino. */
+        uint32_t full = left / 512u;
+        if (full > nsec - s) full = nsec - s;
+        if (read_run(lba + s, full, buf + bytes_read) != 0) return -1;
+        bytes_read += full * 512u;
+        s += full;
+        continue;
+      }
       if (disk_read_sector(current_drive, lba + s, fat_bounce) != 0) return -1;
-      take = bytes_per_sector - off;
+      take = 512u - off;
       if (take > left) take = left;
       for (i = 0; i < take; i++) buf[bytes_read + i] = fat_bounce[off + i];
       bytes_read += take;
       off = 0;
-      fat_breathe();
+      s++;
     }
-    cluster = get_next_cluster(cluster);
-    if (fat_type == 16 && cluster >= 0xFFF8) break;
-    if (fat_type == 12 && cluster >= 0xFF8) break;
+    fat_breathe_run(nsec);
   }
   return (int)bytes_read;
 }
@@ -1388,9 +1456,7 @@ static void flush_fat(void) {
 // Escreve diretório raiz de volta no disco
 static void flush_root_dir(void) {
   uint8_t* root_buf = (uint8_t*)root_dir;
-  for (uint32_t i = 0; i < root_dir_sectors; i++) {
-    write_sector(root_dir_sector + i, root_buf + (i * bytes_per_sector));
-  }
+  write_sectors(root_dir_sector, root_dir_sectors, root_buf);
 }
 
 /* Grava na raiz ou em pastas ("temp\\net\\ARQ.EXT" cria temp e net). */
@@ -1434,15 +1500,14 @@ int fat_get_space_info(uint32_t* total_bytes, uint32_t* free_bytes) {
   if (fat_type == 16) {
     uint16_t* fat16 = (uint16_t*)fat_table;
     
-    // Conta clusters totais (começa do cluster 2)
-    // Precisa saber quantos clusters existem
-    // Vamos usar uma estimativa baseada no tamanho da FAT
-    uint32_t fat_size_sectors = boot_sector->sectors_per_fat_16;
-    uint32_t fat_size_bytes = fat_size_sectors * bytes_per_sector;
-    
-    // FAT16: cada entrada é 2 bytes
-    // Total de clusters = (tamanho FAT em bytes) / 2
-    total_clusters = fat_size_bytes / 2;
+    // Clusters de dados de verdade: a FAT, arredondada para setores inteiros,
+    // tem mais entradas do que o volume tem clusters.
+    uint32_t total_sectors = boot_sector->total_sectors_16;
+    uint32_t data_sectors;
+    if (total_sectors == 0) total_sectors = boot_sector->total_sectors_32;
+    data_sectors = total_sectors - (boot_sector->reserved_sectors +
+                   (boot_sector->fat_count * boot_sector->sectors_per_fat_16) + root_dir_sectors);
+    total_clusters = data_sectors / sectors_per_cluster + 2;
     
     // Conta clusters livres (valor 0)
     for (uint32_t i = 2; i < total_clusters && i < 0xFFF8; i++) {
@@ -1456,6 +1521,7 @@ int fat_get_space_info(uint32_t* total_bytes, uint32_t* free_bytes) {
   }
   
   // Converte para bytes
+  if (total_clusters >= 2) total_clusters -= 2;
   *total_bytes = total_clusters * sectors_per_cluster * bytes_per_sector;
   *free_bytes = free_clusters * sectors_per_cluster * bytes_per_sector;
   

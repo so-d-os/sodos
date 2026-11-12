@@ -71,10 +71,18 @@ static void put_ring(struct ring* r) {
   if (r && r->readers == 0 && r->writers == 0) free(r);
 }
 
+/* sodos_shm.c: a posix-lite manda para ca tudo o que e >= 2000. */
+#define SHM_FD(fd) ((fd) >= 3000)
+int sodos_shm_close(int fd);
+int dup(int fd);
+ssize_t sodos_shm_read(int fd, void* buf, size_t n);
+ssize_t sodos_shm_write(int fd, const void* buf, size_t n);
+
 int sodos_pipe_close(int fd) {
   struct pipe_end* e = get_end(fd);
   struct ring* rx;
   struct ring* tx;
+  if (SHM_FD(fd)) return sodos_shm_close(fd);
   if (!e) {
     errno = EBADF;
     return -1;
@@ -93,6 +101,7 @@ ssize_t sodos_pipe_read(int fd, void* buf, size_t n) {
   struct pipe_end* e = get_end(fd);
   struct ring* r;
   size_t i;
+  if (SHM_FD(fd)) return sodos_shm_read(fd, buf, n);
   if (!e || !e->rx) {
     errno = EBADF;
     return -1;
@@ -123,6 +132,7 @@ ssize_t sodos_pipe_write(int fd, const void* buf, size_t n) {
   struct pipe_end* e = get_end(fd);
   struct ring* r;
   size_t done = 0;
+  if (SHM_FD(fd)) return sodos_shm_write(fd, buf, n);
   if (!e || !e->tx) {
     errno = EBADF;
     return -1;
@@ -242,6 +252,22 @@ int fcntl(int fd, int cmd, ...) {
       return e ? (e->flags | O_RDWR) : O_RDWR;
     case F_SETFL:
       if (e) e->flags = (int)arg & O_NONBLOCK;
+      return 0;
+    case 0:    /* F_DUPFD */
+    case 1030: /* F_DUPFD_CLOEXEC */
+      return dup(fd);
+    case 5:  /* F_GETLK: so existe este processo, nunca ha trava de outro */
+    case 36: /* F_OFD_GETLK */
+      if (arg) ((struct flock*)arg)->l_type = F_UNLCK;
+      return 0;
+    case 6:  /* F_SETLK */
+    case 7:  /* F_SETLKW */
+    case 37: /* F_OFD_SETLK */
+    case 38: /* F_OFD_SETLKW */
+      return 0;
+    case 1033: /* F_ADD_SEALS: nao ha outro processo de quem proteger */
+      return 0;
+    case 1034: /* F_GET_SEALS */
       return 0;
     default:
       errno = EINVAL;

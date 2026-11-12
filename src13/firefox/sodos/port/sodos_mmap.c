@@ -54,6 +54,11 @@ struct sodos_map {
   struct sodos_map* next;
 };
 
+/* sodos_shm.c */
+int sodos_shm_is(int fd);
+void* sodos_shm_map(int fd, size_t len, off_t off);
+int sodos_shm_unmap(void* addr, size_t len);
+
 static struct sodos_map* maps;
 static struct sodos_base* bases;
 
@@ -105,6 +110,7 @@ void* mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off) {
      * MAP_SHARED gravavel precisaria devolver as escritas ao arquivo. */
     char* p;
     size_t got = 0;
+    if (sodos_shm_is(fd)) return sodos_shm_map(fd, len, off);
     if ((flags & MAP_SHARED) && (prot & PROT_WRITE)) {
       errno = ENOSYS;
       return MAP_FAILED;
@@ -182,6 +188,7 @@ int munmap(void* addr, size_t len) {
     dbg_hex((unsigned)len);
     dbg_txt("\n");
   }
+  if (a && sodos_shm_unmap(a, len)) return 0;
   if (!a || len == 0) {
     errno = EINVAL;
     return -1;

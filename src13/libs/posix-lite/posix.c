@@ -430,8 +430,19 @@ extern int sodos_pipe_close(int fd);
 extern ssize_t sodos_pipe_read(int fd, void* buf, size_t n);
 extern ssize_t sodos_pipe_write(int fd, const void* buf, size_t n);
 #define PIPE_FD(fd) ((fd) >= 2000)
+/* sodos_shm.c: memoria compartilhada (shm_open), descritores a partir de 3000. */
+extern int sodos_shm_ftruncate(int fd, off_t len);
+extern int sodos_shm_fstat(int fd, struct stat* st);
+extern off_t sodos_shm_lseek(int fd, off_t off, int whence);
+extern int sodos_shm_dup(int fd);
+#define SHM_FD(fd) ((fd) >= 3000)
 #else
 #define PIPE_FD(fd) 0
+#define SHM_FD(fd) 0
+#define sodos_shm_ftruncate(fd, len) (-1)
+#define sodos_shm_fstat(fd, st) (-1)
+#define sodos_shm_lseek(fd, off, whence) (-1)
+#define sodos_shm_dup(fd) (-1)
 #define sodos_pipe_close(fd) (-1)
 #define sodos_pipe_read(fd, buf, n) (-1)
 #define sodos_pipe_write(fd, buf, n) (-1)
@@ -621,6 +632,7 @@ __export ssize_t write(int fd, const void* buf, size_t n) {
 __export off_t lseek(int fd, off_t off, int whence) {
   struct fd_ent* e;
   int np;
+  if (SHM_FD(fd)) return sodos_shm_lseek(fd, off, whence);
   if (fd < 3 || fd >= FD_MAX || !fds[fd].used) {
     errno = EBADF;
     return -1;
@@ -662,6 +674,7 @@ __export int fsync(int fd) {
 __export int ftruncate(int fd, off_t len) {
   struct fd_ent* e;
   char* nb;
+  if (SHM_FD(fd)) return sodos_shm_ftruncate(fd, len);
   if (fd < 3 || fd >= FD_MAX || !fds[fd].used || len < 0) {
     errno = EBADF;
     return -1;
@@ -693,6 +706,7 @@ __export int ftruncate(int fd, off_t len) {
 __export int dup(int fd) {
   int nfd;
   struct fd_ent* e;
+  if (SHM_FD(fd)) return sodos_shm_dup(fd);
   if (fd < 3 || fd >= FD_MAX || !fds[fd].used) {
     errno = EBADF;
     return -1;
@@ -717,6 +731,7 @@ __export int dup(int fd) {
 
 __export int fstat(int fd, struct stat* st) {
   struct fd_ent* e;
+  if (SHM_FD(fd)) return sodos_shm_fstat(fd, st);
   if (!st) {
     errno = EINVAL;
     return -1;

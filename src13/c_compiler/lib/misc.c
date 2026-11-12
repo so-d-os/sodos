@@ -362,7 +362,8 @@ size_t wcstombs(char* dst, const wchar_t* src, size_t n) {
 struct __so_ts {
   long tv_sec, tv_nsec;
 };
-int sched_yield(void);
+/* Fraco: so a libsodos tem threads; sem ela, quem cede a vez e o kernel. */
+extern int sched_yield(void) __attribute__((weak));
 int clock_gettime(int clk, struct __so_ts* ts);
 
 static long long __so_now_ns(int clk) {
@@ -392,7 +393,8 @@ static long __so_futex(volatile int* addr, int op, int val, const struct __so_ts
         errno = ETIMEDOUT;
         return -1;
       }
-      sched_yield();
+      if (sched_yield) sched_yield();
+      else k_yield();
     }
     return 0;
   }

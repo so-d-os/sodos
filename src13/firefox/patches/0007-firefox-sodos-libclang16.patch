@@ -1,0 +1,17 @@
+Fase M5: bindgen com libclang anterior a 17 (sodos/scripts/fetch-libclang.sh).
+Aplicar depois do 0006. Teste: sodos/scripts/build-browser64.sh build compile
+
+--- a/xpcom/threads/nsThreadUtils.h
++++ b/xpcom/threads/nsThreadUtils.h
+@@ -999,8 +999,9 @@
+   // This is good advice regardless of the types you're handling. Making it a
+   // dependent type so that the check only happens when this specialization is
+   // instantiated.
+-  static_assert(!std::is_same_v<std::void_t<T>, void>,
+-                "please use a lambda function");
++  // sizeof(T) e nao std::void_t<T>: o clang anterior ao 17 (libclang do
++  // bindgen) resolve o alias sem esperar a instanciacao (CWG1558).
++  static_assert(sizeof(T) == 0, "please use a lambda function");
+ };
+ 
+ // default impl.

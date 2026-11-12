@@ -830,8 +830,6 @@ ENOSYS_STUB(shmget, int a, size_t b, int c)
 ENOSYS_STUB(shmdt, const void* a)
 ENOSYS_STUB(shmctl, int a, int b, void* c)
 ENOSYS_STUB(ftok, const char* a, int b)
-ENOSYS_STUB(shm_open, const char* a, int b, unsigned c)
-ENOSYS_STUB(shm_unlink, const char* a)
 ENOSYS_STUB(statfs, const char* a, void* b)
 ENOSYS_STUB(sysinfo, void* a)
 ENOSYS_SSIZE(sendfile, int a, int b, long* c, size_t d)
@@ -843,11 +841,15 @@ void* shmat(int a, const void* b, int c) {
   errno = ENOSYS;
   return (void*)-1;
 }
+int sodos_shm_is(int fd);
 int posix_fallocate(int fd, long off, long len) {
-  (void)fd;
-  (void)off;
-  (void)len;
-  return ENOSYS;
+  struct stat s;
+  /* So a memoria compartilhada (sodos_shm.c) reserva de verdade. */
+  if (!sodos_shm_is(fd)) return ENOSYS;
+  if (off < 0 || len <= 0) return EINVAL;
+  if (fstat(fd, &s) != 0) return errno;
+  if (off + len > s.st_size && ftruncate(fd, off + len) != 0) return errno;
+  return 0;
 }
 void* setmntent(const char* a, const char* b) {
   (void)a;
@@ -957,9 +959,36 @@ int sem_timedwait(sem_t* s, const struct timespec* abstime) {
 
 /* Sem shell Unix para preencher o ambiente: valores padrao do SODOS. */
 __attribute__((constructor(102))) static void sodos_default_env(void) {
+  /* O shell do SODOS nao passa ambiente: D:\\SODOS\\ENV.TXT traz linhas
+   * NOME=valor que valem para todo programa portado (ex.: MOZ_LOG=...). */
+  {
+    static char env[2048];
+    int n = k_fload("D:\\SODOS\\ENV.TXT", env, (int)sizeof(env) - 1);
+    char* p = env;
+    if (n < 0) n = 0;
+    env[n] = 0;
+    while (*p) {
+      char* e = p;
+      char* eq;
+      while (*e && *e != '\n' && *e != '\r') e++;
+      if (*e) *e++ = 0;
+      eq = strchr(p, '=');
+      if (eq && eq != p && p[0] != '#') {
+        *eq = 0;
+        setenv(p, eq + 1, 1);
+      }
+      p = e;
+      while (*p == '\n' || *p == '\r') p++;
+    }
+  }
   setenv("HOME", "/D/USER/DEFAULT", 0);
   setenv("TMPDIR", "/D/TEMP", 0);
   setenv("USER", "sodos", 0);
+  /* Gecko: o SODOS nao cria processos filhos, entao tudo roda no processo
+   * principal (sem processo de rede nem de conteudo). */
+  setenv("MOZ_DISABLE_SOCKET_PROCESS", "1", 0);
+  setenv("MOZ_FORCE_DISABLE_E10S", "1", 0);
+  setenv("MOZ_DISABLE_CONTENT_SANDBOX", "1", 0);
 }
 
 /* ---- depuracao ---------------------------------------------------------- */
