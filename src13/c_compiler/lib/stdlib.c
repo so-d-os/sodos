@@ -92,6 +92,9 @@ void* malloc(size_t n) {
      * deslocamento para o free achar o bloco original. */
     h = (struct hdr*)(((uintptr_t)raw + sizeof(struct hdr) + 15u) &
                       ~(uintptr_t)15u);
+#ifdef SODOS_ALLOC_TRACE
+    /* Traco de alocacao na serial: so para depurar. Ligado, cada malloc/free
+     * grande escreve no COM1 e a navegacao fica ordens de grandeza mais lenta. */
     if (n >= 0x2000u) {
       dbg_txt("!AB n=");
       dbg_u32((unsigned)n);
@@ -99,6 +102,7 @@ void* malloc(size_t n) {
       dbg_u32((unsigned)(uintptr_t)(h + 1));
       dbg_txt("\n");
     }
+#endif
     h->cls = BIG_CLASS;
     h->magic = HDR_MAGIC;
     h->size = n;
@@ -167,6 +171,7 @@ void free(void* p) {
   if (h->magic != HDR_MAGIC) return; /* ponteiro invalido ou free duplo */
   h->magic = 0;
   if (h->cls == BIG_CLASS) {
+#ifdef SODOS_ALLOC_TRACE
     if (h->size >= 0x2000u) {
       dbg_txt("!FB p=");
       dbg_u32((unsigned)(uintptr_t)p);
@@ -174,6 +179,7 @@ void free(void* p) {
       dbg_u32(h->size);
       dbg_txt("\n");
     }
+#endif
     k_free((char*)h - h->pad);
     return;
   }

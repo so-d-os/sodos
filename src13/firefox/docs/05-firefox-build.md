@@ -771,3 +771,42 @@ O alvo tambem reinstala [sodos.js](../sodos/prefs/sodos.js), que agora tem
 `browser.sessionstore.resume_from_crash=false`: como o QEMU quase sempre e
 fechado a forca, sem essa pref o Firefox restaurava a sessao anterior (uma aba
 "Nova aba") em vez de abrir a pagina inicial.
+
+### "database disk image is malformed" ao rolar a pagina
+
+O Firefox aborta (`Redirecting call to abort() to mozalloc_abort`) quando uma
+consulta encontra o `places.sqlite`/`favicons.sqlite` corrompido. As causas no
+port, em ordem de importancia:
+
+1. **`fcntl` nao implementa travas** (`sodos_pipe.c`: `F_SETLK`/`F_SETLKW`
+   devolvem 0 sem travar). O SQLite usa essas travas de byte-range para
+   coordenar as varias conexoes/threads (places, favicons, storage, cookies).
+   Sem elas, duas escritas podem se sobrepor.
+2. **Escrita de arquivo inteiro**: `fsync`/`close` da posix-lite gravam o
+   arquivo todo (`k_fsave`) no FAT, sem escrita atomica. Um QEMU fechado no
+   meio da gravacao deixa o banco truncado.
+3. **Desligamento a forca**: cada `make run` interrompido no meio de um write
+   aumenta a chance de corrupcao.
+
+Mitigacao atual: `make firefox-profile-reset` recria o perfil e o
+[sodos.js](../sodos/prefs/sodos.js) desliga o que mais grava durante a
+navegacao (`places.history.enabled`, `browser.chrome.site_icons`,
+`browser.pagethumbnails.capturing_disabled`). O conserto de verdade e
+implementar as travas `fcntl` na posix-lite.
+
+### Por que a navegacao e lenta
+
+- **Tracos na serial**: o malloc/free da libc imprimia `!AB`/`!FB` para toda
+  alocacao >= 8 KB e o `mmap` imprimia `!MP`/`!MV` para >= 64 KB. O Firefox
+  aloca o tempo todo; cada linha vai para o COM1 (I/O sincrono). Agora estao
+  atras de `SODOS_ALLOC_TRACE`/`SODOS_MMAP_TRACE` (desligados): no mesmo teste
+  a serial caiu de ~478 KB para ~14 KB.
+- **Processo unico, sem e10s**, e escalonador **cooperativo**: layout, JS,
+  rede e banco dividem a mesma thread; qualquer operacao longa para tudo.
+- **I/O de arquivo inteiro** no FAT16: abrir um arquivo o carrega na memoria e
+  `fsync` regrava o arquivo todo (um `places.sqlite` de 1,7 MB vira 1,7 MB de
+  escrita). Nao ha pagina sob demanda nem `mmap` de arquivo compartilhado.
+- **Sem GPU**: rasterizacao por software; e o QEMU precisa de KVM (com TCG fica
+  uma ordem de grandeza mais lento).
+- **Servicos em segundo plano** (remote settings, IndexedDB) falham e repetem,
+  gastando tempo de inicializacao.

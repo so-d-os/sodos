@@ -27,3 +27,12 @@ pref("browser.newtabpage.enabled", false);
 // O QEMU quase sempre e fechado a força: sem isto o Firefox restaura a sessao
 // anterior (uma aba "Nova aba") em vez de abrir a pagina inicial.
 pref("browser.sessionstore.resume_from_crash", false);
+// Menos escrita em disco: o fcntl do port nao implementa travas de arquivo e o
+// fsync reescreve o arquivo inteiro no FAT. Historico/favicons/thumbnails sao
+// os que mais gravam durante a navegacao e ja apareceram corrompidos
+// ("database disk image is malformed" no places.sqlite/favicons.sqlite).
+pref("places.history.enabled", false);
+pref("browser.chrome.site_icons", false);
+pref("browser.pagethumbnails.capturing_disabled", true);
+pref("browser.safebrowsing.malware.enabled", false);
+pref("browser.safebrowsing.phishing.enabled", false);

@@ -167,6 +167,7 @@ void* mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off) {
   e->next = maps;
   maps = e;
 
+#ifdef SODOS_MMAP_TRACE
   if (len >= 0x10000u) {
     dbg_txt("!MP len=");
     dbg_hex((unsigned)len);
@@ -174,6 +175,7 @@ void* mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off) {
     dbg_hex((unsigned)(uintptr_t)al);
     dbg_txt("\n");
   }
+#endif
   return (void*)al;
 }
 
@@ -181,6 +183,7 @@ int munmap(void* addr, size_t len) {
   struct sodos_map** pp = &maps;
   char* a = (char*)addr;
 
+#ifdef SODOS_MMAP_TRACE
   if (len >= 0x10000u) {
     dbg_txt("!MU a=");
     dbg_hex((unsigned)(uintptr_t)addr);
@@ -188,6 +191,7 @@ int munmap(void* addr, size_t len) {
     dbg_hex((unsigned)len);
     dbg_txt("\n");
   }
+#endif
   if (a && sodos_shm_unmap(a, len)) return 0;
   if (!a || len == 0) {
     errno = EINVAL;
@@ -242,6 +246,7 @@ int munmap(void* addr, size_t len) {
 }
 
 int mprotect(void* addr, size_t len, int prot) {
+#ifdef SODOS_MMAP_TRACE
   if (len >= 0x10000u) {
     dbg_txt("!MT a=");
     dbg_hex((unsigned)(uintptr_t)addr);
@@ -251,10 +256,12 @@ int mprotect(void* addr, size_t len, int prot) {
     dbg_hex((unsigned)prot);
     dbg_txt("\n");
   }
+#endif
   return 0; /* sem protecao por pagina no SODOS */
 }
 
 int madvise(void* addr, size_t len, int advice) {
+#ifdef SODOS_MMAP_TRACE
   if (len >= 0x10000u) {
     dbg_txt("!MV a=");
     dbg_hex((unsigned)(uintptr_t)addr);
@@ -264,6 +271,7 @@ int madvise(void* addr, size_t len, int advice) {
     dbg_hex((unsigned)advice);
     dbg_txt("\n");
   }
+#endif
   /* So MADV_DONTNEED/MADV_FREE descartam: o chamador espera achar zeros no reuso.
    * Os demais sao dicas (o Gecko pede MADV_NOHUGEPAGE sobre a pilha em uso). */
   if ((advice == MADV_DONTNEED || advice == MADV_FREE) && addr && len) memset(addr, 0, len);
