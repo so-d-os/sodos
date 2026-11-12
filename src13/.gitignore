@@ -64,3 +64,4 @@ disk-256mb.img
 # Dumps e capturas de teste locais
 REGS_LINUX.BIN
 mc-*.png
+disk-antigo.img
