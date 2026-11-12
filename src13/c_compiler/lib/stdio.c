@@ -445,13 +445,17 @@ int remove(const char* path) {
 }
 
 /* Sem rename no kernel: copia o arquivo inteiro e apaga o antigo. */
-int rename(const char* from, const char* to) {
+int rename(const char* ufrom, const char* uto) {
   int sz;
   char* buf;
-  if (!from || !to) {
+  char from[FILENAME_MAX];
+  char to[FILENAME_MAX];
+  if (!ufrom || !uto || strlen(ufrom) >= FILENAME_MAX || strlen(uto) >= FILENAME_MAX) {
     errno = EINVAL;
     return -1;
   }
+  dos_path(ufrom, from);
+  dos_path(uto, to);
   sz = k_fsize(from);
   if (sz < 0) {
     errno = ENOENT;

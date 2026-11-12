@@ -225,6 +225,7 @@ static const char PAGE[] =
   "GET /win/mouse/coord\n"
   "GET /win/mouse?x=10&y=20&click=1\n"
   "GET /win/windows\n"
+  "GET /win/launch?path=D:\\X.EXE\n"
   "GET /win/close?program=Gerenciador\n"
   "GET /win/execute?cmd=help\n"
   "POST /win/execute   corpo = comando\n"
@@ -495,6 +496,15 @@ static void handle(char* req) {
     }
     if (png) send_png(scale, level);
     else send_bmp(scale);
+    return;
+  }
+  if (eq(path, "/win/launch")) {
+    /* Abre um programa como janela do WIN (o mesmo pedido de k_win_launch). */
+    char lp[64];
+    lp[0] = 0;
+    if (!form_get(q, "path", lp, (int)sizeof(lp))) form_get(body, "path", lp, (int)sizeof(lp));
+    if (lp[0] && win_launch(lp) == 0) reply(200, "OK", "ok\n", 3, head);
+    else reply(400, "Bad Request", "path vazio\n", 11, head);
     return;
   }
   if (eq(path, "/win/key")) {

@@ -4635,7 +4635,9 @@ static void wm_exec(struct wm_win* wins, int* focus, int big, const char* path) 
     return;
   }
   /* file_load le no maximo max-1 bytes (poe um NUL no fim) */
-  if (file_load(path, (char*)magic, 5) == 4 && magic[0] == SOX_MAGIC) {
+  /* SOX (x32), SOX2 (LP64) ou ELF dinamico: o carregador de modulos decide. */
+  if (file_load(path, (char*)magic, 5) == 4 &&
+      (magic[0] == SOX_MAGIC || magic[0] == SOX_MAGIC2 || magic[0] == 0x464C457Fu)) {
     char* argv[2];
     argv[0] = (char*)path;
     argv[1] = 0;

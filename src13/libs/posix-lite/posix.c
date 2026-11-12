@@ -305,6 +305,19 @@ static time_t file_mtime(const char* full) {
   return 0;
 }
 
+/* Numero de inode a partir do caminho (sem diferenciar maiusculas): a FAT nao
+ * tem inode, e quem compara st_dev/st_ino para saber se dois descritores sao o
+ * mesmo arquivo (as travas do SQLite) nao pode ver zero em todos. */
+static unsigned long path_ino(const char* full) {
+  unsigned long h = 1469598103u;
+  for (; *full; full++) {
+    char c = *full;
+    if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+    h = (h ^ (unsigned char)c) * 16777619u;
+  }
+  return h ? h : 1;
+}
+
 static int fd_alloc(void) {
   int i;
   for (i = 3; i < FD_MAX; i++)
@@ -744,6 +757,8 @@ __export int fstat(int fd, struct stat* st) {
   memset(st, 0, sizeof(*st));
   st->st_mode = S_IFREG | S_IRUSR | S_IWUSR;
   st->st_size = e->size;
+  st->st_dev = 1;
+  st->st_ino = path_ino(e->path);
   st->st_mtime = file_mtime(e->path);
   st->st_atime = st->st_mtime;
   st->st_ctime = st->st_mtime;
@@ -764,13 +779,16 @@ __export int stat(const char* path, struct stat* st) {
   }
   join_cwd(path, full, PATH_MAX);
   memset(st, 0, sizeof(*st));
-  if (path_is_dir(full)) {
-    st->st_mode = S_IFDIR | S_IRWXU;
-    st->st_size = 0;
-    return 0;
-  }
+  st->st_dev = 1;
+  st->st_ino = path_ino(full);
+  /* Arquivo primeiro: e o caso comum e poupa listar a pasta. */
   sz = k_fsize(full);
   if (sz < 0) {
+    if (path_is_dir(full)) {
+      st->st_mode = S_IFDIR | S_IRWXU;
+      st->st_size = 0;
+      return 0;
+    }
     errno = ENOENT;
     return -1;
   }
