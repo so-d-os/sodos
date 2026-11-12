@@ -24,3 +24,6 @@ pref("app.update.enabled", false);
 pref("browser.startup.page", 1);
 pref("browser.startup.homepage", "https://www.google.com/");
 pref("browser.newtabpage.enabled", false);
+// O QEMU quase sempre e fechado a força: sem isto o Firefox restaura a sessao
+// anterior (uma aba "Nova aba") em vez de abrir a pagina inicial.
+pref("browser.sessionstore.resume_from_crash", false);

@@ -754,3 +754,20 @@ O que faltava e como ficou:
 Ainda lento e sem e10s: o download de 452 KB e o layout rodam no processo
 unico e no escalonador cooperativo; os servicos em segundo plano (detector de
 portal, `location.services.mozilla.com`) tambem aparecem no log.
+
+### Se a janela abrir em "Nova aba" e o Google nao carregar
+
+Sintoma: o FIREFOX.EXE abre a janela, o NSS inicializa, mas a aba fica em
+"Nova aba" e nao ha pedido a `www.google.com` na serial. Quase sempre e o
+**perfil acumulado** de execucoes interrompidas (erros de IndexedDB/sqlite
+atrasam a inicializacao) ou uma sessao antiga restaurada. Com o QEMU fechado:
+
+```sh
+make -C src13 firefox-profile-reset   # apaga D:\USER\DEFAULT\.mozilla no disco
+make -C src13 run
+```
+
+O alvo tambem reinstala [sodos.js](../sodos/prefs/sodos.js), que agora tem
+`browser.sessionstore.resume_from_crash=false`: como o QEMU quase sempre e
+fechado a forca, sem essa pref o Firefox restaurava a sessao anterior (uma aba
+"Nova aba") em vez de abrir a pagina inicial.

@@ -610,6 +610,26 @@ disk-files: disk.img
 	@sh tools/usb-docs.sh
 	@sh tools/usb-wifi.sh
 
+# Apaga o perfil do Firefox no disco (D:\USER\DEFAULT\.MOZILLA) e reinstala as
+# prefs do port. Util quando o perfil acumulado de execucoes interrompidas
+# (IndexedDB/sqlite) trava a inicializacao: a janela abre em "Nova aba" e a
+# pagina inicial nao carrega. O proximo boot cria um perfil novo.
+firefox-profile-reset: disk.img
+	@if pgrep -f "[q]emu-system.*file=$(DISK)" >/dev/null; then \
+	  echo "Feche o QEMU antes de apagar o perfil."; exit 1; fi
+	@if ! mdir -i $(DISK)@@512 ::/FIREFOX >/dev/null 2>&1; then \
+	  echo "Firefox nao esta no disco: rode make disk-files antes."; exit 1; fi
+	@if ! mdir -i $(DISK)@@512 ::/FIREFOX/BROWSER/DEFAULTS/PREFERENCES >/dev/null 2>&1; then \
+	  echo "Faltam os defaults do Firefox: rode make disk-files antes."; exit 1; fi
+	@# O nome 8.3 no FAT e MOZILLA (sem o ponto); mdeltree com ".MOZILLA"
+	@# nao apaga, por isso usamos o nome curto.
+	@mdeltree -i $(DISK)@@512 ::/USER/DEFAULT/MOZILLA || exit 1
+	@if mdir -i $(DISK)@@512 ::/USER/DEFAULT/MOZILLA >/dev/null 2>&1; then \
+	  echo "Nao consegui apagar D:\\USER\\DEFAULT\\.mozilla."; exit 1; fi
+	@mcopy -o -i $(DISK)@@512 firefox/sodos/prefs/sodos.js \
+	  ::/FIREFOX/BROWSER/DEFAULTS/PREFERENCES/SODOS.JS || exit 1
+	@echo "Firefox: perfil apagado e prefs de D:/FIREFOX/browser/defaults/preferences atualizadas."
+
 # Sobe o QEMU e mostra os comandos para formatar o disco (digite no prompt do QEMU)
 run-format: os.img disk.img disk2.img
 	@echo ""
