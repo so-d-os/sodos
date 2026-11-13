@@ -37,6 +37,8 @@ Regras:
 | `0010-nspr-sodos-poll.patch` | NSPR usa `poll()` do port no SODOS (`_PR_POLL_AVAILABLE`); a emulacao com `select()` nao via os fds de pipes e soquetes (>= 2000) e a thread de soquetes parava |
 | `0011-firefox-sodos-freebl-static.patch` | freebl estatico: sem `FREEBL_NO_WEAK` no SODOS (o stubs.c usa os simbolos fracos do link, sem dlopen de libnspr4/libnssutil) e `STUB_SAFE_CALL5` no ramo fraco; sem isso `FREEBL_GetVector` devolvia NULL e o softoken dava `-8023` no `BL_Init` |
 | `0012-firefox-sodos-roda.patch` | roda do mouse: `HeadlessWidget.h` usa no SODOS o modo de delta do GTK (linhas, 3 por passo); sem isso o `deltaMode` ficava -1 e o `EventStateManager` abortava (`MOZ_CRASH`) ao rolar |
+| `0013-firefox-sodos-audio-nulo.patch` | backend `sodos` no cubeb (`USE_SODOS`, `cubeb_sodos.c` copiado de `sodos/cubeb` por `build-browser64.sh`): saida de audio nula que consome as amostras no ritmo do relogio, para o `<audio>`/`<video>` andar sem placa de som |
+| `0014-firefox-sodos-jit-reserva.patch` | reserva de codigo do JIT de 256 MB no SODOS (`MaxCodeBytesPerProcess`); sem memoria virtual o mmap da reserva de 2044 MB virava RAM e o GC ficava sem chunks (`Failed to allocate new chunk during GC`) |
 | `rust-std-sodos.patch` | `std` do Rust para `target_os = "sodos"`; aplica no `rust-src` do nightly (`sodos/scripts/patch-rust-std.sh`), nao na arvore do Firefox |
 
 Os marcadores SODOS_MARK em js/src/shell/js.cpp (bytes na serial COM1)

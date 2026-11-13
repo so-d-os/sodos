@@ -10,6 +10,19 @@ pref("network.trr.mode", 5);
 // Detector de portal cativo e de conectividade: pedidos em segundo plano.
 pref("network.captive-portal-service.enabled", false);
 pref("network.connectivity-service.enabled", false);
+// O kernel tem 64 soquetes TCP para tudo. Sem limite o pool HTTP guarda
+// conexoes ociosas para cada host de uma pagina do Google (e as especulativas)
+// e a proxima aba fica sem vaga: "Unable to connect".
+pref("network.http.max-connections", 40);
+pref("network.http.max-persistent-connections-per-server", 4);
+pref("network.http.max-urgent-start-excessive-connections-per-host", 1);
+pref("network.http.keep-alive.timeout", 30);
+pref("network.http.speculative-parallel-limit", 0);
+pref("network.predictor.enabled", false);
+pref("network.prefetch-next", false);
+pref("network.dns.disablePrefetch", true);
+pref("browser.urlbar.speculativeConnect.enabled", false);
+pref("browser.places.speculativeConnect.enabled", false);
 // Primeira execucao: sem a aba de privacidade e sem as boas-vindas.
 pref("datareporting.policy.firstRunURL", "");
 pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);
@@ -56,3 +69,5 @@ pref("media.rdd-process.enabled", false);
 pref("browser.backup.enabled", false);
 pref("browser.backup.scheduled.enabled", false);
 pref("browser.backup.archive.enabled", false);
+// Audio: so ha o backend nulo do SODOS (cubeb_sodos.c), sem som por enquanto.
+pref("media.cubeb.backend", "sodos");

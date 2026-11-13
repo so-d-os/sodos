@@ -8,6 +8,7 @@
 #include "net.h"
 #include "module.h"
 #include "kexports.h"
+#include "isr.h"
 #include "clip.h"
 #include "visual.h"
 #include "fbcon.h"
@@ -819,6 +820,9 @@ static int k_memmap(uint32_t* kb, int cells, uint32_t* cell_kb, uint32_t pid) {
   return map_n;
 }
 
+/* Excecoes do programa vao para entry (sinais da libc; ver isr.c). 0 desliga. */
+static int k_fault_entry(void* entry) { return isr_fault_set((uint64_t)(uintptr_t)entry); }
+
 struct kexp {
   const char* name;
   void* fn;
@@ -861,6 +865,7 @@ static const struct kexp table[] = {
   EXP(k_exe_drive),
   EXP(k_malloc),
   EXP(k_malloc_aligned),
+  EXP(k_fault_entry),
   EXP(k_free),
   EXP(k_realloc),
   EXP(k_msize),

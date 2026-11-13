@@ -45,7 +45,7 @@ PORT_CC := $(CC64) $(PIC) -I $(FX)/sodos/include -I $(C)/include
 LDSO := ld -shared --hash-style=both -z max-page-size=0x1000 -z noexecstack -z notext \
 	--no-eh-frame-hdr --strip-debug
 
-LIBC_SRC := string ctype stdlib stdio printf scanf fpconv math time misc wchar setjmp64
+LIBC_SRC := string ctype stdlib stdio printf scanf fpconv math time misc sigfault64 wchar setjmp64
 PORT_SRC := $(notdir $(basename $(wildcard $(FX)/sodos/port/*.c)))
 # A ordem importa: port, posix e libc repetem algumas funcoes (getpid, pipe,
 # fcntl...) e vale a primeira, como no link estatico (toolchain/sodos-gcc.py).

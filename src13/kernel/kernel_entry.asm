@@ -8,8 +8,10 @@
 ;
 ; O ponto de entrada continua sendo kernel_entry.  Qualquer carregador que
 ; respeite o contrato entrega o mesmo BootInfo ao mesmo kmain() 64 bits.
-; Paginas de 2 MB, identidade, 4 GB: diretorios 0x3000 (GB 0), 0x8000 (GB 1),
-; 0x9000 (GB 2) e 0x6000 (GB 3); ver mm.c.  Tabelas em 0x1000/0x2000.  No GB 3
+; Paginas de 2 MB, identidade, 4 GB: diretorios 0x3000 (GB 0), pd_gb12 (GB 1
+; e GB 2, no .data do kernel) e 0x6000 (GB 3); ver mm.c.  GB 1/2 ficavam em
+; 0x8000/0x9000, mas o smp.c copia o trampolim dos APs para 0x8000: 1-2 GB
+; passavam a apontar para lixo (#PF em 0x40000000 no umalloc_aligned).  Tabelas em 0x1000/0x2000.  No GB 3
 ; o buraco PCI fica UC pelos MTRRs do firmware; o framebuffer Bochs em
 ; 0xE0000000 e o candidato 0xFD000000 ganham UC explicito. GDT em 0x4000.
 ; 0x8000-0x9FFF era o stage2; ele ja terminou quando chegamos aqui.
@@ -60,19 +62,21 @@ kernel_entry:
     add edi, 8
     loop .fill
 
-    ; 1 GB..3 GB: diretorios 0x8000 e 0x9000 (contiguos, 1024 entradas).
+    ; 1 GB..3 GB: pd_gb12 (dois diretorios contiguos, 1024 entradas).
     mov ecx, 1024
     mov eax, 0x40000083
-    mov edi, 0x8000
+    mov edi, pd_gb12
 .fill12:
     mov [edi], eax
     mov dword [edi+4], 0
     add eax, 0x200000
     add edi, 8
     loop .fill12
-    mov dword [0x2008], 0x8003
+    mov eax, pd_gb12 + 3
+    mov dword [0x2008], eax
     mov dword [0x200C], 0
-    mov dword [0x2010], 0x9003
+    mov eax, pd_gb12 + 0x1000 + 3
+    mov dword [0x2010], eax
     mov dword [0x2014], 0
 
     ; 3 GB..4 GB: identidade inteira (RAM abaixo do buraco PCI em notebooks)
@@ -113,7 +117,7 @@ kernel_entry:
     ; Framebuffer entregue pelo carregador (GOP via GRUB): pode estar em
     ; qualquer lugar (0xD0000000 numa AMD, BAR alto acima de 4 GB...).
     ; Mapeia 64 MB a partir de fb_addr, write-combining (PAT 1 = WC abaixo).
-    ; GB 0..3 usam os diretorios 0x3000/0x8000/0x9000/0x6000; acima, 0x7000.
+    ; GB 0..3 usam os diretorios 0x3000/pd_gb12/pd_gb12+0x1000/0x6000; acima, 0x7000.
     mov eax, [ebp + 56]
     mov edx, [ebp + 60]
     mov ecx, eax
@@ -133,10 +137,10 @@ kernel_entry:
     jb .fbi_done
     jmp .fbi_map
 .fbi_not0:
-    mov edi, 0x8000
+    mov edi, pd_gb12
     cmp ecx, 1
     je .fbi_map
-    mov edi, 0x9000
+    mov edi, pd_gb12 + 0x1000
     cmp ecx, 2
     je .fbi_map
     mov edi, 0x6000
@@ -273,3 +277,10 @@ lm_entry:
     cli
     hlt
     jmp .hang
+
+; Diretorios de pagina de GB 1 e GB 2. No .data (nao no .bss): o kmain zera o
+; BSS depois que a paginacao ja usa estas tabelas.
+section .data
+align 4096
+pd_gb12:
+    times 1024 dq 0

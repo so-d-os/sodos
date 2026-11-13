@@ -9,6 +9,7 @@
 #include "reboot.h"
 #include "kexports.h"
 #include "module_priv.h"
+#include "isr.h"
 
 void* kexport_find(const char* name);
 int mod_call_entry(void* fn, int argc, char** argv, void* stack_top);
@@ -542,6 +543,7 @@ static void exec_release(uint32_t pid, int id) {
   unload(id);
   elf_release_pid(pid);
   ufree_owner(pid);
+  isr_fault_release(pid);
 }
 
 int mod_kill(uint32_t pid) {

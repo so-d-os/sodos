@@ -274,10 +274,11 @@ static int format(struct sink* s, const char* fmt, va_list ap) {
       }
     }
     for (;; fmt++) {
-      if (*fmt == 'l') lng++;
+      /* LP64 (x64): long, size_t e ptrdiff_t tem 64 bits; %lx lia so 32. */
+      if (*fmt == 'l') lng += sizeof(long) == 8 ? 2 : 1;
       else if (*fmt == 'L' || *fmt == 'q') lng = 2;
       else if (*fmt == 'h' || *fmt == 'z' || *fmt == 't' || *fmt == 'j') {
-        if (*fmt == 'j') lng = 2;
+        if (*fmt == 'j' || (*fmt != 'h' && sizeof(void*) == 8)) lng = 2;
       } else break;
     }
     c = *fmt;

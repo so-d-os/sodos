@@ -81,6 +81,10 @@ void* k_malloc(unsigned n);
 /* Kernel novo: endereco multiplo de align (potencia de 2). Programas que devem
  * rodar em kernel antigo procuram com k_dl_sym(0, "k_malloc_aligned", 0). */
 void* k_malloc_aligned(unsigned n, unsigned align);
+/* Kernel novo: excecoes da CPU do programa (#DE #UD #GP #PF #MF #AC #XM) vao
+ * para entry em vez da tela de EXCEPTION. So para a libc (sigaction, x64):
+ * procure com k_dl_sym(0, "k_fault_entry", 0). entry 0 desliga. */
+int k_fault_entry(void* entry);
 void k_free(void* p);
 void* k_realloc(void* p, unsigned n);
 unsigned k_msize(void* p);
@@ -237,7 +241,7 @@ int k_net_pending(void);
 void k_tcp_close(void);
 
 /* rede: varios soquetes TCP nao bloqueantes (IP em ordem de host).
- * k_sock_connect: 1..16 ou < 0 (a conexao segue sozinha; veja k_sock_poll).
+ * k_sock_connect: 1..64 ou < 0 (a conexao segue sozinha; veja k_sock_poll).
  * k_sock_poll: bits 1 ler, 2 escrever, 4 erro, 8 conectado.
  * k_sock_send: aceitos, -1 EAGAIN, -2 erro. k_sock_recv: lidos, 0 fim,
  * -1 EAGAIN, -2 erro (peek != 0 nao consome). k_sock_err: errno do Linux.

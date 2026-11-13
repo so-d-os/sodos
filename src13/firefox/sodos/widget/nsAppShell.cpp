@@ -2,6 +2,7 @@
 #include "nsAppShell.h"
 
 #include "HeadlessScreenHelper.h"
+#include "mozilla/Hal.h"
 #include "mozilla/TimeStamp.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/widget/ScreenManager.h"
@@ -16,9 +17,13 @@ using mozilla::widget::ScreenManager;
 
 nsAppShell::nsAppShell() : mMonitor("nsAppShell"), mPending(false) {}
 
-nsAppShell::~nsAppShell() = default;
+nsAppShell::~nsAppShell() { hal::Shutdown(); }
 
 nsresult nsAppShell::Init() {
+  // Como os nsAppShell do GTK/Windows/Android: sem isto a tabela de wake
+  // locks do HAL fica nula e o primeiro <video>/<audio> tocando (ou o
+  // "screen" wake lock) derrubava o processo em PLDHashTable::ChangeTable.
+  hal::Init();
   if (XRE_IsParentProcess()) {
     // A tela do Gecko e a area da janela que o WIN deu ao programa.
     if (widget::sodos::Open()) {

@@ -28,7 +28,7 @@ int net_tcp_pending(void);
 void net_tcp_close(void);
 
 /* Soquetes TCP nao bloqueantes, varios ao mesmo tempo (IPs em ordem de host).
- * connect: 1..16 ou < 0. poll: bits 1 ler, 2 escrever, 4 erro, 8 conectado.
+ * connect: 1..64 ou < 0. poll: bits 1 ler, 2 escrever, 4 erro, 8 conectado.
  * send: aceitos, -1 EAGAIN, -2 erro. recv: lidos, 0 fim, -1 EAGAIN, -2 erro.
  * err: errno do Linux. pump: retransmite e anda as filas (o poll ja chama). */
 int net_sock_connect(uint32_t ip, int port, uint32_t owner);

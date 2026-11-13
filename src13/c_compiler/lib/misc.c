@@ -157,34 +157,95 @@ struct lconv* localeconv(void) {
   return &lc;
 }
 
-/* ---------- sinais ---------- */
-static sighandler_t sig_tab[NSIG];
+/* ---------- sinais ----------
+ * signal() e sigaction() dividem a mesma tabela. raise() entrega na hora. No
+ * x64 as excecoes da CPU (SIGSEGV, SIGILL, SIGFPE, SIGBUS) chegam de verdade:
+ * sigfault64.c pede ao kernel (k_fault_entry) assim que alguem instala um
+ * handler para elas. */
+static struct sigaction sig_act[NSIG];
+
+struct sigaction* __so_sig_act(int sig) {
+  if (sig <= 0 || sig >= NSIG) return 0;
+  return &sig_act[sig];
+}
+
+#if defined(__x86_64__) && !defined(__ILP32__)
+void __so_fault_arm(void);
+int __so_fault_raise(int sig);
+#endif
+
+static void sig_armed(int sig) {
+#if defined(__x86_64__) && !defined(__ILP32__)
+  if (sig == SIGSEGV || sig == SIGILL || sig == SIGFPE || sig == SIGBUS) {
+    struct sigaction* a = &sig_act[sig];
+    if ((a->sa_flags & SA_SIGINFO) ? (a->sa_sigaction != 0) : (a->sa_handler != SIG_DFL))
+      __so_fault_arm();
+  }
+#else
+  (void)sig;
+#endif
+}
 
 sighandler_t signal(int sig, sighandler_t handler) {
   sighandler_t old;
-  if (sig <= 0 || sig >= NSIG || sig == SIGKILL) {
+  if (sig <= 0 || sig >= NSIG || sig == SIGKILL || sig == SIGSTOP) {
     errno = EINVAL;
     return SIG_ERR;
   }
-  old = sig_tab[sig];
-  sig_tab[sig] = handler;
+  old = sig_act[sig].sa_handler;
+  memset(&sig_act[sig], 0, sizeof(sig_act[sig]));
+  sig_act[sig].sa_handler = handler;
+  sig_armed(sig);
   return old;
 }
 
-int raise(int sig) {
-  sighandler_t h;
+int sigaction(int sig, const struct sigaction* act, struct sigaction* old) {
   if (sig <= 0 || sig >= NSIG) {
     errno = EINVAL;
     return -1;
   }
-  h = sig_tab[sig];
-  if (h == SIG_IGN) return 0;
-  if (h == SIG_DFL) {
-    if (sig == SIGCHLD) return 0;
+  if (old) *old = sig_act[sig];
+  if (act) {
+    if (sig == SIGKILL || sig == SIGSTOP) {
+      errno = EINVAL;
+      return -1;
+    }
+    sig_act[sig] = *act;
+    sig_armed(sig);
+  }
+  return 0;
+}
+
+int raise(int sig) {
+  struct sigaction a;
+  siginfo_t si;
+  if (sig <= 0 || sig >= NSIG) {
+    errno = EINVAL;
+    return -1;
+  }
+  a = sig_act[sig];
+  if (a.sa_flags & SA_SIGINFO) {
+    if (a.sa_sigaction) {
+      memset(&si, 0, sizeof(si));
+      si.si_signo = sig;
+      si.si_code = SI_TKILL;
+      a.sa_sigaction(sig, &si, 0);
+      return 0;
+    }
+    a.sa_handler = SIG_DFL;
+  }
+  if (a.sa_handler == SIG_IGN) return 0;
+  if (a.sa_handler == SIG_DFL) {
+#if defined(__x86_64__) && !defined(__ILP32__)
+    /* Dentro do handler de uma falha (SIGSEGV...): retoma a instrucao que
+     * falhou e o kernel mostra a EXCEPTION com o RIP original. */
+    __so_fault_raise(sig);
+#endif
+    if (sig == SIGCHLD || sig == SIGWINCH || sig == SIGURG || sig == SIGCONT) return 0;
     exit(128 + sig);
   }
-  sig_tab[sig] = SIG_DFL;
-  h(sig);
+  sig_act[sig].sa_handler = SIG_DFL;
+  a.sa_handler(sig);
   return 0;
 }
 
@@ -528,7 +589,6 @@ int sigfillset(sigset_t* set) { if (set) memset(set, 0xff, sizeof(*set)); return
 int sigaddset(sigset_t* set, int sig) { if (set && sig > 0 && sig < 32) set->val[sig/32] |= 1u << (sig%32); return 0; }
 int sigdelset(sigset_t* set, int sig) { if (set && sig > 0 && sig < 32) set->val[sig/32] &= ~(1u << (sig%32)); return 0; }
 int sigismember(const sigset_t* set, int sig) { return set && sig > 0 && sig < 32 && (set->val[sig/32] & (1u << (sig%32))); }
-int sigaction(int sig, const struct sigaction* act, struct sigaction* old) { (void)sig; (void)act; (void)old; return 0; }
 int sigprocmask(int how, const sigset_t* set, sigset_t* old) { (void)how; (void)set; (void)old; return 0; }
 int sigwait(const sigset_t* set, int* sig) { (void)set; if (sig) *sig = 0; return 0; }
 

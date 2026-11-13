@@ -37,7 +37,7 @@ SOXRUN = $(B)/soxrun
 HCC = $(B)/cc
 CC_SRC = cc/main.c cc/util.c cc/lex.c cc/pp.c cc/type.c cc/parse.c cc/gen.c
 
-all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/HELLO.EXE $(O)/CRASHT.EXE \
+all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/HELLO.EXE $(O)/CRASHT.EXE $(O)/SIGT64.EXE \
 	$(O)/CC.EXE $(O)/LINK.EXE $(O)/TLS.DLL $(O)/HTTPS.EXE $(O)/GUI.DLL $(O)/IMG.DLL \
 	$(O)/BROWSER.EXE $(O)/IMAGEVW.EXE $(O)/VIDPLAY.EXE $(O)/FONTADV.EXE $(O)/COMMAND.EXE $(O)/HTTPD.EXE \
 	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE $(O)/VIDEOCFG.EXE $(O)/IMGBIG.DLL $(O)/AIPANEL.EXE $(O)/MENUCFG.EXE \
@@ -291,7 +291,7 @@ $(DRV)/AMDCUR.DLL: $(B)/drv_amdcur.o $(LINK64) | $(DRV)
 drivers: $(DRV)/GPUTEST.DLL $(DRV)/GPUFAIL.DLL $(DRV)/VIRTGPU.DLL $(DRV)/AMDGOP.DLL $(DRV)/AMDCUR.DLL
 
 # LIBCX64 estatica: mesma libc, compilada -m64, ligada no HELLO64C.
-LIBC64_SRC = string ctype stdlib stdio printf scanf fpconv math time misc wchar setjmp64 ctors64
+LIBC64_SRC = string ctype stdlib stdio printf scanf fpconv math time misc sigfault64 wchar setjmp64 ctors64
 LIBC64_OBJ = $(patsubst %,$(B)/x64_%.o,$(LIBC64_SRC))
 
 $(B)/x64_%.o: lib/%.c | $(B)
@@ -310,6 +310,16 @@ $(O)/HELLO64C.EXE: $(B)/x_crt0_64libc.o $(B)/hello64c.o $(LIBC64_OBJ) $(LINK64) 
 	$(LINK64) /out:$@ $(B)/x_crt0_64libc.o $(B)/hello64c.o $(LIBC64_OBJ) $(O)/KERNEL.IMP
 
 hello64c: $(O)/HELLO64C.EXE
+
+# SIGT64: excecoes da CPU como sinais (k_fault_entry + lib/sigfault64.c).
+$(B)/sigt64.o: examples/sigt64.c | $(B)
+	gcc -m64 -O2 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -mno-red-zone \
+	  -mcmodel=large -fno-asynchronous-unwind-tables -nostdinc -isystem include -c $< -o $@
+
+$(O)/SIGT64.EXE: $(B)/x_crt0_64libc.o $(B)/sigt64.o $(LIBC64_OBJ) $(LINK64) $(O)/KERNEL.IMP
+	$(LINK64) /out:$@ $(B)/x_crt0_64libc.o $(B)/sigt64.o $(LIBC64_OBJ) $(O)/KERNEL.IMP
+
+sigt64: $(O)/SIGT64.EXE
 
 $(SOXRUN): tools/soxrun.c sox.h | $(B)
 	$(HOSTCC) -no-pie -fno-pie -mstackrealign -D_FILE_OFFSET_BITS=64 $(HCFLAGS) -o $@ tools/soxrun.c

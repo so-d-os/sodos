@@ -88,6 +88,8 @@ fi
 rm -rf "$SRC/widget/sodos"
 mkdir -p "$SRC/widget/sodos"
 cp -rp "$S/sodos/widget/." "$SRC/widget/sodos/"
+# Saida de audio nula (patch 0013 liga USE_SODOS no cubeb).
+cp -p "$S/sodos/cubeb/cubeb_sodos.c" "$SRC/media/libcubeb/src/cubeb_sodos.c"
 
 mkdir -p "$OBJ"
 cd "$OBJ"

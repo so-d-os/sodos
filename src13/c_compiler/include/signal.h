@@ -5,9 +5,9 @@
 extern "C" {
 #endif
 
-/* Sinais so por raise(): o Ctrl+C do SO encerra o programa direto. O NSPR
- * instala handlers com sigaction; aqui as chamadas sao aceitas e nao fazem
- * nada (nao ha entrega de sinal no SODOS). */
+/* Sinais por raise() e, no x64, as excecoes da CPU (SIGSEGV, SIGILL, SIGFPE,
+ * SIGBUS) com handler instalado por sigaction (lib/sigfault64.c + kernel
+ * k_fault_entry). O Ctrl+C do SO encerra o programa direto. */
 typedef int sig_atomic_t;
 typedef void (*sighandler_t)(int);
 
@@ -102,6 +102,9 @@ struct sigaction {
 #define SA_SIGINFO 4
 #define SA_ONSTACK 0x08000000
 #define SA_NODEFER 0x40000000
+#define SA_RESETHAND 0x80000000
+#define ILL_ILLOPN 2
+#define BUS_ADRALN 1
 
 sighandler_t signal(int sig, sighandler_t handler);
 int raise(int sig);

@@ -2041,7 +2041,7 @@ int net_tcp_pending(void) {
  * TCP (tcp_raw, tcp_input, tcp_rx_segment) e a mesma. Nada aqui espera: o
  * envio vai para uma fila, um segmento por vez (como a API bloqueante), e a
  * retransmissao anda em net_sock_pump, que quem faz poll chama. */
-#define KS_MAX 16
+#define KS_MAX 64            /* = SOCK_MAX do Firefox: o pool HTTP guarda varias conexoes ociosas */
 #define KS_RX (128 * 1024)   /* potencia de 2: o anel usa mascara */
 #define KS_TXQ (64 * 1024)
 
@@ -2219,6 +2219,16 @@ int net_sock_connect(uint32_t ip, int port, uint32_t owner) {
   if (!nic_ok || ks_cur || port <= 0 || port > 65535) return -1;
   for (i = 0; i < KS_MAX && !s; i++)
     if (!ks[i].used) s = &ks[i];
+  /* Sem vaga: um soquete ja fechado pelo programa (so esperando o FIN/ACK)
+   * nao tem mais dono que o use; o par recebe RST e segue a vida. */
+  for (i = 0; i < KS_MAX && !s; i++)
+    if (ks[i].closing) {
+      ks_enter(&ks[i]);
+      if (tcp_state != ST_CLOSED) tcp_raw(0x14, 0, 0, tcp_snd_nxt, 0);
+      ks_leave(&ks[i]);
+      ks_free(&ks[i]);
+      s = &ks[i];
+    }
   /* Sem vaga: o que sobrou de um programa que ja saiu volta para a lista. */
   for (i = 0; i < KS_MAX && !s; i++)
     if (ks[i].owner != owner) {

@@ -75,6 +75,8 @@ isr_common:
   and rsp, -16
   call isr_dispatch
   mov rsp, rbx
+  test rax, rax
+  jnz .fault
   pop r11
   pop r10
   pop r9
@@ -88,3 +90,19 @@ isr_common:
   pop rax
   add rsp, 16
   iretq
+
+; isr_dispatch devolveu a entrada de falhas do programa (k_fault_entry): pula
+; para ela como numa chamada, rdi = frame (fica intacto acima da nova pilha;
+; rbx/rbp/r8-r11 originais estao nele, r12-r15 e os xmm nao foram tocados),
+; rsi = CR2 (o isr_dispatch devolve isr_ret_t em rax:rdx). A pilha nova
+; comeca 512 bytes abaixo do frame (o que havia ali era o proprio
+; isr_dispatch). RFLAGS volta ao do programa (IF inclusive).
+.fault:
+  mov rdi, rsp
+  mov rsi, rdx
+  lea rsp, [rdi - 512]
+  and rsp, -16
+  push qword [rdi + 15*8]
+  popfq
+  push qword 0
+  jmp rax
