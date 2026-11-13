@@ -876,6 +876,20 @@ que no SODOS e o HOME), e o `PreferencesWriter` regravando o `prefs.js` via
 sendo a escrita ATA: DMA (bus master) ou virtio-blk, e sem `cli` durante a
 transferencia.
 
+**Relogio (`k_ms`, `net/net.c`).** Cada `k_ms` lia o PIT (`outb 0x43` +
+2x `inb 0x40`, uma saida de VM por acesso) e o port le o relogio o tempo todo
+(`clock_gettime`, esperas com prazo, `resched`): ~38% da CPU com o Firefox
+aberto. Agora o relogio e o contador do IRQ0 (1 kHz, leitura de memoria); se o
+IRQ0 parar por 4M consultas seguidas, volta a ler o PIT ate o tick andar.
+O TSC foi tentado e descartado: na VM aninhada do WSL2 o `rdtsc` tambem sai
+para o emulador, e a taxa dele variou alguns % entre boots e durante a
+execucao (com ele o relogio chegou a andar 37% rapido sob carga). Medido
+contra o host em 180 s abrindo o Firefox: relogio +0,02% (o PIT do KVM
+reinjeta tick atrasado, entao a escrita com `cli` nao perde tempo); relogio
+de 38% para 3,6% da CPU; codigo do Firefox de 1% para 26%. Proximo item visivel
+no perfil: `sodos__tls_switch` (~10%), um `wrmsr` do FS base a cada troca de
+thread do port, que tambem sai da VM.
+
 ### Mouse e teclado lentos com o Firefox aberto
 
 Medido no QEMU/KVM com `-smp 4`: **so o desktop, sem Firefox, ja usa ~92% de um

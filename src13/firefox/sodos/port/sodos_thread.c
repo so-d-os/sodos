@@ -590,3 +590,78 @@ int pthread_cancel(pthread_t t) {
   (void)t;
   return ENOSYS;
 }
+
+/* ---------- futex (FUTEX_WAIT / FUTEX_WAKE da libc LP64) ----------
+ * Antes o FUTEX_WAIT da libc (c_compiler/lib/misc.c) cedia a vez em laco ate o
+ * valor mudar e o FUTEX_WAKE nao fazia nada. Com as threads do Rust (Glean,
+ * WebRender, rayon) esperando assim, cada volta do escalonador passava por
+ * todas: troca de TLS (wrmsr/wrfsbase, que numa VM saem para o emulador) e
+ * relogio a cada uma, ~10% da CPU com o Firefox aberto (tools/qprof).
+ * Agora a thread dorme na fila de sono e o wake a acorda na hora. A fatia de
+ * FX_SLICE_MS e so a rede para quem mudar o valor sem chamar wake. */
+#define FX_SLICE_MS 50
+
+struct fx_wait {
+  volatile int* addr;
+  struct sodos_thread* t;
+  int woken;
+  struct fx_wait* next;
+};
+static struct fx_wait* fx_head;
+
+/* Tira t da fila de sono antes do prazo e a poe na de prontos. */
+static void unsleep(struct sodos_thread* t) {
+  struct sodos_thread** pp = &sleep_h;
+  if (!t || t->state != ST_SLEEP) return;
+  while (*pp && *pp != t) pp = &(*pp)->sleep_next;
+  if (*pp) *pp = t->sleep_next;
+  t->sleep_next = NULL;
+  make_ready(t);
+}
+
+static void fx_unlink(struct fx_wait* w) {
+  struct fx_wait** pp = &fx_head;
+  while (*pp && *pp != w) pp = &(*pp)->next;
+  if (*pp) *pp = w->next;
+}
+
+/* 0 acordou (ou o valor mudou); 1 o valor ja era outro (EAGAIN);
+ * 2 venceu o prazo (ETIMEDOUT). deadline_ms: sodos__ms() absoluto, 0 = sem. */
+int sodos_futex_wait(volatile int* addr, int val, uint64_t deadline_ms) {
+  struct fx_wait w;
+  if (!sched_inited) sodos__sched_init();
+  if (*addr != val) return 1;
+  w.addr = addr;
+  w.t = cur;
+  w.woken = 0;
+  w.next = fx_head;
+  fx_head = &w;
+  for (;;) {
+    uint64_t now = sodos__ms();
+    unsigned slice = FX_SLICE_MS;
+    if (w.woken || *addr != val) break;
+    if (deadline_ms) {
+      if (now >= deadline_ms) {
+        fx_unlink(&w);
+        return 2;
+      }
+      if (deadline_ms - now < slice) slice = (unsigned)(deadline_ms - now);
+    }
+    sodos__sleep_ms(slice ? slice : 1);
+  }
+  fx_unlink(&w);
+  return 0;
+}
+
+/* Acorda ate n threads esperando em addr; devolve quantas. */
+int sodos_futex_wake(volatile int* addr, int n) {
+  struct fx_wait* w;
+  int k = 0;
+  for (w = fx_head; w && k < n; w = w->next) {
+    if (w->addr != addr || w->woken) continue;
+    w->woken = 1;
+    unsleep(w->t);
+    k++;
+  }
+  return k;
+}

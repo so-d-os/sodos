@@ -11,6 +11,7 @@
 #include "mm.h"
 #include "drives.h"
 #include "vt.h"
+#include "irq.h"
 
 #define SLIRP_IP   0x0A00020Fu
 #define SLIRP_MASK 0xFFFFFF00u
@@ -166,11 +167,59 @@ static void time_init(void) {
       break;
     }
   }
+  serial_puts(pit_ok ? "[net] relogio: IRQ0 (PIT se o IRQ0 parar)\n"
+                      : "[net] relogio: sem PIT\n");
 }
 
+/* Relogio dos programas (k_ms) e da rede: o contador do IRQ0 (1 kHz), uma
+ * leitura de memoria. Antes cada consulta lia o PIT (outb 0x43 + 2 inb 0x40),
+ * e numa VM cada acesso de porta e uma saida para o emulador: o Firefox le o
+ * relogio o tempo todo (clock_gettime, esperas com prazo, o escalonador do
+ * port) e isso chegava a ~38% da CPU (tools/qprof). O PIT por consulta tambem
+ * perdia milissegundos: so via um estouro por leitura.
+ * Medido no QEMU/KVM do WSL2 contra o host, 180 s abrindo o Firefox (escrita
+ * de disco com cli): IRQ0 +0,02% (o PIT do KVM reinjeta tick atrasado). O TSC
+ * da VM aninhada nao serve: variou alguns % entre boots e durante a execucao,
+ * e o rdtsc tambem sai para o emulador.
+ * IRQ0 parado (mascarado, cli) por 4M consultas seguidas: volta a ler o PIT
+ * ate o tick andar de novo (o relogio nunca congela). O limite e alto porque
+ * com a consulta barata um laco de espera do port passa de 64K chamadas
+ * dentro de 1 ms; com 64K o PIT voltava a ser lido o tempo todo (11% da CPU)
+ * e o relogio atrasava 1,4%. */
 static void time_poll(void) {
+  static int started, stuck;
+  static uint64_t last_tick;
+  static uint32_t tick_adj, same_n;
+  uint64_t tk;
   uint16_t now;
   if (!pit_ok) return;
+  tk = irq_ticks();
+  if (!started) {
+    started = 1;
+    last_tick = tk;
+    tick_adj = ms_now - (uint32_t)tk;
+  }
+  if (tk != last_tick) {
+    uint32_t m;
+    if (stuck) {
+      /* So adianta: se o PIT contou alem dos ticks (IRQ0 parado de verdade,
+       * ticks perdidos), adota; se contou menos (o PIT por consulta perde
+       * ms), os ticks valem. */
+      stuck = 0;
+      if ((int32_t)(ms_now - ((uint32_t)tk + tick_adj)) > 0) tick_adj = ms_now - (uint32_t)tk;
+    }
+    last_tick = tk;
+    same_n = 0;
+    m = (uint32_t)tk + tick_adj;
+    if ((int32_t)(m - ms_now) > 0) ms_now = m;
+    return;
+  }
+  if (!stuck) {
+    if (++same_n < (1u << 22)) return;
+    stuck = 1;
+    pit_prev = pit_read();
+    return;
+  }
   now = pit_read();
   if (now > pit_prev) ms_now++;
   pit_prev = now;

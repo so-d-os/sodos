@@ -443,9 +443,19 @@ static long long __so_now_ns(int clk) {
   return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
 }
 
+/* Com a libsodos (threads do port): espera que bloqueia de verdade e wake que
+ * acorda (sodos_thread.c). Sem ela, o laco de ceder a vez abaixo. */
+extern int sodos_futex_wait(volatile int* addr, int val, unsigned long long deadline_ms)
+    __attribute__((weak));
+extern int sodos_futex_wake(volatile int* addr, int n) __attribute__((weak));
+extern unsigned long long sodos_now_ms(void) __attribute__((weak));
+
 static long __so_futex(volatile int* addr, int op, int val, const struct __so_ts* ts) {
   int cmd = op & 127; /* sem FUTEX_PRIVATE_FLAG/FUTEX_CLOCK_REALTIME */
-  if (cmd == 1 || cmd == 10) return 0; /* FUTEX_WAKE(_BITSET) */
+  if (cmd == 1 || cmd == 10) {         /* FUTEX_WAKE(_BITSET) */
+    if (sodos_futex_wake) return sodos_futex_wake(addr, val);
+    return 0;
+  }
   if (cmd == 0 || cmd == 9) {          /* FUTEX_WAIT(_BITSET) */
     /* WAIT: timeout relativo (monotonic); WAIT_BITSET: absoluto (o relogio
      * vem do FUTEX_CLOCK_REALTIME). */
@@ -457,6 +467,22 @@ static long __so_futex(volatile int* addr, int op, int val, const struct __so_ts
     }
     if (*addr != val) {
       errno = EAGAIN;
+      return -1;
+    }
+    if (sodos_futex_wait && sodos_now_ms) {
+      unsigned long long deadline = 0;
+      int r;
+      if (ts) {
+        long long left = end - __so_now_ns(clk);
+        if (left <= 0) {
+          errno = ETIMEDOUT;
+          return -1;
+        }
+        deadline = sodos_now_ms() + (unsigned long long)((left + 999999LL) / 1000000LL);
+      }
+      r = sodos_futex_wait(addr, val, deadline);
+      if (r == 0) return 0;
+      errno = r == 1 ? EAGAIN : ETIMEDOUT;
       return -1;
     }
     while (*addr == val) {

@@ -498,12 +498,33 @@ static void* pack_user_argv(int* argc_io, char** argv, uint8_t* stack, uint32_t 
 }
 
 static uint8_t mod_tls_block[4096] __attribute__((aligned(16)));
+/* Base do FS (TLS dos programas). Com CR4.FSGSBASE (ligado no kernel_entry
+ * quando o CPU tem) usa rdfsbase/wrfsbase: numa VM o rdmsr/wrmsr saem para o
+ * emulador, e isto roda em toda troca de tarefa (k_yield, preempcao). */
+static int fsgsbase_on(void) {
+  static int on = -1;
+  if (on < 0) {
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    on = (cr4 >> 16) & 1;
+  }
+  return on;
+}
 static uint64_t mod_fs_read(void) {
   uint32_t lo, hi;
+  if (fsgsbase_on()) {
+    uint64_t v;
+    __asm__ volatile("rdfsbase %0" : "=r"(v));
+    return v;
+  }
   __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000100));
   return ((uint64_t)hi << 32) | lo;
 }
 static void mod_fs_write(uint64_t v) {
+  if (fsgsbase_on()) {
+    __asm__ volatile("wrfsbase %0" :: "r"(v) : "memory");
+    return;
+  }
   __asm__ volatile("wrmsr" :: "c"(0xC0000100), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
 }
 

@@ -37,7 +37,11 @@ QEMU_ACCEL := $(shell [ -r /dev/kvm ] && [ -w /dev/kvm ] && grep -qE 'vmx|svm' /
 # SMP: o kernel acha as CPUs no MADT e sobe os APs (INIT-SIPI). Hoje eles
 # provam a execucao paralela e ficam em hlt; o escalonador ainda e da BSP.
 SMP ?= 4
-QEMU=qemu-system-x86_64 -accel $(QEMU_ACCEL) -m 8192 -smp $(SMP) -usb -device usb-tablet
+# CPU do host (KVM) ou todas as do emulador (TCG): o qemu64 padrao nao tem
+# FSGSBASE, e sem ele a troca do TLS (FS base) a cada troca de thread/tarefa
+# usa wrmsr, que numa VM sai para o emulador (~10% da CPU com o Firefox).
+QEMU_CPU ?= $(if $(filter kvm,$(QEMU_ACCEL)),host,max)
+QEMU=qemu-system-x86_64 -accel $(QEMU_ACCEL) -cpu $(QEMU_CPU) -m 8192 -smp $(SMP) -usb -device usb-tablet
 
 # VirtualBox (Windows/WSL).  wslpath/cygpath convertem o caminho para o
 # PowerShell; em Linux nativo o alvo vbox avisa que nao ha suporte.

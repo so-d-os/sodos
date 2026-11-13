@@ -33,8 +33,23 @@ static unsigned g_nmods;
 static uint64_t g_static;
 static void* g_main_tp;
 
+/* Troca a base do FS a cada troca de thread. Com CR4.FSGSBASE (o kernel liga
+ * no boot quando o CPU tem) usa wrfsbase: numa VM o wrmsr sai para o emulador
+ * e era ~10% da CPU com o Firefox no QEMU/WSL2 (tools/qprof). Os programas
+ * rodam em ring 0, entao podem ler o CR4; kernel antigo (bit desligado)
+ * continua no wrmsr. */
 static void set_fs_base(void* tp) {
+  static int fsgs = -1;
   uint64_t v = (uint64_t)(uintptr_t)tp;
+  if (fsgs < 0) {
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    fsgs = (int)((cr4 >> 16) & 1);
+  }
+  if (fsgs) {
+    __asm__ volatile("wrfsbase %0" : : "r"(v) : "memory");
+    return;
+  }
   __asm__ volatile("wrmsr" : : "c"(0xC0000100u), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
 }
 
@@ -121,8 +136,23 @@ unsigned long __sodos_tls_align = 1;
 
 static void* g_main_tp;
 
+/* Troca a base do FS a cada troca de thread. Com CR4.FSGSBASE (o kernel liga
+ * no boot quando o CPU tem) usa wrfsbase: numa VM o wrmsr sai para o emulador
+ * e era ~10% da CPU com o Firefox no QEMU/WSL2 (tools/qprof). Os programas
+ * rodam em ring 0, entao podem ler o CR4; kernel antigo (bit desligado)
+ * continua no wrmsr. */
 static void set_fs_base(void* tp) {
+  static int fsgs = -1;
   uint64_t v = (uint64_t)(uintptr_t)tp;
+  if (fsgs < 0) {
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    fsgs = (int)((cr4 >> 16) & 1);
+  }
+  if (fsgs) {
+    __asm__ volatile("wrfsbase %0" : : "r"(v) : "memory");
+    return;
+  }
   __asm__ volatile("wrmsr" : : "c"(0xC0000100u), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
 }
 

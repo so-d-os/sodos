@@ -219,6 +219,25 @@ kernel_entry:
     xsetbv
 .no_avx:
 
+    ; CR4.FSGSBASE (bit 16): rdfsbase/wrfsbase trocam a base do FS (TLS) sem
+    ; MSR. Numa VM o wrmsr/rdmsr da base saem para o emulador, e o port troca
+    ; o FS a cada troca de thread (sodos_tls.c) e o kernel a cada troca de
+    ; tarefa (module.c): ~10% da CPU com o Firefox no QEMU/WSL2. So se o CPU
+    ; tem a instrucao (CPUID.(EAX=7,ECX=0):EBX bit 0).
+    xor eax, eax
+    cpuid
+    cmp eax, 7
+    jb .no_fsgsbase
+    mov eax, 7
+    xor ecx, ecx
+    cpuid
+    test ebx, 1
+    jz .no_fsgsbase
+    mov eax, cr4
+    or eax, (1 << 16)
+    mov cr4, eax
+.no_fsgsbase:
+
     mov eax, 0x1000
     mov cr3, eax
 
