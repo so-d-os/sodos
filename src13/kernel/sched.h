@@ -16,3 +16,4 @@ int gui_coop_pause(void);
 int sched_post(int (*fn)(void*), void* arg);
 /* Excecao fatal: sched_yield nao faz mais nada (ver isr.c). */
 void sched_freeze(void);
+int sched_frozen(void);

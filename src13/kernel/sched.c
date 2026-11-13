@@ -11,6 +11,7 @@ static int frozen;
 /* Excecao: o CRASH.LOG grava com o FAT, que cede a vez a cada poucos setores.
  * Depois disto ninguem mais troca de tarefa. */
 void sched_freeze(void) { frozen = 1; }
+int sched_frozen(void) { return frozen; }
 
 void sched_set_idle(void (*fn)(void)) {
   idle_fn = fn;

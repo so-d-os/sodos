@@ -941,6 +941,64 @@ int sem_timedwait(sem_t* s, const struct timespec* abstime) {
 }
 
 /* Sem shell Unix para preencher o ambiente: valores padrao do SODOS. */
+int k_fload(const char* path, char* buf, int max);
+struct k_dirent;
+int k_dir(const char* path, struct k_dirent* out, int max);
+int k_fsize(const char* path);
+int k_fsave(const char* path, const char* data, int size);
+int k_fdelete(const char* path);
+int k_rmdir(const char* path);
+
+/* O k_dirent do so.h (44 bytes). */
+struct z_dirent {
+  char name[32];
+  unsigned size;
+  unsigned short date;
+  unsigned short time;
+  unsigned char dir;
+  unsigned char pad[3];
+};
+
+/* Apaga a pasta e tudo dentro (so usado no Z:, o ramdisk). */
+static void z_rmtree(const char* path, int depth) {
+  enum { ZMAX = 2048 };
+  struct z_dirent* e;
+  char sub[320];
+  int n, i;
+  if (depth > 24) return;
+  e = (struct z_dirent*)malloc(sizeof(*e) * ZMAX);
+  if (!e) return;
+  n = k_dir(path, (struct k_dirent*)e, ZMAX);
+  for (i = 0; i < n; i++) {
+    if (!strcmp(e[i].name, ".") || !strcmp(e[i].name, "..")) continue;
+    snprintf(sub, sizeof sub, "%s\\%s", path, e[i].name);
+    if (e[i].dir) z_rmtree(sub, depth + 1);
+    else k_fdelete(sub);
+  }
+  free(e);
+  k_rmdir(path);
+}
+
+/* Perfil no Z:: o marcador fica enquanto o Firefox roda. Se ele ja existe na
+ * partida, a execucao anterior nao terminou (Ctrl+Backspace, Sair, queda) e o
+ * perfil ficou pela metade: com ele o Firefox abre em "Nova aba" e nao carrega
+ * nada (o mesmo do make firefox-profile-reset). No ramdisk o perfil e
+ * descartavel: apaga e comeca outro. */
+#define Z_RUN_MARK "Z:\\USER\\DEFAULT\\SODOSRUN.TXT"
+static void z_run_unmark(void) { k_fdelete(Z_RUN_MARK); }
+
+static void z_profile_check(void) {
+  const char* home = getenv("HOME");
+  if (!home || strncmp(home, "/Z/", 3) != 0) return;
+  if (k_fsize(Z_RUN_MARK) >= 0) {
+    z_rmtree("Z:\\USER\\DEFAULT\\.mozilla", 0);
+    z_rmtree("Z:\\USER\\DEFAULT\\.cache", 0);
+    fprintf(stderr, "[sodos] perfil no Z: de execucao interrompida apagado\n");
+  }
+  k_fsave(Z_RUN_MARK, "1", 1);
+  atexit(z_run_unmark);
+}
+int k_exe_drive(void);
 __attribute__((constructor(102))) static void sodos_default_env(void) {
   /* O shell do SODOS nao passa ambiente: D:\\SODOS\\ENV.TXT traz linhas
    * NOME=valor que valem para todo programa portado (ex.: MOZ_LOG=...). */
@@ -948,6 +1006,12 @@ __attribute__((constructor(102))) static void sodos_default_env(void) {
     static char env[2048];
     int n = k_fload("D:\\SODOS\\ENV.TXT", env, (int)sizeof(env) - 1);
     char* p = env;
+    if (n < 0) {
+      /* Sem D: (notebook, Firefox no pendrive): a unidade do .EXE. */
+      char alt[] = "?:\\SODOS\\ENV.TXT";
+      alt[0] = (char)k_exe_drive();
+      if (alt[0]) n = k_fload(alt, env, (int)sizeof(env) - 1);
+    }
     if (n < 0) n = 0;
     env[n] = 0;
     while (*p) {
@@ -964,8 +1028,21 @@ __attribute__((constructor(102))) static void sodos_default_env(void) {
       while (*p == '\n' || *p == '\r') p++;
     }
   }
+  /* Z: e o ramdisk do kernel (FAT16 na RAM, vazio a cada boot): perfil,
+   * SQLite e cache ficam la, sem gravar no disco nem no pendrive.
+   * HOME=/D/USER/DEFAULT no ENV.TXT volta ao perfil no disco. */
+  {
+    /* espaco para um k_dirent (44 bytes no so.h) */
+    uint64_t ze[16];
+    struct k_dirent* zp = (struct k_dirent*)ze;
+    if (k_dir("Z:\\USER\\DEFAULT", zp, 1) >= 0 && k_dir("Z:\\TEMP", zp, 1) >= 0) {
+      setenv("HOME", "/Z/USER/DEFAULT", 0);
+      setenv("TMPDIR", "/Z/TEMP", 0);
+    }
+  }
   setenv("HOME", "/D/USER/DEFAULT", 0);
   setenv("TMPDIR", "/D/TEMP", 0);
+  z_profile_check();
   setenv("USER", "sodos", 0);
   /* Gecko: o SODOS nao cria processos filhos, entao tudo roda no processo
    * principal (sem processo de rede nem de conteudo). */
@@ -979,7 +1056,134 @@ __attribute__((constructor(102))) static void sodos_default_env(void) {
 extern char __executable_start[] __attribute__((weak));
 extern char etext[] __attribute__((weak));
 
-/* Lista na serial os enderecos de codigo da pilha (toolchain: simbolizar com o ELF). */
+/* ---- registro de crash: X:\LOG\FIREFOX.LOG ------------------------------
+ * Cada crash entra no TOPO do arquivo (o mais recente primeiro), com data,
+ * motivo (gMozCrashReason do MOZ_CRASH), pilha e as ultimas linhas do
+ * console. Vai para D:\LOG (QEMU) ou para a unidade do .EXE (U: no
+ * notebook). Tudo em buffers estaticos: o heap pode estar quebrado. */
+
+extern int __so_console_tail(char* out, int max) __attribute__((weak));
+int k_fsize(const char* path);
+int k_fload(const char* path, char* buf, int max);
+int k_mkdir(const char* path);
+int k_date(void);
+int k_time(void);
+unsigned k_drive_mask(void);
+unsigned k_ms(void);
+
+#define CRASH_KEEP (384 * 1024) /* tamanho maximo do FIREFOX.LOG */
+#define CRASH_ENTRY (24 * 1024)
+static char crash_buf[CRASH_ENTRY + CRASH_KEEP];
+static int crash_len;
+static uintptr_t crash_stk[40];
+static int crash_nstk;
+
+/* Motivo do primeiro abort(): o mozalloc_abort troca o gMozCrashReason pela
+ * propria mensagem antes de chegar aqui (patch 0006, mozalloc_abort.cpp). */
+static const char* crash_first;
+static int crash_first_set;
+void sodos_crash_reason(const char* aReason) {
+  crash_first = aReason;
+  crash_first_set = 1;
+}
+
+static void cl_add(const char* s, int n) {
+  if (n < 0) n = (int)strlen(s);
+  if (crash_len + n > CRASH_ENTRY) n = CRASH_ENTRY - crash_len;
+  if (n > 0) {
+    memcpy(crash_buf + crash_len, s, (size_t)n);
+    crash_len += n;
+  }
+}
+
+static void cl_printf(const char* fmt, ...) {
+  char b[512];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(b, sizeof b, fmt, ap);
+  va_end(ap);
+  cl_add(b, -1);
+}
+
+static int crash_save(char drv) {
+  char dir[8] = {drv, ':', '\\', 'L', 'O', 'G', 0};
+  char path[24];
+  int old;
+  snprintf(path, sizeof path, "%c:\\LOG\\FIREFOX.LOG", drv);
+  k_mkdir(dir);
+  old = k_fsize(path);
+  if (old > 0) {
+    int got;
+    if (old > CRASH_KEEP) old = CRASH_KEEP;
+    got = k_fload(path, crash_buf + crash_len, old);
+    if (got < 0) got = 0;
+    if (got > old) got = old;
+    /* corta na ultima linha inteira */
+    if (got == CRASH_KEEP)
+      while (got > 0 && crash_buf[crash_len + got - 1] != '\n') got--;
+    old = got;
+  } else {
+    old = 0;
+  }
+  if (k_fsave(path, crash_buf, crash_len + old) < 0) return -1;
+  fprintf(stderr, "[crash] registrado em %s\n", path);
+  return 0;
+}
+
+static void crash_log(const char* why) {
+  static int busy;
+  static char tail[6144];
+  int d, t, n, i;
+  unsigned mask;
+  char exe;
+  if (busy++) return;
+  d = k_date();
+  t = k_time();
+  crash_len = 0;
+  if (d > 0 && t >= 0)
+    cl_printf("==== %04d-%02d-%02d %02d:%02d:%02d UTC  FIREFOX.EXE: %s ====\n", d / 10000, d / 100 % 100,
+              d % 100, t / 10000, t / 100 % 100, t % 100, why);
+  else
+    cl_printf("==== (sem relogio, %u ms)  FIREFOX.EXE: %s ====\n", k_ms(), why);
+  if (crash_first_set && crash_first)
+    cl_printf("Motivo: %s\n", crash_first);
+  else if (crash_first_set)
+    cl_add("Motivo: abort() sem MOZ_CRASH (veja a pilha e o console)\n", -1);
+  else
+    cl_add("Motivo: sem abort() (pure virtual, stack protector ou ponteiro nulo em memcpy/memset)\n", -1);
+  cl_printf("Base: %lx  (addr2line -f -C -e FIREFOX.EXE.elf <base_elf+offset>)\n",
+            (unsigned long)__executable_start);
+  cl_add("Pilha (offset desde a base):\n", -1);
+  for (i = 0; i < crash_nstk; i++)
+    cl_printf("  +%lx\n", (unsigned long)(crash_stk[i] - (uintptr_t)__executable_start));
+  if (__so_console_tail) {
+    n = __so_console_tail(tail, (int)sizeof tail);
+    i = 0;
+    /* comeca numa linha inteira */
+    while (i < n && n == (int)sizeof tail && tail[i] != '\n') i++;
+    if (i < n && tail[i] == '\n' && n == (int)sizeof tail) i++;
+    cl_add("Ultimas linhas do console:\n", -1);
+    for (; i < n; i++) {
+      char c = tail[i];
+      if (c == '\r') continue;
+      if ((unsigned char)c < 32 && c != '\n' && c != '\t') c = '.';
+      cl_add(&c, 1);
+    }
+    if (crash_len && crash_buf[crash_len - 1] != '\n') cl_add("\n", 1);
+  }
+  cl_add("\n", 1);
+  /* D:\LOG quando ha D: (QEMU); senao a unidade do .EXE (pendrive) */
+  mask = k_drive_mask();
+  exe = (char)k_exe_drive();
+  if (exe >= 'a' && exe <= 'z') exe -= 32;
+  if ((mask & (1u << 3)) && crash_save('D') == 0) return;
+  if (exe >= 'A' && exe <= 'Z' && exe != 'D' && crash_save(exe) == 0) return;
+  if (exe != 'U') crash_save('U');
+}
+
+/* Lista na serial os enderecos de codigo da pilha (toolchain: simbolizar com o
+ * ELF) e grava o crash no FIREFOX.LOG. Chamado so nos caminhos fatais: abort,
+ * pure virtual, stack protector, ponteiro nulo em memcpy/memset. */
 void sodos_dump_stack(void) {
   uintptr_t* sp = (uintptr_t*)__builtin_frame_address(0);
   int i, shown = 0;
@@ -988,9 +1192,12 @@ void sodos_dump_stack(void) {
     uintptr_t v = sp[i];
     if ((char*)v >= __executable_start && (char*)v < etext) {
       fprintf(stderr, "[stk] %lx\n", (unsigned long)v);
+      crash_stk[shown] = v;
       shown++;
     }
   }
+  crash_nstk = shown;
+  crash_log(crash_first_set && crash_first ? "MOZ_CRASH" : crash_first_set ? "abort" : "erro fatal");
 }
 
 /* ---- simbolos do Rust ---------------------------------------------------- */

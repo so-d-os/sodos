@@ -4,6 +4,8 @@
 #include <stdint.h>
 
 void mm_init(void);
+/* Paginas de 2 MB de [phys, phys+size) viram write-combining (LFB). */
+int mm_map_wc(uint64_t phys, uint64_t size);
 void* kmalloc(uint32_t nbytes);
 void kfree(void* ptr);
 int mm_ready(void);
@@ -19,6 +21,9 @@ void um_set_owner(uint32_t owner);
 uint32_t um_owner(void);
 void* umalloc(uint32_t nbytes);
 void* umalloc_owned(uint32_t nbytes, uint32_t owner);
+/* Bloco do kernel (dono 0) tirado do fim da arena: para caches que ficam. */
+void* umalloc_top(uint32_t nbytes);
+void* umalloc_aligned(uint32_t nbytes, uint32_t align);
 void* urealloc(void* ptr, uint32_t nbytes);
 void ufree(void* ptr);
 uint32_t usize(void* ptr);

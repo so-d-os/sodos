@@ -142,11 +142,37 @@ void* malloc(size_t n) {
   }
 }
 
-/* C11 aligned_alloc: o malloc do SODOS ja devolve 16-alinhado. Para
- * alinhamentos maiores nao ha garantia; a libc++ usa em tipos over-aligned. */
+/* C11 aligned_alloc: o malloc do SODOS ja devolve 16-alinhado. Acima disso
+ * o bloco vem direto do k_malloc, como os grandes, e o cabecalho fica logo
+ * antes do endereco alinhado; h->pad leva o free ao bloco original. O codigo
+ * AVX2 (dav1d, por exemplo) faz vmovdqa em dados de posix_memalign(32/64):
+ * sem isso, #GP. */
 void* aligned_alloc(size_t align, size_t n) {
-  (void)align;
-  return malloc(n);
+  struct hdr* h;
+  char* raw;
+  uintptr_t u;
+  if (align <= 16) return malloc(n);
+  if (align & (align - 1)) {
+    err_value = EINVAL;
+    return NULL;
+  }
+  if (n == 0) n = 1;
+  if (align > 0x10000000u || n > 0xF0000000u - align) {
+    err_value = ENOMEM;
+    return NULL;
+  }
+  raw = (char*)k_malloc((unsigned)(n + sizeof(struct hdr) + align));
+  if (!raw) {
+    err_value = ENOMEM;
+    return NULL;
+  }
+  u = ((uintptr_t)raw + sizeof(struct hdr) + align - 1) & ~(uintptr_t)(align - 1);
+  h = (struct hdr*)u - 1;
+  h->cls = BIG_CLASS;
+  h->magic = HDR_MAGIC;
+  h->size = (unsigned)n;
+  h->pad = (unsigned)((char*)h - raw);
+  return h + 1;
 }
 
 void _Exit(int code) {
@@ -426,4 +452,11 @@ void* bsearch(const void* key, const void* b, size_t n, size_t sz,
 
 void* memalign(size_t align, size_t n) { return aligned_alloc(align, n); }
 
-int posix_memalign(void** out, size_t align, size_t n) { void* p = aligned_alloc(align, n); if (!p) return 12; *out = p; return 0; }
+int posix_memalign(void** out, size_t align, size_t n) {
+  void* p;
+  if (align < sizeof(void*) || (align & (align - 1))) return EINVAL;
+  p = aligned_alloc(align, n);
+  if (!p) return ENOMEM;
+  *out = p;
+  return 0;
+}

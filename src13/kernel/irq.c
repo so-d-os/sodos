@@ -16,6 +16,10 @@ uint64_t irq_idle(void) { return bsp_idle_ticks; }
 /* Marca o BSP como ocioso (esperando tecla/tarefa) para o TOP. */
 void cpu_idle(int on) { bsp_idle_flag = on ? 1 : 0; }
 
+/* Preempcao do WIN: chamado no IRQ0, depois do EOI, com o RIP interrompido. */
+static void (*tick_hook)(uint64_t rip);
+void irq_set_tick_hook(void (*fn)(uint64_t rip)) { tick_hook = fn; }
+
 static inline unsigned char irq_inb(unsigned short port) {
   unsigned char data;
   __asm__ volatile ("inb %1, %0" : "=a"(data) : "Nd"(port));
@@ -40,5 +44,7 @@ void irq_handle(isr_frame_t* f) {
       }
     }
     pic_send_eoi(irq);
+    /* Depois do EOI: o gancho pode trocar de tarefa e so voltar bem depois. */
+    if (irq == 0 && tick_hook) tick_hook(f->eip);
   }
 }

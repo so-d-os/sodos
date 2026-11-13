@@ -621,10 +621,13 @@ firefox-profile-reset: disk.img
 	  echo "Firefox nao esta no disco: rode make disk-files antes."; exit 1; fi
 	@if ! mdir -i $(DISK)@@512 ::/FIREFOX/BROWSER/DEFAULTS/PREFERENCES >/dev/null 2>&1; then \
 	  echo "Faltam os defaults do Firefox: rode make disk-files antes."; exit 1; fi
-	@# O nome 8.3 no FAT e MOZILLA (sem o ponto); mdeltree com ".MOZILLA"
-	@# nao apaga, por isso usamos o nome curto.
-	@mdeltree -i $(DISK)@@512 ::/USER/DEFAULT/MOZILLA || exit 1
-	@if mdir -i $(DISK)@@512 ::/USER/DEFAULT/MOZILLA >/dev/null 2>&1; then \
+	@# Com nomes longos no FAT o perfil fica em ".mozilla" (8.3 MOZILL~1);
+	@# discos antigos tem tambem "MOZILLA", da epoca so 8.3. Apaga os dois.
+	@for d in .mozilla MOZILLA; do \
+	  if mdir -i $(DISK)@@512 "::/USER/DEFAULT/$$d" >/dev/null 2>&1; then \
+	    mdeltree -i $(DISK)@@512 "::/USER/DEFAULT/$$d" || exit 1; fi; \
+	done
+	@if mdir -i $(DISK)@@512 ::/USER/DEFAULT/.mozilla >/dev/null 2>&1; then \
 	  echo "Nao consegui apagar D:\\USER\\DEFAULT\\.mozilla."; exit 1; fi
 	@mcopy -o -i $(DISK)@@512 firefox/sodos/prefs/sodos.js \
 	  ::/FIREFOX/BROWSER/DEFAULTS/PREFERENCES/SODOS.JS || exit 1

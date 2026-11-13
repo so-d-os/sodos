@@ -280,6 +280,16 @@ static void open_sel(void) {
     int rc;
     copy_str(full2, g_path, PATHMAX);
     cat_str(full2, e->name, PATHMAX);
+    /* .EXE abre na propria janela do WIN, como pelo desktop: k_exec aqui
+     * rodava o programa dentro da tarefa do Explorer (o Firefox nao abria e
+     * o Explorer ficava preso ate ele sair). .BAT e caminho que nao cabe no
+     * pedido do WIN (63 caracteres) continuam pelo k_exec. */
+    if (is_exe(e->name) && strlen(full2) < 63 && k_win_launch(full2) == 0) {
+      char b[160];
+      snprintf(b, sizeof(b), "abrindo %s", full2);
+      set_status(b);
+      return;
+    }
     set_status("executando...");
     gui_present();
     rc = k_exec(full2, 0, 0);

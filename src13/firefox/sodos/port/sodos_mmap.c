@@ -1,7 +1,7 @@
 /* sodos_mmap.c - mmap anonimo sobre o heap do kernel.
  *
  * Enquanto o kernel nao tem paginas sob demanda, o mapa anonimo e um bloco
- * do heap do processo, zerado e alinhado a 2 MiB (o coletor de lixo do
+ * do heap do processo, zerado e alinhado (4 KiB a 2 MiB, ver map_align; o coletor de lixo do
  * SpiderMonkey exige alinhamento e desmapeia cabeca/cauda para alinhar, por
  * isso munmap aceita sub-faixas). Sem MAP_FIXED de verdade, arquivo so como
  * copia (leitura/MAP_PRIVATE) e sem protecao real (mprotect/madvise sao no-op): o Gecko precisa disto
@@ -66,6 +66,22 @@ static struct sodos_base* bases;
  * zeradas: ficam PROT_NONE e as paginas so sao "commitadas" depois. Todo o
  * resto (chunks do GC, nursery) precisa vir zerado. */
 #define MM_NO_ZERO_MIN 0x20000000u
+
+/* Kernel novo: k_malloc_aligned devolve o bloco ja alinhado, sem a folga de
+ * MM_ALIGN que fazia um chunk de 1 MB do GC custar 3 MB (OOM do Nursery no
+ * google.com). Procurado em tempo de execucao para rodar em kernel antigo. */
+static void* (*kmal)(unsigned, unsigned);
+static int kmal_done;
+
+/* Alinhamento natural: a maior potencia de 2 <= len, entre 4 KiB e MM_ALIGN.
+ * O GC pede chunks de ChunkSize alinhados a ChunkSize; reservas maiores ficam
+ * a 2 MiB. Se algum chamador quiser mais, o MapAlignedPages remapeia com
+ * folga e desmapeia cabeca/cauda (munmap aceita sub-faixas). */
+static uint32_t map_align(size_t len) {
+  uint32_t a = 0x1000u;
+  while (a < MM_ALIGN && (size_t)a * 2u <= len) a *= 2u;
+  return a;
+}
 
 static struct sodos_map* find_map(char* a, size_t len) {
   struct sodos_map* e;
@@ -134,7 +150,20 @@ void* mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off) {
     return MAP_FAILED;
   }
 
-  raw = k_malloc((unsigned)(len + MM_ALIGN));
+  {
+    uint32_t want = map_align(len);
+    if (!kmal_done) {
+      kmal = (void* (*)(unsigned, unsigned))k_dl_sym(0, "k_malloc_aligned", 0);
+      kmal_done = 1;
+    }
+    if (kmal) {
+      raw = kmal((unsigned)len, want);
+      al = (uintptr_t)raw;
+    } else {
+      raw = k_malloc((unsigned)(len + want));
+      al = ((uintptr_t)raw + (want - 1)) & ~(uintptr_t)(want - 1);
+    }
+  }
   if (!raw) {
     dbg_txt("!MM len=");
     dbg_hex((unsigned)len);
@@ -142,8 +171,6 @@ void* mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off) {
     errno = ENOMEM;
     return MAP_FAILED;
   }
-  al = ((uintptr_t)raw + (MM_ALIGN - 1)) & ~(uintptr_t)(MM_ALIGN - 1);
-
   b = (struct sodos_base*)malloc(sizeof(*b));
   e = (struct sodos_map*)malloc(sizeof(*e));
   if (!b || !e) {

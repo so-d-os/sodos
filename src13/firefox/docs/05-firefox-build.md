@@ -540,8 +540,9 @@ O que estava faltando no repositorio e foi versionado nessa refeitura:
 - **`make test` (x32) nao liga**: `sodos_extra.c` usa `__sodos_stack_size`,
   `wait` e `waitpid`, que nao existem no link x32. O caminho do port e o LP64,
   mas o criterio geral 2 de `03-fases.md` esta quebrado.
-- **`aligned_alloc`/`memalign`/`posix_memalign`** ignoram alinhamento maior
-  que 16 (`c_compiler/lib/stdlib.c`).
+- ~~`aligned_alloc`/`memalign`/`posix_memalign` ignoravam alinhamento maior
+  que 16~~ (corrigido em 2026-11-13: o AVX2 do dav1d fazia `vmovdqa` em CDF
+  desalinhado e derrubava o SO com #GP ao abrir video AV1).
 - **Marcadores de depuracao** (`!MU`, `!FB`) continuam saindo na serial.
 - **Toolkit**: `--enable-default-toolkit=cairo-headless` nao existe no 153 (so
   variantes de GTK). O proximo passo, o `libxul`, precisa de um toolkit `sodos`
@@ -788,7 +789,25 @@ port, em ordem de importancia:
 3. **Desligamento a forca**: cada `make run` interrompido no meio de um write
    aumenta a chance de corrupcao.
 
-Mitigacao atual: `make firefox-profile-reset` recria o perfil e o
+**Causa principal (corrigida em 2026-11-12):** a posix-lite dava a cada `open`
+uma copia propria do arquivo na memoria, e o `fsync`/`close` regravava o
+arquivo inteiro a partir dela. O SQLite abre o mesmo banco em varias conexoes;
+cada uma gravava a sua copia por cima da outra, e um perfil novo ja tinha
+"malformed" em menos de 100 s. Agora todos os fds do mesmo caminho dividem um
+objeto (`struct fobj` em `libs/posix-lite/posix.c`): mesmo conteudo, mesmo
+tamanho no `fstat`/`stat`, `O_TRUNC` vale para todos e `unlink` com o arquivo
+aberto nao o recria no `close`. Teste: `c_compiler/tests/t_fshare.c` no
+soxrun (com a posix-lite antiga falham 7 verificacoes). Duas sessoes seguidas
+do Firefox no mesmo perfil: nenhum "malformed" nem abort. Entre conexoes do
+mesmo processo o SQLite trava pelo proprio `unixInodeInfo` (chave
+`st_dev`/`st_ino`), entao o `fcntl` sem travas so importaria com dois
+processos.
+
+O `make firefox-profile-reset` apagava `MOZILLA` (nome 8.3 antigo), mas com
+nomes longos o perfil fica em `.mozilla`: o reset nao zerava nada. Agora apaga
+os dois.
+
+Mitigacao anterior: `make firefox-profile-reset` recria o perfil e o
 [sodos.js](../sodos/prefs/sodos.js) desliga o que mais grava durante a
 navegacao (`places.history.enabled`, `browser.chrome.site_icons`,
 `browser.pagethumbnails.capturing_disabled`). O conserto de verdade e
@@ -833,3 +852,86 @@ Agravantes:
 - Sem preempcao no kernel: nao ha como interromper uma thread do browser no
   meio; o conserto estrutural e preempcao (ou um `hlt`/fatiamento no laco do
   WIN) e as travas `fcntl` para o lock de perfil.
+
+#### O que foi feito (preempcao das janelas do WIN)
+
+Tres causas somadas travavam mouse/teclado/tela:
+
+1. **Um evento de entrada por fatia do programa.** O laco do WIN chamava
+   `tasks_pump()` a cada volta e lia no maximo um byte do controlador PS/2 por
+   volta; um pacote de mouse sao 3 bytes, entao cada movimento custava 3 fatias
+   inteiras do Firefox. Agora, com entrada pendente (pacote pela metade, byte
+   no 0x64 ou evento ha menos de 3 ms), o WIN so cede a cada 30 ms
+   (`win_wm_run`, `video/visual.c`).
+2. **Sem preempcao.** Layout/JS/rasterizacao longos nao chamam o sistema. Agora
+   o IRQ0 (1 kHz) tira a tarefa GUI da CPU depois de `GUI_SLICE_MS` (10 ms), so
+   quando o RIP esta no codigo do proprio programa (`mod_rip_preemptible`,
+   nunca no kernel nem num driver DLL). O estado SSE/AVX vai junto
+   (`xsave`/`fxsave` numa area por tarefa) e o FS base (TLS) passou a fazer
+   parte de `struct mod_cpu`. O `isr_common` agora salva r8-r11 (antes um IRQ
+   podia estragar esses registros no meio de um programa).
+3. **O Firefox so devolvia a vez com todas as threads ociosas.** O
+   `resched` (`sodos_thread.c`) agora chama `k_yield` a cada 8 ms mesmo com
+   threads prontas (precisa religar o FIREFOX.EXE).
+
+Para religar so com o port mudado, com o GCC 13 no PATH (o g++ 12 do Debian
+nao compila a libc++ 18: falta o builtin `__is_convertible`, e o `build.sh`
+apaga `build/libcxx64/obj` antes de compilar):
+
+```sh
+export PATH=$HOME/ffsrc/gcc-13/bin:$PATH
+make -C firefox libcxx64 && make firefox-browser-link
+```
+
+Antes, confira que a arvore do Firefox tem todos os patches (`patch -p1 -R
+--dry-run` em cada um). Sem o 0011 o `PR_CallOnce_stub` do freebl chama
+`abort()` no `BL_Init` e o FIREFOX.EXE sai com 127 ("Redirecting call to
+abort() to mozalloc_abort") logo depois de abrir a janela. Depois de aplicar
+um patch, `make firefox-browser-compile` recompila (os erros de link dos `.so`
+como `libnspr4.so` sao esperados) e `firefox-browser-link` religa.
+
+Medido (QEMU/KVM `-smp 4`, 90 s abrindo o FIREFOX.EXE, latencia da API HTTP do
+WIN, que e atendida no mesmo laco): kernel antigo media 2,2 s, p90 > 10 s
+(timeouts); kernel novo media 137 ms, p50 88 ms, max 771 ms.
+
+**Distribuicao pelas CPUs:** os APs sobem mas ficam em `hlt`
+(`kernel/smp.c`, fase C1); `smp_run` so roda uma tarefa num AP com a BSP
+parada esperando. Rodar o Firefox num AP em paralelo ao WIN exige kernel
+reentrante (no minimo uma trava global nas chamadas `k_*`, entrada por IRQ
+roteada para a BSP, heap/FAT/rede protegidos). Ate la tudo roda na BSP e a
+preempcao e o que garante a resposta da interface.
+
+#### Firefox no pendrive (notebook, sem D:)
+
+No notebook (boot pelo GRUB) nao ha D: de disco, e o port usa `/D/USER/DEFAULT`
+(HOME), `/D/TEMP` e `/D/SODOS/FONTS`: sem perfil o FIREFOX.EXE abortava e o
+console mostrava as linhas `[stk]` do `sodos_dump_stack`. Agora
+`c_compiler/lib/unixdrv.h` (usado pelo `fopen`, `realpath` e pela posix-lite)
+manda `/D/` para a unidade do .EXE quando `D:\USER` nao existe e la existe; o
+`ENV.TXT` tambem e procurado nessa unidade. O atalho `FFLAUNCH.EXE` (vai como
+`USER\DEFAULT\DESKTOP\FIREFOX.EXE`) tenta a unidade dele, D: e U:, e o
+EXPLORER abre .EXE pelo WIN (`k_win_launch`) em vez de `k_exec` dentro da
+propria tarefa.
+
+#### Mouse e teclado lentos no QEMU: LFB uncached
+
+Medido com `WIN_INLAT_LOG 1` (`video/visual.c`): o tick de 1 ms marca quando
+chega entrada (byte no 8042 ou relatorio do tablet USB) e o WIN anota quando a
+retira; vai para a serial o histograma, onde a CPU estava a cada tick e o
+tempo de cada parte do laco.
+
+- A entrada em si chegava ao WIN em ~6 ms. O que travava era o **desenho**:
+  um quadro inteiro custava ~38 ms com o AMDGOP.DLL (o `SODOS.CFG` de teste o
+  liga sobre o Bochs VBE) e ~197 ms sem ele, e com o Firefox ativo ~100 ms.
+  97-99% disso era copiar o back buffer para o LFB.
+- Causa: no boot por BIOS o LFB do Bochs (0xFD000000) so e achado pelo WIN e
+  ficava no mapeamento write-back padrao; o MTRR do SeaBIOS marca o buraco
+  PCI como UC, e UC vence WB. `mm_map_wc()` (`kernel/mm.c`) poe PWT nas
+  paginas de 2 MB do LFB (PAT 1 = WC, ja programado pelo `kernel_entry`).
+  Quadro inteiro: **~1 ms**. Latencia da entrada no desktop: 0-5 ms; com o
+  Firefox ~6 ms (intervalo do tablet do QEMU), picos de ~90 ms quando o
+  Firefox grava o perfil (FAT por PIO no kernel, sem preempcao).
+- O framebuffer que o GRUB/UEFI passa no boot (notebook) ja era WC.
+- Tambem: com entrada esperando, a tarefa GUI e preemptada sem esperar a
+  fatia de 10 ms, e o laco do WIN so chama `net_poll` uma vez por tick (o
+  `nic_poll` da NE2000 era mais da metade do tempo do WIN ocioso).

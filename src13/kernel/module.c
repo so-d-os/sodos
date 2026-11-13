@@ -41,7 +41,11 @@ const char* mod_last_error(void) { return last_err; }
 uint32_t mod_current_pid(void) { return cur_pid; }
 char mod_exe_drive(void) { return exe_drive; }
 
+static uint64_t mod_fs_read(void);
+static void mod_fs_write(uint64_t v);
+
 void mod_cpu_save(struct mod_cpu* s) {
+  s->fs = mod_fs_read();
   s->ctx = cur_ctx;
   s->pid = cur_pid;
   s->owner = um_owner();
@@ -55,6 +59,21 @@ void mod_cpu_load(const struct mod_cpu* s) {
   um_set_owner(s->owner);
   mod_depth = s->depth;
   exe_drive = s->drive;
+  /* Dois programas com TLS (Firefox, LLAMA) nao podem dividir o FS. */
+  if (s->fs != mod_fs_read()) mod_fs_write(s->fs);
+}
+
+int mod_rip_preemptible(uint64_t rip) {
+  int i;
+  if (!cur_pid) return 0;
+  for (i = 0; i < MOD_MAX; i++) {
+    const struct module* m = &mods[i];
+    uint64_t b;
+    if (!m->used || !m->base || m->pid != cur_pid) continue;
+    b = (uint64_t)(uintptr_t)m->base;
+    if (rip >= b && rip < b + m->size) return 1;
+  }
+  return 0;
 }
 
 static char up(char c) {
@@ -487,6 +506,61 @@ static void mod_fs_write(uint64_t v) {
   __asm__ volatile("wrmsr" :: "c"(0xC0000100), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
 }
 
+/* Programas rodando agora (um por mod_exec em andamento). Uma tarefa do WIN
+ * encerrada a forca (Ctrl+Backspace, Sair) nunca volta ao fim do mod_exec:
+ * mod_kill faz por ela a mesma limpeza. prev = programa que a chamou. */
+#define LIVE_MAX 32
+static struct {
+  uint32_t pid;
+  uint32_t prev;
+  int id;
+} live[LIVE_MAX];
+
+static void live_add(uint32_t pid, uint32_t prev, int id) {
+  int i;
+  for (i = 0; i < LIVE_MAX; i++) {
+    if (live[i].pid) continue;
+    live[i].pid = pid;
+    live[i].prev = prev;
+    live[i].id = id;
+    return;
+  }
+}
+
+static int live_find(uint32_t pid) {
+  int i;
+  if (!pid) return -1;
+  for (i = 0; i < LIVE_MAX; i++)
+    if (live[i].pid == pid) return i;
+  return -1;
+}
+
+/* O que o fim do mod_exec devolve: DLLs, exports, imagem, .so e o heap. */
+static void exec_release(uint32_t pid, int id) {
+  dyn_release_pid(pid);
+  kexp_release_pid(pid);
+  unload(id);
+  elf_release_pid(pid);
+  ufree_owner(pid);
+}
+
+int mod_kill(uint32_t pid) {
+  int n = 0;
+  int i;
+  while ((i = live_find(pid)) >= 0) {
+    uint32_t prev = live[i].prev;
+    int id = live[i].id;
+    live[i].pid = 0;
+    serial_puts("[mod] encerrado a forca pid=");
+    serial_hex32(pid);
+    serial_puts("\n");
+    exec_release(pid, id);
+    n++;
+    pid = prev;
+  }
+  return n;
+}
+
 int mod_exec(const char* path, int argc, char** argv) {
   int id;
   int rc;
@@ -539,7 +613,31 @@ int mod_exec(const char* path, int argc, char** argv) {
   }
   {
     int nargc = argc;
-    void* av = pack_user_argv(&nargc, argv, stack, ssz, mods[id].is64);
+    /* argc=0 (EXPLORER, HTTPD no boot) quebra programas POSIX: o Firefox le
+     * argv[1..] alem do NULL e cai em #GP. Sempre entrega argv[0] = o EXE. */
+    /* argv[0] e sempre o caminho completo (U:\FIREFOX\FIREFOX.EXE), nao o que
+     * foi digitado ("firefox"): readlink("/proc/self/exe") sai dele e o Gecko
+     * acha a propria pasta por ali. */
+    char* self_av[32];
+    char self_path[DRV_PATH];
+    void* av;
+    if (nargc <= 0 || !argv) nargc = 1;
+    if (nargc > 31) nargc = 31;
+    {
+      int ai;
+      char L;
+      /* "U:FIREFOX.EXE" (relativo a pasta atual) -> "U:\FIREFOX\FIREFOX.EXE" */
+      self_path[0] = 0;
+      path_parse(path, &L, self_path + 3, DRV_PATH - 3);
+      self_path[0] = L;
+      self_path[1] = ':';
+      self_path[2] = '\\';
+      self_av[0] = self_path[3] ? self_path : (char*)path;
+      for (ai = 1; ai < nargc; ai++) self_av[ai] = argv[ai];
+      self_av[nargc] = 0;
+      argv = self_av;
+    }
+    av = pack_user_argv(&nargc, argv, stack, ssz, mods[id].is64);
     if (!av) {
       set_err("argumentos nao cabem na pilha", 0);
       unload(id);
@@ -550,6 +648,7 @@ int mod_exec(const char* path, int argc, char** argv) {
       return MOD_ERR_MEMORY;
     }
     kbd_break_take();   /* Ctrl+C antigo (do prompt) nao mata o novo */
+    live_add(pid, prev_pid, id);
     {
       uint64_t prev_fs = mod_fs_read();
       uint64_t canary = 0x9e3779b97f4a7c15ull;
@@ -581,13 +680,13 @@ int mod_exec(const char* path, int argc, char** argv) {
       serial_puts("\n");
     }
   }
-  dyn_release_pid(pid);
-  kexp_release_pid(pid);
-  unload(id);
-  elf_release_pid(pid);
+  {
+    int li = live_find(pid);
+    if (li >= 0) live[li].pid = 0;
+  }
   um_set_owner(prev_owner);
   cur_pid = prev_pid;
-  ufree_owner(pid);
+  exec_release(pid, id);
   exe_drive = prev_drive;
   return rc;
 }

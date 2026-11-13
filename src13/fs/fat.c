@@ -85,6 +85,9 @@ static uint8_t fat_dirty[FAT_TABLE_MAX / 512u / 8u];
 static void mem_zero(void* p, uint32_t n);
 static int read_run(uint32_t lba, uint32_t n, uint8_t* dst);
 
+/* Onde find_free_cluster comeca a procurar (zerado a cada fat_mount). */
+static uint32_t free_hint;
+
 static void fat_mark(uint32_t byte_off) {
   uint32_t s = byte_off / 512u;
   fat_dirty[s >> 3] |= (uint8_t)(1u << (s & 7u));
@@ -112,6 +115,7 @@ static uint8_t* const fat_bounce = (uint8_t*)0x7E000u;
 
 static int sector_direct(const void* buffer) {
   uint32_t a = (uint32_t)buffer;
+  if (current_drive == DISK_RAM) return 1;  /* copia de memoria: qualquer buffer */
   if (a < 0x60000u || a + 512u > 0x100000u) return 0;
   if (a >= 0x90000u && a < 0xA0000u) return 0;
   return 1;
@@ -120,7 +124,14 @@ static int sector_direct(const void* buffer) {
 /* A cada poucos setores o desktop volta a ler teclado e rato. */
 static int fat_breath_n;
 
+static void fat_breathe_run(uint32_t nsec);
+
 static void fat_breathe(void) {
+  /* Ramdisk: um setor e so uma copia; pausa so a cada 512, como em blocos. */
+  if (current_drive == DISK_RAM) {
+    fat_breathe_run(1);
+    return;
+  }
   if (++fat_breath_n < 4) return;
   fat_breath_n = 0;
   sched_yield();
@@ -167,7 +178,7 @@ static int read_sectors(uint32_t lba, uint32_t count, void* buffer) {
 /* n setores inteiros de src, que pode estar em qualquer lugar. */
 static int write_run(uint32_t lba, uint32_t n, const uint8_t* src) {
   uint32_t s;
-  if ((uintptr_t)src >= 0x100000u)
+  if ((uintptr_t)src >= 0x100000u || current_drive == DISK_RAM)
     return disk_write_sectors(current_drive, lba, n, src) != 0 ? -1 : 0;
   for (s = 0; s < n; s++)
     if (write_sector(lba + s, src + s * 512u) != 0) return -1;
@@ -255,6 +266,7 @@ int fat_mount(void) {
   }
   
   // Lê a FAT
+  free_hint = 0;
   mem_zero(fat_dirty, sizeof(fat_dirty));
   if (read_sectors(first_fat_sector, boot_sector->sectors_per_fat_16, fat_table) != 0) {
     fat_type = 0;
@@ -524,6 +536,7 @@ static int dc_off;   /* 1 = sem memoria para a tabela: so o disco */
 
 extern int um_ready(void);
 extern void* umalloc_owned(uint32_t nbytes, uint32_t owner);
+extern void* umalloc_top(uint32_t nbytes);
 extern void ufree(void* ptr);
 
 static uint32_t dc_vol(void) {
@@ -543,7 +556,7 @@ static struct dc_ent* dc_slot(uint16_t cluster, int create) {
   if (dc_off || cluster < 2) return 0;
   if (!dc_tab) {
     if (!um_ready()) return 0;
-    dc_tab = (struct dc_ent*)umalloc_owned(DC_SLOTS * (uint32_t)sizeof(struct dc_ent), 0);
+    dc_tab = (struct dc_ent*)umalloc_top(DC_SLOTS * (uint32_t)sizeof(struct dc_ent));
     if (!dc_tab) {
       dc_off = 1;
       return 0;
@@ -585,7 +598,7 @@ static void dc_store(const struct dir_view* v) {
   }
   if (!e->data || e->cap < used) {
     uint32_t cap = (used + 511u) & ~511u;
-    uint8_t* p = (uint8_t*)umalloc_owned(cap, 0);
+    uint8_t* p = (uint8_t*)umalloc_top(cap);  /* cache: longe dos programas */
     if (e->data) ufree(e->data);
     e->data = p;
     e->cap = p ? cap : 0;
@@ -1273,7 +1286,7 @@ static int write_chain(struct fat_dir_entry* entry, const void* data, uint32_t s
     /* Os setores cheios do cluster vao direto do buffer do arquivo, de uma vez. */
     s = (size - bytes_written) / 512u;
     if (s > sectors_per_cluster) s = sectors_per_cluster;
-    if (s && (uintptr_t)file_data < 0x100000u) s = 0;
+    if (s && (uintptr_t)file_data < 0x100000u && current_drive != DISK_RAM) s = 0;
     if (s) {
       if (write_run(lba, s, (const uint8_t*)file_data + bytes_written) != 0) return -1;
       bytes_written += s * 512u;
@@ -1320,7 +1333,7 @@ static uint32_t fat_run(uint16_t* cluster, uint32_t want, uint32_t* nsec) {
 /* n setores inteiros para dst, que pode estar em qualquer lugar. */
 static int read_run(uint32_t lba, uint32_t n, uint8_t* dst) {
   uint32_t s;
-  if ((uintptr_t)dst >= 0x100000u || (n == 1 && sector_direct(dst)))
+  if ((uintptr_t)dst >= 0x100000u || current_drive == DISK_RAM || (n == 1 && sector_direct(dst)))
     return disk_read_sectors(current_drive, lba, n, dst) != 0 ? -1 : 0;
   for (s = 0; s < n; s++)
     if (read_sector(lba + s, dst + s * 512u) != 0) return -1;
@@ -1632,9 +1645,20 @@ static uint16_t find_free_cluster(void) {
     uint16_t* fat16 = (uint16_t*)fat_table;
     uint32_t n = cluster_count() + 2u;
     uint32_t i;
+    uint32_t start;
     if (n > 0xFFF0u) n = 0xFFF0u;
-    for (i = 2; i < n; i++) {
+    /* Proxima livre depois da ultima dada (next-fit): um arquivo grande nao
+     * varre a FAT inteira a cada cluster e sai em clusters vizinhos. */
+    start = (free_hint >= 2u && free_hint < n) ? free_hint : 2u;
+    for (i = start; i < n; i++) {
       if (fat16[i] == 0) {
+        free_hint = i + 1u;
+        return (uint16_t)i;
+      }
+    }
+    for (i = 2; i < start; i++) {
+      if (fat16[i] == 0) {
+        free_hint = i + 1u;
         return (uint16_t)i;
       }
     }

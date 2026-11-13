@@ -4,6 +4,13 @@
 /* Drives 0..3 sao os ATA; DISK_USB e o pendrive do xHCI (kernel/xhci.c),
  * que aceita buffer em qualquer endereco. */
 #define DISK_USB 0x80u
+/* Ramdisk (Z:): setores numa area de RAM, sem disco. Some no reboot. */
+#define DISK_RAM 0x81u
+
+/* Reserva o ramdisk (ate max_bytes; tenta menos se faltar RAM).
+ * Devolve quantos setores ficou (0 = sem ramdisk). */
+uint32_t ramdisk_init(uint64_t max_bytes);
+uint32_t ramdisk_sectors(void);
 
 /* Assinatura única em todo o projeto: (drive, lba, buffer). Nunca passar buffer NULL. */
 int disk_read_sector(uint32_t drive, uint32_t lba, void* buffer);

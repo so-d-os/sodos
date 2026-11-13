@@ -37,6 +37,8 @@ int net_sock_err(int h);
 int net_sock_send(int h, const void* data, int len);
 int net_sock_recv(int h, void* data, int cap, int peek);
 void net_sock_close(int h);
+/* Fecha todos os soquetes de um programa (pid). */
+void net_sock_release_owner(uint32_t owner);
 int net_sock_info(int h, uint32_t* lip, int* lport, uint32_t* rip, int* rport);
 void net_sock_pump(void);
 

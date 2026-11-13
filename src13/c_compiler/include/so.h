@@ -78,6 +78,9 @@ int k_blink(int on);
 
 /* memoria do programa (liberada sozinha quando ele termina) */
 void* k_malloc(unsigned n);
+/* Kernel novo: endereco multiplo de align (potencia de 2). Programas que devem
+ * rodar em kernel antigo procuram com k_dl_sym(0, "k_malloc_aligned", 0). */
+void* k_malloc_aligned(unsigned n, unsigned align);
 void k_free(void* p);
 void* k_realloc(void* p, unsigned n);
 unsigned k_msize(void* p);

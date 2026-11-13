@@ -256,6 +256,7 @@ static void k_cursor(int row, int col) {
 
 /* ---------- memoria ---------- */
 static void* k_malloc(uint32_t n) { return umalloc(n); }
+static void* k_malloc_aligned(uint32_t n, uint32_t align) { return umalloc_aligned(n, align); }
 static void k_free(void* p) { ufree(p); }
 static void* k_realloc(void* p, uint32_t n) { return urealloc(p, n); }
 static uint32_t k_msize(void* p) { return usize(p); }
@@ -484,6 +485,7 @@ static void k_net_pump(void) { net_sock_pump(); }
 
 void kexp_release_pid(uint32_t pid) {
   if (!pid) return;
+  net_sock_release_owner(pid);
   /* Ao fundo, a fonte e o piscar na tela sao de outra tela: nao mexe. */
   if (font_pid == pid) {
     if (!vt_bg()) vga_font_reset();
@@ -858,6 +860,7 @@ static const struct kexp table[] = {
   EXP(k_set_drive),
   EXP(k_exe_drive),
   EXP(k_malloc),
+  EXP(k_malloc_aligned),
   EXP(k_free),
   EXP(k_realloc),
   EXP(k_msize),

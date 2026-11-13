@@ -3,6 +3,10 @@
 
 /* Frame montado por isr_common (long mode). Endereco baixo = primeiro campo. */
 typedef struct isr_frame {
+  uint64_t r11;
+  uint64_t r10;
+  uint64_t r9;
+  uint64_t r8;
   uint64_t rdi;
   uint64_t rsi;
   uint64_t ebp;

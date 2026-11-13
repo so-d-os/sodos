@@ -14,6 +14,10 @@
 #define MOD_ERR_IMPORT   -1003
 #define MOD_ERR_DEPTH    -1004
 int mod_exec(const char* path, int argc, char** argv);
+/* Encerra a forca um programa que nao vai voltar do mod_exec (a tarefa dele
+ * foi descartada) e os que o chamaram na mesma tarefa: libera DLLs, imagem,
+ * .so e todo o heap deles. Quantos programas foram liberados. */
+int mod_kill(uint32_t pid);
 /* Codigo de saida de um programa DOS encerrado com Ctrl+C (ASCII ETX). */
 #define MOD_EXIT_BREAK 3
 
@@ -108,9 +112,14 @@ struct mod_cpu {
   uint32_t owner;
   uint32_t depth;
   char drive;
+  uint64_t fs;   /* FS base (TLS do programa): cada tarefa tem o seu */
 };
 
 void mod_cpu_save(struct mod_cpu* s);
 void mod_cpu_load(const struct mod_cpu* s);
+/* 1 se rip esta no codigo de um modulo do programa corrente (nao no kernel
+ * nem num driver): ali a tarefa pode ser preemptada sem estado do kernel
+ * pela metade. */
+int mod_rip_preemptible(uint64_t rip);
 /* void ctx_switch(uint64_t* save_rsp, uint64_t next_rsp) */
 void ctx_switch(uint64_t* save_rsp, uint64_t next_rsp);

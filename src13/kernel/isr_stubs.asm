@@ -64,11 +64,21 @@ isr_common:
   push rbp
   push rsi
   push rdi
+  ; r8-r11 sao caller-saved: o C do handler pode usa-los. Sem isto um IRQ
+  ; no meio de um programa (ou a preempcao do WIN) estragava esses registros.
+  push r8
+  push r9
+  push r10
+  push r11
   mov rdi, rsp
   mov rbx, rsp
   and rsp, -16
   call isr_dispatch
   mov rsp, rbx
+  pop r11
+  pop r10
+  pop r9
+  pop r8
   pop rdi
   pop rsi
   pop rbp

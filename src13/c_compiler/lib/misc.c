@@ -10,6 +10,7 @@
 #include <stdarg.h>
 #include <unistd.h>
 #include <so.h>
+#include "unixdrv.h"
 
 /* ---------- runtime C++ ----------
  * Versao vazia para .EXE so em C. O runtime C++ (sodos/cxx) define uma
@@ -206,7 +207,7 @@ char* realpath(const char* path, char* out) {
              (path[2] == '/' || path[2] == 0)) {
     /* "/D/USER" de programa portado e D:\USER, como no fopen e na posix-lite
      * (o HOME do Firefox e /D/USER/DEFAULT). Sem isto virava C:\D\USER. */
-    tmp[0] = path[1];
+    tmp[0] = (char)unix_drive(path[1]);
     tmp[1] = ':';
     strncpy(tmp + 2, path + 2, sizeof(tmp) - 3);
     tmp[sizeof(tmp) - 1] = 0;

@@ -301,9 +301,51 @@ static int disk_read_sectors_locked(uint32_t drive, uint32_t lba, uint32_t count
   return 0;
 }
 
+/* ---- Ramdisk (DISK_RAM, unidade Z:) --------------------------------------
+ * Setores numa area de RAM: ler e gravar e so copiar memoria, sem desligar
+ * interrupcoes. Fica de preferencia acima de 4 GB (hmalloc), que nenhum
+ * programa x32 usa; sem ela, um pedaco menor da arena dos programas. */
+static uint8_t* ram_base;
+static uint32_t ram_secs;
+
+uint32_t ramdisk_sectors(void) { return ram_secs; }
+
+uint32_t ramdisk_init(uint64_t max_bytes) {
+  static const uint32_t mb[] = {1023, 768, 512, 384, 256, 128, 64};
+  uint32_t i;
+  if (ram_base) return ram_secs;
+  for (i = 0; i < sizeof(mb) / sizeof(mb[0]); i++) {
+    uint64_t n = (uint64_t)mb[i] << 20;
+    if (n > max_bytes) continue;
+    if (hm_ready()) ram_base = (uint8_t*)hmalloc(n);
+    if (!ram_base && n <= (64ull << 20) && um_ready()) ram_base = (uint8_t*)umalloc_owned((uint32_t)n, 0);
+    if (ram_base) {
+      ram_secs = (uint32_t)(n / 512u);
+      break;
+    }
+  }
+  return ram_secs;
+}
+
+static int ram_copy(uint32_t lba, uint32_t count, void* buffer, int write) {
+  uint8_t* disk;
+  uint64_t n;
+  void* d;
+  const void* s;
+  if (!ram_base || !buffer || count == 0) return -2;
+  if (lba >= ram_secs || count > ram_secs - lba) return -1;
+  disk = ram_base + (uint64_t)lba * 512u;
+  d = write ? (void*)disk : buffer;
+  s = write ? (const void*)buffer : (const void*)disk;
+  n = (uint64_t)count * 64u; /* 512 bytes = 64 quadwords */
+  __asm__ volatile ("cld; rep movsq" : "+D"(d), "+S"(s), "+c"(n) : : "memory");
+  return 0;
+}
+
 int disk_read_sectors(uint32_t drive, uint32_t lba, uint32_t count, void* buffer) {
   uint64_t fl;
   int rc;
+  if (drive == DISK_RAM) return ram_copy(lba, count, buffer, 0);
   __asm__ volatile ("pushfq; pop %0" : "=r"(fl));
   __asm__ volatile ("cli" ::: "memory");
   rc = disk_read_sectors_locked(drive, lba, count, buffer);
@@ -314,6 +356,7 @@ int disk_read_sectors(uint32_t drive, uint32_t lba, uint32_t count, void* buffer
 int disk_read_sector(uint32_t drive, uint32_t lba, void* buffer) {
   uint64_t fl;
   int rc;
+  if (drive == DISK_RAM) return ram_copy(lba, 1, buffer, 0);
   __asm__ volatile ("pushfq; pop %0" : "=r"(fl));
   __asm__ volatile ("cli" ::: "memory");
   rc = disk_read_sector_locked(drive, lba, buffer);
@@ -424,6 +467,7 @@ static int disk_write_sectors_locked(uint32_t drive, uint32_t lba, uint32_t coun
 int disk_write_sectors(uint32_t drive, uint32_t lba, uint32_t count, const void* buffer) {
   uint64_t fl;
   int rc;
+  if (drive == DISK_RAM) return ram_copy(lba, count, (void*)buffer, 1);
   __asm__ volatile ("pushfq; pop %0" : "=r"(fl));
   __asm__ volatile ("cli" ::: "memory");
   rc = disk_write_sectors_locked(drive, lba, count, buffer);
@@ -434,6 +478,7 @@ int disk_write_sectors(uint32_t drive, uint32_t lba, uint32_t count, const void*
 int disk_write_sector(uint32_t drive, uint32_t lba, void* buffer) {
   uint64_t fl;
   int rc;
+  if (drive == DISK_RAM) return ram_copy(lba, 1, buffer, 1);
   __asm__ volatile ("pushfq; pop %0" : "=r"(fl));
   __asm__ volatile ("cli" ::: "memory");
   rc = disk_write_sector_locked(drive, lba, buffer);
@@ -1944,6 +1989,7 @@ void kmain(const struct BootInfo* bi) {
 
   drives_init();
   drives_automount();
+  drives_mount_ramdisk();
   keyb_load_cfg();
   net_demo();
   {

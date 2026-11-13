@@ -466,6 +466,82 @@ uint32_t um_owner(void) { return cur_owner; }
 
 void* umalloc(uint32_t nbytes) { return arena_alloc(&high, nbytes, cur_owner); }
 void* umalloc_owned(uint32_t nbytes, uint32_t owner) { return arena_alloc(&high, nbytes, owner); }
+
+/* Do fim do ultimo bloco livre que cabe: caches do kernel que ficam (buffers
+ * de soquete, cache de pastas do FAT) nao picam o comeco da arena, onde os
+ * programas pedem blocos grandes e contiguos (o JIT do Firefox reserva 2 GB). */
+void* umalloc_top(uint32_t nbytes) {
+  struct arena* a = &high;
+  struct mm_hdr* h;
+  struct mm_hdr* best = 0;
+  uint32_t need;
+  if (!a->ready || nbytes == 0) return 0;
+  need = align_up(nbytes + (uint32_t)sizeof(struct mm_hdr));
+  if (need < nbytes) return 0;
+  h = blk_at(a->start);
+  while (range_ok(a, h)) {
+    if (h->free) merge_next(a, h);
+    if (h->free && h->size >= need) best = h;
+    h = blk_at((uint32_t)h + h->size);
+  }
+  if (!best) return 0;
+  if (best->size - need >= sizeof(struct mm_hdr) + MM_ALIGN) {
+    struct mm_hdr* top = blk_at((uint32_t)best + best->size - need);
+    best->size -= need;
+    top->size = need;
+    top->free = 0;
+    top->owner = 0;
+    return (uint8_t*)top + sizeof(struct mm_hdr);
+  }
+  best->free = 0;
+  best->owner = 0;
+  return (uint8_t*)best + sizeof(struct mm_hdr);
+}
+/* Bloco cujo endereco util e multiplo de align (potencia de 2, >= 16). O
+ * mmap anonimo do port do Firefox pedia len + 2 MB para alinhar sozinho: um
+ * chunk de 1 MB do GC custava 3 MB e o heap acabava (OOM no Nursery). Aqui a
+ * folga antes do endereco alinhado volta a ser um bloco livre. */
+void* umalloc_aligned(uint32_t nbytes, uint32_t align) {
+  struct arena* a = &high;
+  struct mm_hdr* h;
+  uint32_t need;
+  const uint32_t hs = (uint32_t)sizeof(struct mm_hdr);
+  if (align <= MM_ALIGN) return umalloc(nbytes);
+  if (!a->ready || nbytes == 0 || (align & (align - 1u))) return 0;
+  need = align_up(nbytes + hs);
+  if (need < nbytes) return 0;
+  h = blk_at(a->start);
+  while (range_ok(a, h)) {
+    if (h->free) merge_next(a, h);
+    if (h->free && h->size >= need) {
+      uint32_t start = (uint32_t)h;
+      uint32_t end = start + h->size;
+      uint32_t p = (start + hs + align - 1u) & ~(align - 1u);
+      /* A folga da frente precisa caber como bloco livre valido. */
+      if (p - hs != start && p - hs - start < hs + MM_ALIGN) p += align;
+      if (p > start && p - hs >= start && p - hs <= end && end - (p - hs) >= need) {
+        struct mm_hdr* n = blk_at(p - hs);
+        if ((uint32_t)n != start) {
+          h->size = (uint32_t)n - start; /* cabeca continua livre */
+          n->size = end - (uint32_t)n;
+        }
+        if (n->size - need >= hs + MM_ALIGN) {
+          struct mm_hdr* t = blk_at((uint32_t)n + need);
+          t->size = n->size - need;
+          t->free = 1;
+          t->owner = 0;
+          n->size = need;
+        }
+        n->free = 0;
+        n->owner = cur_owner;
+        return (uint8_t*)n + hs;
+      }
+    }
+    h = blk_at((uint32_t)h + h->size);
+  }
+  return 0;
+}
+
 void ufree(void* ptr) { arena_free(&high, ptr); }
 
 uint32_t usize(void* ptr) {
@@ -540,3 +616,34 @@ void mm_walk(mm_walk_fn fn, void* arg) {
 }
 
 uint32_t mm_kernel_end(void) { return kernel_reserved_end(bootinfo_get()); }
+
+/* Marca [phys, phys+size) como write-combining (PAT 1: PWT=1, PCD=0, que o
+ * kernel_entry programa no MSR do PAT). Para o LFB que o WIN acha depois do
+ * boot (Bochs VBE do QEMU/VirtualBox em 0xFD000000): o mapeamento padrao e
+ * write-back, mas o MTRR do SeaBIOS deixa o buraco PCI como UC, e UC vence WB.
+ * Com o PAT WC, a copia do quadro deixa de ser uncached (era 40-200 MB/s).
+ * So mexe em paginas de 2 MB ja presentes; devolve quantas mudou. */
+int mm_map_wc(uint64_t phys, uint64_t size) {
+  uint64_t cr3, a, end = phys + size;
+  uint64_t* pml4;
+  uint64_t* pdpt;
+  int n = 0;
+  if (!size) return 0;
+  __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+  pml4 = (uint64_t*)(uintptr_t)(cr3 & 0x000FFFFFFFFFF000ULL);
+  if (!(pml4[0] & 1u)) return 0;
+  pdpt = (uint64_t*)(uintptr_t)(pml4[0] & 0x000FFFFFFFFFF000ULL);
+  for (a = phys & ~(HM_PAGE - 1u); a < end; a += HM_PAGE) {
+    uint32_t gb = (uint32_t)(a / HM_GB);
+    uint64_t* pd;
+    uint64_t* e;
+    if (gb >= 512 || !(pdpt[gb] & 1u) || (pdpt[gb] & 0x80u)) continue;
+    pd = (uint64_t*)(uintptr_t)(pdpt[gb] & 0x000FFFFFFFFFF000ULL);
+    e = &pd[(a % HM_GB) / HM_PAGE];
+    if ((*e & 0x81u) != 0x81u) continue;           /* presente e de 2 MB */
+    *e = (*e & ~(0x10ULL | 0x1000ULL)) | 0x08ULL;  /* PCD=0, PAT=0, PWT=1 */
+    n++;
+  }
+  if (n) __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+  return n;
+}

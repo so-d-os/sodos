@@ -597,13 +597,14 @@ Aplicar depois do 0005. Teste: sodos/scripts/build-browser64.sh build compile
  #elif defined(XP_MACOSX)
 --- a/memory/mozalloc/mozalloc_abort.cpp
 +++ b/memory/mozalloc/mozalloc_abort.cpp
-@@ -76,7 +76,20 @@
+@@ -76,7 +76,23 @@
  // When building for fuzzing without ASan or TSan, we automatically pull in the
  // UndefinedBehaviorSanitizer runtime which also requires the same workaround
  // as with ASan or TSan.
 +#if defined(__SODOS__)
 +#  include <unistd.h>
 +extern "C" void sodos_dump_stack(void);
++extern "C" void sodos_crash_reason(const char* aReason);
 +#endif
 +
  extern "C" void abort(void) {
@@ -614,6 +615,8 @@ Aplicar depois do 0005. Teste: sodos/scripts/build-browser64.sh build compile
 +    sodos_dump_stack();
 +    _exit(127);
 +  }
++  // Motivo do MOZ_CRASH que chamou abort(): o mozalloc_abort abaixo o troca.
++  sodos_crash_reason(gMozCrashReason);
 +#endif
  #  ifdef MOZ_WIDGET_ANDROID
    char msg[64] = {};

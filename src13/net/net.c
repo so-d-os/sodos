@@ -2226,8 +2226,9 @@ int net_sock_connect(uint32_t ip, int port, uint32_t owner) {
       s = &ks[i];
     }
   if (!s) return -2;
-  if (!s->rxbuf) s->rxbuf = (uint8_t*)umalloc_owned(KS_RX, 0);
-  if (!s->txq) s->txq = (uint8_t*)umalloc_owned(KS_TXQ, 0);
+  /* Ficam com o slot para sempre: do fim da arena, longe dos programas. */
+  if (!s->rxbuf) s->rxbuf = (uint8_t*)umalloc_top(KS_RX);
+  if (!s->txq) s->txq = (uint8_t*)umalloc_top(KS_TXQ);
   if (!s->rxbuf || !s->txq) return -2;
   /* O ARP antes de carregar o TCB: ele le a placa e entrega segmentos. */
   hop = ((ip ^ our_ip) & our_mask) ? our_gw : ip;
@@ -2349,6 +2350,14 @@ void net_sock_close(int h) {
   s->closing = 1;
   s->close_ms = ms_now;
   net_sock_pump();
+}
+
+/* Programa terminou (ou foi encerrado a forca): fecha os soquetes dele. */
+void net_sock_release_owner(uint32_t owner) {
+  int i;
+  if (!owner) return;
+  for (i = 0; i < KS_MAX; i++)
+    if (ks[i].used && ks[i].owner == owner) net_sock_close(i + 1);
 }
 
 /* Enderecos do soquete (ordem de host): local e remoto. */

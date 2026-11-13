@@ -267,6 +267,41 @@ void drives_automount(void) {
   puts_k("D: FAT16 montado (disco 1).\n");
 }
 
+/* Z:: FAT16 num ramdisk de ate 1 GB, formatado a cada boot. Cache e perfil
+ * do Firefox vao para la (HOME=/Z/USER/DEFAULT, TMPDIR=/Z/TEMP). Nada vai
+ * para o disco nem para o pendrive; tudo some ao desligar. */
+#define RAM_LETTER 'Z'
+extern int format_fat16(uint32_t drive, uint32_t lba_start, uint32_t total_sectors,
+                        const char* volume_label);
+int drives_mount_ramdisk(void) {
+  int idx = letter_idx(RAM_LETTER);
+  uint32_t secs;
+  char n[12];
+  if (drv_kind[idx] != DRV_NONE) return 0;
+  secs = ramdisk_init(1023ull << 20);
+  if (!secs) {
+    puts_k("Z: sem RAM livre para o ramdisk.\n");
+    return -1;
+  }
+  if (format_fat16(DISK_RAM, 0, secs, "RAMDISK    ") != 0) return -1;
+  fat_cur = -1;
+  fat_set_drive(DISK_RAM);
+  fat_set_partition_offset(0);
+  if (fat_mount() != 0) return -1;
+  drv_kind[idx] = DRV_FAT;
+  drv_ata[idx] = DISK_RAM;
+  drv_lba[idx] = 0;
+  fat_cur = idx;
+  fat_mkdir("TEMP");
+  fat_mkdir("USER");
+  fat_mkdir("USER\\DEFAULT");
+  puts_k("Z: ramdisk FAT16 de ");
+  uint32_to_string(secs / 2048u, n, sizeof(n));
+  puts_k(n);
+  puts_k(" MB.\n");
+  return 0;
+}
+
 void drives_print_status(void) {
   int i;
   puts_k("Unidades:\n");
@@ -275,7 +310,13 @@ void drives_print_status(void) {
     putc((char)('A' + i));
     puts_k(":  ");
     puts_k(drives_kind_name((char)('A' + i)));
-    if (drv_kind[i] == DRV_FAT && drv_ata[i] == DISK_USB) {
+    if (drv_kind[i] == DRV_FAT && drv_ata[i] == DISK_RAM) {
+      char n[12];
+      puts_k("  RAM ");
+      uint32_to_string(ramdisk_sectors() / 2048u, n, sizeof(n));
+      puts_k(n);
+      puts_k(" MB");
+    } else if (drv_kind[i] == DRV_FAT && drv_ata[i] == DISK_USB) {
       puts_k("  USB ");
       puts_k(xhci_disk_name());
     } else if (drv_kind[i] == DRV_FAT) {

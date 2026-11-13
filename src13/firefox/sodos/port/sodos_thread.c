@@ -230,11 +230,26 @@ static int wake_due(void) {
   return any;
 }
 
+static uint64_t os_last;   /* ultimo k_yield (ver os_yield_due) */
+
 static void idle_wait(void) {
   uint64_t now = sodos__ms();
   uint64_t deadline = sleep_h ? sleep_h->wake_ms : now + 1;
   /* Cede para as outras tarefas do SO (WIN, HTTPD) e volta a checar o PIT. */
   while (sodos__ms() < deadline) k_yield();
+  os_last = sodos__ms();
+}
+
+/* O WIN so le mouse/teclado e desenha quando o programa devolve a vez
+ * (k_yield). Com threads sempre prontas (timers, socket, JS) o idle_wait
+ * nunca rodava e a tela travava: a cada OS_SLICE_MS cede ao SO mesmo assim. */
+#define OS_SLICE_MS 8
+
+static void os_yield_due(void) {
+  uint64_t now = sodos__ms();
+  if (now - os_last < OS_SLICE_MS) return;
+  k_yield();
+  os_last = sodos__ms();
 }
 
 /* Escolhe a proxima thread. Chamado com a thread atual fora da fila de
@@ -242,6 +257,7 @@ static void idle_wait(void) {
 static void resched(void) {
   reap_zombies();
   stacks_check();
+  os_yield_due();
   /* Acorda quem ja venceu o prazo antes de escolher: sem isto, uma thread
    * que so cede a vez (sched_yield em laco, ex.: espera de futex) sempre se
    * reencontra na fila e as que dormem (poll, nanosleep) nunca acordam. */

@@ -390,6 +390,9 @@ $(B)/%.exe: $(B)/%.obj $(O)/CRT0.OBJ $(O)/LIBC.DLL $(LINK)
 $(B)/t_posix.exe: $(B)/t_posix.obj $(O)/CRT0.OBJ $(O)/LIBC.DLL $(O)/POSIX.DLL $(LINK)
 	$(LINK) /out:$@ $(O)/CRT0.OBJ $< $(O)/LIBC.DLL $(O)/POSIX.DLL $(O)/KERNEL.IMP
 
+$(B)/t_fshare.exe: $(B)/t_fshare.obj $(O)/CRT0.OBJ $(O)/LIBC.DLL $(O)/POSIX.DLL $(LINK)
+	$(LINK) /out:$@ $(O)/CRT0.OBJ $< $(O)/LIBC.DLL $(O)/POSIX.DLL $(O)/KERNEL.IMP
+
 test: all $(O)/HELLO2.EXE $(TESTS)
 	$(SOXRUN) -C $(O) HELLO2.EXE um "dois tres"
 	@for t in $(TESTS); do echo "== $$t"; cp $$t $(O)/TEST.EXE; $(SOXRUN) -C $(O) TEST.EXE || exit 1; done

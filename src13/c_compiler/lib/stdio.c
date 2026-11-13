@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <so.h>
+#include "unixdrv.h"
 
 #define F_READ 1
 #define F_WRITE 2
@@ -61,11 +62,30 @@ FILE* __so_stdio(int which) {
 /* Espelho na serial (COM1) da saida do programa: ajuda a depurar portes que
  * ainda nao tem console proprio. */
 #ifdef __x86_64__
+/* Ultimos 8 KB escritos no console: o registro de crash do port (Firefox)
+ * guarda isso junto da pilha, com as mensagens que vieram antes do erro. */
+static char con_tail[8192];
+static unsigned con_pos;
+
+int __so_console_tail(char* out, int max) {
+  unsigned n = con_pos < sizeof con_tail ? con_pos : (unsigned)sizeof con_tail;
+  unsigned i, start = con_pos - n;
+  if (!out || max <= 0) return 0;
+  if (n > (unsigned)max) {
+    start += n - (unsigned)max;
+    n = (unsigned)max;
+  }
+  for (i = 0; i < n; i++) out[i] = con_tail[(start + i) % sizeof con_tail];
+  return (int)n;
+}
+
 static void ser_write(const char* s, int n) {
   int i;
   if (!s) return;
-  for (i = 0; i < n; i++)
+  for (i = 0; i < n; i++) {
     __asm__ volatile("outb %0, %1" :: "a"((unsigned char)s[i]), "d"((unsigned short)0x3F8));
+    con_tail[con_pos++ % sizeof con_tail] = s[i];
+  }
 }
 #else
 static void ser_write(const char* s, int n) { (void)s; (void)n; }
@@ -133,7 +153,7 @@ static void dos_path(const char* path, char* out) {
   int i = 0, j = 0;
   if (path[0] == '/' && ((path[1] >= 'A' && path[1] <= 'Z') || (path[1] >= 'a' && path[1] <= 'z')) &&
       (path[2] == '/' || path[2] == 0)) {
-    out[j++] = path[1];
+    out[j++] = (char)unix_drive(path[1]);
     out[j++] = ':';
     if (!path[2]) out[j++] = '\\';
     i = 2;
@@ -143,6 +163,12 @@ static void dos_path(const char* path, char* out) {
 }
 
 #if __SIZEOF_POINTER__ == 8
+/* open/read/close sao da posix-lite, que nem todo programa liga (HELLO64C,
+ * testes da libc): referencias fracas, e sem ela o fopen do /dev/urandom so
+ * falha com EIO em vez de quebrar o link. */
+#pragma weak open
+#pragma weak read
+#pragma weak close
 /* "/dev/urandom" e "/dev/random" nao existem no SODOS. No LP64 o fopen cria o
  * FILE sobre um fd da posix-lite, que gera bytes pseudo-aleatorios em cada
  * read: e assim que o NSS (fopen + fileno + read) semeia o DRBG. */
@@ -193,7 +219,7 @@ FILE* fopen(const char* upath, const char* mode) {
   }
 #if __SIZEOF_POINTER__ == 8
   if (dev_random_path(path)) {
-    int rfd = open("/dev/urandom", O_RDONLY);
+    int rfd = open ? open("/dev/urandom", O_RDONLY) : -1;
     if (rfd < 0) {
       errno = EIO;
       return NULL;

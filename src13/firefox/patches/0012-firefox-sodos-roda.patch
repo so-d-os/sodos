@@ -1,0 +1,20 @@
+Fase M5: roda do mouse na janela do WIN.
+
+O HeadlessWidget so define o modo dos deltas da roda para GTK, Windows, Mac e
+Android; nos outros alvos fica -1 e o EventStateManager faz
+MOZ_CRASH("Invalid deltaMode value comes") em DispatchLegacyMouseScrollEvents
+(no SODOS vira abort(), "Redirecting call to abort() to mozalloc_abort").
+O SODOS usa os valores do GTK: linhas, 3 por passo da roda.
+Aplicar depois do 0011. Teste: rolar a roda sobre uma pagina no FIREFOX.EXE.
+
+--- a/widget/headless/HeadlessWidget.h
++++ b/widget/headless/HeadlessWidget.h
+@@ -12,7 +12,7 @@
+ 
+ // The various synthesized event values are hardcoded to avoid pulling
+ // in the platform specific widget code.
+-#if defined(MOZ_WIDGET_GTK)
++#if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_SODOS)
+ #  define MOZ_HEADLESS_SCROLL_MULTIPLIER 3
+ #  define MOZ_HEADLESS_SCROLL_DELTA_MODE \
+     mozilla::dom::WheelEvent_Binding::DOM_DELTA_LINE

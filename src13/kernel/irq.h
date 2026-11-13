@@ -11,3 +11,6 @@ uint64_t irq_busy(void);
 uint64_t irq_idle(void);
 /* 1 = BSP esperando (tecla, tarefa em outra CPU); o tick conta como ocioso. */
 void cpu_idle(int on);
+/* Gancho do tick (IRQ0), chamado depois do EOI com o RIP interrompido e
+ * IF=0. Pode trocar de tarefa (preempcao das janelas do WIN). */
+void irq_set_tick_hook(void (*fn)(uint64_t rip));

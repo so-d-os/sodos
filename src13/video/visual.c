@@ -16,6 +16,7 @@
 #include "kexports.h"
 #include "net.h"
 #include "sched.h"
+#include "irq.h"
 #include "visual.h"
 #include "keymap.h"
 #include "clip.h"
@@ -482,6 +483,9 @@ static int bochs_bind_lfb(void) {
       serial_puts("[visual] LFB R/W OK; pitch=");
       serial_hex32(gfx_pitch_bytes);
       serial_puts("\n");
+      /* 16 MB: a VRAM inteira do Bochs VBE, para qualquer modo de video. */
+      if (mm_map_wc((uint64_t)cand[j], 16u << 20) > 0)
+        serial_puts("[visual] LFB write-combining\n");
       gfx_bochs = 1;
       return 1;
     }
@@ -1750,6 +1754,8 @@ static int tablet_hw_init(void) {
 /* 1 se a posicao, os botoes ou a roda mudaram. sys_mx/sys_my e tablet_btn ja atualizados.
  * Byte 5 segue o HID: positivo = roda para cima. tablet_dz guarda o contrario
  * (positivo desce), que e o que as janelas usam para rolar. */
+static void lat_note(uint32_t now);   /* medida da latencia, mais abaixo */
+
 static int tablet_take(void) {
   struct uhci_td* td = tablet_td;
   uint32_t sts;
@@ -1758,6 +1764,7 @@ static int tablet_take(void) {
   sts = td->sts;
   __asm__ volatile ("" ::: "memory");
   if (sts & (1u << 23)) return 0;
+  lat_note((uint32_t)irq_ticks());
   if (sts & ((1u << 22) | (1u << 21) | (1u << 20) | (1u << 18))) {
     td->token &= ~(1u << 19);
     tablet_rearm();
@@ -1801,7 +1808,17 @@ static int input_poll(uint8_t packet[3], int* pkt_idx, uint8_t* sc, int* abs_pos
   uint8_t st, data;
   int is_aux;
   *abs_pos = 0;
-  net_poll();
+  {
+    /* A placa de rede no maximo uma vez por tick (1 ms): cada volta do laco
+     * passa por aqui, e no QEMU (NE2000 por portas de I/O) o nic_poll era
+     * mais da metade do tempo do WIN. Cada chamada esvazia ate 64 quadros. */
+    static uint32_t net_t;
+    uint32_t now = (uint32_t)irq_ticks();
+    if (now != net_t) {
+      net_t = now;
+      net_poll();
+    }
+  }
   if (api_arm) {
     sys_mouse_place(api_x, api_y);
     packet[0] = (api_arm == 2) ? 1 : 0;
@@ -1817,6 +1834,7 @@ static int input_poll(uint8_t packet[3], int* pkt_idx, uint8_t* sc, int* abs_pos
   if (st & 1) {
     is_aux = (st >> 5) & 1;
     data = inb(0x60);
+    lat_note((uint32_t)irq_ticks());
     __asm__ volatile ("sti");
     if (!(mouse_abs_mode && is_aux)) {
       if (!mouse_abs_mode && *pkt_idx > 0) {
@@ -3525,6 +3543,7 @@ struct gui_task {
   struct cmd_con* con; /* aberto pelo Command: escreve la, nao numa janela propria */
   int con_row, con_col;
   uint8_t* stack;
+  uint8_t* xs_raw;     /* SSE/AVX salvos na preempcao (kmalloc, alinhado em uso) */
   char path[80];
   char args[TASK_ARGBUF]; /* argc textos seguidos, cada um com o seu NUL */
 };
@@ -4113,6 +4132,157 @@ int gui_coop_pause(void) {
   return 1;
 }
 
+/* ---------- preempcao das janelas de programa ----------
+ * As tarefas do WIN sao cooperativas: um programa que calcula sem ceder a vez
+ * (layout/JS do Firefox, por exemplo) prendia o laco do WIN, e com ele o
+ * mouse, o teclado e a tela. No IRQ0, se a tarefa passou da fatia e o RIP
+ * esta no codigo do proprio programa (nunca no kernel ou num driver), ela e
+ * tirada da CPU como num k_yield. O estado SSE/AVX vai junto: outro programa
+ * pode usa-lo enquanto esta espera. */
+#define GUI_SLICE_MS 10
+#define XS_MAX 4096
+static volatile uint32_t task_slice_t0;
+static int xs_mode = -1;      /* -1 = nao sondado, 0 = fxsave, 1 = xsave */
+static uint32_t xs_lo, xs_hi; /* XCR0 */
+static uint32_t gui_preempts;
+
+static void xs_probe(void) {
+  uint64_t cr4;
+  uint32_t a, b, c, d;
+  xs_mode = 0;
+  __asm__ volatile ("mov %%cr4, %0" : "=r"(cr4));
+  if (!(cr4 & (1u << 18))) return;              /* OSXSAVE */
+  __asm__ volatile ("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0xD), "c"(0));
+  if (b == 0 || b > XS_MAX) return;
+  __asm__ volatile ("xgetbv" : "=a"(xs_lo), "=d"(xs_hi) : "c"(0));
+  xs_mode = 1;
+}
+
+/* ---------- entrada esperando e latencia da entrada ----------
+ * No tick (1 ms) so se olha se ha entrada esperando: o byte no 8042 ou o
+ * relatorio do tablet USB do QEMU. Com entrada esperando, a tarefa GUI e
+ * preemptada sem esperar o fim da fatia (gui_preempt_tick). lat_note marca
+ * quando o WIN retirou o dado do hardware.
+ *
+ * WIN_INLAT_LOG 1: a cada 3 s vai para a serial o histograma da latencia
+ * (chegada -> WIN le o dado), onde a CPU estava em cada tick (codigo do
+ * programa, kernel a pedido dele, WIN) e o tempo do laco do WIN por parte.
+ * Foi assim que se achou o LFB uncached (quadro de 38-197 ms). */
+#define WIN_INLAT_LOG 0
+static volatile uint32_t in_pend_t;   /* tick em que a entrada chegou; 0 = nada */
+static uint32_t prof_pump, prof_draw, prof_frames, prof_poll;
+#if WIN_INLAT_LOG
+static uint32_t lat_n, lat_sum, lat_max, lat_hist[8];
+static volatile uint32_t st_user, st_kern, st_host;
+static uint32_t lat_rep_t;
+
+static void lat_put(const char* k, uint32_t v) {
+  char num[16];
+  serial_puts(k);
+  int32_to_string((int32_t)v, num, (int)sizeof(num));
+  serial_puts(num);
+}
+#endif
+
+static int input_peek(void) {
+  if (inb(0x64) & 1) return 1;
+  if (mouse_abs_mode && tablet_td && !(tablet_td->sts & (1u << 23))) return 1;
+  return 0;
+}
+
+static void lat_note(uint32_t now) {
+#if WIN_INLAT_LOG
+  static const uint32_t lim[7] = {2, 5, 10, 20, 50, 100, 200};
+  uint32_t t0 = in_pend_t, d;
+  int b = 0;
+  in_pend_t = 0;
+  if (t0) {
+    d = now - t0;
+    while (b < 7 && d >= lim[b]) b++;
+    lat_hist[b]++;
+    lat_n++;
+    lat_sum += d;
+    if (d > lat_max) lat_max = d;
+  }
+  if (now - lat_rep_t < 3000) return;
+  lat_rep_t = now;
+  if (!lat_n) return;
+  lat_put("[inlat] n=", lat_n);
+  lat_put(" media=", lat_sum / lat_n);
+  lat_put(" max=", lat_max);
+  lat_put(" ms | <2:", lat_hist[0]);
+  lat_put(" <5:", lat_hist[1]);
+  lat_put(" <10:", lat_hist[2]);
+  lat_put(" <20:", lat_hist[3]);
+  lat_put(" <50:", lat_hist[4]);
+  lat_put(" <100:", lat_hist[5]);
+  lat_put(" <200:", lat_hist[6]);
+  lat_put(" >=200:", lat_hist[7]);
+  lat_put(" | ticks prog=", st_user);
+  lat_put(" kernel=", st_kern);
+  lat_put(" win=", st_host);
+  lat_put(" | pump=", prof_pump);
+  lat_put(" desenho=", prof_draw);
+  lat_put(" quadros=", prof_frames);
+  lat_put(" poll=", prof_poll);
+  serial_puts("\n");
+  lat_n = lat_sum = lat_max = 0;
+  for (b = 0; b < 8; b++) lat_hist[b] = 0;
+  st_user = st_kern = st_host = 0;
+  prof_pump = prof_draw = prof_frames = prof_poll = 0;
+#else
+  (void)now;
+  in_pend_t = 0;
+#endif
+}
+
+static void gui_preempt_tick(uint64_t rip) {
+  struct gui_task* t;
+  uint8_t* xs;
+  int i;
+  if (host_on) {
+    if (!in_pend_t && input_peek()) {
+      uint32_t now = (uint32_t)irq_ticks();
+      in_pend_t = now ? now : 1;
+    }
+#if WIN_INLAT_LOG
+    if (task_cur < 0) st_host++;
+    else if (mod_rip_preemptible(rip)) st_user++;
+    else st_kern++;
+#endif
+  }
+  if (task_cur < 0 || !host_on || !gtasks || sched_frozen()) return;
+  t = &gtasks[task_cur];
+  if (!t->used || t->wake == WAKE_DEAD || t->wake == WAKE_NONE) return;
+  /* Entrada esperando (tecla, mouse): o WIN precisa da CPU ja, sem esperar a
+   * fatia acabar. */
+  if (!in_pend_t && (uint32_t)irq_ticks() - task_slice_t0 < GUI_SLICE_MS) return;
+  if (!mod_rip_preemptible(rip)) return;
+  if (xs_mode < 0) xs_probe();
+  /* Fora da pilha do programa: a de uma thread do Firefox pode ser pequena.
+   * Uma area por tarefa basta: ela so e preemptada uma vez de cada vez. */
+  if (!t->xs_raw) t->xs_raw = (uint8_t*)kmalloc(XS_MAX + 64);
+  if (!t->xs_raw) return;
+  xs = (uint8_t*)(((uintptr_t)t->xs_raw + 63) & ~(uintptr_t)63);
+  if (xs_mode) {
+    for (i = 512; i < 576; i++) xs[i] = 0;      /* cabecalho XSAVE */
+    __asm__ volatile ("xsave %0" : "=m"(*(uint8_t(*)[XS_MAX])xs) : "a"(xs_lo), "d"(xs_hi) : "memory");
+  } else {
+    __asm__ volatile ("fxsave %0" : "=m"(*(uint8_t(*)[512])xs) : : "memory");
+  }
+  gui_preempts++;
+  /* O EOI ja foi: com IF=1 o desktop roda normal. Um IRQ aqui dentro cai no
+   * kernel (RIP fora do programa) e so conta o tick. */
+  __asm__ volatile ("sti");
+  gui_yield(WAKE_BUSY);
+  __asm__ volatile ("cli");
+  if (xs_mode) {
+    __asm__ volatile ("xrstor %0" : : "m"(*(uint8_t(*)[XS_MAX])xs), "a"(xs_lo), "d"(xs_hi) : "memory");
+  } else {
+    __asm__ volatile ("fxrstor %0" : : "m"(*(uint8_t(*)[512])xs) : "memory");
+  }
+}
+
 static int gui_event_coop(int* ev, int timeout_ms) {
   uint32_t t0 = net_ms();
   int i;
@@ -4341,6 +4511,7 @@ static void gui_idle(void) {
 static int g_drag = -1;
 static int g_drag_ox, g_drag_oy;
 static int g_cap = -1;
+static int g_rcap = -1; /* janela de programa que recebeu o botao direito */
 
 static void task_arm(struct gui_task* t, void (*fn)(void)) {
   uintptr_t top = ((uintptr_t)t->stack + TASK_STACK) & ~(uintptr_t)15;
@@ -4366,6 +4537,8 @@ static void task_reap(int ti) {
   if (t->con) cmd_refocus(t->con);
   if (t->stack) kfree(t->stack);
   t->stack = 0;
+  if (t->xs_raw) kfree(t->xs_raw);
+  t->xs_raw = 0;
   t->run = 0;
   t->con = 0;
   t->used = 0;
@@ -4420,8 +4593,11 @@ static void task_switch_to(int ti) {
   mod_cpu_load(&t->cpu);
   task_cur = ti;
   gui_ix = (t->gid >= 0 && t->gid < GUI_MAX) ? t->gid : 0;
+  task_slice_t0 = (uint32_t)irq_ticks();
   ctx_switch(&host_rsp, t->rsp);
   task_cur = -1;
+  /* Volta da preempcao com IF=0 (veio do IRQ0). */
+  __asm__ volatile ("sti");
   if (t->wake == WAKE_DEAD) task_reap(ti);
 }
 
@@ -4430,8 +4606,10 @@ static void task_start(int ti) {
   mod_cpu_save(&host_cpu);
   task_cur = ti;
   gui_ix = 0;
+  task_slice_t0 = (uint32_t)irq_ticks();
   ctx_switch(&host_rsp, t->rsp);
   task_cur = -1;
+  __asm__ volatile ("sti");
   if (t->wake == WAKE_DEAD) task_reap(ti);
 }
 
@@ -4476,6 +4654,7 @@ static int task_spawn(struct wm_win* wins, int* focus, int big, const char* path
   t->con_row = 0;
   t->con_col = 0;
   t->rsp = 0;
+  t->xs_raw = 0;
   t->stack = (uint8_t*)kmalloc(TASK_STACK);
   if (!t->stack) {
     t->used = 0;
@@ -4546,9 +4725,14 @@ static void tasks_shutdown(void) {
       task_switch_to(i);
     }
     if (gtasks[i].used && gtasks[i].wake != WAKE_DEAD) {
+      /* Nao terminou sozinho (o Firefox demora a fechar): o mod_exec dele
+       * nunca volta, entao a memoria do programa sai aqui. */
+      if (gtasks[i].wake != WAKE_NONE) mod_kill(gtasks[i].cpu.pid);
       if (gtasks[i].stack) kfree(gtasks[i].stack);
+      if (gtasks[i].xs_raw) kfree(gtasks[i].xs_raw);
       gtasks[i].used = 0;
       gtasks[i].stack = 0;
+      gtasks[i].xs_raw = 0;
     } else if (gtasks[i].used) {
       task_reap(i);
     }
@@ -4556,6 +4740,7 @@ static void tasks_shutdown(void) {
   gui_focus = -1;
   g_drag = -1;
   g_cap = -1;
+  g_rcap = -1;
   host_on = 0;
 }
 
@@ -6334,6 +6519,8 @@ static int win_wm_run(void) {
   int kbd_e0 = 0;
   int draw_skip = 0;
   int pkt_idx = 0;
+  uint32_t in_ms = 0;   /* ultimo evento de entrada */
+  uint32_t pump_ms = 0; /* ultima vez que um programa ganhou a CPU */
   uint8_t packet[3];
   int32_t mx;
   int32_t my;
@@ -6399,6 +6586,7 @@ static int win_wm_run(void) {
   sys_mouse_init();
   mx = sys_mx;
   my = sys_my;
+  irq_set_tick_hook(gui_preempt_tick);
   desk_load();
   chrome_leave = 0;
   gui_ensure();
@@ -6414,7 +6602,18 @@ static int win_wm_run(void) {
       gui_stole = 0;
       need_draw = 1;
     }
-    if (task_pick() >= 0) tasks_pump();
+    {
+      /* Entrada primeiro: um pacote de mouse sao 3 bytes e cada volta do
+       * laco dava uma fatia inteira ao programa (Firefox) antes do proximo
+       * byte. Com entrada chegando, so cede a cada 30 ms. */
+      uint32_t now = (uint32_t)irq_ticks();
+      int pend = pkt_idx > 0 || (inb(0x64) & 1) || (now - in_ms) < 3;
+      if ((!pend || now - pump_ms >= 30) && task_pick() >= 0) {
+        pump_ms = now;
+        tasks_pump();
+        prof_pump += (uint32_t)irq_ticks() - now;
+      }
+    }
     if (win_api_dirty) {
       /* 2: so janelas de programa mudaram; vira need_draw 2 se nada mais pediu */
       need_draw = win_api_dirty == 2 && need_draw != 1 ? 2 : 1;
@@ -6473,6 +6672,7 @@ static int win_wm_run(void) {
         else dc_present(gwins[dc.gw].ox, gwins[dc.gw].oy, (int)mx, (int)my);
       }
     } else if (need_draw) {
+      uint32_t prof_t0 = (uint32_t)irq_ticks();
       int bar_ty = h - bar_h + (bar_h - ch) / 2;
       struct start_menu gm;
       int mi;
@@ -6638,6 +6838,8 @@ static int win_wm_run(void) {
       }
       cursor_redraw_at((int)mx, (int)my, col_cursor);
       gfx_frame_end();
+      prof_draw += (uint32_t)irq_ticks() - prof_t0;
+      prof_frames++;
       need_draw = 0;
       draw_skip = 0;
     }
@@ -6645,12 +6847,15 @@ static int win_wm_run(void) {
     {
       uint8_t scb = 0;
       int from_abs = 0;
+      uint32_t prof_p0 = (uint32_t)irq_ticks();
       int kind = input_poll(packet, &pkt_idx, &scb, &from_abs);
+      prof_poll += (uint32_t)irq_ticks() - prof_p0;
       if (kind < 0) {
         vt_idle();   /* as telas do DOS ao fundo andam */
         __asm__ volatile ("pause");
         continue;
       }
+      in_ms = (uint32_t)irq_ticks();
       if (kind == 0) {
         int rf = gui_raw_focus();
         /* Janela crua (emulador): o byte vai inteiro, exceto as teclas do SO. */
@@ -7233,6 +7438,31 @@ static int win_wm_run(void) {
         prev_left = left;
         {
           int right = (packet[0] >> 1) & 1;
+          /* Botao direito numa janela de programa (Firefox: menu de contexto)
+           * vai para ela como DOWN/UP com botao 2, como o esquerdo. */
+          if (gwins && right && !prev_right && !note_dlg && !menu_open) {
+            int hk = HIT_NONE;
+            int id = z_top(wins, (int)mx, (int)my, &hk);
+            if (hk == HIT_GUI && id >= 0 && id < GUI_MAX && gwins[id].open) {
+              struct gui_win* gw = &gwins[id];
+              int relx = (int)mx - gw->ox;
+              int rely = (int)my - (gw->oy + gw->title_h);
+              if (rely >= 0 && relx >= 0 && relx < gw->cw && rely < gw->ch) {
+                gw->z = ++zseq;
+                gui_focus = id;
+                focus = -1;
+                pop_open = 0;
+                gq_push(gw, GUI_EV_DOWN, relx, rely, 2);
+                g_rcap = id;
+                need_draw = 1;
+              }
+            }
+          } else if (!right && prev_right && g_rcap >= 0) {
+            if (gwins && g_rcap < GUI_MAX && gwins[g_rcap].open)
+              gq_push(&gwins[g_rcap], GUI_EV_UP, (int)mx - gwins[g_rcap].ox,
+                      (int)my - (gwins[g_rcap].oy + gwins[g_rcap].title_h), 2);
+            g_rcap = -1;
+          }
           if (right && !prev_right && !note_dlg) {
             int t, on = 0;
             if (wm_pt((int)mx, (int)my, 0, h - bar_h, w, bar_h)) on = 1;

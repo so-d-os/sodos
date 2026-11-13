@@ -1,5 +1,6 @@
 #include "shell.h"
 #include "mm.h"
+#include "serial.h"
 
 static void put_u32(uint32_t n) {
   char num[16];
@@ -64,7 +65,50 @@ static int high_test(void) {
   return 0;
 }
 
+/* "free blocos": blocos usados do heap dos programas (endereco, KB, dono).
+ * Mostra o que ficou preso depois que um programa terminou. */
+static int blk_n;
+
+static void blk_put(void* arg, int area, uint64_t addr, uint64_t size, int used, uint32_t owner) {
+  (void)arg;
+  if (area != 1 || !used) return;
+  {
+    char n[16];
+    serial_puts("[blk] ");
+    uint32_to_string((uint32_t)addr, n, (int)sizeof(n));
+    serial_hex32((uint32_t)addr);
+    serial_puts(" ");
+    uint32_to_string((uint32_t)size, n, (int)sizeof(n));
+    serial_puts(n);
+    serial_puts(" ");
+    uint32_to_string(owner, n, (int)sizeof(n));
+    serial_puts(n);
+    serial_puts("\n");
+  }
+  if (blk_n++ >= 60) return;
+  put_hex((uint32_t)addr);
+  puts_k("  ");
+  put_u32((uint32_t)(size >> 10));
+  puts_k(" KB  dono ");
+  put_u32(owner);
+  puts_k("\n");
+}
+
 int cmd_free(int argc, char** argv) {
+  if (argc > 1 && (strcmp(argv[1], "blocos") == 0 || strcmp(argv[1], "BLOCOS") == 0)) {
+    uint32_t t, u, f, big;
+    blk_n = 0;
+    mm_walk(blk_put, 0);
+    if (blk_n > 60) {
+      put_u32((uint32_t)(blk_n - 60));
+      puts_k(" blocos a mais.\n");
+    }
+    um_stats(&t, &u, &f, &big);
+    puts_k("Maior bloco livre ");
+    put_u32(big >> 10);
+    puts_k(" KB\n");
+    return 0;
+  }
   uint32_t total, used, free_b, largest;
   if (argc > 1 && (strcmp(argv[1], "teste") == 0 || strcmp(argv[1], "TESTE") == 0))
     return high_test();

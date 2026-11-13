@@ -12,6 +12,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <so.h>
+#include "../../c_compiler/lib/unixdrv.h"
 
 #define FD_MAX 64
 #define DIR_MAX 8
@@ -20,15 +21,26 @@
 #define LIST_MAX 16384
 #define FILE_CAP (64 * 1024 * 1024)
 
+/* Um arquivo aberto: os bytes ficam na memoria e o fsync/close grava o
+ * arquivo inteiro (k_fsave). Todos os fds do mesmo caminho dividem o mesmo
+ * objeto. Antes cada open tinha a sua copia: o SQLite abre o mesmo banco em
+ * varias conexoes (places, favicons, leitura assincrona), cada uma gravava a
+ * sua copia por cima da outra e o banco ficava "malformed". */
+struct fobj {
+  int refs;          /* fds que apontam para ele; 0 = livre */
+  int size;
+  int dirty;
+  int gone;          /* unlink com o arquivo aberto: nao grava mais */
+  char path[PATH_MAX];
+  char* data;
+};
+
 struct fd_ent {
   int used;
   int flags;
   int pos;
-  int size;
-  int dirty;
   int rnd; /* /dev/urandom: cada read devolve bytes pseudo-aleatorios */
-  char path[PATH_MAX];
-  char* data;
+  struct fobj* f;
 };
 
 struct __so_DIR {
@@ -39,6 +51,64 @@ struct __so_DIR {
 };
 
 static struct fd_ent fds[FD_MAX];
+static struct fobj fobjs[FD_MAX];
+
+static int path_eq(const char* a, const char* b) {
+  for (;; a++, b++) {
+    char x = *a, y = *b;
+    if (x >= 'a' && x <= 'z') x = (char)(x - 32);
+    if (y >= 'a' && y <= 'z') y = (char)(y - 32);
+    if (x == '/') x = '\\';
+    if (y == '/') y = '\\';
+    if (x != y) return 0;
+    if (!x) return 1;
+  }
+}
+
+/* Objeto ja aberto para este caminho (que nao foi apagado), ou 0. */
+static struct fobj* fobj_find(const char* full) {
+  int i;
+  for (i = 0; i < FD_MAX; i++)
+    if (fobjs[i].refs > 0 && !fobjs[i].gone && path_eq(fobjs[i].path, full)) return &fobjs[i];
+  return 0;
+}
+
+static struct fobj* fobj_new(const char* full) {
+  int i;
+  for (i = 0; i < FD_MAX; i++) {
+    if (fobjs[i].refs == 0) {
+      memset(&fobjs[i], 0, sizeof(fobjs[i]));
+      strncpy(fobjs[i].path, full, PATH_MAX - 1);
+      return &fobjs[i];
+    }
+  }
+  return 0;
+}
+
+static int fobj_flush(struct fobj* o) {
+  if (!o->dirty || o->gone) return 0;
+  if (k_fsave(o->path, o->data ? o->data : "", o->size) < 0) return -1;
+  o->dirty = 0;
+  return 0;
+}
+
+static void fobj_release(struct fobj* o) {
+  if (--o->refs > 0) return;
+  free(o->data);
+  o->data = 0;
+  o->refs = 0;
+}
+
+/* Garante espaco para need bytes (+ NUL). */
+static int fobj_grow(struct fobj* o, int need) {
+  char* nb;
+  if (need > FILE_CAP) return -1;
+  if (o->data && need <= o->size) return 0;
+  nb = (char*)realloc(o->data, (size_t)need + 1);
+  if (!nb) return -1;
+  o->data = nb;
+  return 0;
+}
 static struct __so_DIR dirs[DIR_MAX];
 
 static int is_abs_dos(const char* p) {
@@ -56,7 +126,7 @@ static void join_cwd(const char* path, char* out, int max) {
   if (!path) path = "";
   if (path[0] == '/' && ((path[1] >= 'A' && path[1] <= 'Z') || (path[1] >= 'a' && path[1] <= 'z')) &&
       (path[2] == '/' || path[2] == 0)) {
-    out[j++] = path[1];
+    out[j++] = (char)unix_drive(path[1]);
     out[j++] = ':';
     i = 2;
     if (!path[2]) out[j++] = '\\';
@@ -185,6 +255,15 @@ __export int unlink(const char* path) {
   }
   join_cwd(path, full, PATH_MAX);
   r = k_fdelete(full);
+  {
+    /* Aberto em algum fd: continua legivel por ele, mas nao volta ao disco. */
+    struct fobj* o = fobj_find(full);
+    if (o) {
+      o->gone = 1;
+      o->dirty = 0;
+      if (r < 0) r = 0;
+    }
+  }
   if (r < 0) {
     errno = err_from_k(r);
     return -1;
@@ -329,6 +408,7 @@ __export int open(const char* path, int flags, ...) {
   char full[PATH_MAX];
   int fd, sz, mode = 0;
   struct fd_ent* e;
+  struct fobj* o;
   if (!path) {
     errno = EINVAL;
     return -1;
@@ -352,14 +432,33 @@ __export int open(const char* path, int flags, ...) {
     e->used = 1;
     e->flags = flags;
     e->rnd = 1;
-    e->data = (char*)malloc(1);
-    if (!e->data) {
-      e->used = 0;
+    errno = 0;
+    return fd;
+  }
+  o = fobj_find(full);
+  if (o) {
+    /* Ja aberto: o mesmo conteudo (inclusive o que ainda nao foi gravado). */
+    if ((flags & O_CREAT) && (flags & O_EXCL)) {
+      errno = EEXIST;
+      return -1;
+    }
+    fd = fd_alloc();
+    if (fd < 0) {
       errno = ENOMEM;
       return -1;
     }
-    e->data[0] = 0;
-    strncpy(e->path, full, PATH_MAX - 1);
+    e = &fds[fd];
+    memset(e, 0, sizeof(*e));
+    e->used = 1;
+    e->flags = flags;
+    e->f = o;
+    o->refs++;
+    if ((flags & O_TRUNC) && (flags & (O_WRONLY | O_RDWR))) {
+      o->size = 0;
+      if (o->data) o->data[0] = 0;
+      o->dirty = 1;
+    }
+    e->pos = (flags & O_APPEND) ? o->size : 0;
     errno = 0;
     return fd;
   }
@@ -383,52 +482,38 @@ __export int open(const char* path, int flags, ...) {
     }
     sz = 0;
   }
+  if ((flags & O_TRUNC) && (flags & (O_WRONLY | O_RDWR))) sz = 0;
+  if (sz > FILE_CAP) {
+    errno = EIO;
+    return -1;
+  }
   fd = fd_alloc();
-  if (fd < 0) {
+  o = fobj_new(full);
+  if (fd < 0 || !o) {
     errno = ENOMEM;
     return -1;
   }
+  o->data = (char*)malloc((size_t)sz + 1);
+  if (!o->data) {
+    errno = ENOMEM;
+    return -1;
+  }
+  if (sz > 0 && k_fload(full, o->data, sz + 1) != sz) {
+    free(o->data);
+    o->data = 0;
+    errno = EIO;
+    return -1;
+  }
+  o->data[sz] = 0;
+  o->size = sz;
+  o->dirty = (flags & O_TRUNC) && (flags & (O_WRONLY | O_RDWR));
+  o->refs = 1;
   e = &fds[fd];
   memset(e, 0, sizeof(*e));
   e->used = 1;
   e->flags = flags;
-  e->size = sz;
+  e->f = o;
   e->pos = (flags & O_APPEND) ? sz : 0;
-  strncpy(e->path, full, PATH_MAX - 1);
-  if ((flags & O_TRUNC) && (flags & (O_WRONLY | O_RDWR))) {
-    e->size = 0;
-    e->pos = 0;
-    e->dirty = 1;
-    sz = 0;
-  }
-  if (sz > 0) {
-    if (sz > FILE_CAP) {
-      e->used = 0;
-      errno = EIO;
-      return -1;
-    }
-    e->data = (char*)malloc((size_t)sz + 1);
-    if (!e->data) {
-      e->used = 0;
-      errno = ENOMEM;
-      return -1;
-    }
-    if (k_fload(full, e->data, sz + 1) != sz) {
-      free(e->data);
-      e->used = 0;
-      errno = EIO;
-      return -1;
-    }
-    e->data[sz] = 0;
-  } else {
-    e->data = (char*)malloc(1);
-    if (!e->data) {
-      e->used = 0;
-      errno = ENOMEM;
-      return -1;
-    }
-    e->data[0] = 0;
-  }
   errno = 0;
   return fd;
 }
@@ -463,22 +548,24 @@ extern int sodos_shm_dup(int fd);
 
 __export int close(int fd) {
   struct fd_ent* e;
+  int r = 0;
   if (PIPE_FD(fd)) return sodos_pipe_close(fd);
   if (fd < 3 || fd >= FD_MAX || !fds[fd].used) {
     errno = EBADF;
     return -1;
   }
   e = &fds[fd];
-  if (e->dirty && (e->flags & (O_WRONLY | O_RDWR))) {
-    if (k_fsave(e->path, e->data ? e->data : "", e->size) < 0) {
-      errno = EIO;
-      free(e->data);
-      e->used = 0;
-      return -1;
-    }
+  if (e->f) {
+    /* O ultimo a fechar grava; um fd que escreveu grava ja (como antes). */
+    if ((e->flags & (O_WRONLY | O_RDWR)) || e->f->refs == 1) r = fobj_flush(e->f);
+    fobj_release(e->f);
   }
-  free(e->data);
   e->used = 0;
+  e->f = 0;
+  if (r < 0) {
+    errno = EIO;
+    return -1;
+  }
   errno = 0;
   return 0;
 }
@@ -562,10 +649,10 @@ __export ssize_t read(int fd, void* buf, size_t n) {
     e->pos += (int)n;
     return (ssize_t)n;
   }
-  if (e->pos >= e->size) return 0;
-  left = (size_t)(e->size - e->pos);
+  if (!e->f || e->pos >= e->f->size) return 0;
+  left = (size_t)(e->f->size - e->pos);
   if (n > left) n = left;
-  memcpy(buf, e->data + e->pos, n);
+  memcpy(buf, e->f->data + e->pos, n);
   e->pos += (int)n;
   return (ssize_t)n;
 }
@@ -605,7 +692,7 @@ static void con_write_ansi(const char* s, size_t n) {
 __export ssize_t write(int fd, const void* buf, size_t n) {
   if (PIPE_FD(fd)) return sodos_pipe_write(fd, buf, n);
   struct fd_ent* e;
-  char* nb;
+  struct fobj* o;
   int need;
   if (fd == 1 || fd == 2) {
     if (__so_stdin_raw) con_write_ansi((const char*)buf, n);
@@ -621,24 +708,28 @@ __export ssize_t write(int fd, const void* buf, size_t n) {
     errno = EACCES;
     return -1;
   }
+  o = e->f;
+  if (!o) {
+    errno = EBADF;
+    return -1;
+  }
+  if (e->flags & O_APPEND) e->pos = o->size;
   need = e->pos + (int)n;
   if (need > FILE_CAP) {
     errno = EIO;
     return -1;
   }
-  if (!e->data || need > e->size) {
-    nb = (char*)realloc(e->data, (size_t)need + 1);
-    if (!nb) {
-      errno = ENOMEM;
-      return -1;
-    }
-    e->data = nb;
+  if (fobj_grow(o, need) < 0) {
+    errno = ENOMEM;
+    return -1;
   }
-  memcpy(e->data + e->pos, buf, n);
+  /* escrever alem do fim deixa um buraco de zeros, como no Unix */
+  if (e->pos > o->size) memset(o->data + o->size, 0, (size_t)(e->pos - o->size));
+  memcpy(o->data + e->pos, buf, n);
   e->pos += (int)n;
-  if (e->pos > e->size) e->size = e->pos;
-  e->data[e->size] = 0;
-  e->dirty = 1;
+  if (e->pos > o->size) o->size = e->pos;
+  o->data[o->size] = 0;
+  o->dirty = 1;
   return (ssize_t)n;
 }
 
@@ -653,7 +744,7 @@ __export off_t lseek(int fd, off_t off, int whence) {
   e = &fds[fd];
   if (whence == SEEK_SET) np = off;
   else if (whence == SEEK_CUR) np = e->pos + off;
-  else if (whence == SEEK_END) np = e->size + off;
+  else if (whence == SEEK_END) np = (e->f ? e->f->size : 0) + off;
   else {
     errno = EINVAL;
     return -1;
@@ -674,45 +765,40 @@ __export int fsync(int fd) {
     return fd >= 0 && fd < 3 ? 0 : -1;
   }
   e = &fds[fd];
-  if (e->dirty && (e->flags & (O_WRONLY | O_RDWR))) {
-    if (k_fsave(e->path, e->data ? e->data : "", e->size) < 0) {
-      errno = EIO;
-      return -1;
-    }
-    e->dirty = 0;
+  /* Z: e o ramdisk: gravar no fsync so copiaria o arquivo inteiro de uma RAM
+   * para outra. O close grava (e um processo que cai perde so o ramdisk). */
+  if (e->f && (e->f->path[0] == 'Z' || e->f->path[0] == 'z') && e->f->path[1] == ':') return 0;
+  if (e->f && fobj_flush(e->f) < 0) {
+    errno = EIO;
+    return -1;
   }
   return 0;
 }
 
 __export int ftruncate(int fd, off_t len) {
   struct fd_ent* e;
-  char* nb;
+  struct fobj* o;
   if (SHM_FD(fd)) return sodos_shm_ftruncate(fd, len);
   if (fd < 3 || fd >= FD_MAX || !fds[fd].used || len < 0) {
     errno = EBADF;
     return -1;
   }
   e = &fds[fd];
-  if (!(e->flags & (O_WRONLY | O_RDWR))) {
+  o = e->f;
+  if (!o || !(e->flags & (O_WRONLY | O_RDWR))) {
     errno = EACCES;
     return -1;
   }
-  if (len > e->size) {
-    if (len > FILE_CAP) {
-      errno = EIO;
+  if (len > o->size) {
+    if (fobj_grow(o, (int)len) < 0) {
+      errno = len > FILE_CAP ? EIO : ENOMEM;
       return -1;
     }
-    nb = (char*)realloc(e->data, (size_t)len + 1);
-    if (!nb) {
-      errno = ENOMEM;
-      return -1;
-    }
-    memset(nb + e->size, 0, (size_t)(len - e->size));
-    e->data = nb;
+    memset(o->data + o->size, 0, (size_t)(len - o->size));
   }
-  e->size = len;
-  e->data[len] = 0;
-  e->dirty = 1;
+  o->size = (int)len;
+  o->data[len] = 0;
+  o->dirty = 1;
   return 0;
 }
 
@@ -724,7 +810,7 @@ __export int dup(int fd) {
     errno = EBADF;
     return -1;
   }
-  /* copia independente (sem posicao compartilhada) */
+  /* mesmo arquivo (mesmo conteudo); a posicao continua separada */
   nfd = fd_alloc();
   if (nfd < 0) {
     errno = ENOMEM;
@@ -732,13 +818,7 @@ __export int dup(int fd) {
   }
   e = &fds[nfd];
   *e = fds[fd];
-  e->data = (char*)malloc((size_t)e->size + 1);
-  if (!e->data) {
-    e->used = 0;
-    errno = ENOMEM;
-    return -1;
-  }
-  memcpy(e->data, fds[fd].data, (size_t)e->size + 1);
+  if (e->f) e->f->refs++;
   return nfd;
 }
 
@@ -756,10 +836,10 @@ __export int fstat(int fd, struct stat* st) {
   e = &fds[fd];
   memset(st, 0, sizeof(*st));
   st->st_mode = S_IFREG | S_IRUSR | S_IWUSR;
-  st->st_size = e->size;
+  st->st_size = e->f ? e->f->size : 0;
   st->st_dev = 1;
-  st->st_ino = path_ino(e->path);
-  st->st_mtime = file_mtime(e->path);
+  st->st_ino = e->f ? path_ino(e->f->path) : (unsigned long)(fd + 1);
+  st->st_mtime = e->f && !e->f->gone ? file_mtime(e->f->path) : 0;
   st->st_atime = st->st_mtime;
   st->st_ctime = st->st_mtime;
 #if __SIZEOF_POINTER__ == 8
@@ -783,6 +863,11 @@ __export int stat(const char* path, struct stat* st) {
   st->st_ino = path_ino(full);
   /* Arquivo primeiro: e o caso comum e poupa listar a pasta. */
   sz = k_fsize(full);
+  {
+    /* Aberto e ainda nao gravado: o tamanho de verdade e o da memoria. */
+    struct fobj* o = fobj_find(full);
+    if (o) sz = o->size;
+  }
   if (sz < 0) {
     if (path_is_dir(full)) {
       st->st_mode = S_IFDIR | S_IRWXU;
