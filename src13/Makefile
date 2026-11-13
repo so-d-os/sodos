@@ -28,7 +28,8 @@ APP_CFLAGS=-ffreestanding -fno-pic -fno-stack-protector -fno-pie -nostdlib -O2 -
 	-m32 -march=i386 -mtune=i386 -mno-sse -mno-mmx -mno-3dnow \
 	-Werror -Wstrict-prototypes -I.
 APP_LDFLAGS=-m elf_i386
-# 4 GB: o kernel_entry mapeia 0..4 GB e mm.c usa a maior regiao E820 abaixo de 4 GB (~3 GB no QEMU).
+# 8 GB: o kernel_entry mapeia 0..4 GB e mm.c usa a maior regiao E820 abaixo de 4 GB (~3 GB no QEMU)
+# para os programas; o que passa de 4 GB vai para o hmalloc do kernel (ramdisk Z:, ate 1023 MB).
 # -usb -device usb-tablet: o QEMU entrega a posicao absoluta do ponteiro.
 # KVM quando o usuario esta no grupo kvm (WSL: /dev/kvm); senao TCG. Com KVM a
 # emulacao aninhada (QEMU dentro do SODOS, qemu/README.md) fica usavel.
@@ -36,7 +37,7 @@ QEMU_ACCEL := $(shell [ -r /dev/kvm ] && [ -w /dev/kvm ] && grep -qE 'vmx|svm' /
 # SMP: o kernel acha as CPUs no MADT e sobe os APs (INIT-SIPI). Hoje eles
 # provam a execucao paralela e ficam em hlt; o escalonador ainda e da BSP.
 SMP ?= 4
-QEMU=qemu-system-x86_64 -accel $(QEMU_ACCEL) -m 4096 -smp $(SMP) -usb -device usb-tablet
+QEMU=qemu-system-x86_64 -accel $(QEMU_ACCEL) -m 8192 -smp $(SMP) -usb -device usb-tablet
 
 # VirtualBox (Windows/WSL).  wslpath/cygpath convertem o caminho para o
 # PowerShell; em Linux nativo o alvo vbox avisa que nao ha suporte.

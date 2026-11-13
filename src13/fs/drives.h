@@ -53,6 +53,9 @@ void drives_print_dir(const char* spec);
 void drives_dir(const char* spec, int flags);
 /* del: 0 apagou, >0 quantos (com * e ?), <0 erro (ver drives.c). */
 int drives_del(const char* spec);
+/* Renomeia/move no mesmo disco FAT: 0 ok, -1 nao existe, -2 invalido,
+ * -3 destino e pasta, -5 nao e FAT, -6 outra unidade, -7 pasta entre pastas. */
+int drives_rename(const char* from, const char* to);
 /* md/rd por caminho completo: 0 ok, 1 ja existe (md), -2 nao vazia (rd),
  * -3 nao e pasta (rd), -5 nao e disco FAT, -1 outro erro. */
 int drives_mkdir(const char* path);

@@ -51,6 +51,10 @@ int k_dir(const char* path, struct k_dirent* out, int max);
 /* Apaga arquivo (aceita * e ?): 0, ou quantos com * e ?. -1 nao achou,
  * -3 e pasta, -4 somente leitura, -5 unidade sem apagar, -2 invalido. */
 int k_fdelete(const char* path);
+/* Renomeia/move no mesmo disco FAT sem copiar os dados. 0 ok, -1 nao existe,
+ * -2 invalido/sem lugar, -3 destino e pasta, -5 unidade sem rename,
+ * -6 outra unidade, -7 pasta para outra pasta (-5/-6/-7: copiar). */
+int k_frename(const char* from, const char* to);
 /* 0 ok; mkdir 1 = ja existe; rmdir -2 = nao vazia, -3 = nao e pasta. */
 int k_mkdir(const char* path);
 int k_rmdir(const char* path);

@@ -1541,6 +1541,76 @@ int fat_delete(const char* path) {
   return 0;
 }
 
+/* Renomeia/move from para to no mesmo volume trocando so a entrada de
+ * diretorio: os dados (a cadeia de clusters) ficam onde estao. Antes o
+ * rename() da libc copiava o arquivo inteiro e apagava o antigo, e cada
+ * gravacao atomica do Firefox (temporario + rename) custava o dobro em PIO.
+ * Um to que ja existe (arquivo) e substituido, como no POSIX.
+ * Pasta: so dentro da mesma pasta-mae (o ".." do filho nao muda).
+ * 0 ok. -1 nao existe (from ou a pasta de to). -2 nome invalido/sem lugar.
+ * -3 to e pasta (ou from e pasta e to existe). -7 pasta para outra pasta. */
+int fat_rename(const char* from, const char* to) {
+  static char leaf2[FAT_NAME_MAX];
+  struct dir_view pv;
+  char leaf[FAT_NAME_MAX];
+  struct fat_dir_entry src;
+  struct fat_dir_entry* e;
+  struct fat_dir_entry* d;
+  struct fat_dir_entry* ne;
+  uint16_t src_parent;
+  uint16_t old_dest = 0;
+  int src_first, src_idx, dfirst, is_dir = 0, same_dir, i;
+  if (fat_type != 16 || !from || !from[0] || !to || !to[0]) return -2;
+  if (open_parent(from, &pv, leaf, 0) != 0) return -1;
+  e = dir_find(&pv, leaf, 0, &src_first);
+  if (!e) {
+    e = dir_find(&pv, leaf, 1, &src_first);
+    if (!e) return -1;
+    if (entry_dot(e)) return -2;
+    is_dir = 1;
+  }
+  src = *e;
+  src_parent = pv.cluster;
+  src_idx = (int)(e - pv.ents);
+  /* A segunda vista reaproveita o buffer das subpastas: daqui em diante so
+   * vale a copia src e os indices (a mesma pasta relida tem o mesmo conteudo). */
+  if (open_parent(to, &pv, leaf2, 0) != 0) return -1;
+  same_dir = pv.cluster == src_parent;
+  if (is_dir && !same_dir) return -7;
+  d = dir_find(&pv, leaf2, 1, 0);
+  if (d && !(same_dir && (int)(d - pv.ents) == src_idx)) return -3;
+  d = dir_find(&pv, leaf2, 0, &dfirst);
+  if (d && same_dir && (int)(d - pv.ents) == src_idx) d = 0;  /* so muda a caixa */
+  if (d) {
+    if (is_dir) return -3;
+    old_dest = d->cluster;
+    dir_unlink(&pv, dfirst, d);
+  }
+  /* Na mesma pasta o nome antigo sai antes: o novo pode reusar as entradas. */
+  if (same_dir) dir_unlink(&pv, src_first, &pv.ents[src_idx]);
+  ne = dir_new_entry(&pv, leaf2, src.attributes);
+  if (!ne) return -2;   /* nada foi gravado: a pasta no disco segue igual */
+  for (i = 1; i < 10; i++) ne->reserved[i] = src.reserved[i];
+  ne->time = src.time;
+  ne->date = src.date;
+  ne->cluster = src.cluster;
+  ne->size = src.size;
+  if (dir_flush(&pv) != 0) return -1;
+  if (!same_dir) {
+    /* Agora tira o nome antigo da outra pasta (confere que e o mesmo arquivo). */
+    if (open_parent(from, &pv, leaf, 0) == 0) {
+      e = dir_find(&pv, leaf, is_dir, &src_first);
+      if (e && e->cluster == src.cluster && e->size == src.size) {
+        dir_unlink(&pv, src_first, e);
+        dir_flush(&pv);
+      }
+    }
+  }
+  if (old_dest >= 2 && old_dest != src.cluster) free_chain(old_dest);
+  flush_fat();
+  return 0;
+}
+
 /* Linhas "NOME" ou "NOME\\" se for pasta. path vazio lista a raiz. -1 se nao e pasta.
  * Nome longo de ate 31 caracteres; mais que isso vem o 8.3 (readdir e k_dirent). */
 int fat_list_dir(const char* path, char* output, int max_output) {

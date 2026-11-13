@@ -552,9 +552,11 @@ int remove(const char* path) {
   return 0;
 }
 
-/* Sem rename no kernel: copia o arquivo inteiro e apaga o antigo. */
+/* k_frename troca so a entrada de diretorio (mesmo disco FAT). Entre
+ * unidades, ou numa unidade sem rename, copia o arquivo inteiro e apaga o
+ * antigo. */
 int rename(const char* ufrom, const char* uto) {
-  int sz;
+  int sz, r;
   char* buf;
   char from[FILENAME_MAX];
   char to[FILENAME_MAX];
@@ -564,6 +566,12 @@ int rename(const char* ufrom, const char* uto) {
   }
   dos_path(ufrom, from);
   dos_path(uto, to);
+  r = k_frename(from, to);
+  if (r == 0) return 0;
+  if (r != -5 && r != -6 && r != -7) {
+    errno = r == -1 ? ENOENT : r == -3 ? EISDIR : r == -2 ? EINVAL : EACCES;
+    return -1;
+  }
   sz = k_fsize(from);
   if (sz < 0) {
     errno = ENOENT;

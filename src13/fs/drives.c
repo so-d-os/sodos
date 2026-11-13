@@ -21,6 +21,7 @@ extern int fat_file_size(const char* filename);
 extern int fat_dir_items(const char* path, struct dir_item* out, int max);
 extern int fat_long_name(const char* path, char* out, int max);
 extern int fat_delete(const char* path);
+extern int fat_rename(const char* from, const char* to);
 extern int fat_mkdir(const char* path);
 extern int fat_rmdir(const char* path);
 extern int fat_get_space_info(uint32_t* total_bytes, uint32_t* free_bytes);
@@ -1188,6 +1189,24 @@ static int dir_op(const char* path, int make) {
   if (!name[0] || idx < 0 || !drv_ready(idx)) return -1;
   if (drv_kind[idx] != DRV_FAT) return -5;
   return make ? fat_mkdir(name) : fat_rmdir(name);
+}
+
+/* Renomeia/move no mesmo disco FAT sem copiar os dados (fat_rename).
+ * -6 unidades diferentes e -5 unidade que nao e FAT: quem chama copia. */
+int drives_rename(const char* from, const char* to) {
+  char L1, L2;
+  char n1[DRV_PATH];
+  char n2[DRV_PATH];
+  int idx;
+  if (!from || !to) return -2;
+  path_parse(from, &L1, n1, (int)sizeof(n1));
+  path_parse(to, &L2, n2, (int)sizeof(n2));
+  if (!n1[0] || !n2[0]) return -2;
+  idx = letter_idx(L1);
+  if (idx < 0 || idx != letter_idx(L2)) return -6;
+  if (!drv_ready(idx)) return -2;
+  if (drv_kind[idx] != DRV_FAT) return -5;
+  return fat_rename(n1, n2);
 }
 
 int drives_mkdir(const char* path) { return dir_op(path, 1); }

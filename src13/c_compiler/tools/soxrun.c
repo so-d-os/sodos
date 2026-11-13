@@ -422,6 +422,15 @@ static int k_fdelete(const char* path) {
   if (S_ISDIR(st.st_mode)) return -3;
   return unlink(hp) == 0 ? 0 : -2;
 }
+static int k_frename(const char* from, const char* to) {
+  char a[300], b[300];
+  struct stat st;
+  host_path(from, a, sizeof a);
+  host_path(to, b, sizeof b);
+  if (stat(a, &st) != 0) return -1;
+  if (stat(b, &st) == 0 && S_ISDIR(st.st_mode)) return -3;
+  return rename(a, b) == 0 ? 0 : -2;
+}
 static int k_mkdir(const char* path) {
   char hp[300];
   struct stat st;
@@ -1010,7 +1019,7 @@ static const struct {
 } ktab[] = {
   E(k_putc), E(k_write), E(k_puts), E(k_getc), E(k_trygetc), E(k_readline), E(k_clear), E(k_yield),
   E(k_fsize), E(k_fload), E(k_fread), E(k_fsave), E(k_flist), E(k_dirlist), E(k_pwd), E(k_chdir),
-  E(k_drive), E(k_set_drive), E(k_exe_drive), E(k_dir), E(k_fdelete), E(k_mkdir), E(k_rmdir), E(k_dfree),
+  E(k_drive), E(k_set_drive), E(k_exe_drive), E(k_dir), E(k_fdelete), E(k_frename), E(k_mkdir), E(k_rmdir), E(k_dfree),
   E(k_vput), E(k_cursor), E(k_font_get), E(k_font_set), E(k_font_reset), E(k_blink),
   E(k_malloc), E(k_free), E(k_realloc), E(k_msize), E(k_meminfo), E(k_ps), E(k_memmap), E(k_vram),
   E(k_exit), E(k_exec), E(k_shell), E(k_shell_capture), E(k_last_error), E(k_dll_load), E(k_dll_sym), E(k_dll_free),

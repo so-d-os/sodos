@@ -31,6 +31,26 @@ pref("startup.homepage_welcome_url", "");
 pref("startup.homepage_welcome_url.additional", "");
 pref("browser.startup.homepage_override.mstone", "ignore");
 pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+// Telemetria desligada: com o envio ligado o Glean grava o banco dele
+// (datareporting/glean/db/data.safe.bin, rkv em modo "safe") inteiro a cada
+// metrica registrada, mais o rename. Medido no QEMU/KVM (tools/qprof): a partir
+// de ~20 s da abertura, 94% da CPU ia para essas gravacoes em PIO e a pagina
+// inicial nao chegava a carregar. Sem envio o Glean nao registra metricas.
+pref("datareporting.healthreport.uploadEnabled", false);
+pref("datareporting.policy.dataSubmissionEnabled", false);
+pref("toolkit.telemetry.enabled", false);
+pref("toolkit.telemetry.unified", false);
+pref("toolkit.telemetry.archive.enabled", false);
+pref("toolkit.telemetry.newProfilePing.enabled", false);
+pref("toolkit.telemetry.firstShutdownPing.enabled", false);
+pref("toolkit.telemetry.shutdownPingSender.enabled", false);
+pref("toolkit.telemetry.updatePing.enabled", false);
+pref("toolkit.telemetry.bhrPing.enabled", false);
+pref("toolkit.telemetry.coverage.opt-out", true);
+pref("toolkit.coverage.opt-out", true);
+pref("browser.newtabpage.activity-stream.feeds.telemetry", false);
+pref("browser.newtabpage.activity-stream.telemetry", false);
+pref("app.shield.optoutstudies.enabled", false);
 pref("app.normandy.enabled", false);
 pref("app.update.enabled", false);
 // Alvo do teste de rede do port (trocar por uma pagina inicial propria depois).

@@ -830,6 +830,52 @@ implementar as travas `fcntl` na posix-lite.
 - **Servicos em segundo plano** (remote settings, IndexedDB) falham e repetem,
   gastando tempo de inicializacao.
 
+#### Medido em 2026-11-13: a escrita em disco domina (tools/qprof)
+
+Profiler por amostragem a partir do host: `tools/qprof/qprof.py` le o RIP da
+vCPU 0 pelo QMP (~400 Hz), `qsym.py` da o nome da funcao (kernel.elf e
+`FIREFOX.EXE.elf` de um link com `SODOS_KEEP_ELF=1`, base pela linha
+`[mod] exec FIREFOX.EXE base=` da serial), `qstk.py` grava tambem a pilha e
+`qwho.py` diz quem chamou. QEMU com `-qmp unix:...,server,nowait` (KVM no WSL2).
+
+Abrindo o FIREFOX.EXE no perfil de uso (180 s):
+
+- O codigo do Firefox rodava **0,8%** do tempo. De 20 s em diante, **94%** era
+  `disk_write_sectors`/`disk_write_sector`, 57% das amostras na propria
+  instrucao `rep outsw`. Escrita a **~330 KB/s** contra ~14 MB/s de leitura:
+  o KVM agrupa `rep ins` mas emula `rep outs` uma palavra por vez (uma saida
+  de VM a cada 2 bytes, cara no WSL2 aninhado), e a escrita roda com `cli`, a
+  maquina inteira parada.
+- Quem escrevia: `ScriptPreloader::WriteCache` e depois o **Glean** (rkv em
+  modo safe regrava `datareporting/glean/db/data.safe.bin` inteiro a cada
+  metrica) e, em cada gravacao atomica, o **`rename()` da libc, que copiava o
+  arquivo inteiro** e apagava o antigo.
+
+Mudancas:
+
+1. `fat_rename` (`fs/fat.c`), `drives_rename` e o export **`k_frename`**: troca
+   so a entrada de diretorio (arquivo para qualquer pasta do mesmo disco; pasta
+   so dentro da mesma pasta-mae). O `rename()` (`c_compiler/lib/stdio.c`) usa
+   o `k_frename` e so copia entre unidades ou no ramdisk (-5/-6/-7). Um
+   FIREFOX.EXE ligado com essa libc **exige o kernel novo** (import `k_frename`).
+   `fsck.fat -n` limpo depois de uma sessao interrompida a forca.
+2. `sodos.js` desliga a telemetria (`datareporting.healthreport.uploadEnabled`
+   e `toolkit.telemetry.*`). Na primeira partida depois disso o Glean ainda
+   apaga as metricas antigas uma a uma (cada uma regrava o banco: ~60 s no
+   perfil testado, 53 KB -> 2 KB); depois fica quieto.
+
+Resultado: na primeira partida, 36 MB escritos em 180 s em vez de ~90 MB; na
+segunda (caches ja gravados, Glean limpo), 18 MB, e o browser passa a maior
+parte do tempo ocioso. Mesmo com o envio desligado o Glean chama
+`clear_metrics` em toda partida, e cada commit regrava o banco (2 KB) e mexe
+na FAT: ~20 s de escrita miuda logo no inicio.
+O que ainda pesa: o `scriptCache.bin` (13 MB) e o `startupCache.8.little`
+(4 MB) na primeira partida de um perfil (o ScriptPreloader so aceita `ProfLDS`,
+que no SODOS e o HOME), e o `PreferencesWriter` regravando o `prefs.js` via
+`fsync` (~18% da CPU com o browser parado). O conserto de fundo continua
+sendo a escrita ATA: DMA (bus master) ou virtio-blk, e sem `cli` durante a
+transferencia.
+
 ### Mouse e teclado lentos com o Firefox aberto
 
 Medido no QEMU/KVM com `-smp 4`: **so o desktop, sem Firefox, ja usa ~92% de um

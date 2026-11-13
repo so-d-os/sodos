@@ -143,6 +143,8 @@ static int k_dir(const char* path, struct dir_item* out, int max) {
 
 /* Apaga arquivo (aceita * e ?). 0 ou quantos; <0 erro (drives_del). */
 static int k_fdelete(const char* path) { return path ? drives_del(path) : -1; }
+/* Renomeia sem copiar (drives_rename). <0: ver drives.h; -5/-6 = copiar. */
+static int k_frename(const char* from, const char* to) { return drives_rename(from, to); }
 static int k_mkdir(const char* path) { return path ? drives_mkdir(path) : -1; }
 static int k_rmdir(const char* path) { return path ? drives_rmdir(path) : -1; }
 static int k_dfree(int letter, uint32_t* total_kb, uint32_t* free_kb) {
@@ -850,6 +852,7 @@ static const struct kexp table[] = {
   EXP(k_chdir),
   EXP(k_dir),
   EXP(k_fdelete),
+  EXP(k_frename),
   EXP(k_mkdir),
   EXP(k_rmdir),
   EXP(k_dfree),
