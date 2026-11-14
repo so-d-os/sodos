@@ -1659,36 +1659,6 @@ int fat_dir_items(const char* path, struct dir_item* out, int max) {
   return n;
 }
 
-/* Como fat_dir_items, com o nome longo inteiro (drives_items_long). Nomes
- * maiores que DIR_LONG_NAME-1 ficam de fora. out NULL: so conta. */
-int fat_dir_items_long(const char* path, struct dir_item_long* out, int max) {
-  static char lname[FAT_NAME_MAX];
-  struct dir_view v;
-  struct fat_dir_entry* e;
-  int n = 0;
-  int i = 0;
-  if (fat_type == 0 || (out && max <= 0)) return -1;
-  if (dir_at(path, &v) != 0) return -1;
-  /* dir_next da o nome longo, ou o 8.3 quando nao ha LFN */
-  while ((!out || n < max) && (e = dir_next(&v, &i, lname, 0)) != 0) {
-    const char* nm = lname;
-    int k;
-    if (entry_dot(e) || !lname[0]) continue;
-    for (k = 0; nm[k]; k++) {}
-    if (k >= DIR_LONG_NAME) continue;
-    if (out) {
-      for (k = 0; nm[k]; k++) out[n].name[k] = nm[k];
-      out[n].name[k] = 0;
-      out[n].dir = (e->attributes & 0x10) ? 1 : 0;
-      out[n].size = out[n].dir ? 0 : e->size;
-      out[n].date = e->date;
-      out[n].time = e->time;
-    }
-    n++;
-  }
-  return n;
-}
-
 /* Nome longo inteiro do ultimo nome de path (arquivo ou pasta). */
 int fat_long_name(const char* path, char* out, int max) {
   struct dir_view parent;
