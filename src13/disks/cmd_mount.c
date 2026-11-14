@@ -36,7 +36,7 @@ int cmd_mount(int argc, char** argv) {
     puts_k("  mount D:        disco RAM em D:\n");
     puts_k("  mount 1 D:      disco ATA 1 (disk.img) em D:\n");
     puts_k("  mount 1 D: 0    particao 0 do ATA 1 em D:\n");
-    puts_k("  mount U:        pendrive USB (FAT12/FAT16) em U:\n");
+    puts_k("  mount U:        pendrive USB (FAT12/16/32) em U:\n");
     return 0;
   }
 
@@ -91,7 +91,7 @@ int cmd_mount(int argc, char** argv) {
   if (result == -1)
     puts_k("Erro: boot sector invalido. Tente: mount D:  (RAM)\n");
   else if (result == -2)
-    puts_k("Erro: FAT nao suportado (so FAT12/FAT16).\n");
+    puts_k("Erro: FAT32 nao montado (precisa de \\SODOS\\DRV\\FAT32.DLL).\n");
   else
     puts_k("Erro ao montar. Tente: mount D:  (disco RAM)\n");
   return result;

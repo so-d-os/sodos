@@ -12,6 +12,6 @@ int cmd_usb(int argc, char** argv) {
   if (xhci_disk_sectors())
     puts_k("Pendrive em U:  (dir U:)\n");
   else
-    puts_k("Nenhum pendrive (porta do PC ou hub USB 2; FAT12/FAT16).\n");
+    puts_k("Nenhum pendrive (porta do PC ou hub USB 2; FAT12/16/32).\n");
   return 0;
 }

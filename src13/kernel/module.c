@@ -774,6 +774,21 @@ int mod_dll_load(const char* name) {
   return id + 1;
 }
 
+/* DLL do proprio kernel (driver de sistema de arquivos): pid 0, nao entra na
+ * lista do programa corrente e nao some quando ele termina. */
+int mod_dll_load_sys(const char* path) {
+  uint32_t pid = cur_pid;
+  char drv = exe_drive;
+  int id;
+  if (!path) return 0;
+  cur_pid = 0;
+  exe_drive = path[0] && path[1] == ':' ? path[0] : drives_current();
+  id = load(path, 1);
+  cur_pid = pid;
+  exe_drive = drv;
+  return id < 0 ? 0 : id + 1;
+}
+
 void* mod_dll_sym(int handle, const char* name) {
   int id = handle - 1;
   if (id < 0 || id >= MOD_MAX || !mods[id].used || !name) return 0;

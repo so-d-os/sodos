@@ -30,6 +30,8 @@ int mod_find_batch(const char* name, char* out, int max);
 /* DLL em tempo de execucao. Handle > 0; 0 = falhou. */
 int mod_dll_load(const char* name);
 void* mod_dll_sym(int handle, const char* name);
+/* DLL do kernel (pid 0): fica carregada ate mod_dll_free. */
+int mod_dll_load_sys(const char* path);
 void mod_dll_free(int handle);
 
 /* ---- Bibliotecas ELF (.so) em tempo de execucao: a base de dlopen/dlsym.

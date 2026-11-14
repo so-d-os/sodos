@@ -20,7 +20,7 @@ int drives_is_mounted(char letter);
 const char* drives_kind_name(char letter);
 int drives_mount_ram(char letter);
 int drives_mount_fat(uint32_t ata_drive, char letter, uint32_t partition_num);
-/* Pendrive USB (FAT12/16) em U:. U: tambem monta sozinho no primeiro uso. */
+/* Pendrive USB (FAT12/16; FAT32 pelo FAT32.DLL) em U:. U: tambem monta sozinho no primeiro uso. */
 int drives_mount_usb(void);
 /* Z: na RAM (FAT16, ate 1 GB), criado vazio no boot. */
 int drives_mount_ramdisk(void);

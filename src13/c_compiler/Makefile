@@ -37,7 +37,7 @@ SOXRUN = $(B)/soxrun
 HCC = $(B)/cc
 CC_SRC = cc/main.c cc/util.c cc/lex.c cc/pp.c cc/type.c cc/parse.c cc/gen.c
 
-all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/HELLO.EXE $(O)/CRASHT.EXE $(O)/SOCKT.EXE $(O)/SIGT64.EXE \
+all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/HELLO.EXE $(O)/CRASHT.EXE $(O)/SOCKT.EXE $(O)/SIGT64.EXE $(O)/FAT32T.EXE \
 	$(O)/CC.EXE $(O)/LINK.EXE $(O)/TLS.DLL $(O)/HTTPS.EXE $(O)/GUI.DLL $(O)/IMG.DLL \
 	$(O)/BROWSER.EXE $(O)/IMAGEVW.EXE $(O)/VIDPLAY.EXE $(O)/FONTADV.EXE $(O)/COMMAND.EXE $(O)/HTTPD.EXE \
 	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE $(O)/VIDEOCFG.EXE $(O)/IMGBIG.DLL $(O)/AIPANEL.EXE $(O)/MENUCFG.EXE \
@@ -288,7 +288,14 @@ $(B)/drv_amdcur.o: ../drivers/amdgop/amdgop.c ../video/gpu.h | $(B)
 $(DRV)/AMDCUR.DLL: $(B)/drv_amdcur.o $(LINK64) | $(DRV)
 	$(LINK64) /dll /export:gpu_driver /out:$@ $(B)/drv_amdcur.o
 
-drivers: $(DRV)/GPUTEST.DLL $(DRV)/GPUFAIL.DLL $(DRV)/VIRTGPU.DLL $(DRV)/AMDGOP.DLL $(DRV)/AMDCUR.DLL
+# FAT32.DLL (fs/fsdrv.h): leitura de FAT32, carregado so quando o kernel
+# acha uma unidade FAT32 (pendrive em U:, mount).
+$(B)/drv_fat32.o: ../drivers/fat32/fat32.c ../fs/fsdrv.h | $(B)
+	$(DRVCC) -I../fs -c $< -o $@
+$(DRV)/FAT32.DLL: $(B)/drv_fat32.o $(LINK64) | $(DRV)
+	$(LINK64) /dll /export:fs_driver /out:$@ $(B)/drv_fat32.o
+
+drivers: $(DRV)/FAT32.DLL $(DRV)/GPUTEST.DLL $(DRV)/GPUFAIL.DLL $(DRV)/VIRTGPU.DLL $(DRV)/AMDGOP.DLL $(DRV)/AMDCUR.DLL
 
 # LIBCX64 estatica: mesma libc, compilada -m64, ligada no HELLO64C.
 LIBC64_SRC = string ctype stdlib stdio printf scanf fpconv math time misc sigfault64 wchar setjmp64 ctors64
@@ -366,6 +373,13 @@ $(B)/sockt.obj: examples/sockt.c $(HCC) $(HEADERS)
 
 $(O)/SOCKT.EXE: $(B)/sockt.obj $(O)/CRT0.OBJ $(O)/LIBC.DLL $(LINK)
 	$(LINK) /out:$@ /map $(O)/CRT0.OBJ $(B)/sockt.obj $(O)/LIBC.DLL $(O)/KERNEL.IMP
+
+# FAT32T.EXE: le arquivos/pastas por k_fload/k_fread/k_dir (teste do FAT32.DLL)
+$(B)/fat32t.obj: examples/fat32t.c $(HCC) $(HEADERS)
+	$(HCC) -c examples/fat32t.c -o $@
+
+$(O)/FAT32T.EXE: $(B)/fat32t.obj $(O)/CRT0.OBJ $(O)/LIBC.DLL $(LINK)
+	$(LINK) /out:$@ /map $(O)/CRT0.OBJ $(B)/fat32t.obj $(O)/LIBC.DLL $(O)/KERNEL.IMP
 
 # ---- CC.EXE e LINK.EXE para o SO, compilados pelo nosso cc (estagio 1) ----
 CC_OBJ1 = $(patsubst cc/%.c,$(B)/s1_%.obj,$(CC_SRC))
