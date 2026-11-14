@@ -2,6 +2,7 @@
 #include "irq.h"
 #include "pic.h"
 #include "reboot.h"
+#include "kthread.h"
 
 /* B1: contador do IRQ0. volatile: quem le nao pode cachear o valor. */
 static volatile uint64_t irq_tick_count;
@@ -33,7 +34,7 @@ void irq_handle(isr_frame_t* f) {
     if (irq == 0) {
       /* So conta: nenhum outro estado do kernel e tocado aqui. */
       irq_tick_count++;
-      if (bsp_idle_flag) bsp_idle_ticks++;
+      if (bsp_idle_flag || kt_cpu_idle(0)) bsp_idle_ticks++;
       else bsp_busy_ticks++;
     } else if (irq == 1) {
       uint8_t st = irq_inb(0x64);
@@ -44,7 +45,15 @@ void irq_handle(isr_frame_t* f) {
       }
     }
     pic_send_eoi(irq);
-    /* Depois do EOI: o gancho pode trocar de tarefa e so voltar bem depois. */
-    if (irq == 0 && tick_hook) tick_hook(f->eip);
+    /* Depois do EOI: o gancho pode trocar de tarefa e so voltar bem depois.
+     * So com o mundo (WIN) nesta CPU, e so se o BKL estiver livre ou com
+     * ele: com uma thread de outra CPU no kernel, fica para o proximo tick. */
+    if (irq == 0) {
+      if (tick_hook && kt_world_here() && kt_bkl_try_world()) {
+        tick_hook(f->eip);
+        kt_bkl_drop_world();
+      }
+      kt_tick_pit();
+    }
   }
 }

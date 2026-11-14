@@ -12,6 +12,7 @@
 
 #include "fbcon.h"
 #include "smp.h"
+#include "kthread.h"
 #define VGA vga_text  /* 0xB8000, ou a copia do fbcon no UEFI */
 #define ATTR 0x1F00  /* fundo azul, texto branco */
 
@@ -390,7 +391,7 @@ void isr_fault_release(uint32_t pid) {
 
 static uint64_t fault_target(const isr_frame_t* f) {
   extern char __bss_end[];
-  uint32_t pid = mod_current_pid();
+  uint32_t pid = kt_in_thread() ? kt_cur_pid() : mod_current_pid();
   uint64_t v = f->int_no;
   int i;
   if (!pid || crash_depth) return 0;
@@ -413,6 +414,27 @@ isr_ret_t isr_dispatch(isr_frame_t* f) {
     smp_ipi_ack();
     return isr_ret0;
   }
+  /* Escalonador SMP: EOI antes, porque a troca de tarefa pode demorar a
+   * voltar por aqui. */
+  if (f->int_no == 0xF2) {
+    smp_ipi_ack();
+    kt_tick_lapic(SMP_TICK_MS);
+    return isr_ret0;
+  }
+  if (f->int_no == 0xF3) {
+    smp_ipi_ack();
+    kt_ipi_resched();
+    return isr_ret0;
+  }
+  if (f->int_no == 0xF4) {
+    smp_ipi_ack();
+    kt_ipi_tlb();
+    return isr_ret0;
+  }
+  /* NMI de parada: outra CPU teve uma excecao fatal. */
+  if (f->int_no == 2 && kt_stopping()) {
+    for (;;) __asm__ volatile ("cli; hlt");
+  }
 
   /* IRQ 32..47: enviar EOI e retornar (nao travar) */
   if (f->int_no >= 32 && f->int_no <= 47) {
@@ -427,6 +449,26 @@ isr_ret_t isr_dispatch(isr_frame_t* f) {
     r.entry = fault_target(f);
     if (r.entry) return r;
   }
+
+  /* Thread de programa que falhou no codigo dele: so ela termina. */
+  if (kt_in_thread()) {
+    extern char __bss_end[];
+    if (!(f->eip >= KERNEL_LOAD && f->eip < (uint64_t)(uintptr_t)__bss_end)) {
+      serial_puts("[kt] falta na thread ");
+      serial_hex32((uint32_t)kt_thread_self());
+      serial_puts(" cpu=");
+      serial_hex32((uint32_t)kt_cpu_index());
+      serial_puts(" vetor=0x");
+      serial_hex32((uint32_t)f->int_no);
+      serial_puts(" rip=0x");
+      serial_hex32((uint32_t)(f->eip >> 32));
+      serial_hex32((uint32_t)f->eip);
+      serial_puts(": thread encerrada\n");
+      kt_thread_fault_exit();
+    }
+  }
+  /* Daqui em diante e fatal: as outras CPUs param. */
+  kt_stop_others();
 
   /* Excecao 0..31: log, panic e halt */
   uint64_t cr2;

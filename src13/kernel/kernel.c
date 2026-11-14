@@ -1,4 +1,5 @@
 // kernel.c - minimal 32-bit kernel with a tiny shell and a few commands
+#include "kthread.h"
 #include <stdint.h>
 #include <stddef.h>
 #include "disk.h"
@@ -688,6 +689,7 @@ static int kb_head, kb_tail;
 void mod_exit(int code);
 
 static int break_applies(void) {
+  if (kt_in_thread()) return 0;   /* Ctrl+C e do programa principal */
   return mod_depth > 0 && !win_screen_size(0, 0);
 }
 
@@ -820,6 +822,7 @@ static int get_key(int wait) {
     net_poll();
     if (!kb_read(&sc)) {
       if (!wait) { cpu_idle(0); return 0; }
+      kt_bkl_breathe();
       cpu_idle(1);
       vt_idle();
       continue;
@@ -1922,6 +1925,8 @@ void kmain(const struct BootInfo* bi) {
   pic_mask_all();
   pic_remap(0x20, 0x28);         /* IRQ0..7 -> 0x20; deixa o PIC mascarado */
   idt_init();
+  /* Escalonador (CPU0 = o "mundo"), GS por CPU e BKL; os APs entram no smp_init. */
+  kt_early_init();
   /* B1: liga so o IRQ0 (timer). O IRQ1 continua mascarado: o teclado e lido
    * por polling. Neste ponto o PIT ainda esta no modo do BIOS (~18 Hz);
    * net_init reprograma para ~1000 Hz. O handler do IRQ0 so conta ticks,

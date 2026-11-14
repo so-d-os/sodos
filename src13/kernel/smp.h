@@ -25,9 +25,18 @@ struct k_cpu_stat {
 int smp_cpu_stat(int i, struct k_cpu_stat* out);
 
 /* Executa fn(arg) numa CPU (1..N-1) e espera terminar. 0 = ok.
- * A BSP fica em hlt enquanto a tarefa roda: quem chama tem a maquina so
- * para si (teclado, tela, rede), como se fosse a BSP. */
+ * O "mundo" (shell/WIN) muda para aquela CPU enquanto fn roda; a CPU0 fica
+ * com as threads (ou em hlt). Teclado, tela e rede continuam sendo de uma
+ * CPU por vez: quem tem o mundo. */
 int smp_run(int cpu, void (*fn)(void*), void* arg);
+
+/* IPIs (vetores do kthread.c: 0xF3 reschedule, 0xF4 TLB). */
+void smp_send_ipi(int cpu, uint8_t vec);
+void smp_ipi_others(uint8_t vec);
+void smp_nmi_others(void);
+/* Timer local da CPU corrente (LAPIC, periodico, vetor 0xF2). */
+void smp_timer_start(void);
+#define SMP_TICK_MS 4
 
 /* Confirma o IPI no LAPIC (chamado pelo isr_dispatch). */
 void smp_ipi_ack(void);

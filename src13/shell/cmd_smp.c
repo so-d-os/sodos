@@ -4,12 +4,15 @@
  *   smp run <cpu> <comando>  roda o comando (interno ou .EXE) naquela CPU
  *   smp win <cpu>            abre o WIN naquela CPU
  *
- * A BSP fica parada (hlt) enquanto a tarefa roda, entao ela tem a maquina
- * so para si: teclado, tela e rede sao usados por uma CPU de cada vez.
+ * Com run/win o "mundo" (shell, WIN, drivers) muda para aquela CPU enquanto
+ * o comando roda; a CPU0 fica com as threads dos programas (ou em hlt).
+ * Teclado, tela e rede continuam sendo de uma CPU de cada vez.
+ * A lista tambem manda para a serial os contadores do escalonador ([kt]).
  */
 #include "shell.h"
 #include "smp.h"
 #include "visual.h"
+#include "kthread.h"
 
 extern int shell_exec_line(char* line);
 
@@ -84,6 +87,7 @@ static void lista(void) {
     put_u(st.id);
     puts_k("\n");
   }
+  kt_dump();
   puts_k("\n  smp run <cpu> <comando>   roda um comando naquela CPU\n");
   puts_k("  smp win <cpu>             abre o WIN naquela CPU\n");
 }

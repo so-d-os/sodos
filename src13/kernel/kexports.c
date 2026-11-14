@@ -18,6 +18,7 @@
 #include "httpd.h"
 #include "vt.h"
 #include "smp.h"
+#include "kthread.h"
 
 void mod_exit(int code);
 void shell_read_line(char* buf, int max);
@@ -269,13 +270,18 @@ static void k_meminfo(uint32_t* total, uint32_t* freeb) {
 }
 
 /* ---------- processos e DLL ---------- */
-static void k_exit(int code) { mod_exit(code); }
+/* Numa thread (kthread.c), exit encerra so a thread: o quadro do mod_exec
+ * e da tarefa principal, em outra pilha. */
+static void k_exit(int code) {
+  if (kt_in_thread()) kt_thread_exit(code);
+  mod_exit(code);
+}
 static int k_shell(char* line) {
   char buf[256];
   int i = 0;
   int rc;
   void (*prev)(char);
-  if (!line) return 1;
+  if (!line || kt_in_thread()) return 1;
   while (line[i] && i < (int)sizeof(buf) - 1) {
     buf[i] = line[i];
     i++;
@@ -309,6 +315,7 @@ static int k_shell_capture(char* line, char* out, int max, int* len) {
   void (*hook)(char) = con_hook;
   int rc;
   if (len) *len = 0;
+  if (kt_in_thread()) return -1;
   if (!out || max < 1) return k_shell(line);
   cap_buf = out;
   cap_len = 0;
@@ -333,6 +340,7 @@ static int k_exec(const char* path, int argc, char** argv) {
   char* wide[32];
   uint32_t* narrow = (uint32_t*)argv;
   int n, i;
+  if (kt_in_thread()) return MOD_ERR_DEPTH;   /* programa novo so do mundo */
   if (mod_find_exe(path, full, sizeof(full)) != 0) return MOD_ERR_NOTFOUND;
   /* O programa chamador guarda cada ponteiro em 4 bytes. */
   n = argc;
@@ -530,7 +538,7 @@ static int k_win_bg(uint32_t rgb) { return win_bg_set(rgb); }
 
 static int k_win_key(int ch) { return win_api_key(ch); }
 
-static int k_win_launch(const char* path) { return win_launch(path); }
+static int k_win_launch(const char* path) { return kt_in_thread() ? -1 : win_launch(path); }
 
 /* area de transferencia do kernel (a mesma do Ctrl+C/Ctrl+V do WIN e do DOS) */
 static void k_clip_set(const char* s, int n) { clip_set(s, n); }
@@ -822,15 +830,37 @@ static int k_memmap(uint32_t* kb, int cells, uint32_t* cell_kb, uint32_t pid) {
   return map_n;
 }
 
+/* ---------- threads (kthread.c) ----------
+ * k_thread_create: fn(arg) numa thread nova, em qualquer CPU de cpu_mask
+ * (0 = todas). stack_size 0 = 256 KB. A thread herda a base do FS (TLS) de
+ * quem cria; k_thread_tls troca. Devolve tid > 0 ou erro < 0. */
+static int k_thread_create(int (*fn)(void*), void* arg, unsigned stack_size, unsigned cpu_mask) {
+  return kt_thread_create(fn, arg, stack_size, cpu_mask);
+}
+static int k_thread_join(int tid, int* code) { return kt_thread_join(tid, code); }
+static int k_thread_detach(int tid) { return kt_thread_detach(tid); }
+static void k_thread_exit(int code) { kt_thread_exit(code); }
+static int k_thread_self(void) { return kt_thread_self(); }
+static int k_thread_cpu(void) { return kt_cpu_index(); }
+static int k_thread_affinity(int tid, unsigned mask) { return kt_thread_affinity(tid, mask); }
+static void k_thread_yield(void) { kt_thread_yield(); }
+static int k_thread_tls(unsigned long long fs) { return kt_thread_tls(fs); }
+static int k_futex_wait(volatile int* addr, int val, int timeout_ms) {
+  return kt_futex_wait(addr, val, timeout_ms);
+}
+static int k_futex_wake(volatile int* addr, int n) { return kt_futex_wake(addr, n); }
+
 /* Excecoes do programa vao para entry (sinais da libc; ver isr.c). 0 desliga. */
 static int k_fault_entry(void* entry) { return isr_fault_set((uint64_t)(uintptr_t)entry); }
 
 struct kexp {
   const char* name;
   void* fn;
+  int nolock;   /* 1 = nao passa pelo BKL (so mexe no escalonador) */
 };
 
-#define EXP(n) { #n, (void*)n }
+#define EXP(n) { #n, (void*)n, 0 }
+#define EXP_NOLOCK(n) { #n, (void*)n, 1 }
 
 static const struct kexp table[] = {
   EXP(k_putc),
@@ -935,7 +965,43 @@ static const struct kexp table[] = {
   EXP(k_ui_glass),
   EXP(k_ui_ia),
   EXP(k_gui_dock),
+  EXP(k_thread_create),
+  EXP(k_thread_join),
+  EXP(k_thread_detach),
+  EXP_NOLOCK(k_thread_exit),
+  EXP_NOLOCK(k_thread_self),
+  EXP_NOLOCK(k_thread_cpu),
+  EXP(k_thread_affinity),
+  EXP(k_thread_yield),
+  EXP_NOLOCK(k_thread_tls),
+  EXP(k_futex_wait),
+  EXP_NOLOCK(k_futex_wake),
 };
+
+#define NEXP (sizeof(table) / sizeof(table[0]))
+
+/* Um thunk por export: mov r11, alvo (49 BB imm64) + jmp bkl_thunk_common
+ * (E9 rel32). Programas e .so recebem o thunk no lugar da funcao. */
+extern void bkl_thunk_common(void);
+static uint8_t thunks[NEXP][16] __attribute__((aligned(16)));
+static int thunks_ok;
+
+static void thunks_build(void) {
+  unsigned i;
+  for (i = 0; i < NEXP; i++) {
+    uint8_t* p = thunks[i];
+    uint64_t fn = (uint64_t)(uintptr_t)table[i].fn;
+    int64_t rel = (int64_t)(uintptr_t)bkl_thunk_common - (int64_t)(uintptr_t)(p + 15);
+    int k;
+    p[0] = 0x49;
+    p[1] = 0xBB;
+    for (k = 0; k < 8; k++) p[2 + k] = (uint8_t)(fn >> (k * 8));
+    p[10] = 0xE9;
+    for (k = 0; k < 4; k++) p[11 + k] = (uint8_t)((uint64_t)rel >> (k * 8));
+    p[15] = 0xCC;
+  }
+  thunks_ok = 1;
+}
 
 int rtc_date(void) { return k_date(); }
 int rtc_time(void) { return k_time(); }
@@ -949,7 +1015,11 @@ void* kexport_find(const char* name) {
       a++;
       b++;
     }
-    if (*a == *b) return table[i].fn;
+    if (*a == *b) {
+      if (table[i].nolock) return table[i].fn;
+      if (!thunks_ok) thunks_build();
+      return thunks[i];
+    }
   }
   return 0;
 }

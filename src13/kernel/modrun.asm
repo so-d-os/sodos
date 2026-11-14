@@ -89,3 +89,70 @@ ctx_switch:
   pop rbp
   pop rbx
   ret
+
+; ---------------------------------------------------------------------------
+; bkl_thunk_common: toda funcao k_* chamada por um programa passa por aqui
+; (kexports.c gera um thunk "mov r11, alvo; jmp bkl_thunk_common" por
+; export). Pega o BKL (kt_bkl_enter), chama o alvo e solta (kt_bkl_leave).
+;
+; O endereco de retorno fica na pilha de quem chamou (nada de pilha lateral):
+; as tarefas do WIN trocam de pilha no meio de um k_* e o mod_exit pode
+; abandonar o quadro. Os argumentos de pilha (7o em diante) sao copiados
+; (ate 10) para o quadro novo, no mesmo lugar relativo ao rsp.
+; rax (al = numero de registros vetoriais em varargs) e preservado; rax:rdx
+; da volta tambem.
+; ---------------------------------------------------------------------------
+global bkl_thunk_common
+extern kt_bkl_enter
+extern kt_bkl_leave
+
+bkl_thunk_common:
+  push rbp
+  mov rbp, rsp            ; [rbp+8] = retorno, [rbp+16..] = args de pilha
+  push rdi
+  push rsi
+  push rdx
+  push rcx
+  push r8
+  push r9
+  push rax
+  push r11                ; rsp = rbp - 64 (rbp % 16 == 0)
+  call kt_bkl_enter
+  pop r11
+  pop rax
+  pop r9
+  pop r8
+  pop rcx
+  pop rdx
+  pop rsi
+  pop rdi
+  sub rsp, 80
+  mov r10, [rbp + 16]
+  mov [rsp], r10
+  mov r10, [rbp + 24]
+  mov [rsp + 8], r10
+  mov r10, [rbp + 32]
+  mov [rsp + 16], r10
+  mov r10, [rbp + 40]
+  mov [rsp + 24], r10
+  mov r10, [rbp + 48]
+  mov [rsp + 32], r10
+  mov r10, [rbp + 56]
+  mov [rsp + 40], r10
+  mov r10, [rbp + 64]
+  mov [rsp + 48], r10
+  mov r10, [rbp + 72]
+  mov [rsp + 56], r10
+  mov r10, [rbp + 80]
+  mov [rsp + 64], r10
+  mov r10, [rbp + 88]
+  mov [rsp + 72], r10
+  call r11
+  mov rsp, rbp
+  push rax
+  push rdx                ; rsp = rbp - 16
+  call kt_bkl_leave
+  pop rdx
+  pop rax
+  pop rbp
+  ret

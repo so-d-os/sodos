@@ -1,4 +1,5 @@
 #include "sched.h"
+#include "kthread.h"
 
 #define SCHED_JOBS 8
 
@@ -35,7 +36,15 @@ int sched_post(int (*fn)(void*), void* arg) {
 
 void sched_yield(void) {
   int i;
-  if (in_yield || frozen) return;
+  if (frozen) return;
+  /* Thread de programa (kthread.c): solta o BKL e cede a CPU dela. O WIN e
+   * as tarefas do sched_post sao do mundo. */
+  if (kt_in_thread()) {
+    kt_yield_in_thread();
+    return;
+  }
+  if (in_yield) return;
+  kt_bkl_breathe();
   /* Antes de in_yield: outro programa, retomado daqui, tambem precisa ceder. */
   if (gui_coop_pause()) return;
   in_yield = 1;

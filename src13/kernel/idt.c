@@ -21,6 +21,10 @@ extern void irq4_stub(void),  irq5_stub(void),  irq6_stub(void),  irq7_stub(void
 extern void irq8_stub(void),  irq9_stub(void),  irq10_stub(void), irq11_stub(void);
 extern void irq12_stub(void), irq13_stub(void), irq14_stub(void), irq15_stub(void);
 extern void smp_ipi_stub(void);
+extern void lapic_timer_stub(void);
+extern void resched_ipi_stub(void);
+extern void tlb_ipi_stub(void);
+extern void spurious_stub(void);
 
 static void set_gate(int n, uint64_t handler, uint16_t sel, uint8_t flags) {
   idt[n].off_lo    = (uint16_t)(handler & 0xFFFFu);
@@ -97,6 +101,11 @@ void idt_init(void) {
 
   /* IPI do SMP (acordar AP / avisar que a tarefa terminou). */
   set_gate(0xF1, (uint64_t)smp_ipi_stub, IDT_SEL_CODE, IDT_FLAGS);
+  /* Escalonador SMP: timer do LAPIC, reschedule, TLB e espurio. */
+  set_gate(0xF2, (uint64_t)lapic_timer_stub, IDT_SEL_CODE, IDT_FLAGS);
+  set_gate(0xF3, (uint64_t)resched_ipi_stub, IDT_SEL_CODE, IDT_FLAGS);
+  set_gate(0xF4, (uint64_t)tlb_ipi_stub, IDT_SEL_CODE, IDT_FLAGS);
+  set_gate(0xFF, (uint64_t)spurious_stub, IDT_SEL_CODE, IDT_FLAGS);
 
   idtp.limit = (uint16_t)(sizeof(idt) - 1);
   idtp.base  = (uint64_t)&idt[0];

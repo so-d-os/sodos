@@ -44,7 +44,7 @@ all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/H
 	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
 	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
 	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/TOP.EXE $(O)/COBRA.EXE $(O)/WIFI.EXE $(O)/GIT.EXE \
-	$(O)/AGENT.EXE $(O)/LLAMA.EXE $(O)/FFLAUNCH.EXE \
+	$(O)/AGENT.EXE $(O)/LLAMA.EXE $(O)/FFLAUNCH.EXE $(O)/SMPT.EXE \
 	drivers
 
 # GUI.DLL (janela canvas do WIN) e o navegador, em varios arquivos
@@ -321,11 +321,19 @@ $(O)/SIGT64.EXE: $(B)/x_crt0_64libc.o $(B)/sigt64.o $(LIBC64_OBJ) $(LINK64) $(O)
 
 sigt64: $(O)/SIGT64.EXE
 
+# SMPT: threads em varias CPUs (k_thread_* + k_futex_*), ganho sobre 1 thread.
+$(B)/smpt.o: examples/smpt.c include/so.h | $(B)
+	gcc -m64 -O2 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -mno-red-zone \
+	  -mcmodel=large -fno-asynchronous-unwind-tables -nostdinc -isystem include -c $< -o $@
+
+$(O)/SMPT.EXE: $(B)/x_crt0_64libc.o $(B)/smpt.o $(LIBC64_OBJ) $(LINK64) $(O)/KERNEL.IMP
+	$(LINK64) /out:$@ $(B)/x_crt0_64libc.o $(B)/smpt.o $(LIBC64_OBJ) $(O)/KERNEL.IMP
+
 $(SOXRUN): tools/soxrun.c sox.h | $(B)
 	$(HOSTCC) -no-pie -fno-pie -mstackrealign -D_FILE_OFFSET_BITS=64 $(HCFLAGS) -o $@ tools/soxrun.c
 
 $(O)/KERNEL.IMP: ../kernel/kexports.c | $(O)
-	( echo "LIBRARY KERNEL"; sed -n 's/^ *EXP(\([A-Za-z_0-9]*\)).*/\1/p' $< ) > $@
+	( echo "LIBRARY KERNEL"; sed -n 's/^ *EXP\(_NOLOCK\)\{0,1\}(\([A-Za-z_0-9]*\)).*/\2/p' $< ) > $@
 
 $(B)/g_%.o: lib/%.c $(HEADERS) | $(B)
 	$(TGCC) $(TGFLAGS) -c $< -o $@

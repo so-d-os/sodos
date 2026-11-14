@@ -1,4 +1,5 @@
 /* vt.c - Telas virtuais (Ctrl+F1..F6/F8..F12 texto, Ctrl+F7 WIN). Ver vt.h. */
+#include "kthread.h"
 #include <stdint.h>
 #include "vt.h"
 #include "mm.h"
@@ -70,7 +71,7 @@ static void vt_load(int i) {
 /* Quem chama ja carregou nada: aqui sai o estado de vt_cur e entra o de j. */
 static void vt_switch_to(int j) {
   int i = vt_cur;
-  if (i == j) return;
+  if (i == j || kt_in_thread()) return;   /* telas sao do mundo */
   vt_save(&vts[i]);
   vt_cur = j;
   vt_load(j);

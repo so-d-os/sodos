@@ -1,6 +1,7 @@
-/* Tarefas cooperativas. Nao ha preempcao: quem espera a rede ou o disco
+/* Tarefas cooperativas do "mundo" (shell/WIN): quem espera a rede ou o disco
  * chama sched_yield(). No desktop, isso devolve o turno ao WIN, que pode
- * atender outra janela.
+ * atender outra janela. Numa thread de programa (kthread.c, outra CPU),
+ * sched_yield solta o BKL e cede a CPU dela.
  * SSE/x87 nao sao salvos na troca: ela so ocorre dentro de uma chamada
  * (XMM e caller-saved na ABI SysV) e o kernel e compilado -mno-sse. */
 #pragma once

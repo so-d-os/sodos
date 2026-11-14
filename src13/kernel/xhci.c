@@ -13,6 +13,7 @@
  *   7. disco: CBW, dados e CSW nos dois endpoints bulk (READ(10), WRITE(10)).
  * Um mouse e um disco por vez. Hub USB 3 (SuperSpeed) nao.
  * A memoria e toda de identidade (fisico = virtual) abaixo de 4 GB. */
+#include "kthread.h"
 #include <stdint.h>
 #include "xhci.h"
 #include "bootinfo.h"
@@ -266,6 +267,7 @@ static int mmio_map(uint64_t phys, uint64_t len) {
     pd[(a >> 21) & 511u] = a | 0x9Bu;  /* P | RW | PWT | PCD | PS */
     __asm__ volatile ("invlpg (%0)" : : "r"((uintptr_t)a) : "memory");
   }
+  if (phys) kt_tlb_shootdown();
   return 0;
 }
 

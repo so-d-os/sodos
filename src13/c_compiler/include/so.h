@@ -165,6 +165,26 @@ struct k_cpu_stat {
 int k_cpu_count(void);
 int k_cpu_stat(int i, struct k_cpu_stat* out);
 
+/* Threads (SMP). Cada thread roda em qualquer CPU de cpu_mask (0 = todas),
+ * preemptada pelo timer local. fn(arg) devolve o codigo do join.
+ * stack_size 0 = 256 KB. A thread herda a base do FS (TLS) de quem cria.
+ * O kernel tem um lock grande: k_* de varias threads sao serializados, o
+ * codigo do programa roda em paralelo. exit()/k_exit numa thread encerra so
+ * ela. tid > 0 ou erro < 0; o programa principal e o tid 0. */
+int k_thread_create(int (*fn)(void*), void* arg, unsigned stack_size, unsigned cpu_mask);
+int k_thread_join(int tid, int* code);
+int k_thread_detach(int tid);
+void k_thread_exit(int code);
+int k_thread_self(void);
+int k_thread_cpu(void);             /* CPU corrente (0 = BSP) */
+int k_thread_affinity(int tid, unsigned mask);
+void k_thread_yield(void);
+int k_thread_tls(unsigned long long fs);
+/* Futex: dorme enquanto *addr == val (timeout_ms < 0 = sem limite).
+ * 0 = acordou, -11 = valor ja era outro, -110 = timeout. wake: n < 0 = todos. */
+int k_futex_wait(volatile int* addr, int val, int timeout_ms);
+int k_futex_wake(volatile int* addr, int n);
+
 /* processos e DLLs */
 void k_exit(int code);
 int k_exec(const char* path, int argc, char** argv);

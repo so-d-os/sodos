@@ -1,15 +1,17 @@
-/* smp.c - descobre as CPUs pelo ACPI (MADT) e acorda os APs.
+/* smp.c - descobre as CPUs pelo ACPI (MADT), acorda os APs e cuida do LAPIC
+ * (timer local por CPU e IPIs).
  *
- * Fase C1 do SMP: a BSP continua sendo a unica que roda o kernel; os APs
- * entram em ap_main, provam que executam em paralelo (contador proprio) e
- * ficam parados em hlt. Toda falha (sem ACPI, sem LAPIC, AP que nao sobe)
- * volta para 1 CPU sem derrubar o sistema.
+ * Os APs entram em ap_main com o mesmo CR4/XCR0 da BSP, ligam o LAPIC timer
+ * (periodico, SMP_TICK_MS) e caem no escalonador (kthread.c), que roda nelas
+ * as threads dos programas. Toda falha (sem ACPI, sem LAPIC, AP que nao
+ * sobe) volta para 1 CPU sem derrubar o sistema.
  */
 #include <stdint.h>
 #include "smp.h"
 #include "serial.h"
 #include "net.h"
 #include "irq.h"
+#include "kthread.h"
 
 #define SMP_MAX        8
 #define TRAMP_ADDR     0x8000u
@@ -28,22 +30,12 @@ static uint32_t ids[SMP_MAX];
 static int ncpu;
 static int bsp_id;
 static volatile uint32_t ap_online;
-static volatile uint32_t ap_parked;
-static volatile uint32_t ap_park_ms;      /* quando os APs entraram em hlt */
 static volatile uint8_t ap_up[SMP_MAX];
 static volatile uint64_t ap_work[SMP_MAX];
-
-/* Fila de tarefa por CPU: uma de cada vez, despachada por IPI (vetor 0xF1).
- * A BSP chama smp_run e fica em hlt; o AP roda e avisa de volta. */
-static volatile void (*job_fn)(void*);
-static volatile void* job_arg;
-static volatile int job_cpu = -1;
-static volatile int job_pending;
-static volatile int job_done;
-static volatile int job_busy;             /* tarefa em andamento (p/ TOP) */
-static volatile uint32_t job_t0;
-static volatile uint32_t ap_job_ms;       /* tempo da tarefa atual */
-static volatile uint32_t ap_busy_ms[SMP_MAX];
+static volatile uint32_t ap_go;            /* BSP calibrou o timer: APs entram */
+static uint32_t bsp_cr4;
+static uint32_t bsp_xcr0_lo, bsp_xcr0_hi;
+static uint32_t lapic_per_ms;               /* contagens do timer (div 16) por ms */
 static uint8_t ap_stacks[SMP_MAX][16384] __attribute__((aligned(16)));
 
 /* ---------- portas/MSR ---------- */
@@ -162,19 +154,75 @@ static void lapic_enable(void) {
   b |= 1u << 11;                      /* APIC enable */
   b &= ~(1u << 10);                   /* xAPIC (nao x2APIC) */
   wrmsr(0x1B, b);
-  lapic_wr(0xF0, 0x1F1);              /* SVR: ligado, espurio 0xF1 (tem gate) */
+  lapic_wr(0xF0, 0x1FF);              /* SVR: ligado, espurio 0xFF (sem EOI) */
   lapic_wr(0x80, 0);                  /* TPR: aceita tudo */
   lapic_wr(0xB0, 0);                  /* EOI */
 }
 
 static int ipi(uint32_t id, uint32_t cmd) {
-  int i;
+  int i, rc = -1;
+  uint64_t fl;
+  __asm__ volatile ("pushfq; pop %0; cli" : "=r"(fl) :: "memory");
   lapic_wr(0x310, id << 24);          /* destino */
   lapic_wr(0x300, cmd);               /* ICR low: dispara */
   for (i = 0; i < 100000; i++) {
-    if (!(lapic_rd(0x300) & (1u << 12))) return 0;  /* delivery idle */
+    if (!(lapic_rd(0x300) & (1u << 12))) {  /* delivery idle */
+      rc = 0;
+      break;
+    }
   }
-  return -1;
+  if (fl & 0x200u) __asm__ volatile ("sti" ::: "memory");
+  return rc;
+}
+
+/* Todas menos esta (shorthand 11). */
+static void ipi_others(uint32_t cmd) {
+  int i;
+  uint64_t fl;
+  __asm__ volatile ("pushfq; pop %0; cli" : "=r"(fl) :: "memory");
+  lapic_wr(0x300, 0x000C0000u | cmd);
+  for (i = 0; i < 100000; i++)
+    if (!(lapic_rd(0x300) & (1u << 12))) break;
+  if (fl & 0x200u) __asm__ volatile ("sti" ::: "memory");
+}
+
+void smp_send_ipi(int cpu, uint8_t vec) {
+  if (cpu < 0 || cpu >= ncpu || (cpu > 0 && !ap_up[cpu])) return;
+  ipi(ids[cpu], vec);
+}
+
+void smp_ipi_others(uint8_t vec) {
+  if (ap_online) ipi_others(vec);
+}
+
+void smp_nmi_others(void) {
+  if (ap_online) ipi_others(0x400u);  /* delivery mode NMI */
+}
+
+/* Mede o timer do LAPIC contra o IRQ0 (PIT, 1 ms) da BSP. */
+static void lapic_calibrate(void) {
+  uint64_t t;
+  uint32_t left;
+  lapic_wr(0x3E0, 0x3);               /* divide por 16 */
+  lapic_wr(0x320, 0x10000u | 0xF2u);  /* mascarado, one-shot */
+  t = irq_ticks();
+  while (irq_ticks() == t) __asm__ volatile ("pause");
+  lapic_wr(0x380, 0xFFFFFFFFu);
+  t = irq_ticks();
+  while (irq_ticks() - t < 50) __asm__ volatile ("pause");
+  left = lapic_rd(0x390);
+  lapic_wr(0x380, 0);
+  lapic_per_ms = (0xFFFFFFFFu - left) / 50u;
+  serial_puts("[smp] lapic timer: 0x");
+  serial_hex32(lapic_per_ms);
+  serial_puts(" contagens/ms (div 16)\n");
+}
+
+void smp_timer_start(void) {
+  if (!lapic_per_ms) return;
+  lapic_wr(0x3E0, 0x3);
+  lapic_wr(0x320, 0x20000u | 0xF2u);  /* periodico, vetor 0xF2 */
+  lapic_wr(0x380, lapic_per_ms * SMP_TICK_MS);
 }
 
 static void write_params(int cpu) {
@@ -224,71 +272,47 @@ static int start_ap(int cpu) {
 
 void smp_ipi_ack(void) { lapic_wr(0xB0, 0); }
 
-/* Depois da prova de paralelismo: acorda por IPI, roda a tarefa da vez e
- * avisa a BSP (IPI de volta). Fica em hlt quando nao ha tarefa. */
-static void ap_idle(uint32_t cpu) {
-  for (;;) {
-    if (job_pending && job_cpu == (int)cpu) {
-      void (*fn)(void*) = (void(*)(void*))job_fn;
-      void* arg = (void*)job_arg;
-      job_pending = 0;
-      fn(arg);
-      job_done = 1;
-      ipi(ids[0], 0x000000F1);
-    }
-    __asm__ volatile ("sti; hlt");
-  }
+/* Mesmo CR4 (OSXSAVE, FSGSBASE...) e XCR0 da BSP: as threads usam SSE/AVX e
+ * rdfsbase/wrfsbase em qualquer CPU. */
+static void ap_cpu_setup(void) {
+  uint64_t cr4 = bsp_cr4;
+  __asm__ volatile ("mov %0, %%cr4" :: "r"(cr4) : "memory");
+  if (cr4 & (1u << 18))
+    __asm__ volatile ("xsetbv" :: "c"(0), "a"(bsp_xcr0_lo), "d"(bsp_xcr0_hi));
+  __asm__ volatile ("fninit");
 }
 
 /* Corpo dos APs: nunca volta (o trampolim chamou sem return address). */
 void ap_main(uint32_t cpu) {
-  if (cpu >= (uint32_t)ncpu) {              /* parametro de um AP que reiniciou */
+  if (cpu >= (uint32_t)ncpu || cpu >= SMP_MAX) {   /* AP que reiniciou */
     for (;;) __asm__ volatile ("cli; hlt");
   }
-  if (cpu < SMP_MAX) {
-    lapic_enable();
-    if (!ap_up[cpu]) {                      /* reentrada por SIPI nao conta 2x */
-      ap_up[cpu] = 1;
-      __sync_fetch_and_add(&ap_online, 1);
-    }
-    for (;;) {
-      if (ap_parked) ap_idle(cpu);          /* nao volta */
-      ap_work[cpu]++;
-      __asm__ volatile ("pause");
-    }
+  ap_cpu_setup();
+  lapic_enable();
+  if (!ap_up[cpu]) {                      /* reentrada por SIPI nao conta 2x */
+    ap_up[cpu] = 1;
+    __sync_fetch_and_add(&ap_online, 1);
   }
+  while (!ap_go) {
+    ap_work[cpu]++;
+    __asm__ volatile ("pause");
+  }
+  kt_ap_enter((int)cpu);                  /* liga o timer e vira ociosa */
   for (;;) __asm__ volatile ("cli; hlt");
 }
 
 int smp_cpu_count(void) { return ncpu; }
 
 int smp_run(int cpu, void (*fn)(void*), void* arg) {
-  uint32_t dt;
+  uint32_t t0, dt;
   if (cpu <= 0 || cpu >= ncpu || cpu >= SMP_MAX || !ap_up[cpu] || !fn) return -1;
-  job_fn = fn;
-  job_arg = arg;
-  job_cpu = cpu;
-  job_t0 = (uint32_t)irq_ticks();
-  ap_job_ms = 0;
-  job_done = 0;
-  job_busy = 1;
-  job_pending = 1;
-  if (ipi(ids[cpu], 0x000000F1) < 0) {
-    job_pending = 0;
-    job_busy = 0;
-    return -1;
-  }
-  cpu_idle(1);                       /* o BSP fica ocioso enquanto o AP roda */
-  while (!job_done) {
-    ap_job_ms = (uint32_t)(irq_ticks() - job_t0);   /* uso ao vivo no TOP */
-    __asm__ volatile ("sti; hlt");
-  }
-  cpu_idle(0);
-  dt = (uint32_t)(irq_ticks() - job_t0);
-  ap_busy_ms[cpu] += dt;
-  ap_job_ms = 0;
-  job_busy = 0;
-  job_done = 0;
+  if (!kt_world_here()) return -1;
+  t0 = (uint32_t)irq_ticks();
+  kt_world_migrate(cpu);
+  if (kt_cpu_index() != cpu) return -1;
+  fn(arg);
+  kt_world_migrate(0);
+  dt = (uint32_t)(irq_ticks() - t0);
   serial_puts("[smp] cpu ");
   serial_hex32((uint32_t)cpu);
   serial_puts(" tarefa: ");
@@ -302,18 +326,17 @@ int smp_cpu_stat(int i, struct k_cpu_stat* out) {
   out->id = ids[i];
   out->index = (unsigned)i;
   out->online = (i == 0) ? 1u : (ap_up[i] ? 1u : 0u);
-  out->state = (i == 0) ? 1u : (ap_parked ? 0u : (ap_up[i] ? 1u : 0u));
+  out->state = kt_cpu_idle(i) ? 0u : 1u;
   if (i == 0) {
     out->busy_ms = (unsigned)irq_busy();
     out->idle_ms = (unsigned)irq_idle();
   } else {
-    uint32_t busy = ap_busy_ms[i];
-    uint32_t up = ap_parked ? (uint32_t)(irq_ticks() - ap_park_ms) : 0u;
-    if (job_busy && job_cpu == i) busy += ap_job_ms;
-    out->busy_ms = busy;
-    out->idle_ms = up > busy ? up - busy : 0u;
+    uint32_t b = 0, d = 0;
+    kt_cpu_times(i, &b, &d);
+    out->busy_ms = b;
+    out->idle_ms = d;
   }
-  out->pad[0] = 0;
+  out->pad[0] = (unsigned)kt_cpu_threads(i);
   out->pad[1] = 0;
   return 0;
 }
@@ -347,7 +370,15 @@ void smp_init(void) {
   serial_puts("\n");
   if (ncpu == 1) return;
 
+  {
+    uint64_t cr4;
+    __asm__ volatile ("mov %%cr4, %0" : "=r"(cr4));
+    bsp_cr4 = (uint32_t)cr4;
+    if (cr4 & (1u << 18))
+      __asm__ volatile ("xgetbv" : "=a"(bsp_xcr0_lo), "=d"(bsp_xcr0_hi) : "c"(0));
+  }
   lapic_enable();
+  lapic_calibrate();
   bsp_id = (int)apic_id_self();
   serial_puts("[smp] bsp apic=0x");
   serial_hex32((uint32_t)bsp_id);
@@ -386,9 +417,10 @@ void smp_init(void) {
   }
   if (started == 0 && ap_online == 0) return;
 
-  /* Prova de paralelismo: cada AP conta no proprio contador por 200 ms. */
+  /* Prova de paralelismo: cada AP conta no proprio contador por 100 ms;
+   * depois todos entram no escalonador. */
   for (i = 0; i < ncpu; i++) w0[i] = ap_work[i];
-  net_delay(200);
+  net_delay(100);
   for (i = 0; i < ncpu; i++) {
     uint64_t d = ap_work[i] - w0[i];
     if (!d) continue;
@@ -396,12 +428,13 @@ void smp_init(void) {
     serial_hex32(ids[i]);
     serial_puts(" rodou 0x");
     serial_hex32((uint32_t)d);
-    serial_puts(" voltas em 200 ms\n");
+    serial_puts(" voltas em 100 ms\n");
   }
-  ap_park_ms = (uint32_t)irq_ticks();
-  ap_parked = 1;                    /* APs ficam em hlt ate a fase seguinte */
-  net_delay(5);
+  ap_go = 1;
+  for (i = 0; i < 100 && kt_online_count() < 1 + (int)ap_online; i++) net_delay(1);
   serial_puts("[smp] APs online=0x");
   serial_hex32((uint32_t)ap_online);
-  serial_puts(" (parados)\n");
+  serial_puts(" no escalonador=0x");
+  serial_hex32((uint32_t)(kt_online_count() - 1));
+  serial_puts("\n");
 }

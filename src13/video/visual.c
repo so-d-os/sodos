@@ -5,6 +5,7 @@
  * UEFI: usa o framebuffer GOP que o GRUB entregou (resolucao fixa).
  * Sem Bochs VBE: VGA modo 13h 320x200.
  */
+#include "kthread.h"
 #include <stdint.h>
 #include "serial.h"
 #include "shell.h"
@@ -4116,6 +4117,11 @@ static void console_attach(struct gui_task* t) {
  * tomar a janela de outro programa. */
 static void gui_yield(int wake) {
   struct gui_task* t;
+  /* Thread de programa (outra CPU): nao troca a tarefa do WIN, so cede. */
+  if (kt_in_thread()) {
+    kt_yield_in_thread();
+    return;
+  }
   if (task_cur < 0 || !host_on) return;
   t = &gtasks[task_cur];
   t->wake = wake;
@@ -4127,7 +4133,7 @@ static void gui_yield(int wake) {
 }
 
 int gui_coop_pause(void) {
-  if (task_cur < 0 || !host_on) return 0;
+  if (task_cur < 0 || !host_on || kt_in_thread()) return 0;
   gui_yield(WAKE_BUSY);
   return 1;
 }
@@ -6597,6 +6603,7 @@ static int win_wm_run(void) {
   for (;;) {
     uint8_t data = 0;
 
+    kt_bkl_breathe();   /* threads de programas esperando o kernel */
     if (gui_stole) {
       focus = -1;
       gui_stole = 0;

@@ -37,3 +37,27 @@ smp_ipi_stub:
   push qword 0
   push qword 0xF1
   jmp isr_common
+
+; Escalonador SMP (kthread.c): timer local, reschedule e TLB. EOI no C.
+global lapic_timer_stub
+lapic_timer_stub:
+  push qword 0
+  push qword 0xF2
+  jmp isr_common
+
+global resched_ipi_stub
+resched_ipi_stub:
+  push qword 0
+  push qword 0xF3
+  jmp isr_common
+
+global tlb_ipi_stub
+tlb_ipi_stub:
+  push qword 0
+  push qword 0xF4
+  jmp isr_common
+
+; Interrupcao espuria do LAPIC: nao leva EOI.
+global spurious_stub
+spurious_stub:
+  iretq

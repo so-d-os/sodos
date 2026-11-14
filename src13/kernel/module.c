@@ -2,6 +2,7 @@
  * imports por nome ("KERNEL" = tabela do kernel, outro nome = arquivo .DLL). */
 #include <stdint.h>
 #include "module.h"
+#include "kthread.h"
 #include "mm.h"
 #include "drives.h"
 #include "shell.h"
@@ -45,7 +46,23 @@ char mod_exe_drive(void) { return exe_drive; }
 static uint64_t mod_fs_read(void);
 static void mod_fs_write(uint64_t v);
 
+void mod_thread_enter(struct mod_tsave* s, uint32_t pid, char drive) {
+  s->pid = cur_pid;
+  s->owner = um_owner();
+  s->drive = exe_drive;
+  cur_pid = pid;
+  um_set_owner(pid);
+  exe_drive = drive;
+}
+
+void mod_thread_leave(const struct mod_tsave* s) {
+  cur_pid = s->pid;
+  um_set_owner(s->owner);
+  exe_drive = s->drive;
+}
+
 void mod_cpu_save(struct mod_cpu* s) {
+  s->bkl = kt_bkl_depth();
   s->fs = mod_fs_read();
   s->ctx = cur_ctx;
   s->pid = cur_pid;
@@ -60,6 +77,7 @@ void mod_cpu_load(const struct mod_cpu* s) {
   um_set_owner(s->owner);
   mod_depth = s->depth;
   exe_drive = s->drive;
+  kt_bkl_set_depth(s->bkl);
   /* Dois programas com TLS (Firefox, LLAMA) nao podem dividir o FS. */
   if (s->fs != mod_fs_read()) mod_fs_write(s->fs);
 }
@@ -559,6 +577,7 @@ static int live_find(uint32_t pid) {
 
 /* O que o fim do mod_exec devolve: DLLs, exports, imagem, .so e o heap. */
 static void exec_release(uint32_t pid, int id) {
+  kt_release_pid(pid);   /* threads param antes do heap sumir */
   dyn_release_pid(pid);
   kexp_release_pid(pid);
   unload(id);
@@ -694,7 +713,14 @@ int mod_exec(const char* path, int argc, char** argv) {
     serial_puts(" av=");
     serial_hex32((uint32_t)(uintptr_t)av);
     serial_puts("\n");
-      rc = mod_call_entry(mods[id].base + mods[id].entry, nargc, av, av);
+      {
+        /* Codigo do programa roda sem o BKL: threads dele (e de outros)
+         * entram no kernel enquanto isso. Volta com a mesma profundidade,
+         * inclusive quando o mod_exit pula direto para ca. */
+        int bkl = kt_bkl_suspend();
+        rc = mod_call_entry(mods[id].base + mods[id].entry, nargc, av, av);
+        kt_bkl_resume(bkl);
+      }
       mod_fs_write(prev_fs);
       serial_puts("[mod] saiu ");
       serial_puts(mods[id].name);

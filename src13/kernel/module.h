@@ -113,7 +113,19 @@ struct mod_cpu {
   uint32_t depth;
   char drive;
   uint64_t fs;   /* FS base (TLS do programa): cada tarefa tem o seu */
+  int bkl;       /* profundidade do BKL do mundo nesta tarefa (kthread.c) */
 };
+
+/* Uma thread (kthread.c) dentro do kernel age em nome do programa dela: o
+ * pid, o dono das alocacoes e a unidade do EXE trocam enquanto ela segura o
+ * BKL e voltam ao soltar. */
+struct mod_tsave {
+  uint32_t pid;
+  uint32_t owner;
+  char drive;
+};
+void mod_thread_enter(struct mod_tsave* s, uint32_t pid, char drive);
+void mod_thread_leave(const struct mod_tsave* s);
 
 void mod_cpu_save(struct mod_cpu* s);
 void mod_cpu_load(const struct mod_cpu* s);

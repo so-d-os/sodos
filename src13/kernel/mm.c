@@ -7,6 +7,7 @@
  * escolhida a partir do mapa E820 entregue no BootInfo: nunca testamos (nem
  * escrevemos) memoria reservada e nunca comecamos antes de __bss_end.
  */
+#include "kthread.h"
 #include "mm.h"
 #include "bootinfo.h"
 #include "serial.h"
@@ -644,6 +645,9 @@ int mm_map_wc(uint64_t phys, uint64_t size) {
     *e = (*e & ~(0x10ULL | 0x1000ULL)) | 0x08ULL;  /* PCD=0, PAT=0, PWT=1 */
     n++;
   }
-  if (n) __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+  if (n) {
+    __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+    kt_tlb_shootdown();   /* as outras CPUs tambem tinham o mapeamento velho */
+  }
   return n;
 }
