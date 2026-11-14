@@ -81,6 +81,19 @@ typedef int (*drives_glob_fn)(const char* path, const char* shown, void* ctx);
 int drives_glob(const char* spec, drives_glob_fn fn, void* ctx);
 /* Itens de uma pasta ("U:\\SRC"). Quantos; -1 se nao e pasta. */
 int drives_items(const char* path, struct dir_item* out, int max);
+/* Como dir_item, com o nome longo inteiro (ate 127; mais longo fica de fora).
+ * Para o kernel copiar pastas com nomes grandes (o cache2 do Firefox tem
+ * nomes de 40 letras) sem um drives_long_name por arquivo. */
+#define DIR_LONG_NAME 128
+struct dir_item_long {
+  char name[DIR_LONG_NAME];
+  uint32_t size;
+  uint16_t date;
+  uint16_t time;
+  uint8_t dir;
+};
+/* Itens de uma pasta FAT com nome longo. out NULL: so conta. -1 nao e pasta. */
+int drives_items_long(const char* path, struct dir_item_long* out, int max);
 /* Nome longo inteiro de path (o ultimo nome). 0 achou; -1 nao. */
 int drives_long_name(const char* path, char* out, int max);
 void drives_list(char letter);

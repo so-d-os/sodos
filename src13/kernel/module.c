@@ -10,6 +10,7 @@
 #include "kexports.h"
 #include "module_priv.h"
 #include "isr.h"
+#include "ffperfil.h"
 
 void* kexport_find(const char* name);
 int mod_call_entry(void* fn, int argc, char** argv, void* stack_top);
@@ -549,6 +550,24 @@ static void live_add(uint32_t pid, uint32_t prev, int id) {
   }
 }
 
+static int name_ieq(const char* a, const char* b) {
+  while (*a && *b) {
+    char x = *a++, y = *b++;
+    if (x >= 'a' && x <= 'z') x = (char)(x - 32);
+    if (y >= 'a' && y <= 'z') y = (char)(y - 32);
+    if (x != y) return 0;
+  }
+  return *a == *b;
+}
+
+/* Outro programa vivo (pid != except) com este nome. */
+static int live_other_named(const char* name, uint32_t except) {
+  int i;
+  for (i = 0; i < LIVE_MAX; i++)
+    if (live[i].pid && live[i].pid != except && name_ieq(mods[live[i].id].name, name)) return 1;
+  return 0;
+}
+
 static int live_find(uint32_t pid) {
   int i;
   if (!pid) return -1;
@@ -701,6 +720,9 @@ int mod_exec(const char* path, int argc, char** argv) {
       serial_puts(" rc=");
       serial_hex32((uint32_t)rc);
       serial_puts("\n");
+      /* o atalho do desktop (FFLAUNCH) tambem se chama FIREFOX.EXE: com o
+       * Firefox de verdade ainda aberto, o perfil dele nao e mexido */
+      if (!live_other_named(mods[id].name, pid)) ffp_program_exit(mods[id].name, rc);
     }
   }
   {

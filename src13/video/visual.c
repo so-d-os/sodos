@@ -25,6 +25,7 @@
 #include "xhci.h"
 #include "vt.h"
 #include "gpu.h"
+#include "ffperfil.h"
 #include "c_compiler/sox.h"
 
 static inline void outl(uint16_t port, uint32_t v) {
@@ -4710,6 +4711,21 @@ static void tasks_pump(void) {
   task_switch_to(ti);
 }
 
+static int path_has_firefox(const char* p) {
+  static const char k[] = "firefox.exe";
+  int i, j;
+  if (!p) return 0;
+  for (i = 0; p[i]; i++) {
+    for (j = 0; k[j]; j++) {
+      char c = p[i + j];
+      if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+      if (c != k[j]) break;
+    }
+    if (!k[j]) return 1;
+  }
+  return 0;
+}
+
 static void tasks_shutdown(void) {
   int i, n;
   if (!gtasks) {
@@ -4720,9 +4736,16 @@ static void tasks_shutdown(void) {
     if (!gtasks[i].used) continue;
     if (gtasks[i].gid >= 0 && gtasks[i].gid < GUI_MAX && gwins[gtasks[i].gid].open)
       gq_push(&gwins[gtasks[i].gid], GUI_EV_CLOSE, 0, 0, 0);
-    for (n = 0; n < 256 && gtasks[i].used && gtasks[i].wake != WAKE_DEAD; n++) {
-      if (gtasks[i].wake == WAKE_NONE) break;
-      task_switch_to(i);
+    {
+      /* O Firefox grava o perfil ao sair; morto no meio, o perfil fica
+       * marcado (SODOSRUN.TXT) e nao e salvo (fs/ffperfil.c): ate 8 s. */
+      uint64_t t0 = irq_ticks();
+      int ff = path_has_firefox(gtasks[i].path);
+      for (n = 0; gtasks[i].used && gtasks[i].wake != WAKE_DEAD; n++) {
+        if (gtasks[i].wake == WAKE_NONE) break;
+        if (n >= 256 && !(ff && irq_ticks() - t0 < 8000)) break;
+        task_switch_to(i);
+      }
     }
     if (gtasks[i].used && gtasks[i].wake != WAKE_DEAD) {
       /* Nao terminou sozinho (o Firefox demora a fechar): o mod_exec dele
@@ -4815,6 +4838,7 @@ static void wm_exec(struct wm_win* wins, int* focus, int big, const char* path) 
   uint32_t magic[2] = {0, 0};
   struct wm_win* owner = app_win;
   if (!path) return;
+  if (ffp_busy() && path_has_firefox(path)) ffp_finish();
   if (path_is_command(path)) {
     wm_open_command(wins, focus, big);
     return;
@@ -6088,6 +6112,22 @@ static void draw_taskbar(int w, int h, int bar_h, int ch, int scale, int start_w
       draw_text_t(x, ty, dat, gui_col(UI_DIM), scale);
     }
   }
+  {
+    /* perfil do Firefox voltando para o Z: (fs/ffperfil.c), a esquerda da
+     * data; some se for encostar no logo */
+    int pct = ffp_pct();
+    if (pct >= 0) {
+      char cs[12] = "Cache ";
+      int cn = 6, cx;
+      if (pct >= 10) cs[cn++] = (char)('0' + pct / 10);
+      cs[cn++] = (char)('0' + pct % 10);
+      cs[cn++] = '%';
+      cs[cn] = 0;
+      cx = (t >= 0 && t <= 235959 ? x : w - 12) - 18 - cn * cw;
+      if (cx > lx + lw + 14 + (ui_menu_pos == 1 ? 0 : 6 * cw))
+        draw_text_t(cx, ty, cs, gui_col(UI_DIM), scale);
+    }
+  }
 }
 
 static void chrome_paint_over(void) {
@@ -6452,6 +6492,27 @@ static void win_vt_away(int to) {
  * devolve a memoria. As janelas, as tarefas, o papel de parede, o driver da
  * placa e os buffers do desktop saem agora; a tarefa do WIN em vt.c fica
  * marcada como fechada e o Ctrl+F7 cria outra. */
+/* Progresso do ffp_save por cima do ultimo quadro. */
+static void ffp_show(int pct) {
+  char t[40] = "Salvando perfil do Firefox ";
+  int n = 27, sc = c_scale > 0 ? c_scale : 1;
+  int cw = FONT_W * sc, ch = (vga_bios_font_ok ? FONT_H : 8) * sc;
+  int bw, bh, x, y;
+  if (!gfx_live) return;
+  if (pct >= 10) t[n++] = (char)('0' + pct / 10);
+  t[n++] = (char)('0' + pct % 10);
+  t[n++] = '%';
+  t[n] = 0;
+  bw = (n + 4) * cw;
+  bh = ch * 3;
+  x = ((int)gfx_w - bw) / 2;
+  y = ((int)gfx_h - bh) / 2;
+  gfx_frame_begin();
+  fill_round(x, y, bw, bh, UI_RADIUS, gui_col(UI_BAR));
+  draw_text_t(x + 2 * cw, y + ch, t, gui_col(UI_TEXT), sc);
+  gfx_frame_end();
+}
+
 static void win_session_free(struct wm_win* wins) {
   int i;
   if (wins) {
@@ -6461,6 +6522,7 @@ static void win_session_free(struct wm_win* wins) {
     }
   }
   chrome_unbind();   /* fecha janelas canvas e encerra as tarefas */
+  ffp_save(ffp_show);   /* perfil do Firefox do Z: para o disco */
   if (wins) {
     for (i = 0; i < WM_MAX; i++) {
       if (wins[i].st) kfree(wins[i].st);
@@ -6588,6 +6650,7 @@ static int win_wm_run(void) {
   my = sys_my;
   irq_set_tick_hook(gui_preempt_tick);
   desk_load();
+  ffp_win_start();   /* perfil do Firefox de volta ao Z:, em segundo plano */
   chrome_leave = 0;
   gui_ensure();
   chrome_bind(wins, &focus, &menu_open, &menu_cfg, &menu_tela, big, scale, bar_h, title_h,
@@ -6613,6 +6676,9 @@ static int win_wm_run(void) {
         tasks_pump();
         prof_pump += (uint32_t)irq_ticks() - now;
       }
+      /* Copia do perfil do Firefox: so sem entrada chegando nem arrasto,
+       * ~3 ms por volta (fs/ffperfil.c). */
+      if (!pend && !dc.on && !(inb(0x64) & 1) && ffp_poll()) need_draw = 1;
     }
     if (win_api_dirty) {
       /* 2: so janelas de programa mudaram; vira need_draw 2 se nada mais pediu */

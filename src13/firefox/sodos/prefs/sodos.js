@@ -91,3 +91,8 @@ pref("browser.backup.scheduled.enabled", false);
 pref("browser.backup.archive.enabled", false);
 // Audio: so ha o backend nulo do SODOS (cubeb_sodos.c), sem som por enquanto.
 pref("media.cubeb.backend", "sodos");
+// Cache em disco (Z:) com teto fixo: o kernel copia o perfil e o cache para
+// X:\USER\DEFAULT\FFPERFIL ao fechar o WIN e de volta no proximo boot
+// (fs/ffperfil.c); o "smart size" chegaria a ~1 GB, mais que o pendrive.
+pref("browser.cache.disk.smart_size.enabled", false);
+pref("browser.cache.disk.capacity", 262144);

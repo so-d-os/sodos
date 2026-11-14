@@ -19,6 +19,7 @@ extern int fat_mkdir(const char* path);
 extern int fat_rmdir(const char* path);
 extern int fat_file_size(const char* filename);
 extern int fat_dir_items(const char* path, struct dir_item* out, int max);
+extern int fat_dir_items_long(const char* path, struct dir_item_long* out, int max);
 extern int fat_long_name(const char* path, char* out, int max);
 extern int fat_delete(const char* path);
 extern int fat_rename(const char* from, const char* to);
@@ -1158,6 +1159,16 @@ int drives_items(const char* path, struct dir_item* out, int max) {
   idx = letter_idx(L);
   if (idx < 0 || !drv_ready(idx)) return -1;
   return dir_collect(idx, L, name, out, max);
+}
+
+int drives_items_long(const char* path, struct dir_item_long* out, int max) {
+  char L;
+  char name[DRV_PATH];
+  int idx;
+  path_parse(path, &L, name, (int)sizeof(name));
+  idx = letter_idx(L);
+  if (idx < 0 || !drv_ready(idx) || drv_kind[idx] != DRV_FAT) return -1;
+  return fat_dir_items_long(name, out, max);
 }
 
 int drives_long_name(const char* path, char* out, int max) {
