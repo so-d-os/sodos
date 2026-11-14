@@ -22,7 +22,11 @@
 
 #define TXPAGE 0x40
 #define PSTART 0x46
-#define PSTOP  0x80
+/* Fim do anel de recepcao: 0x80 (16 KB, NE2000 classico, ~9 quadros) ou
+ * 0xC0 quando a placa tem 32 KB (RTL8029 do QEMU): ne_reset testa. Com ~9
+ * quadros o anel enchia em cada rajada e o slirp perdia segmentos. */
+static uint8_t ne_pstop = 0x80;
+#define PSTOP ne_pstop
 
 #define ST_CLOSED    0
 #define ST_SYN_SENT  1
@@ -258,6 +262,7 @@ static int hosts_loaded;   /* HOSTS.CFG lido (ver hosts_load) */
 static uint16_t dns_wait_id;
 static uint16_t dns_wait_port;
 static int dns_got;
+static uint32_t dns_ttl;   /* menor TTL (s) dos registros usados na ultima resposta */
 static uint8_t dns_pkt[1400];
 static int dns_pkt_len;
 
@@ -302,6 +307,16 @@ static uint32_t tcp_ooo_e[TCP_OOO_MAX];
 static int tcp_ooo_n;
 static int tcp_fin_pending;   /* FIN visto num segmento fora de ordem */
 static uint32_t tcp_fin_seq;
+/* Lado do envio (soquetes k_sock_*, que mandam varios segmentos sem esperar):
+ * janela do par ja com a escala dele, MSS dele (limitado a TCP_MSS_TX), a
+ * maior sequencia ja enviada (depois de um go-back-N o snd_nxt volta, mas um
+ * ACK atrasado ate snd_max ainda vale) e ACKs duplicados seguidos. */
+#define TCP_MSS_TX 1400       /* 1400 + 48 de cabecalho com SACK cabe no IP */
+static uint32_t tcp_snd_wnd;
+static int tcp_snd_ws;
+static int tcp_snd_mss = 536;
+static uint32_t tcp_snd_max;
+static int tcp_dupacks;
 static uint8_t tcp_last[1000];
 static int tcp_last_len;
 static uint8_t tcp_last_flags;
@@ -336,11 +351,15 @@ static void ne_dma_write(uint16_t addr, const uint8_t* src, int len) {
   ne_out(0x08, (uint8_t)addr);
   ne_out(0x09, (uint8_t)(addr >> 8));
   ne_out(0x00, 0x12);
-  for (i = 0; i < n; i += 2) {
-    uint16_t w = src[i];
-    if (i + 1 < len) w |= (uint16_t)src[i + 1] << 8;
-    outw((uint16_t)(nic_io + 0x10), w);
+  /* rep outsw: o KVM atende a instrucao de string inteira em poucas saidas;
+   * um outw por palavra eram ~750 saidas para o QEMU por quadro */
+  i = len & ~1;
+  if (i > 0) {
+    const uint8_t* p = src;
+    long cnt = i / 2;
+    __asm__ volatile("cld; rep outsw" : "+S"(p), "+c"(cnt) : "d"((uint16_t)(nic_io + 0x10)) : "memory");
   }
+  if (len & 1) outw((uint16_t)(nic_io + 0x10), src[len - 1]);
   ne_out(0x07, 0x40);
   ne_out(0x00, 0x22);
 }
@@ -354,11 +373,15 @@ static void ne_dma_read(uint16_t addr, uint8_t* dst, int len) {
   ne_out(0x08, (uint8_t)addr);
   ne_out(0x09, (uint8_t)(addr >> 8));
   ne_out(0x00, 0x0A);
-  for (i = 0; i < n; i += 2) {
-    uint16_t w = inw((uint16_t)(nic_io + 0x10));
-    if (i < len) dst[i] = (uint8_t)w;
-    if (i + 1 < len) dst[i + 1] = (uint8_t)(w >> 8);
+  /* rep insw (veja ne_dma_write): no QEMU cada quadro levava ~1,9 ms e o
+   * anel de ~9 quadros enchia, perdendo segmentos (1,5 s de espera no slirp) */
+  i = len & ~1;
+  if (i > 0) {
+    uint8_t* p = dst;
+    long cnt = i / 2;
+    __asm__ volatile("cld; rep insw" : "+D"(p), "+c"(cnt) : "d"((uint16_t)(nic_io + 0x10)) : "memory");
   }
+  if (len & 1) dst[len - 1] = (uint8_t)inw((uint16_t)(nic_io + 0x10));
   ne_out(0x07, 0x40);
   ne_out(0x00, 0x22);
 }
@@ -590,6 +613,7 @@ static int dns_collect(const uint8_t* p, int len, const char* qname,
     off += 10;
     if (off + rdlen > len) break;
     if (dns_expand(p, len, name_at, owner, (int)sizeof(owner)) == 0 && dns_eq(owner, cur)) {
+      if ((typ == 1 || typ == 5) && rd32(p + off - 6) < dns_ttl) dns_ttl = rd32(p + off - 6);
       if (typ == 1 && rdlen == 4 && nips < maxips) {
         uint32_t ip = rd32(p + off);
         if (ip != 0) ips[nips++] = ip;
@@ -1109,11 +1133,65 @@ static int dns_lookup(const char* name, uint32_t* ips, int maxips, int depth) {
   return -1;
 }
 
+/* Cache de nomes: a consulta espera a resposta dentro do kernel e para o
+ * sistema inteiro uma ida e volta (ou 1,5 s por servidor mudo); uma pagina
+ * pede 5-10 nomes e o NSPR pergunta de novo a cada conexao nova. Guarda pelo
+ * TTL da resposta, entre DNS_TTL_MIN e DNS_TTL_MAX segundos. */
+#define DNS_CACHE_N 64
+#define DNS_TTL_MIN 30u
+#define DNS_TTL_MAX 3600u
+struct dns_ent {
+  char name[100];
+  uint32_t ip;
+  uint32_t exp;    /* ms_now em que vence; 0 = vago */
+};
+static struct dns_ent dns_cache[DNS_CACHE_N];
+
+static int dns_name_len(const char* n) {
+  int i = 0;
+  while (n[i]) i++;
+  return i;
+}
+
 static int dns_resolve(const char* name, uint32_t* out) {
   uint32_t ips[4];
-  int n = dns_lookup(name, ips, 4, 0);
+  int n, i, len, slot = 0;
+  len = dns_name_len(name);
+  time_poll();
+  if (len > 0 && len < (int)sizeof(dns_cache[0].name)) {
+    for (i = 0; i < DNS_CACHE_N; i++) {
+      struct dns_ent* e = &dns_cache[i];
+      if (!e->exp) continue;
+      if ((int32_t)(e->exp - ms_now) <= 0) {
+        e->exp = 0;
+        continue;
+      }
+      if (dns_eq(e->name, name)) {
+        *out = e->ip;
+        return 0;
+      }
+    }
+  }
+  dns_ttl = 0xFFFFFFFFu;
+  n = dns_lookup(name, ips, 4, 0);
   if (n <= 0) return -1;
   *out = ips[0];
+  if (len > 0 && len < (int)sizeof(dns_cache[0].name) && dns_ttl != 0xFFFFFFFFu) {
+    uint32_t ttl = dns_ttl < DNS_TTL_MIN ? DNS_TTL_MIN : dns_ttl > DNS_TTL_MAX ? DNS_TTL_MAX : dns_ttl;
+    /* vaga, ou a que vence primeiro */
+    for (i = 0; i < DNS_CACHE_N; i++) {
+      if (!dns_cache[i].exp) {
+        slot = i;
+        break;
+      }
+      if ((int32_t)(dns_cache[i].exp - dns_cache[slot].exp) < 0) slot = i;
+    }
+    time_poll();
+    mem_copy(dns_cache[slot].name, name, len + 1);
+    dns_cache[slot].ip = ips[0];
+    dns_cache[slot].exp = ms_now + ttl * 1000u;
+    if (!dns_cache[slot].exp) dns_cache[slot].exp = 1;
+  }
   return 0;
 }
 
@@ -1226,7 +1304,7 @@ static int tcp_csum_ok(uint32_t src, uint32_t dst, const uint8_t* seg, int len) 
 }
 
 static void tcp_raw(uint8_t flags, const uint8_t* data, int len, uint32_t seq, int advance) {
-  uint8_t seg[60 + 1000];
+  uint8_t seg[60 + TCP_MSS_TX];
   uint32_t sum;
   uint16_t csum;
   int i;
@@ -1234,7 +1312,9 @@ static void tcp_raw(uint8_t flags, const uint8_t* data, int len, uint32_t seq, i
   int hdr = 20;
   int nsack = 0;
   if (len < 0) len = 0;
-  if (len > 1000) len = 1000;
+  if (len > TCP_MSS_TX) len = TCP_MSS_TX;
+  /* so a API bloqueante guarda o segmento para reenviar, e ela manda <= 1000 */
+  if (advance && len > (int)sizeof(tcp_last)) len = (int)sizeof(tcp_last);
   if ((flags & 0x02) && len == 0) hdr = tcp_rx_cap > 65535 ? 32 : 24;
   else if ((flags & 0x10) && tcp_sack_ok && tcp_ooo_n > 0) {
     nsack = tcp_ooo_n > 3 ? 3 : tcp_ooo_n;
@@ -1248,6 +1328,10 @@ static void tcp_raw(uint8_t flags, const uint8_t* data, int len, uint32_t seq, i
   seg[12] = (uint8_t)((hdr / 4) << 4);
   seg[13] = flags;
   win = tcp_rx_cap - tcp_rx_len;
+  /* NE2000 (QEMU): a placa nao tem DMA e guarda so o anel (~20 quadros com
+   * 32 KB); uma janela maior deixa o par mandar rajadas que transbordam o
+   * anel, e cada perda no fim da rajada custava 1,5 s de espera no slirp */
+  if (!nlink && win > (PSTOP - PSTART) * 256 - 3 * 1536) win = (PSTOP - PSTART) * 256 - 3 * 1536;
   if (win < 0) win = 0;
   /* no SYN a janela nunca tem escala; depois, so se o servidor aceitou */
   if (tcp_ws_ok && !(flags & 0x02)) win >>= TCP_WS;
@@ -1300,6 +1384,7 @@ static void tcp_raw(uint8_t flags, const uint8_t* data, int len, uint32_t seq, i
     if (flags & 0x02) tcp_snd_nxt += 1;
     if (flags & 0x01) tcp_snd_nxt += 1;
     tcp_snd_nxt += (uint32_t)len;
+    if ((flags & 0x02) || (int32_t)(tcp_snd_nxt - tcp_snd_max) > 0) tcp_snd_max = tcp_snd_nxt;
   }
 }
 
@@ -1352,10 +1437,18 @@ static void tcp_input(uint32_t src, const uint8_t* seg, int len) {
         if (o + 1 >= doff) break;
         olen = seg[o + 1];
         if (olen < 2 || o + olen > doff) break;
-        if (kind == 3 && olen == 3 && tcp_rx_cap > 65535) tcp_ws_ok = 1;
+        if (kind == 2 && olen == 4) tcp_snd_mss = rd16(seg + o + 2);
+        if (kind == 3 && olen == 3 && tcp_rx_cap > 65535) {
+          tcp_ws_ok = 1;
+          tcp_snd_ws = seg[o + 2] > 14 ? 14 : seg[o + 2];
+        }
         if (kind == 4 && olen == 2 && tcp_rx_cap > 65535) tcp_sack_ok = 1;
         o += olen;
       }
+      if (tcp_snd_mss < 64) tcp_snd_mss = 536;
+      if (tcp_snd_mss > TCP_MSS_TX) tcp_snd_mss = TCP_MSS_TX;
+      tcp_snd_wnd = rd16(seg + 14);    /* a janela do SYN-ACK nao tem escala */
+      tcp_dupacks = 0;
       tcp_snd_una = ack;
       tcp_rcv_nxt = seq + 1;
       tcp_state = ST_EST;
@@ -1366,14 +1459,38 @@ static void tcp_input(uint32_t src, const uint8_t* seg, int len) {
     return;
   }
   if (flags & 0x10) {
-    if ((int32_t)(ack - tcp_snd_una) >= 0 && (int32_t)(tcp_snd_nxt - ack) >= 0)
+    uint32_t top = (int32_t)(tcp_snd_max - tcp_snd_nxt) > 0 ? tcp_snd_max : tcp_snd_nxt;
+    if ((int32_t)(ack - tcp_snd_una) >= 0 && (int32_t)(top - ack) >= 0) {
+      uint32_t w = (uint32_t)rd16(seg + 14) << (tcp_ws_ok ? tcp_snd_ws : 0);
+      /* mesmo ACK, sem dado, janela igual, com algo em transito: duplicado
+       * (o par recebeu um segmento depois de um buraco) */
+      if (ack == tcp_snd_una && plen == 0 && !(flags & 0x01) && w == tcp_snd_wnd &&
+          tcp_snd_una != tcp_snd_nxt)
+        tcp_dupacks++;
+      else if (ack != tcp_snd_una)
+        tcp_dupacks = 0;
       tcp_snd_una = ack;
+      tcp_snd_wnd = w;
+      /* ACK alem do snd_nxt (veio depois de um go-back-N): o par ja tem */
+      if ((int32_t)(ack - tcp_snd_nxt) > 0) tcp_snd_nxt = ack;
+    }
   }
   if (plen > 0 || (flags & 0x01)) {
     /* em ordem ou nao, guarda; o ACK diz ate onde esta inteiro (e o SACK,
      * o que ja veio depois do buraco) */
+    uint32_t before = tcp_rcv_nxt;
     tcp_rx_segment(seq, data, plen, flags & 0x01);
     tcp_ack();
+    /* O ACK andou mas ainda ha buraco (duas perdas na mesma janela): um TCP
+     * Reno sem SACK (o slirp do QEMU) reenvia so a primeira e espera o
+     * relogio (~1,5 s) para a segunda. Mais tres ACKs iguais = 3 duplicados
+     * (o primeiro conta como novo), e ele reenvia na hora. Quem usa SACK ve
+     * os mesmos trechos e nada muda. */
+    if (tcp_rcv_nxt != before && tcp_ooo_n > 0) {
+      tcp_ack();
+      tcp_ack();
+      tcp_ack();
+    }
   }
 }
 
@@ -1835,6 +1952,23 @@ static int ne_reset(uint16_t io) {
     prom[i * 2 + 1] = (uint8_t)(w >> 8);
   }
   for (i = 0; i < 6; i++) our_mac[i] = prom[i * 2];
+  {
+    /* 32 KB? escreve em 0x9000 e em 0x5000 (onde cairia um espelho de 16 KB)
+     * e confere 0x9000 */
+    uint8_t a[32], b[32], r[32];
+    int ok = 1;
+    for (i = 0; i < 32; i++) {
+      a[i] = (uint8_t)(0xA5 ^ (i * 29));
+      b[i] = (uint8_t)(0x3C ^ (i * 53));
+    }
+    ne_dma_write(0x9000, a, 32);
+    ne_dma_write(0x5000, b, 32);
+    ne_dma_read(0x9000, r, 32);
+    for (i = 0; i < 32; i++)
+      if (r[i] != a[i]) ok = 0;
+    ne_pstop = ok ? 0xC0 : 0x80;
+    serial_puts(ok ? "[net] ne2000 32 KB, anel 0x46-0xC0\n" : "[net] ne2000 16 KB, anel 0x46-0x80\n");
+  }
   outb(io, 0x21);
   outb((uint16_t)(io + 0x07), 0xFF);
   outb((uint16_t)(io + 0x01), PSTART);
@@ -2103,6 +2237,8 @@ struct tcb_ctx {
   uint32_t ooo_s[TCP_OOO_MAX], ooo_e[TCP_OOO_MAX];
   int ooo_n, fin_pending;
   uint32_t fin_seq;
+  uint32_t snd_wnd, snd_max;
+  int snd_ws, snd_mss, dupacks;
   uint8_t last[1000];
   int last_len;
   uint8_t last_flags;
@@ -2114,9 +2250,12 @@ struct ksock {
   uint32_t owner;      /* programa que abriu (mod_current_pid) */
   struct tcb_ctx t;
   uint8_t* rxbuf;      /* KS_RX, fica com o slot entre usos */
-  uint8_t* txq;        /* KS_TXQ */
+  uint8_t* txq;        /* KS_TXQ: dados sem ACK + dados ainda nao enviados */
   int txq_off, txq_len;
-  uint32_t tx_ms;      /* ultimo envio que espera ACK */
+  uint32_t txq_seq;    /* sequencia de txq[txq_off] (= snd_una enquanto ha dado) */
+  uint32_t una_seen;   /* snd_una da ultima volta: diz se o ACK andou */
+  uint32_t cwnd, ssthresh;
+  uint32_t tx_ms;      /* relogio da retransmissao (reinicia quando o ACK anda) */
   int tries;
   int err;             /* errno do Linux, 0 = nenhum */
   int est;             /* ja chegou a ESTABLISHED */
@@ -2137,6 +2276,8 @@ static void ctx_save(struct tcb_ctx* c) {
   c->ws_ok = tcp_ws_ok; c->sack_ok = tcp_sack_ok;
   for (i = 0; i < TCP_OOO_MAX; i++) { c->ooo_s[i] = tcp_ooo_s[i]; c->ooo_e[i] = tcp_ooo_e[i]; }
   c->ooo_n = tcp_ooo_n; c->fin_pending = tcp_fin_pending; c->fin_seq = tcp_fin_seq;
+  c->snd_wnd = tcp_snd_wnd; c->snd_max = tcp_snd_max; c->snd_ws = tcp_snd_ws;
+  c->snd_mss = tcp_snd_mss; c->dupacks = tcp_dupacks;
   c->last_len = tcp_last_len; c->last_flags = tcp_last_flags; c->last_seq = tcp_last_seq;
   mem_copy(c->last, tcp_last, tcp_last_len > 0 ? tcp_last_len : 0);
 }
@@ -2150,6 +2291,8 @@ static void ctx_load(const struct tcb_ctx* c) {
   tcp_ws_ok = c->ws_ok; tcp_sack_ok = c->sack_ok;
   for (i = 0; i < TCP_OOO_MAX; i++) { tcp_ooo_s[i] = c->ooo_s[i]; tcp_ooo_e[i] = c->ooo_e[i]; }
   tcp_ooo_n = c->ooo_n; tcp_fin_pending = c->fin_pending; tcp_fin_seq = c->fin_seq;
+  tcp_snd_wnd = c->snd_wnd; tcp_snd_max = c->snd_max; tcp_snd_ws = c->snd_ws;
+  tcp_snd_mss = c->snd_mss; tcp_dupacks = c->dupacks;
   tcp_last_len = c->last_len; tcp_last_flags = c->last_flags; tcp_last_seq = c->last_seq;
   mem_copy(tcp_last, c->last, c->last_len > 0 ? c->last_len : 0);
 }
@@ -2209,6 +2352,94 @@ static void ks_free(struct ksock* s) {
   s->t.state = ST_CLOSED;
 }
 
+/* Envio com janela deslizante: varios segmentos em transito, ate o menor
+ * entre a janela do par e a de congestionamento (slow start a partir de 10
+ * segmentos, como o Linux). Perda: 3 ACKs duplicados reenviam o primeiro
+ * segmento (fast retransmit); o relogio estourado volta tudo para snd_una
+ * (go-back-N) com cwnd de 1 segmento. Antes era 1 segmento de 1000 bytes por
+ * ida e volta: ~5 KB/s de subida com 180 ms, e o ClientHello do TLS e os
+ * cabecalhos HTTP/2 com cookies custavam varias voltas. Com o TCB carregado. */
+#define KS_BURST 32
+static void ks_tx(struct ksock* s) {
+  uint32_t mss = (uint32_t)tcp_snd_mss;
+  uint32_t inflight, limit, sent_off, rto;
+  int burst = 0, probe = 0;
+  if (mss < 64) mss = 536;
+  rto = 300u << (s->tries > 4 ? 4 : s->tries);
+  /* o ACK andou: tira da fila o que o par ja tem */
+  if ((int32_t)(tcp_snd_una - s->una_seen) > 0) {
+    uint32_t got = tcp_snd_una - s->una_seen;
+    uint32_t d = tcp_snd_una - s->txq_seq;
+    if ((int32_t)d > 0) {
+      if (d > (uint32_t)s->txq_len) d = (uint32_t)s->txq_len;
+      s->txq_off += (int)d;
+      s->txq_len -= (int)d;
+      s->txq_seq += d;
+      if (s->txq_len == 0) s->txq_off = 0;
+    }
+    if (s->cwnd < s->ssthresh) s->cwnd += got;
+    else s->cwnd += (mss * mss) / (s->cwnd ? s->cwnd : 1) + 1;
+    if (s->cwnd > 4u * KS_TXQ) s->cwnd = 4u * KS_TXQ;
+    s->una_seen = tcp_snd_una;
+    s->tries = 0;
+    s->tx_ms = ms_now;
+    rto = 300u;
+  }
+  inflight = tcp_snd_nxt - tcp_snd_una;
+  if (inflight > 0 && tcp_dupacks >= 3) {
+    /* fast retransmit: o primeiro segmento sem ACK, de novo */
+    int n = s->txq_len < (int)mss ? s->txq_len : (int)mss;
+    s->ssthresh = inflight / 2 > 2 * mss ? inflight / 2 : 2 * mss;
+    s->cwnd = s->ssthresh;
+    tcp_dupacks = 0;
+    if (n > 0) tcp_raw(0x18, s->txq + s->txq_off, n, tcp_snd_una, 0);
+    else if (s->fin_sent) tcp_raw(0x11, 0, 0, tcp_snd_una, 0);
+    s->tx_ms = ms_now;
+  } else if (inflight > 0 && ms_now - s->tx_ms >= rto) {
+    if (++s->tries > 8) {
+      s->err = ETIMEDOUT_K;
+      tcp_state = ST_CLOSED;
+      return;
+    }
+    s->ssthresh = inflight / 2 > 2 * mss ? inflight / 2 : 2 * mss;
+    s->cwnd = mss;
+    tcp_snd_nxt = tcp_snd_una;   /* go-back-N: o laco abaixo reenvia */
+    s->fin_sent = 0;             /* se o FIN tivesse ACK, nada estaria em transito */
+    tcp_dupacks = 0;
+    s->tx_ms = ms_now;
+    inflight = 0;
+  } else if (inflight == 0 && s->txq_len > 0 && tcp_snd_wnd == 0 && ms_now - s->tx_ms >= rto) {
+    /* janela zero: sonda de 1 byte para saber quando ela abre */
+    probe = 1;
+    if (s->tries < 8) s->tries++;
+  }
+  limit = s->cwnd < tcp_snd_wnd ? s->cwnd : tcp_snd_wnd;
+  if (probe) limit = 1;
+  sent_off = tcp_snd_nxt - s->txq_seq;
+  while ((int32_t)sent_off >= 0 && sent_off < (uint32_t)s->txq_len && inflight < limit &&
+         burst < KS_BURST) {
+    uint32_t n = (uint32_t)s->txq_len - sent_off;
+    if (n > mss) n = mss;
+    if (n > limit - inflight) n = limit - inflight;
+    /* sem segmento pequeno no meio de uma janela quase cheia (silly window) */
+    if (n < mss && n < (uint32_t)s->txq_len - sent_off && inflight > 0) break;
+    if (inflight == 0) s->tx_ms = ms_now;
+    tcp_raw(0x18, s->txq + s->txq_off + sent_off, (int)n, tcp_snd_nxt, 0);
+    tcp_snd_nxt += n;
+    if ((int32_t)(tcp_snd_nxt - tcp_snd_max) > 0) tcp_snd_max = tcp_snd_nxt;
+    sent_off += n;
+    inflight += n;
+    burst++;
+  }
+  if (s->closing && !s->fin_sent && sent_off == (uint32_t)s->txq_len) {
+    if (inflight == 0) s->tx_ms = ms_now;
+    tcp_raw(0x11, 0, 0, tcp_snd_nxt, 0);
+    tcp_snd_nxt += 1;
+    if ((int32_t)(tcp_snd_nxt - tcp_snd_max) > 0) tcp_snd_max = tcp_snd_nxt;
+    s->fin_sent = 1;
+  }
+}
+
 /* Retransmissao, fila de envio e fechamento de todos os soquetes. */
 void net_sock_pump(void) {
   int i;
@@ -2220,12 +2451,19 @@ void net_sock_pump(void) {
     int done = 0;
     if (!s->used) continue;
     ks_enter(s);
-    if (tcp_state == ST_EST || tcp_state == ST_CLOSEWAIT) s->est = 1;
+    if (!s->est && (tcp_state == ST_EST || tcp_state == ST_CLOSEWAIT)) {
+      uint32_t mss = tcp_snd_mss < 64 ? 536u : (uint32_t)tcp_snd_mss;
+      s->est = 1;
+      s->tries = 0;
+      s->txq_seq = tcp_snd_una;
+      s->una_seen = tcp_snd_una;
+      s->cwnd = 10 * mss;
+      s->ssthresh = 4u * KS_TXQ;
+      s->tx_ms = ms_now;
+    }
     if (!s->err && tcp_rst) s->err = s->est ? ECONNRESET_K : ECONNREFUSED_K;
     if (!s->err && tcp_state == ST_CLOSED && !s->est) s->err = ECONNREFUSED_K;
-    if (!s->err && (tcp_state == ST_SYN_SENT ||
-                    ((tcp_state == ST_EST || tcp_state == ST_CLOSEWAIT) &&
-                     tcp_snd_una != tcp_snd_nxt))) {
+    if (!s->err && tcp_state == ST_SYN_SENT) {
       uint32_t rto = 300u << (s->tries > 4 ? 4 : s->tries);
       if (ms_now - s->tx_ms >= rto) {
         if (++s->tries > 8) {
@@ -2237,19 +2475,7 @@ void net_sock_pump(void) {
         }
       }
     } else if (!s->err && (tcp_state == ST_EST || tcp_state == ST_CLOSEWAIT)) {
-      s->tries = 0;
-      if (s->txq_len > 0) {
-        int n = s->txq_len > 1000 ? 1000 : s->txq_len;
-        tcp_raw(0x18, s->txq + s->txq_off, n, tcp_snd_nxt, 1);
-        s->txq_off += n;
-        s->txq_len -= n;
-        if (s->txq_len == 0) s->txq_off = 0;
-        s->tx_ms = ms_now;
-      } else if (s->closing && !s->fin_sent) {
-        tcp_raw(0x11, 0, 0, tcp_snd_nxt, 1);
-        s->fin_sent = 1;
-        s->tx_ms = ms_now;
-      }
+      ks_tx(s);
     }
     if (s->closing)
       done = s->err || tcp_state == ST_CLOSED ||
@@ -2312,6 +2538,10 @@ int net_sock_connect(uint32_t ip, int port, uint32_t owner) {
   tcp_sack_ok = 0;
   tcp_fin_pending = 0;
   tcp_last_len = 0;
+  tcp_snd_wnd = 0;
+  tcp_snd_ws = 0;
+  tcp_snd_mss = 536;
+  tcp_dupacks = 0;
   tcp_dip = ip;
   tcp_dport = (uint16_t)port;
   tcp_sport = tcp_new_port();
