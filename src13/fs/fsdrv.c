@@ -15,6 +15,7 @@
 #include "sched.h"
 #include "serial.h"
 #include "shell.h"
+#include "env.h"
 
 extern void* umalloc_owned(uint32_t nbytes, uint32_t owner);
 extern void ufree(void* ptr);
@@ -81,33 +82,56 @@ int fsdrv_is_fat32(const uint8_t* b) {
   return rd16(b + 22) == 0 && rd32(b + 36) != 0;
 }
 
-/* Um DLL por formato; hoje so FAT32. */
-#define FSDRV_MAX 2
+/* Drivers ja carregados, por caminho. Um driver trocado (SET FAT32DLL=...)
+ * continua carregado: um volume antigo pode estar no meio de uma leitura. */
+#define FSDRV_MAX 8
 static struct {
-  char dll[16];
-  int handle;
+  char path[DRV_PATH];
   const struct fsdrv_ops* ops;
 } drv[FSDRV_MAX];
+static int drv_n;
+/* ultimo pedido por variavel que falhou (nao tenta de novo ate o proximo SET) */
+static char bad_path[DRV_PATH];
+static uint32_t bad_gen;
+static const char* last_path;
+
+static char upc(char c) { return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c; }
 
 static int str_eq(const char* a, const char* b) {
-  while (*a && *a == *b) {
+  while (*a && upc(*a) == upc(*b)) {
     a++;
     b++;
   }
-  return *a == *b;
+  return upc(*a) == upc(*b);
 }
 
-static const struct fsdrv_ops* try_load(char letter, const char* dll) {
-  static const char dir[] = "X:\\SODOS\\DRV\\";
-  char path[48];
-  int i = 0, j, h;
+static void scopy(char* d, const char* s, int max) {
+  int i = 0;
+  while (s[i] && i < max - 1) {
+    d[i] = s[i];
+    i++;
+  }
+  d[i] = 0;
+}
+
+/* Carrega (ou acha ja carregado) o driver em path. */
+static const struct fsdrv_ops* load_path(const char* path, int quiet) {
+  int i, h;
   fsdrv_entry_fn fn;
   const struct fsdrv_ops* ops;
-  for (j = 0; dir[j]; j++) path[i++] = dir[j];
-  for (j = 0; dll[j] && i < (int)sizeof(path) - 1; j++) path[i++] = dll[j];
-  path[i] = 0;
-  path[0] = letter;
-  if (file_size(path) <= 0) return 0;
+  for (i = 0; i < drv_n; i++)
+    if (str_eq(drv[i].path, path)) {
+      last_path = drv[i].path;
+      return drv[i].ops;
+    }
+  if (drv_n >= FSDRV_MAX) return 0;
+  if (file_size(path) <= 0) {
+    if (!quiet) {
+      puts_k(path);
+      puts_k(": nao existe\n");
+    }
+    return 0;
+  }
   h = mod_dll_load_sys(path);
   if (!h) {
     puts_k(path);
@@ -128,31 +152,67 @@ static const struct fsdrv_ops* try_load(char letter, const char* dll) {
   serial_puts("[fsdrv] ");
   serial_puts(path);
   serial_puts(" carregado\n");
+  scopy(drv[drv_n].path, path, DRV_PATH);
+  drv[drv_n].ops = ops;
+  last_path = drv[drv_n].path;
+  drv_n++;
   return ops;
 }
 
+/* X:\SODOS\DRV\<dll> */
+static const struct fsdrv_ops* load_std(char letter, const char* dll) {
+  static const char dir[] = "X:\\SODOS\\DRV\\";
+  char path[48];
+  int i = 0, j;
+  for (j = 0; dir[j]; j++) path[i++] = dir[j];
+  for (j = 0; dll[j] && i < (int)sizeof(path) - 1; j++) path[i++] = dll[j];
+  path[i] = 0;
+  path[0] = letter;
+  return load_path(path, 1);
+}
+
+/* "FAT32.DLL" -> "FAT32DLL" (o nome da variavel de ambiente). */
+static void env_name_of(const char* dll, char* out, int max) {
+  int i, k = 0;
+  for (i = 0; dll[i] && k < max - 1; i++)
+    if (dll[i] != '.') out[k++] = upc(dll[i]);
+  out[k] = 0;
+}
+
+const char* fsdrv_path(void) { return last_path ? last_path : ""; }
+
 const struct fsdrv_ops* fsdrv_get(const char* dll, char skip) {
-  static const char order[] = "DCEFGHIJKLMNOPQRSTUVWXYZAB";
+  /* Z: tem o que veio no SODOS.PAK; depois os discos. U: monta sozinho ao
+   * ser tocado e pode ser justamente quem pediu o driver: fica por ultimo. */
+  static const char order[] = "ZDCEFGHIJKLMNOPQRSTVWXYAB";
   const struct fsdrv_ops* ops = 0;
-  int i, free_slot = -1;
+  char var[24];
+  const char* want;
+  int i;
   if (skip >= 'a' && skip <= 'z') skip = (char)(skip - 32);
-  for (i = 0; i < FSDRV_MAX; i++) {
-    if (drv[i].ops && str_eq(drv[i].dll, dll)) return drv[i].ops;
-    if (!drv[i].ops && free_slot < 0) free_slot = i;
+  /* SET FAT32DLL=D:\CAMINHO\FAT32.DLL (AUTOEXEC.BAT ou prompt) vem primeiro. */
+  env_name_of(dll, var, (int)sizeof(var));
+  want = env_get(var);
+  if (want && want[0] && !(bad_gen == env_gen() && str_eq(bad_path, want))) {
+    char L = upc(want[0]);
+    if (want[1] == ':' && L == skip) {
+      puts_k(var);
+      puts_k(": o driver nao pode estar na unidade que ele vai montar\n");
+    } else {
+      ops = load_path(want, 0);
+    }
+    if (ops) return ops;
+    scopy(bad_path, want, DRV_PATH);
+    bad_gen = env_gen();
+    puts_k(var);
+    puts_k(": usando o driver padrao (\\SODOS\\DRV)\n");
   }
-  if (free_slot < 0) return 0;
   for (i = 0; order[i] && !ops; i++) {
     char L = order[i];
-    /* C: so tem os arquivos embutidos; Z: e o ramdisk vazio. U: monta sozinho
-     * ao ser tocado, e aqui ele pode ser justamente quem pediu o driver. */
-    if (L == skip || L == 'C' || L == 'Z' || L == 'U') continue;
+    if (L == skip || L == 'C') continue;
     if (!drives_is_mounted(L) || !str_eq(drives_kind_name(L), "FAT")) continue;
-    ops = try_load(L, dll);
+    ops = load_std(L, dll);
   }
-  if (!ops && skip != 'U' && drives_is_mounted('U')) ops = try_load('U', dll);
-  if (!ops) return 0;
-  for (i = 0; dll[i] && i < (int)sizeof(drv[0].dll) - 1; i++) drv[free_slot].dll[i] = dll[i];
-  drv[free_slot].dll[i] = 0;
-  drv[free_slot].ops = ops;
+  if (!ops && skip != 'U' && drives_is_mounted('U')) ops = load_std('U', dll);
   return ops;
 }

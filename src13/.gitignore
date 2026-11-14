@@ -65,3 +65,5 @@ disk-256mb.img
 REGS_LINUX.BIN
 mc-*.png
 disk-antigo.img
+sodos.pak
+tools/mkpak

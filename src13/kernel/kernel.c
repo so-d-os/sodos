@@ -47,6 +47,8 @@ int format_fat16(uint32_t drive, uint32_t lba_start, uint32_t total_sectors, con
 #include "vt.h"
 #include "kexports.h"
 #include "smp.h"
+#include "env.h"
+#include "bootpak.h"
 
 const struct executable_entry* find_executable(const char* name) {
   for (int i = 0; i < executable_count; i++) {
@@ -1856,6 +1858,52 @@ static int exec_line(char* line, int history) {
 }
 
 int shell_exec_line(char* line) { return exec_line(line, 1); }
+
+static int is_rem(const char* l) {
+  return (l[0] == 'r' || l[0] == 'R') && (l[1] == 'e' || l[1] == 'E') &&
+         (l[2] == 'm' || l[2] == 'M') && (l[3] == 0 || l[3] == ' ' || l[3] == '\t');
+}
+
+/* AUTOEXEC.BAT de D: (ou de U:, no notebook sem D:) no fim do boot. Com o
+ * BAT.EXE roda como qualquer .BAT; sem ele, linha a linha aqui (SET, mount,
+ * comandos), pulando @, ECHO OFF, REM e ::. */
+static void run_autoexec(void) {
+  char path[] = "D:\\AUTOEXEC.BAT";
+  char exe[DRV_PATH];
+  char* av[1];
+  char* buf;
+  int n, i;
+  if (!drives_is_mounted('D')) path[0] = 'U';
+  if (!drives_is_mounted(path[0]) || file_size(path) < 0) return;
+  serial_puts("[kernel] ");
+  serial_puts(path);
+  serial_puts("\n");
+  av[0] = path;
+  if (mod_find_exe("BAT", exe, (int)sizeof(exe)) == 0) {
+    launch_bat(path, 1, av);
+    return;
+  }
+  buf = (char*)kmalloc(8192);
+  if (!buf) return;
+  n = file_load(path, buf, 8192);
+  for (i = 0; n > 0 && i < n;) {
+    char line[256];
+    char* l = line;
+    int k = 0;
+    while (i < n && buf[i] != '\n') {
+      if (buf[i] != '\r' && k < (int)sizeof(line) - 1) line[k++] = buf[i];
+      i++;
+    }
+    i++;
+    line[k] = 0;
+    while (*l == ' ' || *l == '\t' || *l == '@') l++;
+    if (!*l || (l[0] == ':' && l[1] == ':') || is_rem(l) ||
+        !stricmp(l, "echo off") || !stricmp(l, "echo on"))
+      continue;
+    exec_line(l, 0);
+  }
+  kfree(buf);
+}
 int shell_exec_quiet(char* line) { return exec_line(line, 0); }
 
 extern char __bss_start[];
@@ -1904,6 +1952,8 @@ void kmain(const struct BootInfo* bi) {
 
   /* So depois de zerar a BSS: g_bootinfo vive nela. */
   bootinfo_set(bi);
+  /* Antes de qualquer alocacao: o SODOS.PAK do GRUB vai para depois do kernel. */
+  bootpak_early(bi);
   serial_init();
   fbcon_init(bi);
   serial_puts("\n[kernel] BootInfo v1, firmware=");
@@ -1991,12 +2041,16 @@ void kmain(const struct BootInfo* bi) {
   register_builtin("dlls", cmd_dlls);
   register_builtin("smp", cmd_smp);
   register_builtin("shutdown", cmd_shutdown);
+  register_builtin("set", cmd_set);
 
   drives_init();
   drives_automount();
   drives_mount_ramdisk();
+  bootpak_install();   /* pacote de boot (SODOS.PAK) -> Z:\SODOS\DRV */
   keyb_load_cfg();
   net_demo();
+  /* Antes do HTTPD: o ambiente (SET FAT32DLL=...) ja vale para tudo depois. */
+  run_autoexec();
   {
     char path[DRV_PATH];
     if (mod_find_exe("HTTPD.EXE", path, (int)sizeof(path)) == 0)

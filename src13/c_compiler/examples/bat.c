@@ -73,10 +73,13 @@ static char* trim(char* s) {
   return s;
 }
 
+/* Variaveis do lote; sem ela, o ambiente do sistema (k_getenv). */
 static const char* var_get(const char* name) {
+  static char sysval[VAR_VAL];
   int i;
   for (i = 0; i < nvars; i++)
     if (ci_eq(vname[i], name)) return vval[i];
+  if (k_getenv(name, sysval, VAR_VAL) >= 0) return sysval;
   return 0;
 }
 
@@ -247,6 +250,12 @@ static void do_set(char* rest) {
     return;
   }
   var_set(rest, trim(eq + 1));
+  /* Como no COMMAND.COM: SET no lote vale para o sistema todo depois dele
+   * (AUTOEXEC.BAT: SET FAT32DLL=D:\DRV\FAT32.DLL). */
+  if (errorlevel == 0 && k_setenv(rest, trim(eq + 1)) != 0) {
+    printf("set: ambiente do sistema cheio\n");
+    errorlevel = 1;
+  }
 }
 
 static void do_if(char* rest, struct flow* f) {

@@ -8,6 +8,7 @@
 #include "net.h"
 #include "module.h"
 #include "kexports.h"
+#include "env.h"
 #include "isr.h"
 #include "clip.h"
 #include "visual.h"
@@ -148,6 +149,21 @@ static int k_fdelete(const char* path) { return path ? drives_del(path) : -1; }
 static int k_frename(const char* from, const char* to) { return drives_rename(from, to); }
 static int k_mkdir(const char* path) { return path ? drives_mkdir(path) : -1; }
 static int k_rmdir(const char* path) { return path ? drives_rmdir(path) : -1; }
+/* Ambiente do sistema (SET): copia o valor para out. Tamanho; -1 se nao existe. */
+static int k_getenv(const char* name, char* out, int max) {
+  const char* v = env_get(name);
+  int n = 0;
+  if (!v) return -1;
+  while (v[n] && out && n < max - 1) {
+    out[n] = v[n];
+    n++;
+  }
+  if (out && max > 0) out[n] = 0;
+  while (v[n]) n++;
+  return n;
+}
+/* val vazio apaga. 0 ok. */
+static int k_setenv(const char* name, const char* val) { return env_set(name, val); }
 static int k_dfree(int letter, uint32_t* total_kb, uint32_t* free_kb) {
   return drives_space((char)letter, total_kb, free_kb);
 }
@@ -881,6 +897,8 @@ static const struct kexp table[] = {
   EXP(k_pwd),
   EXP(k_chdir),
   EXP(k_dir),
+  EXP(k_getenv),
+  EXP(k_setenv),
   EXP(k_fdelete),
   EXP(k_frename),
   EXP(k_mkdir),

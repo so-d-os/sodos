@@ -142,7 +142,7 @@ DISKS_CMD_O = $(DISKS_CMD_C:.c=.o)
 
 CMD_O = $(SHELL_CMD_O) $(DISKS_CMD_O)
 
-kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c video/gpu.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/smp.c kernel/reboot.c kernel/xhci.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c fs/fsdrv.c kernel/mm.c net/net.c net/httpd.c net/png.c net/wpa.c net/rtw89.c net/wifi.c kernel/module.c kernel/elf.c kernel/sched.c kernel/kthread.c kernel/kexports.c kernel/keymap.c kernel/clip.c kernel/vt.c $(SHELL_CMD_C) $(DISKS_CMD_C) kernel/ap_blob.o shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
+kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c video/gpu.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/smp.c kernel/reboot.c kernel/xhci.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c fs/fsdrv.c kernel/env.c kernel/bootpak.c kernel/mm.c net/net.c net/httpd.c net/png.c net/wpa.c net/rtw89.c net/wifi.c kernel/module.c kernel/elf.c kernel/sched.c kernel/kthread.c kernel/kexports.c kernel/keymap.c kernel/clip.c kernel/vt.c $(SHELL_CMD_C) $(DISKS_CMD_C) kernel/ap_blob.o shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
 	$(CC) $(CFLAGS) -c kernel/kernel.c -o kernel/kernel.o
 	$(CC) $(CFLAGS) -c kernel/bootinfo.c -o kernel/bootinfo.o
 	$(CC) $(CFLAGS) -c kernel/mm.c -o kernel/mm.o
@@ -165,6 +165,8 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(CC) $(CFLAGS) -c fs/fat.c -o fs/fat.o
 	$(CC) $(CFLAGS) -c fs/drives.c -o fs/drives.o
 	$(CC) $(CFLAGS) -c fs/fsdrv.c -o fs/fsdrv.o
+	$(CC) $(CFLAGS) -c kernel/env.c -o kernel/env.o
+	$(CC) $(CFLAGS) -c kernel/bootpak.c -o kernel/bootpak.o
 	$(CC) $(CFLAGS) -c fs/partition.c -o fs/partition.o
 	$(CC) $(CFLAGS) -c fs/fat_format.c -o fs/fat_format.o
 	$(CC) $(CFLAGS) -c video/visual.c -o video/visual.o
@@ -221,11 +223,11 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(AS) -f elf64 kernel/irq_stubs.asm -o kernel/irq_stubs.o
 	$(AS) -f elf64 kernel/modrun.asm -o kernel/modrun.o
 	$(AS) -f elf64 kernel/kernel_entry.asm -o kernel/kernel_entry.o
-	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 # Mesmo kernel de kernel.elf, com o stub Multiboot2 na frente. O GRUB carrega este ELF.
 kernel_multiboot.elf: kernel.elf kernel/multiboot_header.o kernel/linker_multiboot.ld
-	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 
 kernel.bin: kernel.elf
@@ -325,7 +327,20 @@ executables.c: hello.bin testapp.bin editor.bin hello.elf testapp.elf editor.elf
 	@echo "" >> $@
 	@echo "const int executable_count = 3;" >> $@
 
-os.img: boot.bin stage2.bin kernel.bin app.bin Makefile tools/validate_layout.sh
+# Pacote de boot (kernel/bootpak.c): arquivos que vao para o Z: a cada boot.
+# Cada item: origem=caminho no Z: (sem letra, / vira \).
+PAK_FILES = c_compiler/out/DRV/FAT32.DLL=SODOS/DRV/FAT32.DLL
+
+tools/mkpak: tools/mkpak.c
+	gcc -O2 -Wall -Werror -o $@ $<
+
+c_compiler/out/DRV/FAT32.DLL: drivers/fat32/fat32.c fs/fsdrv.h
+	$(MAKE) -C c_compiler out/DRV/FAT32.DLL
+
+sodos.pak: tools/mkpak c_compiler/out/DRV/FAT32.DLL Makefile
+	tools/mkpak $@ $(PAK_FILES)
+
+os.img: boot.bin stage2.bin kernel.bin app.bin sodos.pak Makefile tools/validate_layout.sh
 	@$(MAKE) --no-print-directory check-layout
 	@STAGE2_SIZE=$$(wc -c < stage2.bin); \
 	STAGE2_SECTORS=$$(( (STAGE2_SIZE + 511) / 512 )); \
@@ -335,14 +350,17 @@ os.img: boot.bin stage2.bin kernel.bin app.bin Makefile tools/validate_layout.sh
 	APP_SECTORS=$$(( (APP_SIZE + 511) / 512 )); \
 	KERNEL_SEEK=$$(( 1 + STAGE2_SECTORS )); \
 	APP_SEEK=$$(( KERNEL_SEEK + KERNEL_SECTORS )); \
-	TOTAL=$$(( APP_SEEK + APP_SECTORS )); \
+	PAK_SEEK=$$(( APP_SEEK + APP_SECTORS )); \
+	PAK_SECTORS=$$(( ($$(wc -c < sodos.pak) + 511) / 512 )); \
+	TOTAL=$$(( PAK_SEEK + PAK_SECTORS )); \
 	if [ "$$TOTAL" -lt 128 ]; then TOTAL=128; fi; \
 	echo "os.img: stage2_sectors=$$STAGE2_SECTORS kernel_sectors=$$KERNEL_SECTORS app_sectors=$$APP_SECTORS total=$$TOTAL"; \
 	dd if=/dev/zero of=os.img bs=512 count=$$TOTAL; \
 	dd if=boot.bin   of=os.img bs=512 seek=0          conv=notrunc; \
 	dd if=stage2.bin of=os.img bs=512 seek=1          conv=notrunc; \
 	dd if=kernel.bin of=os.img bs=512 seek=$$KERNEL_SEEK conv=notrunc; \
-	dd if=app.bin    of=os.img bs=512 seek=$$APP_SEEK   conv=notrunc
+	dd if=app.bin    of=os.img bs=512 seek=$$APP_SEEK   conv=notrunc; \
+	dd if=sodos.pak  of=os.img bs=512 seek=$$PAK_SEEK   conv=notrunc
 
 # Gera uma imagem ISO bootável a partir do os.img
 # Requer genisoimage ou mkisofs instalado no sistema
@@ -744,7 +762,7 @@ install-usb: os.img
 	echo "Concluído. Ajuste a ordem de boot da BIOS para iniciar pelo pendrive."
 
 # ISO cujo GRUB carrega o kernel por Multiboot2.
-iso-grub: kernel_multiboot.elf
+iso-grub: kernel_multiboot.elf sodos.pak
 	@if ! command -v grub-mkrescue >/dev/null 2>&1; then \
 	  echo "Erro: grub-mkrescue não encontrado. Instale com:"; \
 	  echo "  sudo apt-get install grub-pc-bin grub-common xorriso mtools"; \
@@ -753,12 +771,14 @@ iso-grub: kernel_multiboot.elf
 	rm -rf iso_root
 	mkdir -p iso_root/boot/grub
 	cp kernel_multiboot.elf iso_root/boot/kernel.elf
+	cp sodos.pak iso_root/boot/sodos.pak
 	echo 'set timeout=5' > iso_root/boot/grub/grub.cfg
 	echo 'insmod all_video' >> iso_root/boot/grub/grub.cfg
 	echo 'set default=0' >> iso_root/boot/grub/grub.cfg
 	echo '' >> iso_root/boot/grub/grub.cfg
 	echo 'menuentry "SODOS" {' >> iso_root/boot/grub/grub.cfg
 	echo '    multiboot2 /boot/kernel.elf' >> iso_root/boot/grub/grub.cfg
+	echo '    module2 /boot/sodos.pak' >> iso_root/boot/grub/grub.cfg
 	echo '    boot' >> iso_root/boot/grub/grub.cfg
 	echo '}' >> iso_root/boot/grub/grub.cfg
 	grub-mkrescue -o so-grub.iso iso_root
@@ -768,10 +788,11 @@ iso-grub: kernel_multiboot.elf
 # O "make" padrao so gera o os.img; este alvo recompila o kernel Multiboot2 e
 # troca o /boot/sodos/kernel.elf. Sem a entrada, cria a entrada e roda o update-grub.
 .PHONY: grub
-grub: kernel_multiboot.elf
-	@if [ -f /etc/grub.d/41_sodos ]; then \
+grub: kernel_multiboot.elf sodos.pak
+	@if [ -f /etc/grub.d/41_sodos ] && grep -q sodos.pak /etc/grub.d/41_sodos; then \
 	  sudo cp kernel_multiboot.elf /boot/sodos/kernel.elf && \
-	  echo "GRUB: /boot/sodos/kernel.elf atualizado. Reinicie e escolha SODOS (F6)."; \
+	  sudo cp sodos.pak /boot/sodos/sodos.pak && \
+	  echo "GRUB: kernel.elf e sodos.pak atualizados em /boot/sodos. Reinicie e escolha SODOS (F6)."; \
 	else \
 	  sudo sh tools/grub-entry.sh install; \
 	fi

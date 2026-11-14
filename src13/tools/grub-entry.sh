@@ -6,6 +6,7 @@
 #
 # Rode de dentro de src13/ depois de "make kernel_multiboot.elf",
 # ou use "make grub", que recompila e chama este script se preciso.
+# sodos.pak (pacote de boot: FAT32.DLL etc.) vai junto, como module2.
 # A entrada padrao do GRUB nao muda: o SODOS so sobe se for escolhido no menu.
 # Atalho F6: o tema OEM da Positivo esconde a lista do menu e so mostra as
 # teclas F5/F7, entao a entrada e escolhida pelo atalho, nao pelas setas.
@@ -21,6 +22,7 @@ case "$1" in
     [ -f kernel_multiboot.elf ] || { echo "kernel_multiboot.elf nao encontrado (rode em src13/)."; exit 1; }
     mkdir -p "$DEST"
     cp kernel_multiboot.elf "$DEST/kernel.elf"
+    [ -f sodos.pak ] && cp sodos.pak "$DEST/sodos.pak"
     cat > "$ENTRY" <<'EOF'
 #!/bin/sh
 exec tail -n +3 $0
@@ -29,6 +31,7 @@ menuentry 'SODOS (experimental)' --hotkey=f6 {
     insmod multiboot2
     search --no-floppy --set=root --file /boot/sodos/kernel.elf
     multiboot2 /boot/sodos/kernel.elf
+    if [ -f /boot/sodos/sodos.pak ]; then module2 /boot/sodos/sodos.pak; fi
     boot
 }
 EOF

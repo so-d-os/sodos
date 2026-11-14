@@ -124,6 +124,22 @@ multiboot_entry:
     je .mmap
     cmp eax, 8
     je .fb
+    cmp eax, 3
+    je .module
+    jmp .advance
+
+    ; module2 do grub.cfg: o primeiro e o pacote de boot (SODOS.PAK).
+.module:
+    test dword [BOOTINFO + 92], 1
+    jnz .advance
+    mov eax, [esi + 8]
+    mov ecx, [esi + 12]
+    cmp ecx, eax
+    jbe .advance
+    sub ecx, eax
+    mov [BOOTINFO + 112], eax
+    mov [BOOTINFO + 120], ecx
+    or dword [BOOTINFO + 92], 1
     jmp .advance
 
 .mmap:

@@ -539,13 +539,22 @@ build_bootinfo:
     mov eax, [e820_count]
     mov [BOOTINFO_ADDR + 84], eax
     mov dword [BOOTINFO_ADDR + 88], E820_MAX
-    mov dword [BOOTINFO_ADDR + 92], 0
+    mov dword [BOOTINFO_ADDR + 92], 2      ; BOOTINFO_FLAG_PAK_LBA
     mov dword [BOOTINFO_ADDR + 96], E820_ADDR
     mov dword [BOOTINFO_ADDR + 100], 0
 
     movzx eax, byte [boot_drive]
     mov [BOOTINFO_ADDR + 104], eax
     mov dword [BOOTINFO_ADDR + 108], 0
+
+    ; Pacote de boot (SODOS.PAK) logo depois do kernel e do app no disco de
+    ; boot; o kernel le e confere a assinatura (pode nao haver nenhum).
+    mov eax, [kernel_lba]
+    add eax, KERNEL_SECTORS + APP_SECTORS
+    mov [BOOTINFO_ADDR + 112], eax
+    mov dword [BOOTINFO_ADDR + 116], 0
+    mov dword [BOOTINFO_ADDR + 120], 0
+    mov dword [BOOTINFO_ADDR + 124], 0
     ret
 
 ; ---------------------------------------------------------------------------

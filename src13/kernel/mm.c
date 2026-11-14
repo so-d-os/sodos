@@ -10,6 +10,7 @@
 #include "kthread.h"
 #include "mm.h"
 #include "bootinfo.h"
+#include "bootpak.h"
 #include "serial.h"
 
 /* O kernel fica em 0x01000000.  A FAT ocupa 0xA00000-0xA59000 e o heap do
@@ -119,6 +120,8 @@ static uint32_t kernel_reserved_end(const struct BootInfo* bi) {
     uint64_t kend = bi->kernel_phys + bi->kernel_size;
     if (kend > end && kend <= 0xFFFFFFFFULL) end = (uint32_t)kend;
   }
+  /* SODOS.PAK do GRUB fica logo depois do kernel (bootpak_early). */
+  if (bootpak_reserved_end() > end) end = bootpak_reserved_end();
   return end;
 }
 

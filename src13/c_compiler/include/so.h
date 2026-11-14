@@ -48,6 +48,11 @@ struct k_dirent {
 };
 /* Pasta "U:\\SRC": quantas entradas (sem . e ..); -1 se nao e pasta. */
 int k_dir(const char* path, struct k_dirent* out, int max);
+/* Ambiente do sistema (SET NOME=valor, o mesmo do prompt e do AUTOEXEC.BAT).
+ * k_getenv copia o valor para out e devolve o tamanho; -1 se nao existe.
+ * k_setenv com val vazio apaga. 0 ok. */
+int k_getenv(const char* name, char* out, int max);
+int k_setenv(const char* name, const char* val);
 /* Apaga arquivo (aceita * e ?): 0, ou quantos com * e ?. -1 nao achou,
  * -3 e pasta, -4 somente leitura, -5 unidade sem apagar, -2 invalido. */
 int k_fdelete(const char* path);

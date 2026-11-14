@@ -5,6 +5,7 @@
 #include "net.h"
 #include "xhci.h"
 #include "fsdrv.h"
+#include "env.h"
 
 extern void fat_set_drive(uint32_t drive);
 extern void fat_set_partition_offset(uint32_t offset);
@@ -51,6 +52,7 @@ static uint32_t usb_gen;       /* xhci_disk_gen() do pendrive montado em U: */
 static uint32_t usb_try_ms;    /* ultima procura sem achar (0 = nenhuma) */
 static const struct fsdrv_ops* drv_ops[26];   /* DRV_EXT */
 static void* drv_vol[26];
+static uint32_t drv_gen[26];   /* env_gen() quando o driver foi escolhido */
 
 static struct mem_file d_ram[D_RAM_MAX];
 static int d_ram_count;
@@ -124,7 +126,32 @@ static int ext_mount(int idx, uint32_t disk, uint32_t lba, const uint8_t* boot) 
   drv_lba[idx] = lba;
   drv_ops[idx] = ops;
   drv_vol[idx] = vol;
+  drv_gen[idx] = env_gen();
   return 0;
+}
+
+/* Depois de um SET (FAT32DLL pode ter mudado): se o driver escolhido agora e
+ * outro, monta o volume com ele. O volume e o DLL antigos ficam na memoria
+ * (alguns KB): outra tarefa pode estar parada no meio de uma leitura deles. */
+static void ext_recheck(int idx) {
+  const struct fsdrv_ops* ops;
+  void* vol;
+  char L[3] = { (char)('A' + idx), ':', 0 };
+  drv_gen[idx] = env_gen();
+  ops = fsdrv_get("FAT32.DLL", L[0]);
+  if (!ops || ops == drv_ops[idx]) return;
+  vol = ops->mount(fsdrv_host(), drv_ata[idx], drv_lba[idx]);
+  if (!vol) {
+    puts_k(L);
+    puts_k(" o novo driver nao montou; fica o anterior.\n");
+    return;
+  }
+  drv_ops[idx] = ops;
+  drv_vol[idx] = vol;
+  puts_k(L);
+  puts_k(" FAT32 agora pelo ");
+  puts_k(fsdrv_path());
+  puts_k("\n");
 }
 
 /* 1 se name e pasta (raiz "" tambem). */
@@ -247,6 +274,7 @@ static int drv_present(int idx) {
 static int drv_ready(int idx) {
   if (!drv_present(idx)) return 0;
   if (drv_kind[idx] == DRV_FAT && fat_use(idx) != 0) return 0;
+  if (drv_kind[idx] == DRV_EXT && drv_gen[idx] != env_gen()) ext_recheck(idx);
   return 1;
 }
 

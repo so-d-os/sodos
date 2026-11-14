@@ -35,6 +35,13 @@
 #define BOOTINFO_MEM_ACPI_NVS     4u
 #define BOOTINFO_MEM_BAD          5u
 
+/* Pacote de boot (kernel/bootpak.c). PAK_MEM: o carregador (GRUB, module2)
+ * deixou o pacote em pak_addr, pak_size bytes. PAK_LBA: o pacote pode estar
+ * no disco de boot a partir do setor pak_addr (os.img: depois do kernel e do
+ * app); o kernel confere a assinatura. */
+#define BOOTINFO_FLAG_PAK_MEM 1u
+#define BOOTINFO_FLAG_PAK_LBA 2u
+
 /* Entrada do mapa fisico.  Formato identico a uma entrada E820 de 24 bytes. */
 struct BootMemEntry {
   uint64_t base;
@@ -61,10 +68,11 @@ struct BootInfo {
   uint32_t fb_format;      /* 80  BOOTINFO_FB_FORMAT_* */
   uint32_t mem_count;      /* 84  entradas validas */
   uint32_t mem_capacity;   /* 88  capacidade da area apontada */
-  uint32_t flags;          /* 92  reservado para o futuro; 0 agora */
+  uint32_t flags;          /* 92  BOOTINFO_FLAG_* */
   uint64_t mem_map_addr;   /* 96  endereco fisico de BootMemEntry[] */
   uint64_t boot_drive;     /* 104 unidade BIOS usada no boot */
-  uint64_t reserved[2];    /* 112 reservado; deve ser 0 */
+  uint64_t pak_addr;       /* 112 pacote de boot (SODOS.PAK): ver flags */
+  uint64_t pak_size;       /* 120 bytes do pacote na memoria (FLAG_PAK_MEM) */
 } __attribute__((packed));
 
 _Static_assert(sizeof(struct BootMemEntry) == 24u,
@@ -91,6 +99,8 @@ _Static_assert(offsetof(struct BootInfo, mem_map_addr) == 96u,
                "offset de mem_map_addr mudou");
 _Static_assert(offsetof(struct BootInfo, boot_drive) == 104u,
                "offset de boot_drive mudou");
+_Static_assert(offsetof(struct BootInfo, pak_addr) == 112u,
+               "offset de pak_addr mudou");
 
 void bootinfo_set(const struct BootInfo *bi);
 const struct BootInfo *bootinfo_get(void);

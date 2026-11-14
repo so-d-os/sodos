@@ -18,6 +18,11 @@
 #include <stdint.h>
 #include "fsdrv.h"
 
+/* Nome mostrado em mount/df; uma variante de teste usa -DFAT32_NAME=... */
+#ifndef FAT32_NAME
+#define FAT32_NAME "FAT32"
+#endif
+
 #define NAME_MAX 256
 #define PATH_MAX 260
 #define FATC_SECS 32u                  /* janela da FAT: 16 KB, 4096 entradas */
@@ -548,7 +553,7 @@ static int f_space(void* p, uint32_t* total_kb, uint32_t* free_kb) {
 }
 
 static const struct fsdrv_ops ops = {
-  FSDRV_ABI, "FAT32", f_probe, f_mount, f_umount, f_stat, f_read, f_items, f_long_name, f_space,
+  FSDRV_ABI, FAT32_NAME, f_probe, f_mount, f_umount, f_stat, f_read, f_items, f_long_name, f_space,
 };
 
 const struct fsdrv_ops* fs_driver(void) { return &ops; }

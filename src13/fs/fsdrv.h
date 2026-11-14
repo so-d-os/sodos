@@ -68,7 +68,12 @@ typedef const struct fsdrv_ops* (*fsdrv_entry_fn)(void);
 /* ---- lado do kernel (fs/fsdrv.c) ---- */
 /* 1 se o setor de boot e FAT32 (FATSz16 = 0 e FATSz32 != 0). */
 int fsdrv_is_fat32(const uint8_t* boot);
-/* Driver do formato (carrega o DLL na primeira vez). skip = unidade onde nao
- * procurar o DLL (a que esta sendo montada). 0 se nao ha DLL. */
+/* Driver do formato (carrega o DLL na primeira vez). Ordem: a variavel de
+ * ambiente (FAT32.DLL -> %FAT32DLL%, caminho completo), depois
+ * X:\SODOS\DRV\<dll> em Z: (SODOS.PAK), D:, ... e U:. skip = unidade onde
+ * nao procurar (a que esta sendo montada). 0 se nao ha DLL. Quem monta deve
+ * chamar de novo quando env_gen() muda: o driver pode ter sido trocado. */
 const struct fsdrv_ops* fsdrv_get(const char* dll, char skip);
+/* Caminho do ultimo driver devolvido por fsdrv_get. */
+const char* fsdrv_path(void);
 const struct fsdrv_host* fsdrv_host(void);

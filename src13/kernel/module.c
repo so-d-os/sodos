@@ -28,6 +28,9 @@ static char last_err[64];
 static uint32_t next_pid = 1;
 static uint32_t cur_pid;
 static int load_nest;
+/* mod_dll_load_sys: carrega este caminho mesmo se ja ha um DLL de mesmo nome
+ * (driver trocado por SET FAT32DLL=...). */
+static int load_fresh;
 static char exe_drive;
 
 static void set_err(const char* a, const char* b) {
@@ -331,7 +334,7 @@ static int load(const char* req, int want_dll) {
   int is64;
   uint32_t i;
   uint32_t total;
-  if (want_dll) {
+  if (want_dll && !load_fresh) {
     base_name(req, bname, sizeof(bname));
     id = find_loaded(bname);
     if (id >= 0) {
@@ -783,7 +786,9 @@ int mod_dll_load_sys(const char* path) {
   if (!path) return 0;
   cur_pid = 0;
   exe_drive = path[0] && path[1] == ':' ? path[0] : drives_current();
+  load_fresh = 1;
   id = load(path, 1);
+  load_fresh = 0;
   cur_pid = pid;
   exe_drive = drv;
   return id < 0 ? 0 : id + 1;
