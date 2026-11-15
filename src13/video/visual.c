@@ -3263,9 +3263,66 @@ static void cmd_move(struct cmd_con* c, uint8_t sc, int shift) {
   }
 }
 
+/* Tab: completa o que esta antes do cursor (comando, arquivo, pasta), como no
+ * prompt do DOS. Com varios candidatos a linha vai para o log e a lista embaixo. */
+static char tab_out[2048];
+static int tab_outn;
+static void tab_cap(char ch) {
+  if (tab_outn < (int)sizeof(tab_out) - 1) tab_out[tab_outn++] = ch;
+}
+
+static void cmd_tab(struct cmd_con* c) {
+  char buf[CMD_IN];
+  char tail[CMD_IN];
+  char shown[CMD_COLS];
+  char prompt[48];
+  int len, tl, i, plen = 0;
+  if (c->cur > c->inlen) c->cur = c->inlen;
+  len = c->cur;
+  tl = c->inlen - c->cur;
+  for (i = 0; i < len; i++) buf[i] = c->in[i];
+  buf[len] = '\0';
+  for (i = 0; i < tl; i++) tail[i] = c->in[c->cur + i];
+  tail[tl] = '\0';
+  tab_outn = 0;
+  shell_set_out(tab_cap);
+  shell_complete(buf, &len, CMD_IN - tl);
+  shell_set_out(0);
+  tab_out[tab_outn] = '\0';
+  if (tab_outn > 0) {
+    /* varios: mostra a linha como estava e a lista, igual ao DOS */
+    drives_prompt(prompt, (int)sizeof(prompt));
+    while (prompt[plen]) plen++;
+    for (i = 0; i < plen && i < CMD_COLS - 1; i++) shown[i] = prompt[i];
+    for (i = 0; i < c->inlen && plen + i < CMD_COLS - 1; i++) shown[plen + i] = c->in[i];
+    shown[plen + i] = '\0';
+    cmd_push(c, shown);
+    {
+      struct cmd_con* saved = cons_cap;
+      cons_cap = c;
+      c->ocol = 0;
+      for (i = 0; i < tab_outn; i++) cons_emit(tab_out[i]);
+      if (c->ocol) cons_emit('\n');
+      c->ocol = 0;
+      cons_cap = saved;
+    }
+  }
+  if (len + tl > CMD_IN - 1) return;
+  for (i = 0; i < len; i++) c->in[i] = buf[i];
+  for (i = 0; i < tl; i++) c->in[len + i] = tail[i];
+  c->inlen = len + tl;
+  c->in[c->inlen] = '\0';
+  c->cur = len;
+  c->sel = 0;
+}
+
 static int cmd_key(struct wm_win* w, char ch) {
   struct cmd_con* c = (struct cmd_con*)w->st;
   if (!c || c->busy) return 0;
+  if (ch == '\t') {
+    cmd_tab(c);
+    return 0;
+  }
   c->hist = 0; /* editou a linha: as setas recomecam do mais recente */
   if (ch == '\b' || ch == 0x7f) {
     /* com algo marcado na linha, apaga a marcacao; senao o anterior (Del: o seguinte) */
@@ -4318,6 +4375,20 @@ int gui_dock_open(const char* title, int w) {
   return gui_open(title);
 }
 
+/* Pedido de tamanho: a proxima gui_open nasce com wpct% da largura da tela e
+ * hpct% da altura acima da barra de tarefas (Explorer: 1/3 x 1/2). */
+static int gui_pct_w, gui_pct_h;
+
+int gui_open_pct(const char* title, int wpct, int hpct) {
+  gui_pct_w = wpct > 0 && wpct <= 100 ? wpct : 0;
+  gui_pct_h = hpct > 0 && hpct <= 100 ? hpct : 0;
+  {
+    int rc = gui_open(title);
+    gui_pct_w = gui_pct_h = 0;
+    return rc;
+  }
+}
+
 int gui_open(const char* title) {
   uint32_t bytes;
   int i, n = 0, slot = -1;
@@ -4383,6 +4454,23 @@ int gui_open(const char* title) {
     if (gui.ox < 0) gui.ox = 0;
     if (gui.oy < 0) gui.oy = 0;
     gui_clamp_pos();
+  }
+  if (gui_pct_w > 0 || gui_pct_h > 0) {
+    int scale = gui.scale > 0 ? gui.scale : 1;
+    int bar = glyph_rows() * scale + (gfx_h >= 400u ? 8 : 2);
+    int avail = (int)gfx_h - bar;
+    int w = gui_pct_w > 0 ? (int)gfx_w * gui_pct_w / 100 : gui.cw;
+    int h = gui_pct_h > 0 ? avail * gui_pct_h / 100 - gui.title_h : gui.ch;
+    if (w < 360) w = 360;
+    if (h < 240) h = 240;
+    if (w > (int)gfx_w) w = (int)gfx_w;
+    if (h > avail - gui.title_h) h = avail - gui.title_h;
+    gui.cw = w;
+    gui.ch = h;
+    if (gui.ox + gui.cw > (int)gfx_w) gui.ox = (int)gfx_w - gui.cw;
+    if (gui.oy + gui.title_h + gui.ch > avail) gui.oy = avail - gui.title_h - gui.ch;
+    if (gui.ox < 0) gui.ox = 0;
+    if (gui.oy < 0) gui.oy = 0;
   }
   if (gui_dock_w > 0) {
     int scale = (gfx_h >= 400u) ? 2 : 1;

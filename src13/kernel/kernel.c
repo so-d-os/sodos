@@ -1029,6 +1029,10 @@ static int hit_less(const struct tab_hit* a, const struct tab_hit* b) {
 }
 
 /* A lista em colunas, como o dir /w, e o prompt com a linha de novo. */
+/* Command do WIN: a linha digitada e desenhada pela janela; o Tab so muda
+ * buf e a lista vai para a saida (shell_set_out), sem eco nem prompt. */
+static int tab_quiet;
+
 static void tab_show(const struct tab_hit* hits, int nh, const char* buf, int len) {
   int w = 0, cols, k, c;
   for (k = 0; k < nh; k++) {
@@ -1040,7 +1044,7 @@ static void tab_show(const struct tab_hit* hits, int nh, const char* buf, int le
   w += 2;
   cols = 80 / w;
   if (cols < 1) cols = 1;
-  putc('\n');
+  if (!tab_quiet) putc('\n');
   for (k = 0; k < nh; k++) {
     int n = 0;
     puts_k(hits[k].name);
@@ -1053,6 +1057,7 @@ static void tab_show(const struct tab_hit* hits, int nh, const char* buf, int le
     else for (c = n; c < w; c++) putc(' ');
   }
   if (nh >= TAB_HITS) puts_k("  ...\n");
+  if (tab_quiet) return;
   {
     char prompt[64];
     drives_prompt(prompt, (int)sizeof(prompt));
@@ -1175,11 +1180,11 @@ static void complete_line(char* buf, int* io_i, int max) {
   if (tok + r >= max) goto out;
   while (i > tok) {
     i--;
-    putc('\b');
+    if (!tab_quiet) putc('\b');
   }
   for (k = 0; k < r; k++) {
     buf[tok + k] = rep[k];
-    putc(rep[k]);
+    if (!tab_quiet) putc(rep[k]);
   }
   i = tok + r;
   buf[i] = '\0';
@@ -1187,6 +1192,26 @@ static void complete_line(char* buf, int* io_i, int max) {
 out:
   if (items) kfree(items);
   if (hits) kfree(hits);
+}
+
+/* Tab para quem desenha a propria linha (Command do WIN): completa buf[0..*len)
+ * no lugar; com varios candidatos a lista sai por putc (shell_set_out).
+ * Devolve 1 se buf mudou. */
+int shell_complete(char* buf, int* len, int max) {
+  int before = *len;
+  char old[256];
+  int k, changed;
+  if (!buf || !len || *len < 0 || *len >= max) return 0;
+  for (k = 0; k < *len && k < (int)sizeof(old) - 1; k++) old[k] = buf[k];
+  old[k] = '\0';
+  buf[*len] = '\0';
+  tab_quiet = 1;
+  complete_line(buf, len, max);
+  tab_quiet = 0;
+  changed = *len != before;
+  for (k = 0; !changed && k < *len; k++)
+    if (buf[k] != old[k]) changed = 1;
+  return changed;
 }
 
 // Move o cursor sem apagar (a linha digitada pode quebrar para a linha de baixo)

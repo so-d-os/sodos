@@ -19,6 +19,9 @@ void putc(char c);
 /* Enquanto fn nao e nulo, putc e clear_screen mandam o texto para fn.
  * clear_screen manda '\\f'. */
 void shell_set_out(void (*fn)(char c));
+/* Tab de quem desenha a propria linha: completa buf[0..*len) no lugar (sem eco);
+ * com varios candidatos a lista sai por putc. 1 = buf mudou. */
+int shell_complete(char* buf, int* len, int max);
 void (*shell_get_out(void))(char c);
 /* Enquanto fn nao e nulo, o .EXE achado por shell_exec_line vai para fn.
  * fn devolve 0 quando nao quer o programa, e ai roda o mod_exec de sempre. */

@@ -181,6 +181,55 @@ static void path_normalize(char* p) {
   }
 }
 
+/* Argumento da linha de comando -> caminho completo, a partir da pasta atual
+ * do shell: "." (EXPLORER . no Command), "..", "SUB\\X", "\\X", "D:", "D:X". */
+static void path_resolve(const char* arg, char* out) {
+  char cwd[PATHMAX];
+  char tmp[PATHMAX];
+  int i, j, n;
+  k_pwd(cwd, PATHMAX);
+  if (!cwd[0] || cwd[1] != ':') copy_str(cwd, "D:\\", PATHMAX);
+  path_normalize(cwd);
+  if (arg[0] && arg[1] == ':') {
+    if (arg[2] == '\\' || arg[2] == '/') copy_str(tmp, arg, PATHMAX);
+    else if ((arg[0] | 32) == (cwd[0] | 32))
+      snprintf(tmp, PATHMAX, "%s%s", cwd, arg + 2); /* D:X na unidade atual */
+    else
+      snprintf(tmp, PATHMAX, "%c:\\%s", arg[0], arg + 2);
+  } else if (arg[0] == '\\' || arg[0] == '/') {
+    snprintf(tmp, PATHMAX, "%c:%s", cwd[0], arg);
+  } else {
+    snprintf(tmp, PATHMAX, "%s%s", cwd, arg);
+  }
+  path_normalize(tmp);
+  /* tira os "." e resolve os ".." (sem passar da raiz "X:\\") */
+  copy_str(out, tmp, PATHMAX);
+  out[3] = 0;
+  n = 3;
+  i = 3;
+  while (tmp[i]) {
+    char part[PATHMAX];
+    j = 0;
+    while (tmp[i] && tmp[i] != '\\' && j < PATHMAX - 1) part[j++] = tmp[i++];
+    part[j] = 0;
+    if (tmp[i] == '\\') i++;
+    if (!j || (j == 1 && part[0] == '.')) continue;
+    if (j == 2 && part[0] == '.' && part[1] == '.') {
+      if (n > 3) {
+        n--; /* barra final */
+        while (n > 3 && out[n - 1] != '\\') n--;
+        out[n] = 0;
+      }
+      continue;
+    }
+    if (n + j + 1 >= PATHMAX) break;
+    memcpy(out + n, part, (size_t)j);
+    n += j;
+    out[n++] = '\\';
+    out[n] = 0;
+  }
+}
+
 static void path_parent(char* p) {
   int l = (int)strlen(p);
   if (l > 3) {
@@ -896,7 +945,8 @@ int main(int argc, char** argv) {
   if (argc > 2 && argv[1] && (argv[1][0] == '/' || argv[1][0] == '-') &&
       (argv[1][1] == 'P' || argv[1][1] == 'p') && argv[2] && argv[2][0])
     g_folder = 1;
-  if (gui_open("Explorer") != 0) {
+  /* um terco da largura e metade da altura da tela */
+  if (gui_open_pct("Explorer", 33, 50) != 0) {
     printf("EXPLORER: nao abriu a janela\n");
     return 1;
   }
@@ -915,11 +965,14 @@ int main(int argc, char** argv) {
     copy_str(g_path, root, PATHMAX);
   }
   if (g_folder) {
-    copy_str(g_path, argv[2], PATHMAX);
-    path_normalize(g_path);
+    path_resolve(argv[2], g_path);
     gui_title(g_path);
-  } else if (argc > 1 && argv[1] && argv[1][0])
-    copy_str(g_path, argv[1], PATHMAX);
+  } else if (argc > 1 && argv[1] && argv[1][0]) {
+    /* EXPLORER . / EXPLORER SUB / EXPLORER ..: caminho completo, senao os
+     * arquivos da lista nao abrem (ficariam relativos a ".") */
+    path_resolve(argv[1], g_path);
+    gui_title(g_path);
+  }
   k_pwd(lastpath, PATHMAX);
   if (!g_path[0] && lastpath[0] && lastpath[1] == ':') {
     char root[4];
@@ -982,7 +1035,7 @@ int main(int argc, char** argv) {
     /* -------------------------------------------------------- coluna esquerda */
     lx = 10;
     ly = by + bh + 10;
-    lw = 210;
+    lw = sw < 760 ? 160 : 210; /* janela estreita (1/3 da tela) */
     lh = sh - ly - (ch + 26) - 10;
     if (lh < 200) lh = 200;
     /* visao de pasta (aberta do desktop): sem unidades nem atalhos */
@@ -1040,23 +1093,33 @@ int main(int argc, char** argv) {
     /* --------------------------------------------------- botoes da direita */
     by = fy + fh + 8;
     bx = fx;
-    if (wg_button(&id_open, bx, by, 110, 28, "Abrir", g_n > 0)) open_sel();
-    if (wg_button(&id_newdir, bx + 116, by, 130, 28, "Nova pasta", 1))
+    {
+      /* 662 px na largura cheia; janela estreita encolhe os seis botoes */
+      static const int bxs[7] = {0, 116, 252, 390, 486, 582, 662};
+      int k, bpos[7];
+      for (k = 0; k < 7; k++) bpos[k] = fw >= 662 ? bxs[k] : bxs[k] * fw / 662;
+#define BTN_X(k) (bx + bpos[k])
+#define BTN_W(k) (bpos[(k) + 1] - bpos[k] - (fw >= 662 ? 6 : 4))
+    if (wg_button(&id_open, BTN_X(0), by, BTN_W(0), 28, "Abrir", g_n > 0)) open_sel();
+    if (wg_button(&id_newdir, BTN_X(1), by, BTN_W(1), 28, "Nova pasta", 1))
       make_dir();
-    if (wg_button(&id_del, bx + 252, by, 130, 28,
+    if (wg_button(&id_del, BTN_X(2), by, BTN_W(2), 28,
                   "Excluir", g_n > 0 && g_sel >= 0))
       g_ask_del = 1;
-    if (wg_button(&id_sortname, bx + 390, by, 90, 28, "Nome", 1)) {
+    if (wg_button(&id_sortname, BTN_X(3), by, BTN_W(3), 28, "Nome", 1)) {
       g_sort = 0;
       sort_entries();
     }
-    if (wg_button(&id_sortsize, bx + 486, by, 90, 28, "Tamanho", 1)) {
+    if (wg_button(&id_sortsize, BTN_X(4), by, BTN_W(4), 28, "Tamanho", 1)) {
       g_sort = 1;
       sort_entries();
     }
-    if (wg_button(&id_sortdate, bx + 582, by, 80, 28, "Data", 1)) {
+    if (wg_button(&id_sortdate, BTN_X(5), by, bpos[6] - bpos[5], 28, "Data", 1)) {
       g_sort = 2;
       sort_entries();
+    }
+#undef BTN_X
+#undef BTN_W
     }
 
     /* -------------------------------------------------------- status bar */

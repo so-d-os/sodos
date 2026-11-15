@@ -704,6 +704,9 @@ static int k_ui_ia(int on) {
   return ui_ia_set(on);
 }
 static int k_gui_dock(const char* title, int w) { return gui_dock_open(title, w); }
+static int k_gui_open_pct(const char* title, int wpct, int hpct) {
+  return gui_open_pct(title, wpct, hpct);
+}
 
 /* ---------- TOP: programas, servicos e mapa da memoria ----------
  * Os blocos de imagem, exports e strings de um modulo tem dono 0; os dados
@@ -1109,6 +1112,7 @@ static const struct kexp table[] = {
   EXP(k_ui_glass),
   EXP(k_ui_ia),
   EXP(k_gui_dock),
+  EXP(k_gui_open_pct),
   EXP(k_thread_create),
   EXP(k_thread_join),
   EXP(k_thread_detach),

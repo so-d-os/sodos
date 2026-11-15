@@ -81,8 +81,8 @@ $(O)/BROWSER.EXE: $(BROWSER_OBJ) $(O)/TLS.DLL $(O)/GUI.DLL $(O)/IMG.DLL
 	$(HCC) -o $@ $(BROWSER_OBJ) $(O)/TLS.DLL $(O)/GUI.DLL $(O)/IMG.DLL
 
 # visualizador de imagem (utils/image_view.c). Nome 8.3: IMAGEVW.EXE
-$(O)/IMAGEVW.EXE: ../utils/image_view.c $(O)/GUI.DLL $(O)/IMG.DLL $(HCC) $(HEADERS)
-	$(HCC) -o $@ ../utils/image_view.c $(O)/GUI.DLL $(O)/IMG.DLL
+$(O)/IMAGEVW.EXE: ../utils/image_view.c $(O)/GUI.DLL $(O)/IMGBIG.DLL $(HCC) $(HEADERS)
+	$(HCC) -o $@ ../utils/image_view.c $(O)/GUI.DLL $(O)/IMGBIG.DLL
 
 # Player de video. Nome 8.3: VIDPLAY.EXE
 $(O)/VIDPLAY.EXE: ../utils/videoplay.c $(O)/GUI.DLL $(O)/IMG.DLL $(HCC) $(HEADERS)

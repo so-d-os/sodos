@@ -14,6 +14,15 @@ __export int gui_open(const char* title) {
   return 0;
 }
 
+/* Janela com uma fracao da tela: wpct% da largura e hpct% da altura. */
+__export int gui_open_pct(const char* title, int wpct, int hpct) {
+  int rc = k_gui_open_pct(title, wpct, hpct);
+  if (rc != 0) return rc;
+  k_gui_size(&win_w, &win_h);
+  k_gui_font(&char_w, &char_h);
+  return 0;
+}
+
 /* Janela docada na lateral direita (painel de IA): w = largura em pixels. */
 __export int gui_dock_open(const char* title, int w) {
   int rc = k_gui_dock(title, w);

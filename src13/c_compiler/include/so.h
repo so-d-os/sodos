@@ -287,6 +287,8 @@ void k_net_pump(void);
 /* janela canvas: so funciona num .EXE aberto pelo WIN. Cores 0xRRGGBB.
  * Use gui.h (GUI.DLL), que tem as constantes de eventos e teclas. */
 int k_gui_open(const char* title);
+/* abre com wpct% da largura e hpct% da altura da tela (0 = padrao) */
+int k_gui_open_pct(const char* title, int wpct, int hpct);
 void k_gui_close(void);
 void k_gui_title(const char* title);
 void k_gui_size(int* w, int* h);

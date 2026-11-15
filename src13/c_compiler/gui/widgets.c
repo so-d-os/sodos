@@ -173,8 +173,13 @@ __export int wg_status(int x, int y, int w, const char* left, const char* right)
   gui_fill(x, y, w, h, g_theme->face);
   gui_fill(x, y, w, 1, g_theme->face_hi);
   gui_fill(x, y + 1, w, 1, g_theme->face_lo);
-  if (left) gui_text(x + 8, y + 5, left, -1, g_theme->text, g_theme->face,
-                     GUI_TEXT_NOBG);
+  {
+    /* janela estreita: o texto da esquerda e cortado antes do da direita */
+    int rw = right ? wg_text_w(right) + 16 : 0;
+    if (left && w - rw - 16 > 0)
+      gui_text_fit(x + 8, y + 5, left, w - rw - 16, g_theme->text, g_theme->face,
+                   GUI_TEXT_NOBG);
+  }
   if (right) {
     int rw = wg_text_w(right);
     gui_text(x + w - rw - 8, y + 5, right, -1, g_theme->text_dim,
