@@ -32,6 +32,7 @@ void vga_force_text_mode(void);
 /* So com k_gui_raw(1) (emuladores): entrada crua da janela com foco. */
 #define GUI_EV_SCAN  7  /* ev[3] = byte do teclado PS/2 (set 1, com E0 e soltar) */
 #define GUI_EV_MOVE  8  /* ev[1]=x ev[2]=y ev[3]=botoes (1 esq, 2 dir, 4 meio) */
+#define GUI_EV_RESIZE 9 /* a janela mudou de tamanho: ev[1]=largura ev[2]=altura */
 #define GUI_KEY_UP    0x101
 #define GUI_KEY_DOWN  0x102
 #define GUI_KEY_LEFT  0x103
@@ -58,6 +59,8 @@ int gui_event(int* ev, int timeout_ms);
 int gui_input_pending(void);
 /* Entrada crua (GUI_EV_SCAN/GUI_EV_MOVE) para a janela do programa: 0 ok. */
 int gui_raw_set(int on);
+/* 1: o programa trata Ctrl+V (recebe 22) em vez de o WIN digitar o texto. */
+int gui_clip_set(int on);
 void gui_pixels(int x, int y, int w, int h, const void* rgba, int stride);
 /* chamado pelo WIN em volta de mod_exec: so ai a janela pode abrir */
 void gui_session(int allowed);
@@ -89,6 +92,8 @@ int ui_ia_get(void);
 int gui_dock_open(const char* title, int w);
 /* Pede ao WIN que abra um programa (janela). Executa no proximo quadro. */
 int win_launch(const char* path);
+/* Arquivo/pasta mudou: se o caminho e da pasta DESKTOP, o desktop rele. */
+void win_desk_touch(const char* path);
 
 /* Lista "titulo x y w h". -1 se o desktop nao esta aberto. */
 int win_windows(char* out, int max);

@@ -1,7 +1,7 @@
 /* nsWidgetFactory.cpp - construtores do backend do SODOS. */
 #include "nsWidgetFactory.h"
 
-#include "HeadlessClipboard.h"
+#include "SodosClipboard.h"
 #include "mozilla/Components.h"
 #include "mozilla/ModuleUtils.h"
 #include "mozilla/WidgetUtils.h"
@@ -14,7 +14,7 @@ using namespace mozilla;
 using namespace mozilla::widget;
 
 NS_IMPL_COMPONENT_FACTORY(nsIClipboard) {
-  nsCOMPtr<nsIClipboard> inst = new HeadlessClipboard();
+  nsCOMPtr<nsIClipboard> inst = new SodosClipboard();
   return inst.forget();
 }
 

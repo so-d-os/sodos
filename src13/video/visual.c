@@ -2403,6 +2403,11 @@ static int note_hit(struct wm_win* w, int top, int scale, int mx, int my) {
   return note_at_rc(w, scale, tl, tc);
 }
 
+/* Caractere sob o mouse (sem arredondar para a borda mais perto). */
+static int note_dbl_pos(struct wm_win* w, int top, int scale, int mx, int my) {
+  return note_hit(w, top, scale, mx - FONT_W * scale / 2, my);
+}
+
 /* Rola so o necessario para o cursor aparecer. */
 static void note_follow_caret(struct wm_win* w, int top, int scale) {
   int r, c;
@@ -3105,6 +3110,58 @@ static void cmd_geom(struct wm_win* w, struct cmd_con* c, int title_h, int scale
 }
 
 /* Linha virtual e coluna sob o ponto (mx, my). */
+/* Letra de palavra para o duplo clique: letras, digitos, _ e acentos. */
+static int word_ch(unsigned char ch) {
+  return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+         ch == '_' || ch >= 128;
+}
+
+/* Palavra em s[0..n) que contem k (ou termina em k): [*a, *b). 0 se nao ha. */
+static int word_at(const char* s, int n, int k, int* a, int* b) {
+  if (k > n) k = n;
+  if (k >= n || !word_ch((unsigned char)s[k])) {
+    if (k > 0 && word_ch((unsigned char)s[k - 1])) k--;
+    else return 0;
+  }
+  *a = k;
+  *b = k;
+  while (*a > 0 && word_ch((unsigned char)s[*a - 1])) (*a)--;
+  while (*b < n && word_ch((unsigned char)s[*b])) (*b)++;
+  return 1;
+}
+
+/* Dois cliques na mesma janela, perto e em ate 450 ms. O terceiro clique
+ * recomeca a contagem. */
+static uint32_t dbl_t;
+static int dbl_w = -1, dbl_x, dbl_y;
+
+static int dbl_click(int win, int x, int y) {
+  uint32_t now = (uint32_t)irq_ticks();
+  int dx = x - dbl_x, dy = y - dbl_y;
+  int hit = win == dbl_w && now - dbl_t < 450u && dx >= -4 && dx <= 4 && dy >= -4 && dy <= 4;
+  dbl_t = now;
+  dbl_w = hit ? -1 : win;
+  dbl_x = x;
+  dbl_y = y;
+  return hit;
+}
+
+/* Duplo clique no Command: marca a palavra da linha r sob a coluna k. */
+static void cmd_word(struct cmd_con* c, int r, int k) {
+  char row[CMD_COLS + 48 + CMD_IN];
+  int len = cmd_row_text(c, r, row, (int)sizeof(row));
+  int a, b;
+  if (!word_at(row, len, k, &a, &b)) return;
+  c->sel = 1;
+  c->ar = c->br = r;
+  c->ac = a;
+  c->bc = b;
+  if (r == c->n && !c->busy) {
+    int plen = cmd_plen();
+    if (b >= plen) c->cur = b - plen;
+  }
+}
+
 static void cmd_hit(struct wm_win* w, struct cmd_con* c, int title_h, int scale, int mx, int my,
                     int* r, int* col) {
   struct cmd_geo g;
@@ -3121,6 +3178,14 @@ static void cmd_hit(struct wm_win* w, struct cmd_con* c, int title_h, int scale,
     *r = g.start + li;
   }
   *col = k;
+}
+
+/* Como cmd_hit, mas a coluna e a da celula sob o mouse. */
+static void cmd_hit_cell(struct wm_win* w, struct cmd_con* c, int title_h, int scale, int mx,
+                         int my, int* r, int* col) {
+  struct cmd_geo g;
+  cmd_geom(w, c, title_h, scale, &g);
+  cmd_hit(w, c, title_h, scale, mx - g.cell / 2, my, r, col);
 }
 
 static void cmd_draw(struct wm_win* w, int focus, int title_h, int scale,
@@ -3202,6 +3267,9 @@ static void wm_open_command(struct wm_win* wins, int* focus, int big) {
   *focus = i;
 }
 
+static void title_max_btn(int x, int y, int s, int maxed);
+static int wm_is_max(struct wm_win* w);
+
 static void wm_draw_inner(struct wm_win* w, int focus, int title_h, int scale,
                           uint32_t col_win, uint32_t col_title, uint32_t col_white,
                           uint32_t col_black, uint32_t col_btn, uint32_t col_inactive) {
@@ -3219,6 +3287,7 @@ static void wm_draw_inner(struct wm_win* w, int focus, int title_h, int scale,
   fill_round(close_x, w->y + 3, close_s, close_s, 5, gui_col(0xC23440));
   draw_text_t(close_x + (close_s > FONT_W * scale ? (close_s - FONT_W * scale) / 2 : 0),
               ty, "x", gui_col(UI_TEXT), scale);
+  title_max_btn(close_x - close_s - 4, w->y + 3, close_s, wm_is_max(w));
   fill_rect(w->x + w->w - 12, w->y + w->h - 12, 10, 10, col_black);
   fill_rect(w->x + w->w - 11, w->y + w->h - 11, 8, 8, col_btn);
   if (w->kind == WM_KIND_NOTE) {
@@ -3535,6 +3604,8 @@ struct gui_win {
   int drag_ox, drag_oy;
   int raw;      /* k_gui_raw: scancodes e movimento crus (emuladores) */
   int raw_btn;  /* botoes apertados dentro da janela (captura do arrasto) */
+  int clip;     /* k_gui_clip: o programa trata Ctrl+V (recebe 22) */
+  int maxed;    /* maximizada pelo botao/duplo clique no titulo */
 };
 
 struct gui_task {
@@ -3745,6 +3816,8 @@ int gui_open(const char* title) {
   gui.qr = 0;
   gui.ask_close = 0;
   gui.drag = 0;
+  gui.clip = 0;
+  gui.maxed = 0;
   gui.z = ++zseq;
   gui_focus = gui_ix;
   gui_stole = 1;
@@ -4011,6 +4084,12 @@ int gui_raw_set(int on) {
   return 0;
 }
 
+int gui_clip_set(int on) {
+  if (!gui_ok()) return -1;
+  gui.clip = on ? 1 : 0;
+  return 0;
+}
+
 /* Janela com foco em modo cru, ou -1. */
 static int gui_raw_focus(void) {
   if (!gwins || gui_focus < 0 || gui_focus >= GUI_MAX) return -1;
@@ -4039,6 +4118,45 @@ int win_api_key(int ch) {
   gq_push(&gwins[gui_focus], GUI_EV_KEY, 0, 0, ch);
   win_api_dirty = 1;
   return 0;
+}
+
+/* Ctrl+V numa janela de programa que nao trata a area de transferencia: o
+ * texto entra como teclas, aos poucos, porque a fila so tem GUI_Q lugares.
+ * Quebras de linha e Tab viram espaco (Enter enviaria o campo no meio). */
+static char gpaste[CLIP_MAX];
+static int gpaste_n, gpaste_i;
+static int gpaste_win = -1;
+
+static void gui_paste_pump(void) {
+  struct gui_win* w;
+  if (gpaste_win < 0) return;
+  if (!gwins || gpaste_win != gui_focus || !gwins[gpaste_win].open) {
+    gpaste_win = -1;
+    return;
+  }
+  w = &gwins[gpaste_win];
+  if (w->qn >= GUI_Q - 4) return;
+  while (gpaste_i < gpaste_n && w->qn < GUI_Q - 4)
+    gq_push(w, GUI_EV_KEY, 0, 0, (unsigned char)gpaste[gpaste_i++]);
+  if (gpaste_i >= gpaste_n) gpaste_win = -1;
+  win_api_dirty = 1;
+}
+
+static void gui_paste_start(int gid) {
+  int n = clip_get(gpaste, (int)sizeof(gpaste));
+  int k, m = 0;
+  while (n > 0 && (gpaste[n - 1] == '\n' || gpaste[n - 1] == '\r')) n--;
+  for (k = 0; k < n; k++) {
+    unsigned char ch = (unsigned char)gpaste[k];
+    if (ch == '\r') continue;
+    if (ch == '\n' || ch == '\t') ch = ' ';
+    if (ch < 32 || ch == 127) continue;
+    gpaste[m++] = (char)ch;
+  }
+  gpaste_n = m;
+  gpaste_i = 0;
+  gpaste_win = m > 0 ? gid : -1;
+  gui_paste_pump();
 }
 
 
@@ -4944,11 +5062,19 @@ struct desk_item {
   char path[48];
   int image;
   int dir;
+  int lnk;   /* NOME.LNK: atalho, o conteudo e o caminho do programa */
   int tw, th;
   uint8_t* px;
 };
 static struct desk_item desk_items[DESK_MAX];
 static int desk_n;
+static volatile int desk_dirty;   /* win_desk_touch: rele no proximo quadro */
+/* Renomear no desktop (depois de Nova pasta): indice, texto e nome antigo */
+static int desk_ren = -1;
+static char desk_ren_buf[13];
+static int desk_ren_len;
+static int desk_ren_all;   /* nome todo marcado: digitar substitui */
+static char desk_ren_old[16];
 
 static void desk_free(void) {
   int i;
@@ -5077,12 +5203,22 @@ static void desk_load(void) {
     it->path[plen + k] = 0;
     it->dir = dir;
     it->image = 0;
+    it->lnk = !dir && desk_ext_is(it->name, "LNK");
     if (!dir && desk_is_image(it->name)) it->image = 1;
     else if (!dir && desk_is_video(it->name)) it->image = 2;
     it->tw = it->th = 0;
     it->px = 0;
     if (it->image == 1) desk_load_thm(it);
     desk_n++;
+  }
+  if (desk_ren >= 0) {
+    /* a lista mudou durante a edicao: acha o item pelo nome antigo */
+    int i, j;
+    desk_ren = -1;
+    for (i = 0; i < desk_n; i++) {
+      for (j = 0; desk_items[i].name[j] && desk_items[i].name[j] == desk_ren_old[j]; j++) { }
+      if (!desk_items[i].name[j] && !desk_ren_old[j]) desk_ren = i;
+    }
   }
 }
 
@@ -5099,6 +5235,192 @@ static int desk_refresh(void) {
   }
   desk_load();
   return 1;
+}
+
+/* Chamado por k_fsave/k_mkdir/k_fdelete/...: caminho com DESKTOP marca o
+ * desktop para reler os icones (o laco do WIN olha desk_dirty). */
+void win_desk_touch(const char* path) {
+  static const char key[] = "DESKTOP";
+  int i, j;
+  if (!path) return;
+  for (i = 0; path[i]; i++) {
+    for (j = 0; key[j]; j++) {
+      char c = path[i + j];
+      if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+      if (c != key[j]) break;
+    }
+    if (!key[j]) {
+      desk_dirty = 1;
+      return;
+    }
+  }
+}
+
+static int desk_dir_ok(const char* p) {
+  char buf[16];
+  return file_list(p, buf, (int)sizeof(buf)) >= 0;
+}
+
+/* Pasta do desktop (D:, ou U: sem D:), criando USER\DEFAULT\DESKTOP se
+ * faltar. out recebe o caminho com barra no fim. 0 = ok. */
+static int desk_ensure_root(char* out, int max) {
+  static const char* parts[3] = {"USER", "DEFAULT", "DESKTOP"};
+  char p[48];
+  int i, k, n;
+  char L;
+  {
+    /* a pasta que o desktop ja mostra (D: com itens, ou a do pendrive) */
+    char list[DESK_LIST];
+    const char* pre;
+    if (desk_read_list(list, &pre) > 0) {
+      wm_copy_str(out, max, pre);
+      return 0;
+    }
+  }
+  L = drives_is_mounted('D') ? 'D' : 'U';
+  if (L == 'U' && !drives_is_mounted('U') && drives_mount_usb() != 0) return -1;
+  n = 0;
+  p[n++] = L;
+  p[n++] = ':';
+  p[n++] = '\\';
+  for (i = 0; i < 3; i++) {
+    for (k = 0; parts[i][k] && n < (int)sizeof(p) - 2; k++) p[n++] = parts[i][k];
+    p[n] = 0;
+    if (!desk_dir_ok(p)) drives_mkdir(p);
+    p[n++] = '\\';
+    p[n] = 0;
+  }
+  if (!desk_dir_ok(p)) return -1;
+  wm_copy_str(out, max, p);
+  return 0;
+}
+
+/* Nome do icone em edicao: Enter grava (rename no disco), Esc cancela. */
+static void desk_ren_start(int i) {
+  int k;
+  if (i < 0 || i >= desk_n) return;
+  for (k = 0; desk_items[i].name[k] && k < 12; k++) desk_ren_buf[k] = desk_items[i].name[k];
+  desk_ren_buf[k] = 0;
+  desk_ren_len = k;
+  desk_ren_all = 1;
+  wm_copy_str(desk_ren_old, (int)sizeof(desk_ren_old), desk_items[i].name);
+  desk_ren = i;
+}
+
+static void desk_ren_commit(void) {
+  struct desk_item* it;
+  char to[64];
+  int plen, nlen, i, same = 1;
+  if (desk_ren < 0 || desk_ren >= desk_n) {
+    desk_ren = -1;
+    return;
+  }
+  it = &desk_items[desk_ren];
+  desk_ren = -1;
+  while (desk_ren_len > 0 && (desk_ren_buf[desk_ren_len - 1] == ' ' ||
+                              desk_ren_buf[desk_ren_len - 1] == '.'))
+    desk_ren_len--;
+  desk_ren_buf[desk_ren_len] = 0;
+  if (!desk_ren_len) return;
+  for (i = 0; it->name[i] || desk_ren_buf[i]; i++)
+    if (it->name[i] != desk_ren_buf[i]) same = 0;
+  if (same) return;
+  nlen = 0;
+  while (it->name[nlen]) nlen++;
+  plen = 0;
+  while (it->path[plen]) plen++;
+  plen -= nlen;
+  if (plen <= 0 || plen + desk_ren_len >= (int)sizeof(to)) return;
+  for (i = 0; i < plen; i++) to[i] = it->path[i];
+  for (i = 0; i < desk_ren_len; i++) to[plen + i] = desk_ren_buf[i];
+  to[plen + desk_ren_len] = 0;
+  if (desk_dir_ok(to) || file_size(to) >= 0) {
+    app_status_set("ja existe com esse nome");
+    return;
+  }
+  if (drives_rename(it->path, to) != 0) {
+    app_status_set("nao renomeou");
+    return;
+  }
+  desk_load();
+}
+
+/* Tecla durante a edicao (ASCII; 0 ignora). */
+static void desk_ren_key(int c) {
+  if (desk_ren_all && c != '\r' && c != '\n' && c != 27) {
+    desk_ren_all = 0;
+    if (c == 8 || (c > 32 && c < 127)) {
+      desk_ren_len = 0;
+      desk_ren_buf[0] = 0;
+      if (c == 8) return;
+    }
+  }
+  if (c == '\r' || c == '\n') desk_ren_commit();
+  else if (c == 27) desk_ren = -1;
+  else if (c == 8) {
+    if (desk_ren_len > 0) desk_ren_buf[--desk_ren_len] = 0;
+  } else if (c > 32 && c < 127 && desk_ren_len < 12 && c != '\\' && c != '/' && c != ':' &&
+             c != '*' && c != '?' && c != '"' && c != '<' && c != '>' && c != '|') {
+    if (c >= 'a' && c <= 'z') c -= 32;
+    desk_ren_buf[desk_ren_len++] = (char)c;
+    desk_ren_buf[desk_ren_len] = 0;
+  }
+}
+
+/* Botao direito no desktop > Nova pasta: NOVAPASTA, NOVAP001, ... */
+static void desk_new_folder(void) {
+  char root[48];
+  char full[64];
+  int i, n;
+  if (desk_ensure_root(root, (int)sizeof(root)) != 0) {
+    app_status_set("sem pasta do desktop");
+    return;
+  }
+  for (i = 0; i < 100; i++) {
+    char name[12];
+    if (i == 0) wm_copy_str(name, (int)sizeof(name), "NOVAPASTA");
+    else {
+      wm_copy_str(name, (int)sizeof(name), "NOVAP000");
+      name[5] = (char)('0' + i / 100);
+      name[6] = (char)('0' + (i / 10) % 10);
+      name[7] = (char)('0' + i % 10);
+    }
+    wm_copy_str(full, (int)sizeof(full), root);
+    n = 0;
+    while (full[n]) n++;
+    wm_copy_str(full + n, (int)sizeof(full) - n, name);
+    if (desk_dir_ok(full) || file_size(full) >= 0) continue;
+    if (drives_mkdir(full) == 0) {
+      int k;
+      desk_load();
+      for (k = 0; k < desk_n; k++) {
+        int j;
+        for (j = 0; name[j] && desk_items[k].name[j] == name[j]; j++) { }
+        if (!name[j] && !desk_items[k].name[j]) {
+          desk_ren_start(k);
+          break;
+        }
+      }
+      return;
+    }
+  }
+  app_status_set("nao criou a pasta");
+}
+
+/* Atalho .LNK: primeira linha do arquivo e o caminho do .EXE. */
+static int desk_lnk_target(const char* lnk, char* out, int max) {
+  char buf[96];
+  int n = file_load(lnk, buf, (int)sizeof(buf));
+  int i, j = 0;
+  if (n <= 0) return 0;
+  if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
+  buf[n] = 0;
+  i = 0;
+  while (buf[i] == ' ' || buf[i] == '\t') i++;
+  for (; buf[i] && buf[i] != '\r' && buf[i] != '\n' && j < max - 1; i++) out[j++] = buf[i];
+  while (j > 0 && (out[j - 1] == ' ' || out[j - 1] == '\t')) j--;
+  out[j] = 0;
+  return j > 0;
 }
 
 static int desk_place(int index, int icon, int ch, int scale, int sw, int sh, int bar_h,
@@ -5210,8 +5532,46 @@ static void desk_draw(int icon, int ch, int scale, int sw, int sh, int bar_h,
       fill_rect(x, y + icon - 1, icon, 1, col_black);
       fill_rect(x, y, 1, icon, col_black);
       fill_rect(x + icon - 1, y, 1, icon, col_black);
+      if (it->lnk) {
+        /* seta de atalho no canto de baixo, a esquerda */
+        int a = icon / 3;
+        int t = a / 6 > 1 ? a / 6 : 1;
+        int k;
+        uint32_t blue = desk_color(32, 96, 200);
+        if (a < 6) a = 6;
+        fill_rect(x + 1, y + icon - 1 - a, a, a, col_white);
+        fill_rect(x + 1, y + icon - 1 - a, a, 1, col_black);
+        fill_rect(x + a, y + icon - 1 - a, 1, a, col_black);
+        for (k = 0; k < a - 4; k++)
+          fill_rect(x + 3 + k, y + icon - 4 - k - t, t, t, blue);
+        fill_rect(x + a - 1 - a / 2, y + icon - a + 1, a / 2, t, blue);
+        fill_rect(x + a - 2, y + icon - a + 1, t, a / 2, blue);
+      }
     }
-    draw_string_scaled(x, y + icon + 2, it->name, col_white, col_desk, scale);
+    if (i == desk_ren) {
+      int bw = 12 * FONT_W * scale + 8;
+      int bh = (vga_bios_font_ok ? FONT_H : 8) * scale + 4;
+      int tw = desk_ren_len * FONT_W * scale;
+      fill_rect(x - 2, y + icon, bw, bh, col_black);
+      fill_rect(x - 1, y + icon + 1, bw - 2, bh - 2, col_white);
+      if (desk_ren_all) {
+        uint32_t sel = desk_color(32, 96, 200);
+        fill_rect(x + 2, y + icon + 2, tw, bh - 4, sel);
+        draw_string_scaled(x + 2, y + icon + 2, desk_ren_buf, col_white, sel, scale);
+      } else
+        draw_string_scaled(x + 2, y + icon + 2, desk_ren_buf, col_black, col_white, scale);
+      fill_rect(x + 2 + tw, y + icon + 2, scale > 1 ? 2 : 1, bh - 4, col_black);
+    } else if (it->lnk) {
+      char lab[16];
+      int k = 0;
+      while (it->name[k] && it->name[k] != '.' && k < 15) {
+        lab[k] = it->name[k];
+        k++;
+      }
+      lab[k] = 0;
+      draw_string_scaled(x, y + icon + 2, lab, col_white, col_desk, scale);
+    } else
+      draw_string_scaled(x, y + icon + 2, it->name, col_white, col_desk, scale);
   }
 }
 
@@ -5505,8 +5865,8 @@ static void wm_open_fonts(struct wm_win* wins, int* focus, int big) {
   *focus = i;
 }
 
-/* Menu de contexto do desktop: Console e Configuracoes de tela. */
-#define POP_N 3
+/* Menu de contexto do desktop: Nova pasta, Console, Configuracoes de tela, Design. */
+#define POP_N 4
 static void pop_geom(int ax, int ay, int scale, int scr_w, int scr_h, int bar_h,
                      int* x, int* y, int* rw, int* rh) {
   int ch = (vga_bios_font_ok ? FONT_H : 8) * scale;
@@ -5800,6 +6160,114 @@ static void dc_present(int x, int y, int cx, int cy) {
   }
 }
 
+/* ---- maximizar / restaurar (botao ao lado do X e duplo clique no titulo) */
+static int max_bar_h(int scale) {
+  return (vga_bios_font_ok ? FONT_H : 8) * scale + (gfx_h >= 400u ? 8 : 2);
+}
+
+/* Botao de maximizar: quadrado vazado; maximizada, dois quadrados (restaurar). */
+static void title_max_btn(int x, int y, int s, int maxed) {
+  int m = s / 4 > 2 ? s / 4 : 2;
+  int t = s >= 20 ? 2 : 1;
+  uint32_t fg = gui_col(UI_TEXT);
+  fill_round(x, y, s, s, 5, gui_col(0x3A4250));
+  if (!maxed) {
+    int bx = x + m, by = y + m, bw = s - 2 * m, bh = s - 2 * m;
+    fill_rect(bx, by, bw, t * 2, fg);
+    fill_rect(bx, by + bh - t, bw, t, fg);
+    fill_rect(bx, by, t, bh, fg);
+    fill_rect(bx + bw - t, by, t, bh, fg);
+  } else {
+    int d = s / 6 > 1 ? s / 6 : 2;
+    int bw = s - 2 * m - d, bh = bw;
+    int bx = x + m + d, by = y + m;
+    /* de tras (so as bordas de cima e da direita aparecem) */
+    fill_rect(bx, by, bw, t, fg);
+    fill_rect(bx + bw - t, by, t, bh, fg);
+    fill_rect(bx, by, t, d, fg);
+    fill_rect(bx + bw - d, by + bh - t, d, t, fg);
+    /* da frente */
+    bx -= d;
+    by += d;
+    fill_rect(bx, by, bw, t * 2, fg);
+    fill_rect(bx, by + bh - t, bw, t, fg);
+    fill_rect(bx, by, t, bh, fg);
+    fill_rect(bx + bw - t, by, t, bh, fg);
+  }
+}
+
+/* Retangulo de "restaurar": 80% da largura e da altura da tela, centrado
+ * acima da barra de tarefas. */
+static void max_restore_rect(int scale, int* x, int* y, int* w, int* h) {
+  int bar = max_bar_h(scale);
+  *w = (int)gfx_w * 8 / 10;
+  *h = (int)gfx_h * 8 / 10;
+  if (*h > (int)gfx_h - bar) *h = (int)gfx_h - bar;
+  *x = ((int)gfx_w - *w) / 2;
+  *y = ((int)gfx_h - bar - *h) / 2;
+  if (*y < 0) *y = 0;
+}
+
+static int gw_is_max(struct gui_win* g) {
+  return g->maxed || (g->ox <= 0 && g->oy <= 0 && g->cw >= (int)gfx_w);
+}
+
+/* Troca o tamanho da area do programa: novo buffer com o que cabia do
+ * antigo; o programa recebe GUI_EV_RESIZE e redesenha no proximo quadro. */
+static int gw_set_rect(struct gui_win* g, int x, int y, int cw, int ch) {
+  uint32_t* np;
+  int yy, cpw, cph;
+  if (cw < 160) cw = 160;
+  if (ch < 48) ch = 48;
+  np = (uint32_t*)umalloc_owned((uint32_t)cw * (uint32_t)ch * 4u, 0);
+  if (!np) return -1;
+  fill32(np, 0xFFFFFFu, (uint32_t)cw * (uint32_t)ch);
+  cpw = cw < g->cw ? cw : g->cw;
+  cph = ch < g->ch ? ch : g->ch;
+  if (g->pix)
+    for (yy = 0; yy < cph; yy++) {
+      int xx;
+      for (xx = 0; xx < cpw; xx++) np[yy * cw + xx] = g->pix[yy * g->cw + xx];
+    }
+  if (g->pix) ufree(g->pix);
+  g->pix = np;
+  g->ox = x;
+  g->oy = y;
+  g->cw = cw;
+  g->ch = ch;
+  gq_push(g, GUI_EV_RESIZE, cw, ch, 0);
+  win_api_dirty = 1;
+  return 0;
+}
+
+static void gw_toggle_max(struct gui_win* g) {
+  int scale = g->scale > 0 ? g->scale : 1;
+  if (gw_is_max(g)) {
+    int x, y, w, h;
+    max_restore_rect(scale, &x, &y, &w, &h);
+    if (gw_set_rect(g, x, y, w, h - g->title_h) == 0) g->maxed = 0;
+  } else {
+    int h = (int)gfx_h - max_bar_h(scale);
+    if (gw_set_rect(g, 0, 0, (int)gfx_w, h - g->title_h) == 0) g->maxed = 1;
+  }
+}
+
+static int wm_is_max(struct wm_win* w) {
+  return w->x <= 0 && w->y <= 0 && w->w >= (int)gfx_w;
+}
+
+static void wm_toggle_max(struct wm_win* w, int scale) {
+  if (wm_is_max(w)) {
+    max_restore_rect(scale, &w->x, &w->y, &w->w, &w->h);
+  } else {
+    w->x = 0;
+    w->y = 0;
+    w->w = (int)gfx_w;
+    w->h = (int)gfx_h - max_bar_h(scale);
+  }
+  win_api_dirty = 1;
+}
+
 static void gui_draw_frame(struct gui_win* w, int active, uint32_t col_title, uint32_t col_white,
                            uint32_t col_black, uint32_t col_btn, uint32_t col_inactive) {
   int scale = w->scale > 0 ? w->scale : 1;
@@ -5816,6 +6284,7 @@ static void gui_draw_frame(struct gui_win* w, int active, uint32_t col_title, ui
   draw_text_t(w->ox + 12, ty, w->title, gui_col(UI_TEXT), scale);
   fill_round(close_x, w->oy + 3, close_s, close_s, 5, gui_col(0xC23440));
   draw_text_t(close_x + xoff, ty, "x", gui_col(UI_TEXT), scale);
+  title_max_btn(close_x - close_s - 4, w->oy + 3, close_s, gw_is_max(w));
   gui_blit_win(w);
   (void)col_black;
   round_top_frame(w->ox, w->oy, w->cw, hh, UI_RADIUS, gui_col(UI_BORDER));
@@ -6641,6 +7110,7 @@ static int win_wm_run(void) {
         prof_pump += (uint32_t)irq_ticks() - now;
       }
     }
+    gui_paste_pump();
     if (win_api_dirty) {
       /* 2: so janelas de programa mudaram; vira need_draw 2 se nada mais pediu */
       need_draw = win_api_dirty == 2 && need_draw != 1 ? 2 : 1;
@@ -6665,6 +7135,10 @@ static int win_wm_run(void) {
       launch_pending = 0;
       wm_exec(wins, &focus, big, launch_path);
       need_draw = 1;
+    }
+    if (desk_dirty) {
+      desk_dirty = 0;
+      if (desk_refresh()) need_draw = 1;
     }
     if (ui_ia_launch) {
       ui_ia_launch = 0;
@@ -6843,11 +7317,13 @@ static int win_wm_run(void) {
         menu_panel(px, py, pw, ph);
         {
           int ih = (ph - 4) / POP_N;
-          menu_row(px + 1, py + 2, pw - 2, ih, "Console", pop_hot == 0, 0,
+          menu_row(px + 1, py + 2, pw - 2, ih, "Nova pasta", pop_hot == 0, 0,
                    col_win, col_title, col_white, col_black, scale);
-          menu_row(px + 1, py + 2 + ih, pw - 2, ih, "Configuracoes de tela", pop_hot == 1, 0,
+          menu_row(px + 1, py + 2 + ih, pw - 2, ih, "Console", pop_hot == 1, 0,
                    col_win, col_title, col_white, col_black, scale);
-          menu_row(px + 1, py + 2 + 2 * ih, pw - 2, ih, "Design", pop_hot == 2, 0,
+          menu_row(px + 1, py + 2 + 2 * ih, pw - 2, ih, "Configuracoes de tela", pop_hot == 2, 0,
+                   col_win, col_title, col_white, col_black, scale);
+          menu_row(px + 1, py + 2 + 3 * ih, pw - 2, ih, "Design", pop_hot == 3, 0,
                    col_win, col_title, col_white, col_black, scale);
         }
         menu_frame(px, py, pw, ph, col_black);
@@ -7066,15 +7542,20 @@ static int win_wm_run(void) {
         } else if (left && !prev_left) {
           int handled = 0;
           int icons_on;
-          if (pop_open) {
+          if (desk_ren >= 0) {
+            desk_ren_commit();
+            handled = 1;
+            need_draw = 1;
+          } else if (pop_open) {
             int px, py, pw, ph;
             pop_geom(pop_x, pop_y, scale, w, h, bar_h, &px, &py, &pw, &ph);
             pop_open = 0;
             if (wm_pt((int)mx, (int)my, px, py, pw, ph)) {
               int ih = (ph - 4) / POP_N;
               int item = ih > 0 ? ((int)my - (py + 2)) / ih : 0;
-              if (item <= 0) wm_open_command(wins, &focus, big);
-              else if (item == 1) wm_open_display(wins, &focus, big);
+              if (item <= 0) desk_new_folder();
+              else if (item == 1) wm_open_command(wins, &focus, big);
+              else if (item == 2) wm_open_display(wins, &focus, big);
               else host_open_design(wins, &focus, big);
             }
             handled = 1;
@@ -7271,6 +7752,15 @@ static int win_wm_run(void) {
                 run_out = 0;
                 focus = nw;
               }
+            } else if (desk_items[desk_i].lnk) {
+              char tgt[64];
+              char exe[64];
+              if (desk_lnk_target(desk_items[desk_i].path, tgt, (int)sizeof(tgt))) {
+                if (!desk_find(tgt, exe, (int)sizeof(exe)))
+                  wm_copy_str(exe, (int)sizeof(exe), tgt);
+                wm_exec(wins, &focus, big, exe);
+              } else
+                app_status_set("atalho vazio");
             } else if (desk_items[desk_i].image == 1)
               wm_open_image(wins, &focus, big, desk_items[desk_i].path);
             else if (desk_items[desk_i].image == 2)
@@ -7313,6 +7803,11 @@ static int win_wm_run(void) {
               if (wm_pt((int)mx, (int)my, gw->ox + gw->cw - close_s - 2, gw->oy + 2,
                         close_s, close_s)) {
                 gq_push(gw, GUI_EV_CLOSE, 0, 0, 0);
+              } else if (wm_pt((int)mx, (int)my, gw->ox + gw->cw - 2 * close_s - 6, gw->oy + 2,
+                               close_s, close_s)) {
+                gw_toggle_max(gw);
+              } else if (rely < 0 && dbl_click(1000 + id, (int)mx, (int)my)) {
+                gw_toggle_max(gw);
               } else if (rely < 0) {
                 g_drag = id;
                 g_drag_ox = (int)mx - gw->ox;
@@ -7349,6 +7844,11 @@ static int win_wm_run(void) {
                 if (focus < 0) focus = wm_find_kind(wins, WM_KIND_APP);
                 if (focus < 0) focus = 0;
                 if (focus >= 0 && focus < WM_MAX && wins[focus].used) wm_raise(&wins[focus]);
+              } else if (wm_pt((int)mx, (int)my, close_x - close_s - 4, wins[hit].y + 2, close_s,
+                               close_s) ||
+                         (wm_pt((int)mx, (int)my, wins[hit].x, wins[hit].y, wins[hit].w, title_h) &&
+                          dbl_click(hit, (int)mx, (int)my))) {
+                wm_toggle_max(&wins[hit], scale);
               } else if (wins[hit].kind == WM_KIND_APP && wins[hit].st && app_entry &&
                          wm_pt((int)mx, (int)my, wins[hit].x + 4,
                                wins[hit].y + title_h + 2, wins[hit].w - 8,
@@ -7424,10 +7924,18 @@ static int win_wm_run(void) {
                                wins[hit].w, wins[hit].h - title_h - mb_h)) {
                 /* clicar poe o cursor e comeca a marcar; com Shift estende */
                 int k = note_hit(&wins[hit], title_h + mb_h, scale, (int)mx, (int)my);
+                int wa, wb;
                 if (!keymap_shift()) note_anc = k;
                 else if (note_anc < 0) note_anc = note_caret;
                 note_caret = k;
                 sel_drag = hit;
+                if (dbl_click(hit, (int)mx, (int)my) &&
+                    word_at(note_buf, note_len, note_dbl_pos(&wins[hit], title_h + mb_h, scale,
+                                                             (int)mx, (int)my), &wa, &wb)) {
+                  note_anc = wa;
+                  note_caret = wb;
+                  sel_drag = -1; /* arrastar nao desfaz a palavra */
+                }
               } else if (wins[hit].kind == WM_KIND_CMD && wins[hit].st &&
                          wm_pt((int)mx, (int)my, wins[hit].x, wins[hit].y + title_h,
                                wins[hit].w, wins[hit].h - title_h)) {
@@ -7442,6 +7950,11 @@ static int win_wm_run(void) {
                 cc->bc = k;
                 cc->sel = 1;
                 sel_drag = hit;
+                if (dbl_click(hit, (int)mx, (int)my)) {
+                  cmd_hit_cell(&wins[hit], cc, title_h, scale, (int)mx, (int)my, &r, &k);
+                  cmd_word(cc, r, k);
+                  sel_drag = -1;
+                }
               }
               need_draw = 1;
               handled = 1;
@@ -7560,6 +8073,15 @@ static int win_wm_run(void) {
       }
       if (keymap_kp_nav(sc)) kbd_e0 = 1; /* NumLock desligado: vira seta, Home... */
       if (kbd_e0 && !(sc & 0x80)) kp = keymap_ext_char(sc);
+      if (desk_ren >= 0) {
+        /* nome de icone do desktop em edicao: o teclado e dele */
+        if (!(sc & 0x80) && (!kbd_e0 || kp)) {
+          desk_ren_key(kp ? kp : keymap_char(sc));
+          need_draw = 1;
+        }
+        kbd_e0 = 0;
+        continue;
+      }
       if (kbd_e0 && !kp) {
         kbd_e0 = 0;
         if (!(sc & 0x80) && gwins && gui_focus >= 0 && gui_focus < GUI_MAX && gwins[gui_focus].open) {
@@ -7702,6 +8224,21 @@ static int win_wm_run(void) {
         }
         if (gwins && gui_focus >= 0 && gui_focus < GUI_MAX && gwins[gui_focus].open) {
           int k = (c == '\n') ? '\r' : (unsigned char)c;
+          /* Ctrl+letra chega como caractere de controle (Ctrl+C = 3), como no
+           * terminal. Ctrl+V cola a area de transferencia do kernel como
+           * teclas, a nao ser que o programa a trate (k_gui_clip). Ctrl+H, I,
+           * J e M seriam Backspace, Tab e Enter: nao vao. */
+          if (kbd_ctrl_down()) {
+            int l = (unsigned char)c | 0x20;
+            if (l >= 'a' && l <= 'z') {
+              if (l == 'v' && !gwins[gui_focus].clip) {
+                gui_paste_start(gui_focus);
+                continue;
+              }
+              if (l == 'h' || l == 'i' || l == 'j' || l == 'm') continue;
+              k = l - 'a' + 1;
+            }
+          }
           gq_push(&gwins[gui_focus], GUI_EV_KEY, 0, 0, k);
           continue;
         }

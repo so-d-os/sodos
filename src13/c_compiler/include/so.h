@@ -300,6 +300,10 @@ int k_gui_event(int* ev, int timeout_ms);
  * tem o foco. Para emuladores (QEMU). Ctrl+F1..F12 trocam de tela e
  * Ctrl+Backspace fecha o WIN: continuam do kernel. */
 int k_gui_raw(int on);
+/* Teclado da janela: Ctrl+letra chega como 1..26 (Ctrl+C = 3). Ctrl+V o WIN
+ * digita sozinho o texto da area de transferencia (k_clip_get); com
+ * k_gui_clip(1) o programa recebe 22 e cola ele mesmo. */
+int k_gui_clip(int on);
 /* rgba = R,G,B,A por pixel. No modo retro A < 128 nao desenha; no modo
  * avancado o pixel e misturado com o que ja esta na janela. */
 void k_gui_pixels(int x, int y, int w, int h, const void* rgba, int stride);

@@ -104,6 +104,8 @@ __export int gui_wait(gui_event_t* ev, int timeout_ms) {
   ev->x = raw[1];
   ev->y = raw[2];
   ev->key = raw[3];
+  /* maximizar/restaurar no WIN: gui_width/gui_height passam a valer o novo */
+  if (t >= 0 && ev->type == GUI_EV_RESIZE) k_gui_size(&win_w, &win_h);
   return t < 0 ? GUI_EV_CLOSE : ev->type;
 }
 
@@ -141,6 +143,17 @@ __export void gui_edit_select_all(gui_edit_t* e) {
 
 __export int gui_edit_key(gui_edit_t* e, int key) {
   if (key == '\r' || key == '\n') return 2;
+  /* Ctrl+A marca tudo; Ctrl+C copia e Ctrl+X recorta o campo (o campo nao
+   * tem marcacao parcial). Ctrl+V o WIN digita sozinho. */
+  if (key == 1) {
+    gui_edit_select_all(e);
+    return 1;
+  }
+  if (key == 3 || key == 24) {
+    k_clip_set(e->text, e->len);
+    if (key == 24) gui_edit_set(e, "");
+    return key == 24;
+  }
   if (e->all) {
     e->all = 0;
     if (key == '\b' || key == GUI_KEY_DEL || (key >= 32 && key < 127)) {

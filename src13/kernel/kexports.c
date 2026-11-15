@@ -104,7 +104,11 @@ static int k_fload(const char* path, char* buf, int max) { return file_load(path
 static int k_fread(const char* path, uint32_t offset, char* buf, int len) {
   return file_read_at(path, offset, buf, len);
 }
-static int k_fsave(const char* path, const char* data, int size) { return file_save(path, data, size); }
+static int k_fsave(const char* path, const char* data, int size) {
+  int rc = file_save(path, data, size);
+  win_desk_touch(path);
+  return rc;
+}
 static int k_drive(void) { return drives_current(); }
 static int k_set_drive(int letter) { return drives_set_current((char)letter); }
 /* Unidade do .EXE em execucao (para achar D:\LOG, D:\omni.ja, ...). */
@@ -144,11 +148,29 @@ static int k_dir(const char* path, struct dir_item* out, int max) {
 }
 
 /* Apaga arquivo (aceita * e ?). 0 ou quantos; <0 erro (drives_del). */
-static int k_fdelete(const char* path) { return path ? drives_del(path) : -1; }
+static int k_fdelete(const char* path) {
+  int rc = path ? drives_del(path) : -1;
+  win_desk_touch(path);
+  return rc;
+}
 /* Renomeia sem copiar (drives_rename). <0: ver drives.h; -5/-6 = copiar. */
-static int k_frename(const char* from, const char* to) { return drives_rename(from, to); }
-static int k_mkdir(const char* path) { return path ? drives_mkdir(path) : -1; }
-static int k_rmdir(const char* path) { return path ? drives_rmdir(path) : -1; }
+static int k_frename(const char* from, const char* to) {
+  int rc = drives_rename(from, to);
+  win_desk_touch(from);
+  win_desk_touch(to);
+  return rc;
+}
+/* Mudou algo em ...\DESKTOP: win_desk_touch faz o desktop reler os icones. */
+static int k_mkdir(const char* path) {
+  int rc = path ? drives_mkdir(path) : -1;
+  win_desk_touch(path);
+  return rc;
+}
+static int k_rmdir(const char* path) {
+  int rc = path ? drives_rmdir(path) : -1;
+  win_desk_touch(path);
+  return rc;
+}
 /* Ambiente do sistema (SET): copia o valor para out. Tamanho; -1 se nao existe. */
 static int k_getenv(const char* name, char* out, int max) {
   const char* v = env_get(name);
@@ -540,6 +562,7 @@ static void k_gui_text(int x, int y, const char* s, int n, uint32_t fg, uint32_t
 static void k_gui_present(void) { gui_present(); }
 static int k_gui_event(int* ev, int timeout_ms) { return gui_event(ev, timeout_ms); }
 static int k_gui_raw(int on) { return gui_raw_set(on); }
+static int k_gui_clip(int on) { return gui_clip_set(on); }
 static void k_gui_pixels(int x, int y, int w, int h, const void* rgba, int stride) {
   gui_pixels(x, y, w, h, rgba, stride);
 }
@@ -971,6 +994,7 @@ static const struct kexp table[] = {
   EXP(k_gui_present),
   EXP(k_gui_event),
   EXP(k_gui_raw),
+  EXP(k_gui_clip),
   EXP(k_gui_pixels),
   EXP(k_gui_quality),
   EXP(k_win_bg),

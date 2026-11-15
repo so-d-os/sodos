@@ -20,6 +20,7 @@ void k_gui_size(int* w, int* h);
 void k_gui_pixels(int x, int y, int w, int h, const void* rgba, int stride);
 void k_gui_present(void);
 int k_gui_event(int* ev, int timeout_ms);
+int k_gui_clip(int on);
 }
 
 /* gui.h do SODOS */
@@ -91,6 +92,9 @@ bool Open() {
     return false;
   }
   sOpen = true;
+  // Ctrl+V chega como tecla (22) e o Gecko cola do SodosClipboard, que ja e a
+  // area do kernel: o WIN nao digita o texto por nos (perderia as linhas).
+  k_gui_clip(1);
   Mark("janela aberta", sWidth, sHeight);
   return true;
 }
