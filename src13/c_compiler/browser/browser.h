@@ -29,7 +29,7 @@ typedef struct {
   int tls;
   int tls_ok;
   char secure[96]; /* "HTTPS" ou o aviso do certificado */
-  int from_cache;  /* 1 se leu D:\temp\net */
+  int from_cache;  /* 1 se leu do cache (Z:\temp\browser) */
   int cache_saved; /* 1 se esta visita gravou o cache */
   int aborted;     /* 1 se o usuario teclou ou clicou no meio do pedido */
 } http_resp_t;
@@ -39,7 +39,7 @@ typedef int (*progress_fn)(const char* msg);
 #define HTTP_FRESH   1 /* ignora o cache (botao Recarregar) e grava por cima */
 #define HTTP_NOSTORE 2 /* nao grava no cache (paginas de busca) */
 /* 0 = recebeu uma resposta (veja status); -1 = erro de rede (veja err).
- * Figuras (image/...) nunca vao para o cache. */
+ * Tudo que vem com 200 (paginas, CSS, JS e figuras) vai para o cache. */
 int http_get(const char* url, http_resp_t* r, progress_fn progress, int flags);
 void http_free(http_resp_t* r);
 /* Fecha a conexao que ficou aberta para o proximo pedido (fim da pagina). */
@@ -52,11 +52,11 @@ void http_idle_close(void);
 #define RUN_IMG   8
 #define RUN_BG    16
 
-#define DOC_IMGS 32
-#define DOC_ELS 24
+#define DOC_IMGS 64
+#define DOC_ELS 64
 #define DOC_SCRIPTS 16
 #define DOC_FORMS 4
-#define DOC_FIELDS 48
+#define DOC_FIELDS 96
 
 typedef struct {
   int line, col, len, off;
@@ -74,7 +74,23 @@ typedef struct {
   char alt[64];
   int cols, lines;   /* caixa reservada na grade */
   int state;         /* 0 pendente, 1 decodificada, -1 falhou */
+  int fit;           /* 1 = tamanho adivinhado: desenha sem distorcer */
 } doc_img_t;
+
+/* Caixa desenhada antes do texto: fundo e bordas de blocos e celulas.
+ * Linhas inclusivas; colunas [col0, col1) com meia coluna de folga. */
+#define RECT_FILL   1
+#define RECT_TOP    2
+#define RECT_RIGHT  4
+#define RECT_BOTTOM 8
+#define RECT_LEFT   16
+#define RECT_SIDES  (RECT_TOP | RECT_RIGHT | RECT_BOTTOM | RECT_LEFT)
+typedef struct {
+  int line0, line1;
+  int col0, col1;
+  int flags;
+  unsigned bg, border;
+} doc_rect_t;
 
 typedef struct {
   char id[32];
@@ -91,8 +107,11 @@ typedef struct {
 typedef struct {
   int line, col, len;
   int submit, hidden, form, box;
+  int check;   /* 1 checkbox, 2 radio */
+  int checked;
   char name[32];
   char value[128];
+  char placeholder[48];
 } doc_field_t;
 
 typedef struct {
@@ -115,6 +134,9 @@ typedef struct {
   doc_field_t fields[DOC_FIELDS];
   int nfields;
   char js_alert[160];
+  doc_rect_t* rects;
+  int nrects, rects_cap;
+  unsigned page_bg; /* fundo da pagina (body/html) */
 } doc_t;
 
 /* cols = largura em caracteres; cp437 = 1 usa os acentos da fonte da BIOS.

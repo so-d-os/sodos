@@ -12,6 +12,7 @@
 #include <gui.h>
 #include <img.h>
 #include "browser.h"
+#include "cache.h"
 
 #define HIST_MAX 32
 #define SCROLL_W 14
@@ -756,10 +757,11 @@ static void navigate(const char* input, int push, int fresh) {
                                            ci_has(r.content_type, "1252"), 1);
       }
       if (r.from_cache)
-        snprintf(msg, sizeof(msg), "%d - %d KB - cache D:\\temp\\net", r.status, r.body_len / 1024);
+        snprintf(msg, sizeof(msg), "%d - %d KB - cache %s", r.status, r.body_len / 1024,
+                 cache_where());
       else if (r.cache_saved)
-        snprintf(msg, sizeof(msg), "%d - %d KB - gravou D:\\temp\\net - %s", r.status,
-                 r.body_len / 1024, r.tls ? (r.secure[0] ? r.secure : "HTTPS") : "HTTP");
+        snprintf(msg, sizeof(msg), "%d - %d KB - gravou %s - %s", r.status, r.body_len / 1024,
+                 cache_where(), r.tls ? (r.secure[0] ? r.secure : "HTTPS") : "HTTP");
       else
         snprintf(msg, sizeof(msg), "%d - %d KB - %s", r.status, r.body_len / 1024,
                  r.tls ? (r.secure[0] ? r.secure : "HTTPS") : "HTTP");
@@ -854,7 +856,28 @@ static void draw(void) {
   gui_edit_draw(&addr, addr_x, 4, addr_w, CH + 4, focus_addr);
   gui_button(btn_go_x, 4, btn_go_w, CH + 4, "Ir", 1);
 
-  gui_fill(0, content_y, sx, content_h, 0xFFFFFF);
+  gui_fill(0, content_y, sx, content_h, doc.page_bg);
+  /* fundos e bordas de blocos e celulas, antes do texto */
+  for (i = 0; i < doc.nrects; i++) {
+    const doc_rect_t* q = &doc.rects[i];
+    int y0, y1, x0, x1, cy0, cy1, cx0, cx1;
+    if (!q->flags || q->line1 < q->line0) continue;
+    if (q->line1 < scroll || q->line0 > scroll + rows) continue;
+    y0 = content_y + (q->line0 - scroll) * CH;
+    y1 = content_y + (q->line1 + 1 - scroll) * CH;
+    x0 = 8 + q->col0 * CW - CW / 2;
+    x1 = 8 + q->col1 * CW + CW / 2;
+    cy0 = y0 < content_y ? content_y : y0;
+    cy1 = y1 > content_y + content_h ? content_y + content_h : y1;
+    cx0 = x0 < 0 ? 0 : x0;
+    cx1 = x1 > sx ? sx : x1;
+    if (cx1 <= cx0 || cy1 <= cy0) continue;
+    if (q->flags & RECT_FILL) gui_fill(cx0, cy0, cx1 - cx0, cy1 - cy0, q->bg);
+    if ((q->flags & RECT_TOP) && y0 >= cy0) gui_fill(cx0, y0, cx1 - cx0, 1, q->border);
+    if ((q->flags & RECT_BOTTOM) && y1 - 1 < cy1) gui_fill(cx0, y1 - 1, cx1 - cx0, 1, q->border);
+    if ((q->flags & RECT_LEFT) && x0 >= cx0) gui_fill(x0, cy0, 1, cy1 - cy0, q->border);
+    if ((q->flags & RECT_RIGHT) && x1 - 1 < cx1) gui_fill(x1 - 1, cy0, 1, cy1 - cy0, q->border);
+  }
   for (i = doc_first_run(&doc, scroll); i < doc.nruns; i++) {
     const run_t* r = &doc.runs[i];
     int y, x;
@@ -1160,6 +1183,7 @@ int main(int argc, char** argv) {
   static char first[URL_MAX];
   int i, n = 0;
   strcpy(first, "about:inicio");
+  doc.page_bg = 0xFFFFFF;
   /* BROWSER g gato preto: os argumentos voltam a ser uma linha */
   for (i = 1; i < argc; i++) {
     int k = (int)strlen(argv[i]);

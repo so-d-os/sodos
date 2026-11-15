@@ -50,6 +50,9 @@ static const char id_open, id_newdir, id_del, id_list, id_drives;
 static const char id_sortname, id_sortsize, id_sortdate;
 
 static const wg_theme_t* th;
+/* 1 = "visao de pasta" (EXPLORER /P caminho, clique numa pasta do desktop):
+ * so a lista e o endereco no topo; o titulo da janela e o caminho */
+static int g_folder;
 
 /* menu de contexto (botao direito) */
 #define CTX_OPEN   1
@@ -228,6 +231,7 @@ static void go(const char* p, int add_hist) {
   gui_edit_set(&g_edit, g_path);
   load_dir(g_path);
   set_status(g_path);
+  if (g_folder) gui_title(g_path);
 }
 
 /* --------------------------------------------------------------- listagem */
@@ -877,6 +881,9 @@ int main(int argc, char** argv) {
   int ndrv;
   char lastpath[PATHMAX];
 
+  if (argc > 2 && argv[1] && (argv[1][0] == '/' || argv[1][0] == '-') &&
+      (argv[1][1] == 'P' || argv[1][1] == 'p') && argv[2] && argv[2][0])
+    g_folder = 1;
   if (gui_open("Explorer") != 0) {
     printf("EXPLORER: nao abriu a janela\n");
     return 1;
@@ -895,7 +902,12 @@ int main(int argc, char** argv) {
     root[3] = 0;
     copy_str(g_path, root, PATHMAX);
   }
-  if (argc > 1 && argv[1] && argv[1][0]) copy_str(g_path, argv[1], PATHMAX);
+  if (g_folder) {
+    copy_str(g_path, argv[2], PATHMAX);
+    path_normalize(g_path);
+    gui_title(g_path);
+  } else if (argc > 1 && argv[1] && argv[1][0])
+    copy_str(g_path, argv[1], PATHMAX);
   k_pwd(lastpath, PATHMAX);
   if (!g_path[0] && lastpath[0] && lastpath[1] == ':') {
     char root[4];
@@ -961,6 +973,8 @@ int main(int argc, char** argv) {
     lw = 210;
     lh = sh - ly - (ch + 26) - 10;
     if (lh < 200) lh = 200;
+    /* visao de pasta (aberta do desktop): sem unidades nem atalhos */
+    if (!g_folder) {
     wg_group(lx, ly, lw, 120, "Unidades");
     ndrv = drive_lines(drives, (int)sizeof(drives), doff, 26);
     for (i = 0; i < ndrv; i++) {
@@ -1000,9 +1014,10 @@ int main(int argc, char** argv) {
                  GUI_TEXT_NOBG);
       }
     }
+    }
 
     /* ------------------------------------------------------------- lista */
-    fx = lx + lw + 10;
+    fx = g_folder ? 10 : lx + lw + 10;
     fy = by + bh + 10;
     fw = sw - fx - 10;
     if (fw < 320) fw = 320;

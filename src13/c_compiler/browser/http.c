@@ -339,7 +339,7 @@ int http_get(const char* url, http_resp_t* r, progress_fn progress, int flags) {
       r->url[URL_MAX - 1] = 0;
     }
     if (r->tls) strncpy(r->secure, "HTTPS", sizeof(r->secure) - 1);
-    snprintf(msg, sizeof(msg), "100%% cache D:\\temp\\net");
+    snprintf(msg, sizeof(msg), "100%% cache %s", cache_where());
     progress(msg);
     return 0;
   }
@@ -364,10 +364,8 @@ int http_get(const char* url, http_resp_t* r, progress_fn progress, int flags) {
       continue;
     }
     /* So 200: o 202 do desafio anti-robo do DuckDuckGo nao pode ficar no cache.
-     * Figuras tambem nao: no WIN o FAT cede a CPU a cada 4 setores, e gravar
-     * uma miniatura levava segundos, contra 0,1 s para baixar de novo. */
-    if (r->status == 200 && r->body && !(flags & HTTP_NOSTORE) &&
-        strncmp(r->content_type, "image/", 6) != 0) {
+     * Figuras entram tambem: no Z: (RAM) gravar nao cede a CPU por setor. */
+    if (r->status == 200 && r->body && !(flags & HTTP_NOSTORE)) {
       if (cache_store(url, r->url[0] ? r->url : url, r->status, r->content_type, r->body, r->body_len,
                       r->tls, r->tls_ok) == 0)
         r->cache_saved = 1;

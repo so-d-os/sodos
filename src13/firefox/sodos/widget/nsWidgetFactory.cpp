@@ -1,7 +1,9 @@
 /* nsWidgetFactory.cpp - construtores do backend do SODOS. */
 #include "nsWidgetFactory.h"
 
-#include "SodosClipboard.h"
+// SodosClipboard.cpp entra aqui: um .cpp novo no moz.build so compila depois
+// de reconfigurar o objdir (o backend.mk nao se refaz sozinho).
+#include "SodosClipboard.cpp"
 #include "mozilla/Components.h"
 #include "mozilla/ModuleUtils.h"
 #include "mozilla/WidgetUtils.h"

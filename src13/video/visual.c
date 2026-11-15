@@ -1958,6 +1958,7 @@ struct wm_win {
   int x, y, w, h;
   char title[24];
   struct app_state* st;
+  int auto_close;   /* RUN terminou com 0: o laco do WIN fecha a janela */
 };
 
 /* z maior fica na frente. gui_focus >= 0 quando a janela da frente e um .EXE. */
@@ -1965,6 +1966,7 @@ static int zseq;
 static int gui_focus = -1;
 static int gui_stole;
 static int win_api_dirty;
+static int run_close_pending;   /* alguma janela RUN marcada com auto_close */
 
 static void wm_raise(struct wm_win* w) {
   w->z = ++zseq;
@@ -3269,13 +3271,77 @@ static void wm_open_command(struct wm_win* wins, int* focus, int big) {
 
 static void title_max_btn(int x, int y, int s, int maxed);
 static int wm_is_max(struct wm_win* w);
+/* X e maximizar ficam TB_PAD pixels longe da borda direita: o canto de cima
+ * a direita fica livre para redimensionar. */
+#define TB_PAD 10
+
+/* ---- redimensionar por qualquer canto ---------------------------------- */
+#define RS_L 1
+#define RS_R 2
+#define RS_T 4
+#define RS_B 8
+static int rs_code, rs_mx0, rs_my0, rs_x0, rs_y0, rs_w0, rs_h0;
+
+/* Canto (RS_L|RS_T, ...) sob o rato, ou 0. k = tamanho da zona do canto. */
+static int win_corner(int mx, int my, int x, int y, int w, int h, int k) {
+  int c = 0;
+  if (mx < x || my < y || mx >= x + w || my >= y + h) return 0;
+  if (mx < x + k) c |= RS_L;
+  else if (mx >= x + w - k) c |= RS_R;
+  if (my < y + k) c |= RS_T;
+  else if (my >= y + h - k) c |= RS_B;
+  /* so cantos: precisa de um lado horizontal e um vertical */
+  if (!(c & (RS_L | RS_R)) || !(c & (RS_T | RS_B))) return 0;
+  return c;
+}
+
+static void rs_begin(int code, int mx, int my, int x, int y, int w, int h) {
+  rs_code = code;
+  rs_mx0 = mx;
+  rs_my0 = my;
+  rs_x0 = x;
+  rs_y0 = y;
+  rs_w0 = w;
+  rs_h0 = h;
+}
+
+/* Novo retangulo: o canto agarrado segue o rato, o oposto fica parado. */
+static void rs_apply(int mx, int my, int min_w, int min_h, int max_x, int max_y,
+                     int* x, int* y, int* w, int* h) {
+  int dx = mx - rs_mx0, dy = my - rs_my0;
+  int x0 = rs_x0, y0 = rs_y0, x1 = rs_x0 + rs_w0, y1 = rs_y0 + rs_h0;
+  if (rs_code & RS_L) {
+    x0 += dx;
+    if (x0 > x1 - min_w) x0 = x1 - min_w;
+    if (x0 < 0) x0 = 0;
+  }
+  if (rs_code & RS_R) {
+    x1 += dx;
+    if (x1 < x0 + min_w) x1 = x0 + min_w;
+    if (x1 > max_x) x1 = max_x;
+  }
+  if (rs_code & RS_T) {
+    y0 += dy;
+    if (y0 > y1 - min_h) y0 = y1 - min_h;
+    if (y0 < 0) y0 = 0;
+  }
+  if (rs_code & RS_B) {
+    y1 += dy;
+    if (y1 < y0 + min_h) y1 = y0 + min_h;
+    if (y1 > max_y) y1 = max_y;
+  }
+  *x = x0;
+  *y = y0;
+  *w = x1 - x0;
+  *h = y1 - y0;
+}
 
 static void wm_draw_inner(struct wm_win* w, int focus, int title_h, int scale,
                           uint32_t col_win, uint32_t col_title, uint32_t col_white,
                           uint32_t col_black, uint32_t col_btn, uint32_t col_inactive) {
   int ch = (vga_bios_font_ok ? FONT_H : 8) * scale;
   int close_s = title_h - 4;
-  int close_x = w->x + w->w - close_s - 2;
+  int close_x = w->x + w->w - close_s - TB_PAD;
   uint32_t tc = focus ? col_title : col_inactive;
   int ty = w->y + (title_h - ch) / 2;
   /* barra de titulo de vidro, cantos de cima arredondados; nos cantos aparece
@@ -3539,6 +3605,7 @@ static int wm_new_run_window(struct wm_win* wins, int big, const char* path,
   wins[i].h = big ? gfx_sy(300) : 120;
   wm_clamp_rect(&wins[i].x, &wins[i].y, &wins[i].w, &wins[i].h, big);
   wins[i].used = 1;
+  wins[i].auto_close = 0;
   base = path;
   for (p = path; *p; p++)
     if (*p == '\\' || *p == ':') base = p + 1;
@@ -3559,6 +3626,11 @@ static void wm_run_status(struct wm_win* w, int rc) {
   if (rc <= MOD_ERR_NOTFOUND && rc >= MOD_ERR_DEPTH) {
     app_copy(w->st->status, (int)sizeof(w->st->status), mod_last_error());
     return;
+  }
+  if (rc == 0) {   /* terminou bem: a janela some sozinha */
+    w->auto_close = 1;
+    run_close_pending = 1;
+    win_api_dirty = 1;
   }
   app_copy(msg, (int)sizeof(msg), "retornou ");
   int32_to_string(rc, num, (int)sizeof(num));
@@ -4645,6 +4717,9 @@ static void gui_idle(void) {
 
 static int g_drag = -1;
 static int g_drag_ox, g_drag_oy;
+/* janela de programa sendo redimensionada pelo canto (contorno g_rs_*) */
+static int g_rs = -1;
+static int g_rs_x, g_rs_y, g_rs_w, g_rs_h;
 static int g_cap = -1;
 static int g_rcap = -1; /* janela de programa que recebeu o botao direito */
 
@@ -4874,6 +4949,7 @@ static void tasks_shutdown(void) {
   }
   gui_focus = -1;
   g_drag = -1;
+  g_rs = -1;
   g_cap = -1;
   g_rcap = -1;
   host_on = 0;
@@ -5738,6 +5814,20 @@ static void wm_open_explorer(struct wm_win* wins, int* focus, int big) {
   wm_open_app(wins, focus, big);
 }
 
+/* Clique numa pasta do desktop: Explorer em "visao de pasta" (EXPLORER /P
+ * caminho). 0 se nao achou o EXPLORER.EXE (quem chama mostra a listagem). */
+static int wm_open_folder(struct wm_win* wins, int* focus, int big, const char* path) {
+  char exe[48];
+  char* argv[4];
+  if (!desk_find("D:\\EXPLORER.EXE", exe, (int)sizeof(exe)) || file_size(exe) <= 0) return 0;
+  argv[0] = exe;
+  argv[1] = (char*)"/P";
+  argv[2] = (char*)path;
+  argv[3] = 0;
+  wm_exec_sox(wins, focus, big, exe, app_win, 3, argv);
+  return 1;
+}
+
 static void wm_open_mgr(struct wm_win* wins, int* focus, int big) {
   int i = wm_find_kind(wins, WM_KIND_MGR);
   if (i < 0) i = wm_alloc(wins);
@@ -6273,7 +6363,7 @@ static void gui_draw_frame(struct gui_win* w, int active, uint32_t col_title, ui
   int scale = w->scale > 0 ? w->scale : 1;
   int ch = glyph_rows() * scale;
   int close_s = w->title_h - 4;
-  int close_x = w->ox + w->cw - close_s - 2;
+  int close_x = w->ox + w->cw - close_s - TB_PAD;
   int ty = w->oy + (w->title_h - ch) / 2;
   int xoff = close_s > FONT_W * scale ? (close_s - FONT_W * scale) / 2 : 0;
   int hh = w->title_h + w->ch;
@@ -7136,6 +7226,28 @@ static int win_wm_run(void) {
       wm_exec(wins, &focus, big, launch_path);
       need_draw = 1;
     }
+    if (run_close_pending) {
+      int k;
+      run_close_pending = 0;
+      for (k = 0; k < WM_MAX; k++) {
+        if (!wins[k].used || !wins[k].auto_close) continue;
+        task_forget_win(&wins[k]);
+        if (wins[k].st) {
+          kfree(wins[k].st);
+          wins[k].st = 0;
+        }
+        if (app_win == &wins[k]) app_win = 0;
+        wins[k].auto_close = 0;
+        wins[k].used = 0;
+        if (focus == k) {
+          int j;
+          focus = -1;
+          for (j = 0; j < WM_MAX; j++)
+            if (wins[j].used) { focus = j; break; }
+        }
+      }
+      need_draw = 1;
+    }
     if (desk_dirty) {
       desk_dirty = 0;
       if (desk_refresh()) need_draw = 1;
@@ -7194,6 +7306,14 @@ static int win_wm_run(void) {
       paint_stacked(wins, title_h, scale, col_win, col_title, col_white, col_black,
                     col_btn, col_inactive);
       draw_taskbar(w, h, bar_h, ch, scale, start_w);
+      if (gwins && g_rs >= 0) {
+        /* contorno do novo tamanho enquanto arrasta o canto */
+        uint32_t oc = gui_col(UI_ACCENT);
+        fill_rect(g_rs_x, g_rs_y, g_rs_w, 2, oc);
+        fill_rect(g_rs_x, g_rs_y + g_rs_h - 2, g_rs_w, 2, oc);
+        fill_rect(g_rs_x, g_rs_y, 2, g_rs_h, oc);
+        fill_rect(g_rs_x + g_rs_w - 2, g_rs_y, 2, g_rs_h, oc);
+      }
       if (menu_open) {
         static const char* labels[] = {
           "Bloco de notas", "Gerenciador", "Explorer", "Configuracoes", "Navegador", "Command", "Sair"
@@ -7487,7 +7607,11 @@ static int win_wm_run(void) {
           }
         }
         left = packet[0] & 1;
-        if (left && gwins && g_drag >= 0 && g_drag < GUI_MAX && gwins[g_drag].open) {
+        if (left && gwins && g_rs >= 0 && g_rs < GUI_MAX && gwins[g_rs].open) {
+          rs_apply((int)mx, (int)my, 200, gwins[g_rs].title_h + 60, w, h - bar_h, &g_rs_x,
+                   &g_rs_y, &g_rs_w, &g_rs_h);
+          need_draw = 1;
+        } else if (left && gwins && g_drag >= 0 && g_drag < GUI_MAX && gwins[g_drag].open) {
           int save = gui_ix;
           gwins[g_drag].ox = (int)mx - g_drag_ox;
           gwins[g_drag].oy = (int)my - g_drag_oy;
@@ -7506,10 +7630,8 @@ static int win_wm_run(void) {
             wins[drag].x = (int)mx - drag_ox;
             wins[drag].y = (int)my - drag_oy;
           } else {
-            wins[drag].w = (int)mx - wins[drag].x + drag_ox;
-            wins[drag].h = (int)my - wins[drag].y + drag_oy;
-            if (wins[drag].w < min_w) wins[drag].w = min_w;
-            if (wins[drag].h < min_h) wins[drag].h = min_h;
+            rs_apply((int)mx, (int)my, min_w, min_h, w, h - bar_h, &wins[drag].x,
+                     &wins[drag].y, &wins[drag].w, &wins[drag].h);
           }
           if (wins[drag].x < 0) wins[drag].x = 0;
           if (wins[drag].y < 0) wins[drag].y = 0;
@@ -7739,7 +7861,10 @@ static int win_wm_run(void) {
             menu_open = 0;
             menu_cfg = 0;
             menu_tela = 0;
-            if (desk_items[desk_i].dir) {
+            if (desk_items[desk_i].dir &&
+                wm_open_folder(wins, &focus, big, desk_items[desk_i].path)) {
+              /* aberta no Explorer (visao de pasta) */
+            } else if (desk_items[desk_i].dir) {
               char listing[512];
               int nw = wm_new_run_window(wins, big, desk_items[desk_i].name, 0);
               if (nw >= 0) {
@@ -7800,12 +7925,22 @@ static int win_wm_run(void) {
               gw->z = ++zseq;
               gui_focus = id;
               focus = -1;
-              if (wm_pt((int)mx, (int)my, gw->ox + gw->cw - close_s - 2, gw->oy + 2,
+              int rc;
+              if (wm_pt((int)mx, (int)my, gw->ox + gw->cw - close_s - TB_PAD, gw->oy + 2,
                         close_s, close_s)) {
                 gq_push(gw, GUI_EV_CLOSE, 0, 0, 0);
-              } else if (wm_pt((int)mx, (int)my, gw->ox + gw->cw - 2 * close_s - 6, gw->oy + 2,
-                               close_s, close_s)) {
+              } else if (wm_pt((int)mx, (int)my, gw->ox + gw->cw - 2 * close_s - TB_PAD - 4,
+                               gw->oy + 2, close_s, close_s)) {
                 gw_toggle_max(gw);
+              } else if ((rc = win_corner((int)mx, (int)my, gw->ox, gw->oy, gw->cw,
+                                          gw->title_h + gw->ch, big ? 12 : 8)) != 0) {
+                /* canto: o contorno segue o rato; o buffer muda ao soltar */
+                rs_begin(rc, (int)mx, (int)my, gw->ox, gw->oy, gw->cw, gw->title_h + gw->ch);
+                g_rs = id;
+                g_rs_x = gw->ox;
+                g_rs_y = gw->oy;
+                g_rs_w = gw->cw;
+                g_rs_h = gw->title_h + gw->ch;
               } else if (rely < 0 && dbl_click(1000 + id, (int)mx, (int)my)) {
                 gw_toggle_max(gw);
               } else if (rely < 0) {
@@ -7823,7 +7958,9 @@ static int win_wm_run(void) {
             }
             if (hit >= 0) {
               int close_s = title_h - 4;
-              int close_x = wins[hit].x + wins[hit].w - close_s - 2;
+              int close_x = wins[hit].x + wins[hit].w - close_s - TB_PAD;
+              int rc = win_corner((int)mx, (int)my, wins[hit].x, wins[hit].y, wins[hit].w,
+                                  wins[hit].h, big ? 12 : 8);
               int mb_h = note_menubar_h(ch);
               int fw = note_file_w(scale);
               wm_raise(&wins[hit]);
@@ -7849,6 +7986,11 @@ static int win_wm_run(void) {
                          (wm_pt((int)mx, (int)my, wins[hit].x, wins[hit].y, wins[hit].w, title_h) &&
                           dbl_click(hit, (int)mx, (int)my))) {
                 wm_toggle_max(&wins[hit], scale);
+              } else if (rc) {
+                drag = hit;
+                drag_mode = rc;
+                rs_begin(rc, (int)mx, (int)my, wins[hit].x, wins[hit].y, wins[hit].w,
+                         wins[hit].h);
               } else if (wins[hit].kind == WM_KIND_APP && wins[hit].st && app_entry &&
                          wm_pt((int)mx, (int)my, wins[hit].x + 4,
                                wins[hit].y + title_h + 2, wins[hit].w - 8,
@@ -7911,9 +8053,9 @@ static int win_wm_run(void) {
               } else if (wm_pt((int)mx, (int)my, wins[hit].x + wins[hit].w - 14,
                                wins[hit].y + wins[hit].h - 14, 14, 14)) {
                 drag = hit;
-                drag_mode = 1;
-                drag_ox = wins[hit].x + wins[hit].w - (int)mx;
-                drag_oy = wins[hit].y + wins[hit].h - (int)my;
+                drag_mode = RS_R | RS_B;
+                rs_begin(drag_mode, (int)mx, (int)my, wins[hit].x, wins[hit].y, wins[hit].w,
+                         wins[hit].h);
               } else if (wm_pt((int)mx, (int)my, wins[hit].x, wins[hit].y, wins[hit].w, title_h)) {
                 drag = hit;
                 drag_mode = 0;
@@ -7963,6 +8105,16 @@ static int win_wm_run(void) {
           (void)handled;
         }
         if (!left) {
+          if (gwins && g_rs >= 0 && g_rs < GUI_MAX && gwins[g_rs].open) {
+            struct gui_win* rg = &gwins[g_rs];
+            if (g_rs_x != rg->ox || g_rs_y != rg->oy || g_rs_w != rg->cw ||
+                g_rs_h != rg->title_h + rg->ch) {
+              if (gw_set_rect(rg, g_rs_x, g_rs_y, g_rs_w, g_rs_h - rg->title_h) == 0)
+                rg->maxed = 0;
+            }
+            need_draw = 1;
+          }
+          g_rs = -1;
           if (gwins && g_cap >= 0 && g_cap < GUI_MAX && gwins[g_cap].open)
             gq_push(&gwins[g_cap], GUI_EV_UP, (int)mx - gwins[g_cap].ox,
                     (int)my - (gwins[g_cap].oy + gwins[g_cap].title_h), 1);

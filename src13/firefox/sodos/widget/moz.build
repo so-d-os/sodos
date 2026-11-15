@@ -18,7 +18,6 @@ SOURCES += [
     "nsUserIdleServiceSodos.cpp",
     "nsWidgetFactory.cpp",
     "nsWindowSodos.cpp",
-    "SodosClipboard.cpp",
     "SodosWindow.cpp",
 ]
 

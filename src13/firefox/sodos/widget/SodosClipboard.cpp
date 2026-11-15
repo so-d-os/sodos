@@ -151,8 +151,9 @@ SodosClipboard::GetNativeClipboardSequenceNumber(
     nsAutoCString kernel;
     KernelText(kernel);
     uint32_t h = 2166136261u;
-    for (char c : kernel) {
-      h = (h ^ uint8_t(c)) * 16777619u;
+    const char* p = kernel.BeginReading();
+    for (uint32_t i = 0; i < kernel.Length(); i++) {
+      h = (h ^ uint8_t(p[i])) * 16777619u;
     }
     seq = int32_t(h ^ (uint32_t(seq) * 2654435761u));
   }
