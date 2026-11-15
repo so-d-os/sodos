@@ -141,14 +141,15 @@ static void pics_free(void) {
   for (i = 0; i < DOC_IMGS; i++) img_free(&pics[i]);
 }
 
-static int read_url(const char* url, char** data, int* len) {
+static int read_url_fn(const char* url, char** data, int* len, progress_fn fn) {
   url_t u;
   *data = 0;
   *len = 0;
   if (url_parse(url, &u) != 0) return -1;
   if (strcmp(u.scheme, "http") == 0 || strcmp(u.scheme, "https") == 0) {
     http_resp_t r;
-    if (http_get(url, &r, progress, 0) != 0) {
+    if (http_get(url, &r, fn, 0) != 0 || r.status < 200 || r.status >= 300) {
+      /* pagina de erro (404...) nao serve como CSS, script ou figura */
       http_free(&r);
       return -1;
     }
@@ -182,6 +183,10 @@ static int read_url(const char* url, char** data, int* len) {
     return 0;
   }
   return -1;
+}
+
+static int read_url(const char* url, char** data, int* len) {
+  return read_url_fn(url, data, len, progress);
 }
 
 static int b64_val(int c) {
@@ -321,17 +326,25 @@ static int async_step(void) {
 }
 
 /* ---------- CSS externo: <link rel=stylesheet> e @import ---------- */
-#define CSS_SHEETS 8                 /* arquivos por pagina */
-#define CSS_SHEET_MAX (96 * 1024)    /* bytes por arquivo */
-#define CSS_TOTAL (256 * 1024)       /* bytes somados */
+#define CSS_SHEETS 128                /* arquivos por pagina (o Bing usa ~100) */
+#define CSS_SHEET_MAX (512 * 1024)    /* bytes por arquivo */
+#define CSS_TOTAL (2 * 1024 * 1024)   /* bytes somados */
+
+typedef struct {
+  char url[URL_MAX];
+  char* data;
+  int n, done;
+} css_sheet_t;
 
 typedef struct {
   char* b;
-  int n, cap, sheets;
-  char seen[CSS_SHEETS][URL_MAX];
+  int n, cap;
+  css_sheet_t* sh;
+  int ns;
 } css_acc_t;
 
-/* valor do atributo name= numa tag (texto depois do '<'); 0 se nao tem */
+/* valor do atributo name= numa tag (texto depois do '<'); 0 se nao tem.
+ * &amp; vira & (os href da Wikipedia vem assim). */
 static int tag_attr(const char* tag, const char* name, char* out, int max) {
   int nl = (int)strlen(name), i;
   for (i = 1; tag[i]; i++) {
@@ -345,8 +358,14 @@ static int tag_attr(const char* tag, const char* name, char* out, int max) {
     p++;
     while (*p == ' ') p++;
     q = (*p == '"' || *p == '\'') ? *p++ : 0;
-    while (*p && k < max - 1 && (q ? *p != q : !isspace((unsigned char)*p) && *p != '>'))
+    while (*p && k < max - 1 && (q ? *p != q : !isspace((unsigned char)*p) && *p != '>')) {
+      if (*p == '&' && strncmp(p, "&amp;", 5) == 0) {
+        out[k++] = '&';
+        p += 5;
+        continue;
+      }
       out[k++] = *p++;
+    }
     out[k] = 0;
     return 1;
   }
@@ -372,10 +391,33 @@ static void css_put(css_acc_t* a, const char* s, int n) {
   a->b[a->n] = 0;
 }
 
-static void css_fetch(css_acc_t* a, const char* base, const char* href, int depth);
+/* Barra de estado durante o CSS: "CSS 12/96 - recebendo r.bing.com" */
+static int css_cur, css_cnt;
+static int css_progress(const char* msg) {
+  char b[200];
+  while (*msg >= '0' && *msg <= '9') msg++;
+  if (*msg == '%') msg++;
+  while (*msg == ' ') msg++;
+  snprintf(b, sizeof b, "CSS %d/%d - %s", css_cur, css_cnt, msg);
+  return progress(b);
+}
 
-/* @import "x.css"; @import url(x.css) screen; -> baixa antes do resto da folha */
-static void css_imports(css_acc_t* a, const char* css, int n, const char* base, int depth) {
+/* Guarda a folha na lista (na ordem da pagina); baixa depois. */
+static void css_add_sheet(css_acc_t* a, const char* base, const char* href) {
+  char absu[URL_MAX];
+  int i;
+  if (a->ns >= CSS_SHEETS || !a->sh) return;
+  if (url_resolve(base ? base : "", href, absu, URL_MAX) != 0) return;
+  if (strncmp(absu, "http", 4) != 0 && strncmp(absu, "file", 4) != 0) return;
+  for (i = 0; i < a->ns; i++)
+    if (strcmp(a->sh[i].url, absu) == 0) return;
+  memset(&a->sh[a->ns], 0, sizeof(css_sheet_t));
+  strcpy(a->sh[a->ns].url, absu);
+  a->ns++;
+}
+
+/* @import "x.css"; @import url(x.css) screen; -> chama fn para cada endereco */
+static void css_imports(css_acc_t* a, const char* css, int n, const char* base, int now) {
   int i;
   for (i = 0; i + 7 < n; i++) {
     char href[URL_MAX];
@@ -390,48 +432,60 @@ static void css_imports(css_acc_t* a, const char* css, int n, const char* base, 
            !isspace((unsigned char)*p))
       href[k++] = *p++;
     href[k] = 0;
-    if (href[0]) css_fetch(a, base, href, depth + 1);
+    if (!href[0]) continue;
+    if (!now) {
+      css_add_sheet(a, base, href);
+    } else {
+      /* @import dentro de uma folha ja baixada: busca agora, sem descer mais */
+      char absu[URL_MAX];
+      char* data = 0;
+      int dn = 0;
+      if (url_resolve(base, href, absu, URL_MAX) != 0) continue;
+      if (read_url_fn(absu, &data, &dn, css_progress) == 0 && data) {
+        if (dn > CSS_SHEET_MAX) dn = CSS_SHEET_MAX;
+        css_put(a, data, dn);
+      }
+      free(data);
+    }
   }
 }
 
-static void css_fetch(css_acc_t* a, const char* base, const char* href, int depth) {
-  char absu[URL_MAX];
-  char* data = 0;
-  int dn = 0, i;
-  if (depth > 1 || a->sheets >= CSS_SHEETS || a->n >= CSS_TOTAL) return;
-  if (url_resolve(base ? base : "", href, absu, URL_MAX) != 0) return;
-  for (i = 0; i < a->sheets; i++)
-    if (strcmp(a->seen[i], absu) == 0) return;
-  strcpy(a->seen[a->sheets++], absu);
-  if (read_url(absu, &data, &dn) != 0 || !data) {
-    free(data);
-    return;
+static int same_host(const char* u, const char* v) {
+  const char* a = strstr(u, "://");
+  const char* b = strstr(v, "://");
+  if (!a || !b) return 0;
+  a += 3;
+  b += 3;
+  while (*a && *a != '/' && *a == *b) {
+    a++;
+    b++;
   }
-  if (dn > CSS_SHEET_MAX) dn = CSS_SHEET_MAX;
-  css_imports(a, data, dn, absu, depth); /* os importados valem antes desta folha */
-  css_put(a, data, dn);
-  free(data);
+  return (*a == 0 || *a == '/') && (*b == 0 || *b == '/');
 }
 
 /* Junta o CSS externo da pagina, na ordem: folhas de <link rel=stylesheet>
- * (menos media=print) e os @import dos blocos <style>. */
+ * (menos media=print) e os @import dos blocos <style>. As folhas sao
+ * baixadas agrupadas por servidor: a conexao fica aberta entre elas (trocar
+ * de servidor a cada folha custaria uma troca de chaves TLS por folha). */
 static char* gather_css(const char* html, int len, const char* base, int* outn) {
   css_acc_t a;
-  int i;
+  int i, j;
   memset(&a, 0, sizeof a);
   *outn = 0;
-  for (i = 1; i + 6 < len && a.sheets < CSS_SHEETS && a.n < CSS_TOTAL; i++) {
-    char tag[1024], v[URL_MAX];
-    int j = i, k = 0;
+  a.sh = (css_sheet_t*)malloc(CSS_SHEETS * sizeof(css_sheet_t));
+  if (!a.sh) return 0;
+  for (i = 1; i + 6 < len && a.ns < CSS_SHEETS; i++) {
+    char tag[2048], v[URL_MAX];
+    int j2 = i, k = 0;
     if (html[i - 1] != '<') continue;
     if (strncasecmp(html + i, "link", 4) != 0 && strncasecmp(html + i, "style", 5) != 0) continue;
-    while (j < len && html[j] != '>' && k < (int)sizeof tag - 1) tag[k++] = html[j++];
+    while (j2 < len && html[j2] != '>' && k < (int)sizeof tag - 1) tag[k++] = html[j2++];
     tag[k] = 0;
     if (strncasecmp(tag, "style", 5) == 0) {
       /* <style>...</style>: so os @import; o resto o html.c le */
-      int e = j;
+      int e = j2;
       while (e + 8 <= len && strncasecmp(html + e, "</style", 7) != 0) e++;
-      if (j < e) css_imports(&a, html + j + 1, e - j - 1, base, 0);
+      if (j2 < e) css_imports(&a, html + j2 + 1, e - j2 - 1, base, 0);
       i = e;
       continue;
     }
@@ -440,8 +494,44 @@ static char* gather_css(const char* html, int len, const char* base, int* outn) 
     if (tag_attr(tag, "media", v, (int)sizeof v) && ci_has(v, "print") && !ci_has(v, "screen") &&
         !ci_has(v, "all"))
       continue;
-    if (tag_attr(tag, "href", v, (int)sizeof v) && v[0]) css_fetch(&a, base, v, 0);
+    if (tag_attr(tag, "href", v, (int)sizeof v) && v[0]) css_add_sheet(&a, base, v);
   }
+  css_cnt = a.ns;
+  css_cur = 0;
+  for (i = 0; i < a.ns && !pending_ev_have; i++) {
+    if (a.sh[i].done) continue;
+    for (j = i; j < a.ns && !pending_ev_have; j++) {
+      if (a.sh[j].done || !same_host(a.sh[i].url, a.sh[j].url)) continue;
+      css_cur++;
+      load_pct = 5 + 80 * css_cur / (a.ns ? a.ns : 1);
+      a.sh[j].done = 1;
+      if (read_url_fn(a.sh[j].url, &a.sh[j].data, &a.sh[j].n, css_progress) != 0) {
+        free(a.sh[j].data);
+        a.sh[j].data = 0;
+        a.sh[j].n = 0;
+      }
+    }
+    if (!a.sh[i].done) {
+      /* file:// ou endereco sem host */
+      css_cur++;
+      a.sh[i].done = 1;
+      if (read_url_fn(a.sh[i].url, &a.sh[i].data, &a.sh[i].n, css_progress) != 0) {
+        free(a.sh[i].data);
+        a.sh[i].data = 0;
+        a.sh[i].n = 0;
+      }
+    }
+  }
+  for (i = 0; i < a.ns; i++) {
+    css_sheet_t* sh = &a.sh[i];
+    int dn = sh->n;
+    if (!sh->data) continue;
+    if (dn > CSS_SHEET_MAX) dn = CSS_SHEET_MAX;
+    if (!pending_ev_have) css_imports(&a, sh->data, dn, sh->url, 1); /* valem antes desta folha */
+    css_put(&a, sh->data, dn);
+    free(sh->data);
+  }
+  free(a.sh);
   *outn = a.n;
   return a.b;
 }

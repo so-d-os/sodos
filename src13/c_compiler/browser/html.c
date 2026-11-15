@@ -71,6 +71,7 @@
 #define P_OFF     0x20000
 #define P_SPL     0x40000
 #define P_SPR     0x80000
+#define P_FLOAT   0x100000
 
 typedef struct {
   int set;
@@ -80,6 +81,7 @@ typedef struct {
   int width, height; /* px; < 0 = -porcento */
   int hidden, flexcol, mauto, valign, nopad, off;
   int spl, spr; /* margem ou recuo dos lados: vira espaco em volta (1) ou nao (-1) */
+  int flt;      /* float: 1 left, 2 right, 0 none */
 } css_props_t;
 
 typedef struct {
@@ -127,7 +129,7 @@ typedef struct {
   unsigned bg, bcolor;
   int bg_set, display, border, width, height, flexcol, mauto, valign, nopad;
   int legacy_center, closed_details, blocky;
-  int spl, spr;
+  int spl, spr, flt;
 } frm_t;
 
 typedef struct lay lay_t;
@@ -987,7 +989,8 @@ static void handle_tag(lay_t* L, tag_t* t) {
         mark[m++] = '.';
         mark[m] = 0;
       } else {
-        mark[0] = L->cp437 ? (char)(k >= 2 ? 9 : 7) : (k >= 2 ? 'o' : '*');
+        /* disco, circulo, quadrado (o 9 da fonte nao desenha) */
+        mark[0] = k >= 3 ? (L->cp437 ? (char)0xFE : '-') : k == 2 ? 'o' : (L->cp437 ? (char)7 : '*');
         mark[1] = 0;
       }
       if (L->nomark) mark[0] = 0;
@@ -1587,7 +1590,8 @@ static int is_zero(const char* s, int n) {
 static void css_border(css_props_t* p, const char* v, int n, int sides) {
   unsigned col;
   int on;
-  if (has_word(v, n, "none") || has_word(v, n, "hidden") || word_eq(v, n, "0") || is_zero(v, n))
+  if (has_word(v, n, "none") || has_word(v, n, "hidden") || word_eq(v, n, "0") || is_zero(v, n) ||
+      has_word(v, n, "transparent"))
     on = 0;
   else
     on = has_word(v, n, "solid") || has_word(v, n, "dashed") || has_word(v, n, "dotted") ||
@@ -1805,6 +1809,10 @@ static void css_decl(css_t* c, css_props_t* p, const char* prop, const char* v, 
       p->spl = x >= 3 ? 1 : -1;
       p->set |= P_SPL;
     }
+  } else if (is(prop, "float")) {
+    p->flt = has_word(v, n, "right") || has_word(v, n, "inline-end") ? 2
+           : has_word(v, n, "left") || has_word(v, n, "inline-start") ? 1 : 0;
+    p->set |= P_FLOAT;
   } else if (is(prop, "flex-direction") || is(prop, "flex-flow")) {
     p->flexcol = has_word(v, n, "column") || has_word(v, n, "column-reverse") ? 1 : -1;
     p->set |= P_FLEXDIR;
@@ -2291,6 +2299,7 @@ static void props_onto(const css_props_t* r, frm_t* f) {
   if (r->set & P_NOPAD) f->nopad = r->nopad;
   if (r->set & P_SPL) f->spl = r->spl;
   if (r->set & P_SPR) f->spr = r->spr;
+  if (r->set & P_FLOAT) f->flt = r->flt;
 }
 
 #define MATCH_MAX 96
@@ -3302,7 +3311,7 @@ static int lay_table(lay_t* L, tag_t* ttag, int tfi, const char* html, int i, in
     int center = (tf && tf->mauto) || is(ttag->align, "center") ||
                  (tf && tfi > 0 && L->frame[tfi - 1].legacy_center);
     if (center) x0 += (avail - total) / 2;
-    else if (is(ttag->align, "right")) x0 += avail - total;
+    else if (is(ttag->align, "right") || (tf && tf->flt == 2)) x0 += avail - total;
   }
   cx[0] = x0;
   for (c = 0; c < ncols; c++) cx[c + 1] = cx[c] + w[c] + 1;
@@ -3503,12 +3512,25 @@ static int start_tag(lay_t* L, tag_t* t, const char* html, int i, int len) {
   if (f.display == D_INLINE && blocktag && !is_table_part(n)) mode = M_INLINE;
   else if ((f.display == D_BLOCK || f.display == D_FLEX) && !blocktag) mode = M_BLOCK;
   if (parent_flex && (blocktag || mode == M_BLOCK) && !is_table_part(n) && !is(n, "form")) mode = M_INLINE;
+  /* float:left nos itens de menu e paginacao: ficam lado a lado */
+  if (f.flt && (blocktag || mode == M_BLOCK) && !is_table_part(n) && !is(n, "body") && !is(n, "html"))
+    mode = M_INLINE;
+  /* <a style="display:block"> dentro de um item em linha (float, flex,
+   * inline-block): fica dentro da caixinha do item, sem quebrar a linha */
+  if (mode == M_BLOCK) {
+    int k;
+    for (k = L->nframe - 1; k >= L->frame_floor; k--)
+      if (L->frame[k].mode == M_INLINE) {
+        mode = M_NORMAL;
+        break;
+      }
+  }
   f.mode = mode;
   hid = L->hide > 0 || f.hide;
   if (!hid) {
     if (mode == M_INLINE) {
       flush_word(L);
-      gap(L, parent_flex || f.display == D_INLINE);
+      gap(L, parent_flex || f.display == D_INLINE || f.flt);
     } else if (blocktag || mode == M_BLOCK) {
       flush_word(L);
       if (!(L->in_cell && L->d->nruns == L->cell_runs)) flush_line(L);

@@ -28,6 +28,7 @@
 #include "vt.h"
 #include "env.h"
 #include "gpu.h"
+#include "wfont.h"
 #include "c_compiler/sox.h"
 
 static inline void outl(uint16_t port, uint32_t v) {
@@ -875,6 +876,98 @@ static void round_top_frame(int x, int y, int w, int h, int r, uint32_t rgb) {
   fill_rect(x, y + h - 1, w, 1, rgb);
 }
 
+/* ---------------------------------------------------------------------------
+ * Sombra das janelas: caixa desfocada, deslocada um pouco para baixo, bem
+ * clara (estilo macOS). Ela escurece o que ja esta na tela (multiplica), entao
+ * so pode ser desenhada uma vez sobre um fundo recem-pintado.
+ * ------------------------------------------------------------------------- */
+#define SH_R    18   /* raio do desfoque */
+#define SH_DY   5    /* deslocamento para baixo */
+#define SH_A    96   /* opacidade no miolo (0..255) */
+#define SH_PL   SH_R
+#define SH_PR   SH_R
+#define SH_PT   (SH_R - SH_DY)
+#define SH_PB   (SH_R + SH_DY)
+
+static uint8_t sh_tab[2 * SH_R + 1];
+static int sh_ready;
+
+/* Perfil da borda: indice 0 = SH_R para dentro (cheio), 2*SH_R = fora (zero).
+ * Smoothstep vezes (1 + s)/2: perto da borda ~metade, cauda longa e macia. */
+static void sh_init(void) {
+  int k;
+  for (k = 0; k <= 2 * SH_R; k++) {
+    int s = (2 * SH_R - k) * 1024 / (2 * SH_R);          /* 1024 = 1.0 */
+    int v = s * s / 1024 * (3072 - 2 * s) / 1024;        /* smoothstep */
+    v = v * (1024 + s) / 2048;
+    sh_tab[k] = (uint8_t)(v * 255 / 1024);
+  }
+  sh_ready = 1;
+}
+
+/* Fator (0..255) na coordenada p para a caixa [b0,b1). */
+static inline uint32_t sh_f(int p, int b0, int b1) {
+  int t = b0 - p;
+  if (p - (b1 - 1) > t) t = p - (b1 - 1);
+  t += SH_R;
+  if (t <= 0) return sh_tab[0];
+  if (t >= 2 * SH_R) return 0;
+  return sh_tab[t];
+}
+
+/* Escurece n pixels de row; a da coluna c = ay * sh_f(c) / 256. */
+static void sh_span(volatile uint32_t* row, int c0, int c1, uint32_t ay, int bx0, int bx1) {
+  int c;
+  for (c = c0; c < c1; c++) {
+    uint32_t a = (ay * sh_f(c, bx0, bx1)) >> 8;
+    uint32_t k, p;
+    if (!a) continue;
+    k = 256u - a;
+    p = row[c];
+    row[c] = ((((p & 0xFF00FFu) * k) >> 8) & 0xFF00FFu) |
+             ((((p & 0x00FF00u) * k) >> 8) & 0x00FF00u) | (p & 0xFF000000u);
+  }
+}
+
+/* Alfa da linha r (ja vezes SH_A) para a janela em y com altura h. */
+static inline uint32_t sh_row_a(int r, int y, int h) {
+  return SH_A * sh_f(r, y + SH_DY, y + SH_DY + h) / 255u;
+}
+
+/* Sombra da janela (x,y,w,h), so dentro do retangulo de corte [cx0,cx1) x
+ * [cy0,cy1). O miolo da janela (abaixo dos cantos redondos) fica de fora: ela
+ * e pintada por cima. Linhas a partir de ylim (barra de tarefas) ficam sem. */
+static void win_shadow(int x, int y, int w, int h, int cx0, int cy0, int cx1, int cy1,
+                       int ylim) {
+  int r, r0, r1, c0, c1;
+  if (!gfx_bochs || w < 2 * UI_RADIUS || h < 2 * UI_RADIUS) return;
+  if (!sh_ready) sh_init();
+  /* maximizada (ocupa a tela): sombra nenhuma aparece */
+  if (x <= 0 && y <= 0 && x + w >= (int)gfx_w) return;
+  if (cx0 < 0) cx0 = 0;
+  if (cy0 < 0) cy0 = 0;
+  if (cx1 > (int)gfx_w) cx1 = (int)gfx_w;
+  if (cy1 > (int)gfx_h) cy1 = (int)gfx_h;
+  if (cy1 > ylim) cy1 = ylim;
+  r0 = y - SH_PT > cy0 ? y - SH_PT : cy0;
+  r1 = y + h + SH_PB < cy1 ? y + h + SH_PB : cy1;
+  c0 = x - SH_PL > cx0 ? x - SH_PL : cx0;
+  c1 = x + w + SH_PR < cx1 ? x + w + SH_PR : cx1;
+  if (r0 >= r1 || c0 >= c1) return;
+  for (r = r0; r < r1; r++) {
+    volatile uint32_t* row = (volatile uint32_t*)gfx_at(0, r);
+    uint32_t ay = sh_row_a(r, y, h);
+    if (!ay) continue;
+    if (r >= y + UI_RADIUS && r < y + h) {
+      /* so as laterais: o meio e da janela */
+      sh_span(row, c0, x < c1 ? (x > c0 ? x : c0) : c1, ay, x, x + w);
+      sh_span(row, x + w > c0 ? (x + w < c1 ? x + w : c1) : c0, c1, ay, x, x + w);
+    } else {
+      sh_span(row, c0, c1, ay, x, x + w);
+    }
+  }
+}
+
 static int gfx_ram_ok(void) {
   uint32_t bytes = gfx_w * gfx_h * (gfx_bochs ? 4u : 1u);
   volatile uint32_t* p = (volatile uint32_t*)GFX_BACK_PHYS;
@@ -1048,6 +1141,96 @@ static void draw_text_t(int px, int py, const char* s, uint32_t fg, int scale) {
     draw_char_t(px, py, *s++, fg, scale);
     px += FONT_W * scale;
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * Fonte TrueType dos titulos de janela e dos rotulos do desktop (wfont.c).
+ * Ao abrir o WIN procura \SODOS\FONTS em D:, U: e nas outras unidades
+ * montadas; sem o arquivo (ou em 8 bits) fica a fonte de bitmap de sempre.
+ * ------------------------------------------------------------------------- */
+#define WF_PX_BIG   16   /* tela >= 400 linhas (escala 2 da fonte de bitmap) */
+#define WF_PX_SMALL 9
+static const char* const wf_files[] = { "INTER.TTF", "ROBOTO.TTF", "NOTOSANS.TTF" };
+static int wf_tried_px;   /* tamanho ja procurado: nao rele o disco a cada WIN */
+
+static void* wf_alloc(uint32_t n) { return umalloc_top(n); }
+static void wf_release(void* p) { ufree(p); }
+
+static int wf_on(void) { return gfx_bochs && wfont_ready(); }
+
+static void wf_init(int scale) {
+  static const char order[] = "DUCEFGHIJKLMNOPQRSTVWXYZ";
+  int want = scale > 1 ? WF_PX_BIG : WF_PX_SMALL;
+  int d, f;
+  if (!gfx_bochs || !um_ready()) return;
+  if (wfont_ready() && wfont_px() == want) return;
+  if (wf_tried_px == want) return;
+  wf_tried_px = want;
+  for (d = 0; order[d]; d++) {
+    if (order[d] != 'U' && !drives_is_mounted(order[d])) continue;
+    for (f = 0; f < (int)(sizeof(wf_files) / sizeof(wf_files[0])); f++) {
+      static const char dir[] = "X:\\SODOS\\FONTS\\";
+      char path[40];
+      int i = 0, j, sz, rc;
+      uint8_t* buf;
+      for (j = 0; dir[j]; j++) path[i++] = dir[j];
+      for (j = 0; wf_files[f][j]; j++) path[i++] = wf_files[f][j];
+      path[i] = 0;
+      path[0] = order[d];
+      sz = file_size(path);
+      if (sz < 1024 || sz > 8 * 1024 * 1024) continue;
+      buf = (uint8_t*)umalloc_owned((uint32_t)sz + 1, 0);
+      if (!buf) return;
+      rc = file_load(path, (char*)buf, sz + 1) == sz
+             ? wfont_build(buf, sz, want, wf_alloc, wf_release) : -9;
+      ufree(buf);
+      serial_puts("[wfont] ");
+      serial_puts(path);
+      serial_puts(rc == 0 ? " ok\n" : " falhou\n");
+      if (rc == 0) return;
+    }
+  }
+  serial_puts("[wfont] sem \\SODOS\\FONTS: titulos com a fonte de bitmap\n");
+}
+
+/* Texto com a fonte TrueType por cima do que ja esta na tela (cor PIXA, como
+ * fill_rect). (x,y) = canto de cima da linha; nenhuma letra passa de x_lim
+ * (0 = sem limite). Devolve a largura desenhada. */
+static int wf_text(int x, int y, const char* s, uint32_t color, int x_lim) {
+  uint32_t c = pix32(color);
+  uint32_t cr = (c >> 16) & 0xFFu, cg = (c >> 8) & 0xFFu, cb = c & 0xFFu;
+  int pen = x * 256, base = y + wfont_ascent();
+  int xr = (int)gfx_w;
+  if (x_lim > 0 && x_lim < xr) xr = x_lim;
+  for (; *s; s++) {
+    const struct wfont_glyph* g = wfont_glyph((unsigned char)*s);
+    int gx = ((pen + 128) >> 8) + g->left, gy = base - g->top, i, j;
+    if (x_lim > 0 && ((pen + g->adv + 128) >> 8) > x_lim) break;
+    for (j = 0; g->a && j < g->h; j++) {
+      int yy = gy + j;
+      volatile uint32_t* row;
+      const uint8_t* al = g->a + j * g->w;
+      if (yy < 0 || yy >= (int)gfx_h) continue;
+      row = (volatile uint32_t*)gfx_at(0, yy);
+      for (i = 0; i < g->w; i++) {
+        int xx = gx + i;
+        uint32_t a = al[i], na, d;
+        if (!a || xx < 0 || xx >= xr) continue;
+        if (a == 255) {
+          row[xx] = c;
+          continue;
+        }
+        na = 255u - a;
+        d = row[xx];
+        row[xx] = (c & 0xFF000000u) |
+                  (((cr * a + ((d >> 16) & 0xFFu) * na + 127u) / 255u) << 16) |
+                  (((cg * a + ((d >> 8) & 0xFFu) * na + 127u) / 255u) << 8) |
+                  ((cb * a + (d & 0xFFu) * na + 127u) / 255u);
+      }
+    }
+    pen += g->adv;
+  }
+  return ((pen + 128) >> 8) - x;
 }
 
 static void draw_char_font(int px, int py, char c, uint32_t fg, uint32_t bg) {
@@ -3349,7 +3532,11 @@ static void wm_draw_inner(struct wm_win* w, int focus, int title_h, int scale,
   round_top(w->x, w->y, w->w, title_h, UI_RADIUS,
             gui_col(focus ? UI_TITLE_A : UI_TITLE_I));
   fill_rect(w->x, w->y + title_h, w->w, w->h - title_h, col_win);
-  draw_text_t(w->x + 12, ty, w->title, gui_col(UI_TEXT), scale);
+  if (wf_on())
+    wf_text(w->x + 12, w->y + (title_h - wfont_height()) / 2, w->title, gui_col(UI_TEXT),
+            close_x - close_s - 10);
+  else
+    draw_text_t(w->x + 12, ty, w->title, gui_col(UI_TEXT), scale);
   fill_round(close_x, w->y + 3, close_s, close_s, 5, gui_col(0xC23440));
   draw_text_t(close_x + (close_s > FONT_W * scale ? (close_s - FONT_W * scale) / 2 : 0),
               ty, "x", gui_col(UI_TEXT), scale);
@@ -4020,23 +4207,32 @@ void gui_text(int x, int y, const char* s, int n, uint32_t fg, uint32_t bg, int 
 }
 
 static void gui_blit_win(struct gui_win* w) {
-  int y;
+  int y, x0, x1, y0, y1;
   int top = w->oy + w->title_h;
   int left = w->ox;
   if (!w->pix || w->cw < 1 || w->ch < 1) return;
-  for (y = 0; y < w->ch; y++) {
+  /* A janela pode estar meio fora da tela (arrastada): so copia o pedaco
+   * do buffer que cai dentro do quadro. */
+  x0 = left < 0 ? -left : 0;
+  x1 = left + w->cw > (int)gfx_w ? (int)gfx_w - left : w->cw;
+  y0 = top < 0 ? -top : 0;
+  y1 = top + w->ch > (int)gfx_h ? (int)gfx_h - top : w->ch;
+  if (x0 >= x1 || y0 >= y1) return;
+  for (y = y0; y < y1; y++) {
     uint32_t* src = w->pix + y * w->cw;
     if (gfx_bochs) {
+      uint32_t* s = src + x0;
       volatile uint32_t* dst = gfx_offscreen
-        ? (volatile uint32_t*)(gfx_back + (uint32_t)(y + top) * gfx_w * 4u + (uint32_t)left * 4u)
+        ? (volatile uint32_t*)(gfx_back + (uint32_t)(y + top) * gfx_w * 4u +
+                               (uint32_t)(left + x0) * 4u)
         : (volatile uint32_t*)(gfx_lfb + ((uint32_t)(y + top) + gfx_draw_y0) * gfx_pitch_bytes +
-                               (uint32_t)left * 4u);
-      uint32_t n = (uint32_t)w->cw;
-      __asm__ volatile ("rep movsl" : "+S"(src), "+D"(dst), "+c"(n) : : "memory");
+                               (uint32_t)(left + x0) * 4u);
+      uint32_t n = (uint32_t)(x1 - x0);
+      __asm__ volatile ("rep movsl" : "+S"(s), "+D"(dst), "+c"(n) : : "memory");
     } else {
       int x;
       uint32_t last = 0xFFFFFFFFu, idx = 0;
-      for (x = 0; x < w->cw; x++) {
+      for (x = x0; x < x1; x++) {
         if (src[x] != last) {
           last = src[x];
           idx = gui_col(last);
@@ -4062,10 +4258,32 @@ static void gui_clamp_pos(void) {
     gui.oy = limit - gui.title_h - gui.ch;
 }
 
+/* Arrastar pela barra de titulo: a janela pode sair da tela pela esquerda,
+ * pela direita e por baixo. Ficam sempre na tela WIN_KEEP px de barra livre
+ * (fora dos botoes, btn_w px na ponta direita) para pegar de volta, e a barra
+ * inteira fica entre o topo da tela e a barra de tarefas (bar_h). */
+#define WIN_KEEP 40
+static void win_keep_title(int* x, int* y, int w, int title_h, int bar_h, int btn_w) {
+  int keep_l = WIN_KEEP;           /* saindo pela direita: sobra o comeco */
+  int keep_r = WIN_KEEP + btn_w;   /* saindo pela esquerda: botoes + barra livre */
+  int ymax = (int)gfx_h - bar_h - title_h;
+  if (keep_l > w) keep_l = w;
+  if (keep_r > w) keep_r = w;
+  if (keep_l > (int)gfx_w) keep_l = (int)gfx_w;
+  if (keep_r > (int)gfx_w) keep_r = (int)gfx_w;
+  if (*x > (int)gfx_w - keep_l) *x = (int)gfx_w - keep_l;
+  if (*x < keep_r - w) *x = keep_r - w;
+  if (*y > ymax) *y = ymax;
+  if (*y < 0) *y = 0;
+}
+
 static void gui_move_to(int x, int y) {
+  int scale = gui.scale > 0 ? gui.scale : 1;
+  int bar = glyph_rows() * scale + (gfx_h >= 400u ? 8 : 2);
   gui.ox = x - gui.drag_ox;
   gui.oy = y - gui.drag_oy;
-  gui_clamp_pos();
+  /* sem o WIN so ha o botao de fechar (gui_present) */
+  win_keep_title(&gui.ox, &gui.oy, gui.cw, gui.title_h, bar, gui.title_h - 4 + 2);
 }
 
 void gui_present(void) {
@@ -4974,6 +5192,9 @@ static int gui_panel_left(void) {
   if (!gwins) return 0;
   for (i = 0; i < GUI_MAX; i++) {
     if (!gwins[i].open || !win_ieq(gwins[i].title, "SODOS IA")) continue;
+    /* Arrastado para fora pela direita: o "S" fica como se o painel
+     * estivesse encostado na borda (senao cai em cima do relogio). */
+    if (gwins[i].ox > (int)gfx_w - gwins[i].cw) return (int)gfx_w - gwins[i].cw;
     return gwins[i].ox;
   }
   return 0;
@@ -5151,6 +5372,13 @@ static char desk_ren_buf[13];
 static int desk_ren_len;
 static int desk_ren_all;   /* nome todo marcado: digitar substitui */
 static char desk_ren_old[16];
+/* Icone marcado pelo ultimo clique: so o rotulo dele tem fundo (os outros sao
+ * transparentes). -1 nenhum, 0..desk_n-1 itens da pasta (desk_mark_name
+ * guarda o nome para achar de novo quando a pasta e relida), DESK_MARK_FIXED
+ * + 0..3 os fixos DOS/ARQ/WEB/CMD. */
+#define DESK_MARK_FIXED 0x1000
+static int desk_mark = -1;
+static char desk_mark_name[16];
 
 static void desk_free(void) {
   int i;
@@ -5296,6 +5524,25 @@ static void desk_load(void) {
       if (!desk_items[i].name[j] && !desk_ren_old[j]) desk_ren = i;
     }
   }
+  if (desk_mark >= 0 && desk_mark < DESK_MARK_FIXED) {
+    /* o item marcado pode ter mudado de posicao (ou sumido) */
+    int i, j;
+    desk_mark = -1;
+    for (i = 0; i < desk_n && desk_mark_name[0]; i++) {
+      for (j = 0; desk_items[i].name[j] && desk_items[i].name[j] == desk_mark_name[j]; j++) { }
+      if (!desk_items[i].name[j] && !desk_mark_name[j]) desk_mark = i;
+    }
+  }
+}
+
+/* Marca o item i da pasta (ou um fixo, i >= DESK_MARK_FIXED; -1 desmarca). */
+static void desk_mark_item(int i) {
+  int k = 0;
+  desk_mark = i;
+  if (i >= 0 && i < desk_n)
+    for (; desk_items[i].name[k] && k < (int)sizeof(desk_mark_name) - 1; k++)
+      desk_mark_name[k] = desk_items[i].name[k];
+  desk_mark_name[k] = 0;
 }
 
 /* Depois de um comando: rele as miniaturas so se a lista de arquivos mudou.
@@ -5564,9 +5811,32 @@ static void desk_blit(int x, int y, int side, const uint8_t* rgba, int tw, int t
   }
 }
 
+/* Rotulo de icone do desktop: letras com sombra direto sobre o fundo (cor ou
+ * papel de parede aparecem); so o icone marcado ganha a faixa de selecao. */
+static void desk_label(int x, int y, const char* s, int marked, uint32_t fg, uint32_t shadow,
+                       int scale) {
+  int n = 0;
+  if (wf_on()) {
+    if (marked)
+      fill_rect(x - 3, y, wfont_width(s) + 6, wfont_height() + 2, desk_color(32, 96, 200));
+    else
+      wf_text(x + 1, y + 2, s, shadow, 0);
+    wf_text(x, y + 1, s, fg, 0);
+    return;
+  }
+  while (s[n]) n++;
+  if (marked)
+    fill_rect(x - 1, y - 1, n * FONT_W * scale + 2, glyph_rows() * scale + 2,
+              desk_color(32, 96, 200));
+  else
+    draw_text_t(x + 1, y + 1, s, shadow, scale);
+  draw_text_t(x, y, s, fg, scale);
+}
+
 static void desk_draw(int icon, int ch, int scale, int sw, int sh, int bar_h,
                       uint32_t col_desk, uint32_t col_white, uint32_t col_black) {
   int i;
+  (void)col_desk;   /* rotulos sem fundo (desk_label) */
   for (i = 0; i < desk_n; i++) {
     int x, y;
     struct desk_item* it = &desk_items[i];
@@ -5645,9 +5915,9 @@ static void desk_draw(int icon, int ch, int scale, int sw, int sh, int bar_h,
         k++;
       }
       lab[k] = 0;
-      draw_string_scaled(x, y + icon + 2, lab, col_white, col_desk, scale);
+      desk_label(x, y + icon + 2, lab, i == desk_mark, col_white, col_black, scale);
     } else
-      draw_string_scaled(x, y + icon + 2, it->name, col_white, col_desk, scale);
+      desk_label(x, y + icon + 2, it->name, i == desk_mark, col_white, col_black, scale);
   }
 }
 
@@ -6079,6 +6349,7 @@ static struct {
   int wm, gw;    /* janela arrastada: indice em wins ou em gwins (-1 = nao e) */
   int x, y, w, h;
   int cx, cy;    /* ultima posicao do cursor */
+  int ylim;      /* linhas daqui para baixo sao da barra de tarefas: a janela fica atras */
   uint32_t* bg;
   uint32_t* win;
   uint32_t* line; /* linha com cursor ou canto: compoe aqui para nao piscar */
@@ -6106,8 +6377,9 @@ static int dc_track(int wm, int gw, int w, int h) {
     return 1;
   }
   if (dc.capture || !gfx_bochs || !um_ready()) return 0;
-  if (w > (int)gfx_w) w = (int)gfx_w;
-  if (h > (int)gfx_h) h = (int)gfx_h;
+  /* A imagem guardada e a janela inteira (dc_capture_pos a poe toda na tela
+   * para tirar a foto); maior que a tela fica no caminho antigo. */
+  if (w > (int)gfx_w || h > (int)gfx_h) return 0;
   if (w < 1 || h < 1) return 0;
   dc.bg = (uint32_t*)umalloc_owned(screen, 0);
   dc.win = (uint32_t*)umalloc_owned((uint32_t)w * (uint32_t)h * 4u, 0);
@@ -6120,8 +6392,20 @@ static int dc_track(int wm, int gw, int w, int h) {
   dc.gw = gw;
   dc.w = w;
   dc.h = h;
+  dc.ylim = (int)gfx_h - (c_bar_h > 0 ? c_bar_h : 0);
   dc.capture = 1;
   return 0;
+}
+
+/* Onde desenhar a janela para a foto: a posicao mais perto de (x,y) com a
+ * janela toda na tela. Fora dela nao ha pixel para guardar. */
+static void dc_capture_pos(int x, int y, int* sx, int* sy) {
+  if (x + dc.w > (int)gfx_w) x = (int)gfx_w - dc.w;
+  if (y + dc.h > (int)gfx_h) y = (int)gfx_h - dc.h;
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  *sx = x;
+  *sy = y;
 }
 
 static void dc_snap_bg(void) {
@@ -6163,47 +6447,76 @@ static void dc_grow(int* x0, int* y0, int* x1, int* y1, int x, int y, int w, int
   if (y + h > *y1) *y1 = y + h;
 }
 
-/* Escreve fundo, janela e cursor na pagina visivel, so na regiao que mudou. Sem
- * trocar de pagina: a outra volta no quadro inteiro, ao soltar. */
-static void dc_present(int x, int y, int cx, int cy) {
-  int scale = cur_scale();
-  int cw = CUR_W * scale, chh = CUR_H * scale;
+static void dc_rows(volatile uint8_t* base, uint32_t pitch, int x, int y, int x0, int y0,
+                    int x1, int y1, int cx, int cy, int cur_rows);
+
+/* janela arrastada em (x,y) com a sombra em volta */
+static void dc_grow_sh(int* x0, int* y0, int* x1, int* y1, int x, int y) {
+  dc_grow(x0, y0, x1, y1, x - SH_PL, y - SH_PT, dc.w + SH_PL + SH_PR, dc.h + SH_PT + SH_PB);
+}
+
+/* Logo depois de dc_snap_win: a foto foi tirada com a janela toda na tela em
+ * (dc.x,dc.y). Refaz, na pagina em montagem, o fundo ali e a janela na posicao
+ * de verdade (x,y), meio fora da tela e atras da barra de tarefas se for o
+ * caso. O cursor vem depois, com o resto do quadro. */
+static void dc_place(int x, int y) {
   int x0 = x, y0 = y, x1 = x + dc.w, y1 = y + dc.h;
-  int wx0 = x < 0 ? 0 : x;
-  int wx1 = x + dc.w > (int)gfx_w ? (int)gfx_w : x + dc.w;
-  uint32_t black = pix32(PIXA(0, 0, 0)), white = pix32(PIXA(255, 255, 255));
-  volatile uint8_t* base = gfx_lfb + gfx_front_y * gfx_pitch_bytes;
-  uint32_t pitch = gfx_pitch_bytes;
-  int cur_rows = gpu_hwcur ? 0 : chh;   /* cursor da placa: nao entra na imagem */
-  int r;
+  volatile uint8_t* base;
+  uint32_t pitch;
   dc_grow(&x0, &y0, &x1, &y1, dc.x, dc.y, dc.w, dc.h);
-  dc_grow(&x0, &y0, &x1, &y1, dc.cx, dc.cy, cw, chh);
-  dc_grow(&x0, &y0, &x1, &y1, cx, cy, cw, chh);
+  dc_grow_sh(&x0, &y0, &x1, &y1, x, y);
+  dc_grow_sh(&x0, &y0, &x1, &y1, dc.x, dc.y);
   if (x0 < 0) x0 = 0;
   if (y0 < 0) y0 = 0;
   if (x1 > (int)gfx_w) x1 = (int)gfx_w;
   if (y1 > (int)gfx_h) y1 = (int)gfx_h;
-  dc.moved = 0;
-  cursor_saved = 0;
   dc.x = x;
   dc.y = y;
-  dc.cx = cx;
-  dc.cy = cy;
   if (x0 >= x1 || y0 >= y1) return;
-  /* com driver a tela e o back buffer; sem ele, a pagina visivel do LFB */
-  if (gpu_drv && gfx_offscreen) {
+  if (gfx_offscreen) {
     base = gfx_back;
     pitch = gfx_w * 4u;
+  } else {
+    base = gfx_lfb + gfx_draw_y0 * gfx_pitch_bytes;
+    pitch = gfx_pitch_bytes;
   }
+  dc_rows(base, pitch, x, y, x0, y0, x1, y1, 0, 0, 0);
+}
 
+/* Compoe as linhas y0..y1 e colunas x0..x1 (ja dentro da tela) em base: fundo
+ * guardado, janela em (x,y) cortada nas bordas e atras da barra de tarefas, e
+ * cursor em (cx,cy) se cur_rows > 0. */
+static void dc_rows(volatile uint8_t* base, uint32_t pitch, int x, int y, int x0, int y0,
+                    int x1, int y1, int cx, int cy, int cur_rows) {
+  int scale = cur_scale();
+  int wx0 = x < x0 ? x0 : x;
+  int wx1 = x + dc.w > x1 ? x1 : x + dc.w;
+  uint32_t black = pix32(PIXA(0, 0, 0)), white = pix32(PIXA(255, 255, 255));
+  int sh_on = gfx_bochs && dc.w >= 2 * UI_RADIUS && dc.h >= 2 * UI_RADIUS &&
+              !(x <= 0 && y <= 0 && x + dc.w >= (int)gfx_w);
+  int r;
+  if (sh_on && !sh_ready) sh_init();
   for (r = y0; r < y1; r++) {
     const uint32_t* bg = dc.bg + (uint32_t)r * gfx_w;
     volatile uint32_t* out = (volatile uint32_t*)(base + (uint32_t)r * pitch);
-    int in_win = r >= y && r < y + dc.h && wx0 < wx1;
+    int in_win = r >= y && r < y + dc.h && r < dc.ylim && wx0 < wx1;
     const uint32_t* src = in_win ? dc.win + (r - y) * dc.w : 0;
     int corner = in_win && r - y < UI_RADIUS;
     int in_cur = r >= cy && r < cy + cur_rows;
-    if (!in_cur && !corner) {
+    uint32_t ay = sh_on && r >= y - SH_PT && r < y + dc.h + SH_PB && r < dc.ylim
+                    ? sh_row_a(r, y, dc.h) : 0;
+    if (ay) {
+      /* sombra: fundo escurecido, depois a janela por cima */
+      int s0 = x - SH_PL > x0 ? x - SH_PL : x0;
+      int s1 = x + dc.w + SH_PR < x1 ? x + dc.w + SH_PR : x1;
+      dc_copy(dc.line + x0, bg + x0, (uint32_t)(x1 - x0));
+      if (in_win && !corner) {
+        sh_span(dc.line, s0, wx0 > s0 ? wx0 : s0, ay, x, x + dc.w);
+        sh_span(dc.line, wx1 < s1 ? wx1 : s1, s1, ay, x, x + dc.w);
+      } else if (s0 < s1) {
+        sh_span(dc.line, s0, s1, ay, x, x + dc.w);
+      }
+    } else if (!in_cur && !corner) {
       /* Caso comum: cada pedaco vai direto, sem copia intermediaria. */
       if (!in_win) {
         dc_copy(out + x0, bg + x0, (uint32_t)(x1 - x0));
@@ -6214,7 +6527,7 @@ static void dc_present(int x, int y, int cx, int cy) {
       if (wx1 < x1) dc_copy(out + wx1, bg + wx1, (uint32_t)(x1 - wx1));
       continue;
     }
-    dc_copy(dc.line + x0, bg + x0, (uint32_t)(x1 - x0));
+    if (!ay) dc_copy(dc.line + x0, bg + x0, (uint32_t)(x1 - x0));
     if (corner) {
       int c;
       for (c = wx0; c < wx1; c++)
@@ -6235,6 +6548,39 @@ static void dc_present(int x, int y, int cx, int cy) {
     }
     dc_copy(out + x0, dc.line + x0, (uint32_t)(x1 - x0));
   }
+}
+
+/* Escreve fundo, janela e cursor na pagina visivel, so na regiao que mudou. Sem
+ * trocar de pagina: a outra volta no quadro inteiro, ao soltar. */
+static void dc_present(int x, int y, int cx, int cy) {
+  int scale = cur_scale();
+  int cw = CUR_W * scale, chh = CUR_H * scale;
+  int x0 = x, y0 = y, x1 = x + dc.w, y1 = y + dc.h;
+  volatile uint8_t* base = gfx_lfb + gfx_front_y * gfx_pitch_bytes;
+  uint32_t pitch = gfx_pitch_bytes;
+  int cur_rows = gpu_hwcur ? 0 : chh;   /* cursor da placa: nao entra na imagem */
+  dc_grow(&x0, &y0, &x1, &y1, dc.x, dc.y, dc.w, dc.h);
+  dc_grow_sh(&x0, &y0, &x1, &y1, x, y);
+  dc_grow_sh(&x0, &y0, &x1, &y1, dc.x, dc.y);
+  dc_grow(&x0, &y0, &x1, &y1, dc.cx, dc.cy, cw, chh);
+  dc_grow(&x0, &y0, &x1, &y1, cx, cy, cw, chh);
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > (int)gfx_w) x1 = (int)gfx_w;
+  if (y1 > (int)gfx_h) y1 = (int)gfx_h;
+  dc.moved = 0;
+  cursor_saved = 0;
+  dc.x = x;
+  dc.y = y;
+  dc.cx = cx;
+  dc.cy = cy;
+  if (x0 >= x1 || y0 >= y1) return;
+  /* com driver a tela e o back buffer; sem ele, a pagina visivel do LFB */
+  if (gpu_drv && gfx_offscreen) {
+    base = gfx_back;
+    pitch = gfx_w * 4u;
+  }
+  dc_rows(base, pitch, x, y, x0, y0, x1, y1, cx, cy, cur_rows);
   if (gpu_drv && gfx_offscreen) {
     struct gpu_rect d;
     d.x = x0;
@@ -6371,7 +6717,11 @@ static void gui_draw_frame(struct gui_win* w, int active, uint32_t col_title, ui
   (void)col_inactive;
   round_top(w->ox, w->oy, w->cw, w->title_h, UI_RADIUS,
             gui_col(active ? UI_TITLE_A : UI_TITLE_I));
-  draw_text_t(w->ox + 12, ty, w->title, gui_col(UI_TEXT), scale);
+  if (wf_on())
+    wf_text(w->ox + 12, w->oy + (w->title_h - wfont_height()) / 2, w->title, gui_col(UI_TEXT),
+            close_x - close_s - 10);
+  else
+    draw_text_t(w->ox + 12, ty, w->title, gui_col(UI_TEXT), scale);
   fill_round(close_x, w->oy + 3, close_s, close_s, 5, gui_col(0xC23440));
   draw_text_t(close_x + xoff, ty, "x", gui_col(UI_TEXT), scale);
   title_max_btn(close_x - close_s - 4, w->oy + 3, close_s, gw_is_max(w));
@@ -6386,8 +6736,28 @@ static int paint_only, paint_z, paint_x, paint_y, paint_w, paint_h;
 
 static int paint_skip(int z, int x, int y, int w, int h) {
   if (!paint_only) return 0;
+  /* a sombra de uma janela da frente pode cair no retangulo sem a janela */
+  x -= SH_PL;
+  y -= SH_PT;
+  w += SH_PL + SH_PR;
+  h += SH_PT + SH_PB;
   return z < paint_z || x >= paint_x + paint_w || x + w <= paint_x ||
          y >= paint_y + paint_h || y + h <= paint_y;
+}
+
+/* Sombra antes de pintar a janela de nivel z. No quadro inteiro o fundo acabou
+ * de ser pintado. Com paint_only so o retangulo da janela paint_z foi refeito
+ * (e sem os cantos redondos de cima, que sao fundo velho, ja com sombra):
+ * corta ali, senao a sombra escurece de novo a cada redesenho. */
+static void paint_shadow(int z, int x, int y, int w, int h) {
+  int px0 = paint_x, py0 = paint_y, px1 = paint_x + paint_w, py1 = paint_y + paint_h;
+  if (!paint_only) {
+    win_shadow(x, y, w, h, 0, 0, (int)gfx_w, (int)gfx_h, (int)gfx_h);
+    return;
+  }
+  if (z == paint_z) return;
+  win_shadow(x, y, w, h, px0, py0 + UI_RADIUS, px1, py1, (int)gfx_h);
+  win_shadow(x, y, w, h, px0 + UI_RADIUS, py0, px1 - UI_RADIUS, py0 + UI_RADIUS, (int)gfx_h);
 }
 
 static void paint_stacked(struct wm_win* wins, int title_h, int scale, uint32_t col_win,
@@ -6430,6 +6800,13 @@ static void paint_stacked(struct wm_win* wins, int title_h, int scale, uint32_t 
   }
   top = stack_top_z(wins);
   for (i = 0; i < n; i++) {
+    if (kind[i] == 1) {
+      struct wm_win* sw = &wins[order[i]];
+      paint_shadow(sw->z, sw->x, sw->y, sw->w, sw->h);
+    } else {
+      struct gui_win* sg = &gwins[order[i]];
+      paint_shadow(sg->z, sg->ox, sg->oy, sg->cw, sg->title_h + sg->ch);
+    }
     if (kind[i] == 1)
       wm_draw_window(&wins[order[i]], wins[order[i]].z == top && top > 0, title_h, scale,
                      col_win, col_title, col_white, col_black, col_btn, col_inactive);
@@ -6445,6 +6822,12 @@ static void paint_stacked(struct wm_win* wins, int title_h, int scale, uint32_t 
 
 static int z_top(struct wm_win* wins, int x, int y, int* kind) {
   int i, best = -1, bk = HIT_NONE, bz = -1;
+  /* A barra de tarefas fica na frente: a parte de uma janela arrastada para
+   * baixo dela nao recebe clique nem roda. */
+  if (c_wins && c_bar_h > 0 && y >= (int)gfx_h - c_bar_h) {
+    if (kind) *kind = HIT_NONE;
+    return -1;
+  }
   for (i = 0; i < WM_MAX; i++) {
     if (!wins[i].used || run_hidden(&wins[i])) continue;
     if (!wm_pt(x, y, wins[i].x, wins[i].y, wins[i].w, wins[i].h)) continue;
@@ -6595,13 +6978,17 @@ static void chrome_paint_under(void) {
   gfx_desk_clear();
   if (!c_wins) return;
   fill_rect(12, 12, c_icon, c_icon, c_win);
-  draw_string_scaled(12, 12 + c_icon + 2, "DOS", c_white, c_desk, c_scale);
+  desk_label(12, 12 + c_icon + 2, "DOS", desk_mark == DESK_MARK_FIXED + 0, c_white, c_black,
+             c_scale);
   fill_rect(12, c_icon2_y, c_icon, c_icon, c_title);
-  draw_string_scaled(12, c_icon2_y + c_icon + 2, "ARQ", c_white, c_desk, c_scale);
+  desk_label(12, c_icon2_y + c_icon + 2, "ARQ", desk_mark == DESK_MARK_FIXED + 1, c_white,
+             c_black, c_scale);
   draw_nav_icon(12, c_icon3_y, c_icon, c_title, c_white);
-  draw_string_scaled(12, c_icon3_y + c_icon + 2, "WEB", c_white, c_desk, c_scale);
+  desk_label(12, c_icon3_y + c_icon + 2, "WEB", desk_mark == DESK_MARK_FIXED + 2, c_white,
+             c_black, c_scale);
   draw_cmd_icon(12, c_icon4_y, c_icon, c_white, c_black);
-  draw_string_scaled(12, c_icon4_y + c_icon + 2, "CMD", c_white, c_desk, c_scale);
+  desk_label(12, c_icon4_y + c_icon + 2, "CMD", desk_mark == DESK_MARK_FIXED + 3, c_white,
+             c_black, c_scale);
   desk_draw(c_icon, (vga_bios_font_ok ? FONT_H : 8) * c_scale, c_scale, w, h, c_bar_h,
             c_desk, c_white, c_black);
   paint_stacked(c_wins, c_title_h, c_scale, c_win, c_title, c_white, c_black, c_btn, c_inactive);
@@ -6871,18 +7258,22 @@ static int chrome_on_click(int x, int y) {
   }
   if (z_empty(c_wins, x, y)) {
     if (wm_pt(x, y, 12, c_icon4_y, c_icon, c_icon)) {
+      desk_mark_item(DESK_MARK_FIXED + 3);
       wm_open_command(c_wins, c_focus, c_big);
       return 1;
     }
     if (wm_pt(x, y, 12, c_icon3_y, c_icon, c_icon)) {
+      desk_mark_item(DESK_MARK_FIXED + 2);
       wm_open_browser(c_wins, c_focus, c_big);
       return 1;
     }
     if (wm_pt(x, y, 12, c_icon2_y, c_icon, c_icon)) {
+      desk_mark_item(DESK_MARK_FIXED + 1);
       wm_open_notepad(c_wins, c_focus, c_big);
       return 1;
     }
     if (wm_pt(x, y, 12, 12, c_icon, c_icon)) {
+      desk_mark_item(DESK_MARK_FIXED + 0);
       wm_open_mgr(c_wins, c_focus, c_big);
       return 1;
     }
@@ -7100,6 +7491,7 @@ static int win_wm_run(void) {
   int pop_x = 0;
   int pop_y = 0;
   int pop_hot = 0;
+  int menu_row_hot = -1; /* linha do menu Iniciar sob o mouse (ver menu_hover_row) */
   int shift_on = 0;
   int kbd_e0 = 0;
   int draw_skip = 0;
@@ -7173,6 +7565,7 @@ static int win_wm_run(void) {
   my = sys_my;
   irq_set_tick_hook(gui_preempt_tick);
   desk_load();
+  wf_init(scale);   /* fonte TrueType dos titulos e rotulos (ou fica a de bitmap) */
   chrome_leave = 0;
   gui_ensure();
   chrome_bind(wins, &focus, &menu_open, &menu_cfg, &menu_tela, big, scale, bar_h, title_h,
@@ -7295,13 +7688,17 @@ static int win_wm_run(void) {
       cursor_saved = 0;
       gfx_desk_clear();
       fill_rect(12, 12, icon, icon, col_win);
-      draw_string_scaled(12, 12 + icon + 2, "DOS", col_white, col_desk, scale);
+      desk_label(12, 12 + icon + 2, "DOS", desk_mark == DESK_MARK_FIXED + 0, col_white,
+                 col_black, scale);
       fill_rect(12, icon2_y, icon, icon, col_title);
-      draw_string_scaled(12, icon2_y + icon + 2, "ARQ", col_white, col_desk, scale);
+      desk_label(12, icon2_y + icon + 2, "ARQ", desk_mark == DESK_MARK_FIXED + 1, col_white,
+                 col_black, scale);
       draw_nav_icon(12, icon3_y, icon, col_title, col_white);
-      draw_string_scaled(12, icon3_y + icon + 2, "WEB", col_white, col_desk, scale);
+      desk_label(12, icon3_y + icon + 2, "WEB", desk_mark == DESK_MARK_FIXED + 2, col_white,
+                 col_black, scale);
       draw_cmd_icon(12, icon4_y, icon, col_white, col_black);
-      draw_string_scaled(12, icon4_y + icon + 2, "CMD", col_white, col_desk, scale);
+      desk_label(12, icon4_y + icon + 2, "CMD", desk_mark == DESK_MARK_FIXED + 3, col_white,
+                 col_black, scale);
       desk_draw(icon, ch, scale, w, h, bar_h, col_desk, col_white, col_black);
       paint_stacked(wins, title_h, scale, col_win, col_title, col_white, col_black,
                     col_btn, col_inactive);
@@ -7449,15 +7846,32 @@ static int win_wm_run(void) {
         menu_frame(px, py, pw, ph, col_black);
       }
       if (dc.capture) {
+        /* A janela pode estar meio fora da tela: a foto e tirada com ela
+         * toda dentro (sx,sy) e depois dc_place a poe no lugar certo. */
+        int rx, ry, sx, sy;
         dc_snap_bg();
         if (dc.wm >= 0) {
+          rx = wins[dc.wm].x;
+          ry = wins[dc.wm].y;
+          dc_capture_pos(rx, ry, &sx, &sy);
+          wins[dc.wm].x = sx;
+          wins[dc.wm].y = sy;
           wm_draw_window(&wins[dc.wm], 1, title_h, scale, col_win, col_title, col_white,
                          col_black, col_btn, col_inactive);
-          dc_snap_win(wins[dc.wm].x, wins[dc.wm].y, (int)mx, (int)my);
+          wins[dc.wm].x = rx;
+          wins[dc.wm].y = ry;
         } else {
+          rx = gwins[dc.gw].ox;
+          ry = gwins[dc.gw].oy;
+          dc_capture_pos(rx, ry, &sx, &sy);
+          gwins[dc.gw].ox = sx;
+          gwins[dc.gw].oy = sy;
           gui_draw_frame(&gwins[dc.gw], 1, col_title, col_white, col_black, col_btn, col_inactive);
-          dc_snap_win(gwins[dc.gw].ox, gwins[dc.gw].oy, (int)mx, (int)my);
+          gwins[dc.gw].ox = rx;
+          gwins[dc.gw].oy = ry;
         }
+        dc_snap_win(sx, sy, (int)mx, (int)my);
+        dc_place(rx, ry);
       }
       cursor_redraw_at((int)mx, (int)my, col_cursor);
       gfx_frame_end();
@@ -7539,6 +7953,23 @@ static int win_wm_run(void) {
             menu_tela = tela;
             need_draw = 1;
           }
+          {
+            /* O destaque e calculado no desenho a partir do mouse: trocar de
+             * linha precisa de um quadro inteiro. Sem isso so um redesenho
+             * de janela de programa (need_draw 2, que com driver de placa so
+             * mostra o retangulo dela) atualizava, e o menu ficava pela metade. */
+            int row = -1;
+            if (menu_tela && wm_pt((int)mx, (int)my, gm.mode_x, gm.mode_y, gm.mode_w, gm.mode_h))
+              row = 200 + ((int)my - (gm.mode_y + 2)) / (gm.item_h > 0 ? gm.item_h : 1);
+            else if (menu_cfg && wm_pt((int)mx, (int)my, gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h))
+              row = 100 + ((int)my - gm.sub_y) / (gm.item_h > 0 ? gm.item_h : 1);
+            else if (over_main)
+              row = ((int)my - gm.y) / (gm.item_h > 0 ? gm.item_h : 1);
+            if (row != menu_row_hot) {
+              menu_row_hot = row;
+              need_draw = 1;
+            }
+          }
         }
         {
           int di = wm_find_kind(wins, WM_KIND_DISP);
@@ -7612,12 +8043,12 @@ static int win_wm_run(void) {
                    &g_rs_y, &g_rs_w, &g_rs_h);
           need_draw = 1;
         } else if (left && gwins && g_drag >= 0 && g_drag < GUI_MAX && gwins[g_drag].open) {
-          int save = gui_ix;
-          gwins[g_drag].ox = (int)mx - g_drag_ox;
-          gwins[g_drag].oy = (int)my - g_drag_oy;
-          gui_ix = g_drag;
-          gui_clamp_pos();
-          gui_ix = save;
+          struct gui_win* gd = &gwins[g_drag];
+          int gcs = gd->title_h - 4;
+          gd->ox = (int)mx - g_drag_ox;
+          gd->oy = (int)my - g_drag_oy;
+          /* pode sair da tela; a barra de titulo continua alcancavel */
+          win_keep_title(&gd->ox, &gd->oy, gd->cw, gd->title_h, bar_h, TB_PAD + 2 * gcs + 4);
           if (!dc_track(-1, g_drag, gwins[g_drag].cw, gwins[g_drag].title_h + gwins[g_drag].ch))
             need_draw = 1;
         } else if (left && gwins && g_cap >= 0 && g_cap < GUI_MAX && gwins[g_cap].open) {
@@ -7633,11 +8064,10 @@ static int win_wm_run(void) {
             rs_apply((int)mx, (int)my, min_w, min_h, w, h - bar_h, &wins[drag].x,
                      &wins[drag].y, &wins[drag].w, &wins[drag].h);
           }
-          if (wins[drag].x < 0) wins[drag].x = 0;
-          if (wins[drag].y < 0) wins[drag].y = 0;
-          if (wins[drag].x + wins[drag].w > w) wins[drag].x = w - wins[drag].w;
-          if (wins[drag].y + wins[drag].h > h - bar_h)
-            wins[drag].y = h - bar_h - wins[drag].h;
+          /* Pode sair pela esquerda, direita e por baixo (o desenho e cortado
+           * nas bordas); a barra de titulo fica alcancavel. */
+          win_keep_title(&wins[drag].x, &wins[drag].y, wins[drag].w, title_h, bar_h,
+                         TB_PAD + 2 * (title_h - 4) + 4);
           if (drag_mode != 0 || !dc_track(drag, -1, wins[drag].w, wins[drag].h))
             need_draw = 1;
         } else if (left && prev_left && sel_drag >= 0 && wins[sel_drag].used) {
@@ -7832,6 +8262,7 @@ static int win_wm_run(void) {
             menu_open = 0;
             menu_cfg = 0;
             menu_tela = 0;
+            desk_mark_item(DESK_MARK_FIXED + 3);
             wm_open_command(wins, &focus, big);
             handled = 1;
             need_draw = 1;
@@ -7839,6 +8270,7 @@ static int win_wm_run(void) {
             menu_open = 0;
             menu_cfg = 0;
             menu_tela = 0;
+            desk_mark_item(DESK_MARK_FIXED + 2);
             wm_open_browser(wins, &focus, big);
             handled = 1;
             need_draw = 1;
@@ -7846,6 +8278,7 @@ static int win_wm_run(void) {
             menu_open = 0;
             menu_cfg = 0;
             menu_tela = 0;
+            desk_mark_item(DESK_MARK_FIXED + 1);
             wm_open_notepad(wins, &focus, big);
             handled = 1;
             need_draw = 1;
@@ -7853,6 +8286,7 @@ static int win_wm_run(void) {
             menu_open = 0;
             menu_cfg = 0;
             menu_tela = 0;
+            desk_mark_item(DESK_MARK_FIXED + 0);
             wm_open_mgr(wins, &focus, big);
             handled = 1;
             need_draw = 1;
@@ -7861,6 +8295,7 @@ static int win_wm_run(void) {
             menu_open = 0;
             menu_cfg = 0;
             menu_tela = 0;
+            desk_mark_item(desk_i);
             if (desk_items[desk_i].dir &&
                 wm_open_folder(wins, &focus, big, desk_items[desk_i].path)) {
               /* aberta no Explorer (visao de pasta) */
@@ -7915,6 +8350,11 @@ static int win_wm_run(void) {
               menu_open = 0;
               menu_cfg = 0;
               menu_tela = 0;
+              need_draw = 1;
+            }
+            if (hk == HIT_NONE && (int)my < h - bar_h && desk_mark != -1) {
+              /* clique no desktop vazio: nenhum icone fica marcado */
+              desk_mark_item(-1);
               need_draw = 1;
             }
             if (hk == HIT_GUI) {
