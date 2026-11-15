@@ -31,17 +31,34 @@
 
 extern char __bss_end[];
 
+/* Blocos em sequencia fisica (mm_walk, ufree_owner e o TOP dependem disso).
+ * prev = tamanho do bloco anterior (0 no primeiro): junta vizinhos livres nos
+ * dois sentidos na hora do free, entao nunca ha dois livres seguidos. */
 struct mm_hdr {
   uint32_t size;
   uint32_t free;
   uint32_t owner;
-  uint32_t pad;
+  uint32_t prev;
 };
+
+/* Bloco livre: os elos da lista ficam na area util (minimo 16 bytes). */
+struct mm_free {
+  struct mm_hdr h;
+  uint32_t next;
+  uint32_t prv;
+};
+
+/* Listas de livres por tamanho (potencias de 2 a partir de 32 bytes). Antes o
+ * first-fit percorria a arena inteira a cada pedido: com o Firefox eram
+ * milhares de blocos e ~12% da CPU carregando uma pagina. */
+#define MM_NBIN 27
+#define MM_MIN_BLK 32u
 
 struct arena {
   uint32_t start;
   uint32_t end;
   int ready;
+  uint32_t bin[MM_NBIN];
 };
 
 static struct arena low;
@@ -64,13 +81,19 @@ static int range_ok(const struct arena* a, struct mm_hdr* h) {
   return 1;
 }
 
+static void fl_insert(struct arena* a, struct mm_hdr* h);
+
 static void arena_init(struct arena* a, uint32_t start, uint32_t end) {
   struct mm_hdr* h = blk_at(start);
+  int i;
   a->start = start;
   a->end = end;
+  for (i = 0; i < MM_NBIN; i++) a->bin[i] = 0;
   h->size = end - start;
   h->free = 1;
   h->owner = 0;
+  h->prev = 0;
+  fl_insert(a, h);
   a->ready = 1;
 }
 
@@ -377,39 +400,157 @@ int mm_ready(void) { return low.ready; }
 uint32_t mm_heap_start(void) { return MM_HEAP_START; }
 uint32_t mm_heap_end(void) { return MM_HEAP_END; }
 
-static void merge_next(const struct arena* a, struct mm_hdr* h) {
-  for (;;) {
-    struct mm_hdr* nxt = blk_at((uint32_t)h + h->size);
-    if ((uint32_t)nxt >= a->end || !range_ok(a, nxt) || !nxt->free) return;
-    h->size += nxt->size;
+static int bin_of(uint32_t size) {
+  int b = 31 - __builtin_clz(size) - 5;
+  if (b < 0) b = 0;
+  if (b >= MM_NBIN) b = MM_NBIN - 1;
+  return b;
+}
+
+static struct mm_free* fb(uint32_t addr) { return (struct mm_free*)addr; }
+
+static void fl_insert(struct arena* a, struct mm_hdr* h) {
+  int b = bin_of(h->size);
+  struct mm_free* f = (struct mm_free*)h;
+  f->prv = 0;
+  f->next = a->bin[b];
+  if (f->next) fb(f->next)->prv = (uint32_t)h;
+  a->bin[b] = (uint32_t)h;
+}
+
+/* Antes de mudar h->size: a lista e escolhida pelo tamanho. */
+static void fl_remove(struct arena* a, struct mm_hdr* h) {
+  struct mm_free* f = (struct mm_free*)h;
+  if (f->prv) fb(f->prv)->next = f->next;
+  else a->bin[bin_of(h->size)] = f->next;
+  if (f->next) fb(f->next)->prv = f->prv;
+}
+
+static struct mm_hdr* next_blk(const struct arena* a, struct mm_hdr* h) {
+  uint32_t n = (uint32_t)h + h->size;
+  return n < a->end ? blk_at(n) : 0;
+}
+
+static struct mm_hdr* prev_blk(const struct arena* a, struct mm_hdr* h) {
+  uint32_t p;
+  if (!h->prev || h->prev > (uint32_t)h - a->start) return 0;
+  p = (uint32_t)h - h->prev;
+  return blk_at(p);
+}
+
+static void fix_next_prev(const struct arena* a, struct mm_hdr* h) {
+  struct mm_hdr* n = next_blk(a, h);
+  if (n) n->prev = h->size;
+}
+
+/* Refaz prev e as listas a partir da sequencia fisica, juntando livres
+ * vizinhos. Para ufree_owner e para quando um elo de lista sai da arena (um
+ * programa escreveu alem do bloco dele, dentro de um bloco livre). */
+static void arena_rebuild(struct arena* a) {
+  struct mm_hdr* h;
+  uint32_t prev = 0;
+  int i;
+  for (i = 0; i < MM_NBIN; i++) a->bin[i] = 0;
+  h = blk_at(a->start);
+  while (range_ok(a, h)) {
+    h->prev = prev;
+    if (h->free) {
+      struct mm_hdr* n;
+      while ((n = next_blk(a, h)) && range_ok(a, n) && n->free) h->size += n->size;
+      h->free = 1;
+      h->owner = 0;
+      fl_insert(a, h);
+    }
+    prev = h->size;
+    h = blk_at((uint32_t)h + h->size);
   }
+}
+
+static int link_ok(const struct arena* a, uint32_t x) {
+  struct mm_hdr* h = blk_at(x);
+  return x >= a->start && x < a->end && !(x & (MM_ALIGN - 1u)) && range_ok(a, h) && h->free == 1;
+}
+
+/* Bloco livre (fora da lista): junta com os vizinhos e entra na lista. */
+static struct mm_hdr* coalesce(struct arena* a, struct mm_hdr* h) {
+  struct mm_hdr* n = next_blk(a, h);
+  struct mm_hdr* p;
+  if (n && range_ok(a, n) && n->free) {
+    fl_remove(a, n);
+    h->size += n->size;
+  }
+  p = prev_blk(a, h);
+  if (p && range_ok(a, p) && p->free) {
+    fl_remove(a, p);
+    p->size += h->size;
+    h = p;
+  }
+  h->free = 1;
+  h->owner = 0;
+  fix_next_prev(a, h);
+  fl_insert(a, h);
+  return h;
+}
+
+/* h ocupado com size >= need: a sobra (se der um bloco) volta livre. O vizinho
+ * seguinte de um bloco que estava livre nunca e livre. */
+static void split(struct arena* a, struct mm_hdr* h, uint32_t need) {
+  uint32_t rest = h->size - need;
+  if (rest >= MM_MIN_BLK) {
+    struct mm_hdr* t = blk_at((uint32_t)h + need);
+    t->size = rest;
+    t->free = 1;
+    t->owner = 0;
+    t->prev = need;
+    h->size = need;
+    fix_next_prev(a, t);
+    fl_insert(a, t);
+  } else {
+    fix_next_prev(a, h);
+  }
+}
+
+static uint32_t blk_need(uint32_t nbytes) {
+  uint32_t need = align_up(nbytes + (uint32_t)sizeof(struct mm_hdr));
+  if (need < nbytes) return 0;
+  return need < MM_MIN_BLK ? MM_MIN_BLK : need;
+}
+
+/* Primeiro livre que cabe, da lista do tamanho para cima. */
+static struct mm_hdr* find_fit(struct arena* a, uint32_t need) {
+  int b, tries;
+  for (tries = 0; tries < 2; tries++) {
+    int bad = 0;
+    for (b = bin_of(need); b < MM_NBIN && !bad; b++) {
+      uint32_t x;
+      for (x = a->bin[b]; x; x = fb(x)->next) {
+        if (!link_ok(a, x)) {
+          bad = 1;
+          break;
+        }
+        if (blk_at(x)->size >= need) return blk_at(x);
+      }
+    }
+    if (!bad) return 0;
+    serial_puts("[mm] lista de livres corrompida: refazendo\n");
+    arena_rebuild(a);
+  }
+  return 0;
 }
 
 static void* arena_alloc(struct arena* a, uint32_t nbytes, uint32_t owner) {
   struct mm_hdr* h;
   uint32_t need;
   if (!a->ready || nbytes == 0) return 0;
-  need = align_up(nbytes + (uint32_t)sizeof(struct mm_hdr));
-  if (need < nbytes) return 0;
-  h = blk_at(a->start);
-  while (range_ok(a, h)) {
-    if (h->free) merge_next(a, h);
-    if (h->free && h->size >= need) {
-      uint32_t rest = h->size - need;
-      if (rest >= sizeof(struct mm_hdr) + MM_ALIGN) {
-        struct mm_hdr* nxt = blk_at((uint32_t)h + need);
-        nxt->size = rest;
-        nxt->free = 1;
-        nxt->owner = 0;
-        h->size = need;
-      }
-      h->free = 0;
-      h->owner = owner;
-      return (uint8_t*)h + sizeof(struct mm_hdr);
-    }
-    h = blk_at((uint32_t)h + h->size);
-  }
-  return 0;
+  need = blk_need(nbytes);
+  if (!need) return 0;
+  h = find_fit(a, need);
+  if (!h) return 0;
+  fl_remove(a, h);
+  h->free = 0;
+  h->owner = owner;
+  split(a, h, need);
+  return (uint8_t*)h + sizeof(struct mm_hdr);
 }
 
 static struct mm_hdr* arena_hdr(const struct arena* a, void* ptr) {
@@ -426,9 +567,7 @@ static struct mm_hdr* arena_hdr(const struct arena* a, void* ptr) {
 static void arena_free(struct arena* a, void* ptr) {
   struct mm_hdr* h = arena_hdr(a, ptr);
   if (!h) return;
-  h->free = 1;
-  h->owner = 0;
-  merge_next(a, h);
+  coalesce(a, h);
 }
 
 static void arena_stats(const struct arena* a, uint32_t* total, uint32_t* used,
@@ -476,25 +615,29 @@ void* umalloc_owned(uint32_t nbytes, uint32_t owner) { return arena_alloc(&high,
  * programas pedem blocos grandes e contiguos (o JIT do Firefox reserva 2 GB). */
 void* umalloc_top(uint32_t nbytes) {
   struct arena* a = &high;
-  struct mm_hdr* h;
   struct mm_hdr* best = 0;
   uint32_t need;
+  int b;
   if (!a->ready || nbytes == 0) return 0;
-  need = align_up(nbytes + (uint32_t)sizeof(struct mm_hdr));
-  if (need < nbytes) return 0;
-  h = blk_at(a->start);
-  while (range_ok(a, h)) {
-    if (h->free) merge_next(a, h);
-    if (h->free && h->size >= need) best = h;
-    h = blk_at((uint32_t)h + h->size);
+  need = blk_need(nbytes);
+  if (!need) return 0;
+  if (!find_fit(a, need)) return 0;  /* valida as listas */
+  for (b = bin_of(need); b < MM_NBIN; b++) {
+    uint32_t x;
+    for (x = a->bin[b]; x; x = fb(x)->next)
+      if (blk_at(x)->size >= need && blk_at(x) > best) best = blk_at(x);
   }
   if (!best) return 0;
-  if (best->size - need >= sizeof(struct mm_hdr) + MM_ALIGN) {
+  fl_remove(a, best);
+  if (best->size - need >= MM_MIN_BLK) {
     struct mm_hdr* top = blk_at((uint32_t)best + best->size - need);
     best->size -= need;
     top->size = need;
     top->free = 0;
     top->owner = 0;
+    top->prev = best->size;
+    fix_next_prev(a, top);
+    fl_insert(a, best);
     return (uint8_t*)top + sizeof(struct mm_hdr);
   }
   best->free = 0;
@@ -507,41 +650,40 @@ void* umalloc_top(uint32_t nbytes) {
  * folga antes do endereco alinhado volta a ser um bloco livre. */
 void* umalloc_aligned(uint32_t nbytes, uint32_t align) {
   struct arena* a = &high;
-  struct mm_hdr* h;
   uint32_t need;
   const uint32_t hs = (uint32_t)sizeof(struct mm_hdr);
+  int b;
   if (align <= MM_ALIGN) return umalloc(nbytes);
   if (!a->ready || nbytes == 0 || (align & (align - 1u))) return 0;
-  need = align_up(nbytes + hs);
-  if (need < nbytes) return 0;
-  h = blk_at(a->start);
-  while (range_ok(a, h)) {
-    if (h->free) merge_next(a, h);
-    if (h->free && h->size >= need) {
-      uint32_t start = (uint32_t)h;
+  need = blk_need(nbytes);
+  if (!need) return 0;
+  if (!find_fit(a, need)) return 0;  /* valida as listas */
+  for (b = bin_of(need); b < MM_NBIN; b++) {
+    uint32_t x;
+    for (x = a->bin[b]; x; x = fb(x)->next) {
+      struct mm_hdr* h = blk_at(x);
+      uint32_t start = x;
       uint32_t end = start + h->size;
-      uint32_t p = (start + hs + align - 1u) & ~(align - 1u);
+      uint32_t p;
+      struct mm_hdr* n;
+      if (h->size < need) continue;
+      p = (start + hs + align - 1u) & ~(align - 1u);
       /* A folga da frente precisa caber como bloco livre valido. */
-      if (p - hs != start && p - hs - start < hs + MM_ALIGN) p += align;
-      if (p > start && p - hs >= start && p - hs <= end && end - (p - hs) >= need) {
-        struct mm_hdr* n = blk_at(p - hs);
-        if ((uint32_t)n != start) {
-          h->size = (uint32_t)n - start; /* cabeca continua livre */
-          n->size = end - (uint32_t)n;
-        }
-        if (n->size - need >= hs + MM_ALIGN) {
-          struct mm_hdr* t = blk_at((uint32_t)n + need);
-          t->size = n->size - need;
-          t->free = 1;
-          t->owner = 0;
-          n->size = need;
-        }
-        n->free = 0;
-        n->owner = cur_owner;
-        return (uint8_t*)n + hs;
+      if (p - hs != start && p - hs - start < MM_MIN_BLK) p += align;
+      if (!(p > start && p - hs >= start && p - hs <= end && end - (p - hs) >= need)) continue;
+      fl_remove(a, h);
+      n = blk_at(p - hs);
+      if ((uint32_t)n != start) {
+        h->size = (uint32_t)n - start; /* cabeca continua livre */
+        n->size = end - (uint32_t)n;
+        n->prev = h->size;
+        fl_insert(a, h);
       }
+      n->free = 0;
+      n->owner = cur_owner;
+      split(a, n, need);
+      return (uint8_t*)n + hs;
     }
-    h = blk_at((uint32_t)h + h->size);
   }
   return 0;
 }
@@ -555,10 +697,11 @@ uint32_t usize(void* ptr) {
 }
 
 void* urealloc(void* ptr, uint32_t nbytes) {
-  uint32_t old;
+  uint32_t old, need;
   uint8_t* n;
   uint32_t i;
   struct mm_hdr* h;
+  struct mm_hdr* nx;
   if (!ptr) return umalloc(nbytes);
   if (nbytes == 0) {
     ufree(ptr);
@@ -568,8 +711,16 @@ void* urealloc(void* ptr, uint32_t nbytes) {
   if (!h) return 0;
   old = h->size - (uint32_t)sizeof(struct mm_hdr);
   if (old >= nbytes) return ptr;
-  merge_next(&high, h);
-  if (h->size - (uint32_t)sizeof(struct mm_hdr) >= nbytes) return ptr;
+  need = blk_need(nbytes);
+  if (!need) return 0;
+  /* cresce no lugar se o vizinho livre cobre */
+  nx = next_blk(&high, h);
+  if (nx && range_ok(&high, nx) && nx->free && h->size + nx->size >= need) {
+    fl_remove(&high, nx);
+    h->size += nx->size;
+    split(&high, h, need);
+    return ptr;
+  }
   n = (uint8_t*)arena_alloc(&high, nbytes, h->owner);
   if (!n) return 0;
   for (i = 0; i < old; i++) n[i] = ((uint8_t*)ptr)[i];
@@ -579,15 +730,18 @@ void* urealloc(void* ptr, uint32_t nbytes) {
 
 void ufree_owner(uint32_t owner) {
   struct mm_hdr* h;
+  int any = 0;
   if (!high.ready || owner == 0) return;
   h = blk_at(high.start);
   while (range_ok(&high, h)) {
     if (!h->free && h->owner == owner) {
       h->free = 1;
       h->owner = 0;
+      any = 1;
     }
     h = blk_at((uint32_t)h + h->size);
   }
+  if (any) arena_rebuild(&high);
 }
 
 void um_stats(uint32_t* total, uint32_t* used, uint32_t* free_bytes, uint32_t* largest) {
