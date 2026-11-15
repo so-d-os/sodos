@@ -301,8 +301,11 @@ drivers: $(DRV)/FAT32.DLL $(DRV)/GPUTEST.DLL $(DRV)/GPUFAIL.DLL $(DRV)/VIRTGPU.D
 LIBC64_SRC = string ctype stdlib stdio printf scanf fpconv math time misc sigfault64 wchar setjmp64 ctors64
 LIBC64_OBJ = $(patsubst %,$(B)/x64_%.o,$(LIBC64_SRC))
 
+# -O2: sem ele a libc inteira do FIREFOX.EXE saia em -O0 (memcpy era 16% da
+# CPU carregando o Google). -fno-tree-loop-distribute-patterns: o gcc trocaria
+# os lacos do memcpy/memset por chamadas a eles mesmos.
 $(B)/x64_%.o: lib/%.c | $(B)
-	gcc -m64 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -mno-red-zone \
+	gcc -m64 -O2 -fno-strict-aliasing -fno-tree-loop-distribute-patterns -ffreestanding -fno-pic -fno-pie -fno-stack-protector -mno-red-zone \
 	  -mcmodel=large -mstackrealign -fno-asynchronous-unwind-tables -nostdinc -isystem include -c $< -o $@
 
 $(B)/x_crt0_64libc.o: lib/crt0.c | $(B)

@@ -23,6 +23,42 @@ static void null_dest(void) {
 void* memcpy(void* d, const void* s, size_t n) {
   char* a = (char*)d;
   CHECK_DEST(d, n);
+#if __SIZEOF_POINTER__ == 8
+  /* O Firefox e compilado com -ffreestanding (sem builtins): ate as copias de
+   * 16 bytes dos shaders do SWGL chegam aqui. Pequenas: cargas de 8 bytes
+   * sobrepostas (sem laco de byte). Grandes: rep movsb (ERMS), que tem custo
+   * fixo de partida alto mas e a mais rapida para blocos medios e grandes. */
+  typedef unsigned long long __attribute__((may_alias, aligned(1))) u64u;
+  typedef unsigned __attribute__((may_alias, aligned(1))) u32u;
+  if (n <= 16) {
+    if (n >= 8) {
+      u64u x = *(const u64u*)s, y = *(const u64u*)((const char*)s + n - 8);
+      *(u64u*)a = x;
+      *(u64u*)(a + n - 8) = y;
+    } else if (n >= 4) {
+      u32u x = *(const u32u*)s, y = *(const u32u*)((const char*)s + n - 4);
+      *(u32u*)a = x;
+      *(u32u*)(a + n - 4) = y;
+    } else {
+      const char* b0 = (const char*)s;
+      while (n--) *a++ = *b0++;
+    }
+    return d;
+  }
+  if (n <= 128) {
+    const char* b0 = (const char*)s;
+    size_t i;
+    u64u last = *(const u64u*)(b0 + n - 8);
+    for (i = 0; i + 8 <= n; i += 8) *(u64u*)(a + i) = *(const u64u*)(b0 + i);
+    *(u64u*)(a + n - 8) = last;
+    return d;
+  }
+  {
+    void* dd = d;
+    __asm__ volatile("rep movsb" : "+D"(dd), "+S"(s), "+c"(n) : : "memory");
+    return d;
+  }
+#endif
   const char* b = (const char*)s;
   while (n >= 4) {
     *(unsigned*)a = *(const unsigned*)b;
@@ -49,6 +85,25 @@ void* memset(void* d, int c, size_t n) {
   unsigned char* a = (unsigned char*)d;
   unsigned v = (unsigned char)c;
   CHECK_DEST(d, n);
+#if __SIZEOF_POINTER__ == 8
+  if (n < 128) {
+    typedef unsigned long long __attribute__((may_alias, aligned(1))) u64u;
+    unsigned long long w = (unsigned long long)(unsigned char)c * 0x0101010101010101ULL;
+    size_t i;
+    if (n < 8) {
+      while (n--) *a++ = (unsigned char)c;
+      return d;
+    }
+    for (i = 0; i + 8 <= n; i += 8) *(u64u*)(a + i) = w;
+    *(u64u*)(a + n - 8) = w;
+    return d;
+  }
+  {
+    void* dd = d;
+    __asm__ volatile("rep stosb" : "+D"(dd), "+c"(n) : "a"(c) : "memory");
+    return d;
+  }
+#endif
   v |= v << 8;
   v |= v << 16;
   while (n && ((unsigned)a & 3)) {

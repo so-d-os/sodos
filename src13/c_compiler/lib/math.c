@@ -202,6 +202,16 @@ double fma(double a, double b, double c) { return a * b + c; }
 /* Raiz exata (arredondada para o mais proximo): metodo bit a bit sobre a
  * mantissa, como o e_sqrt.c do fdlibm, com o resto em 64 bits. */
 double sqrt(double a) {
+#if defined(__SSE2__) && __SIZEOF_POINTER__ == 8
+  /* sqrtsd ja e exata e arredondada (IEEE); o laco abaixo custava 8% da CPU
+   * do Firefox. So a x64 tem SSE2 garantido. */
+  if (a < 0) {
+    errno = EDOM;
+    return (a - a) / (a - a);
+  }
+  __asm__("sqrtsd %1, %0" : "=x"(a) : "x"(a));
+  return a;
+#endif
   u64 b = dbits(a), m, q = 0, r = 0, mant;
   int ex, e2, s, i;
   if (a != a || a == 0 || a > 1.7976931348623157e308) return a;

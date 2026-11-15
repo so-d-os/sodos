@@ -254,9 +254,14 @@ static uint8_t rxframe[1600];
 static uint8_t txframe[1600];
 static uint8_t wire[1600];
 
-static uint32_t arp_ip;
-static uint8_t arp_mac[6];
-static int arp_valid;
+/* Tabela ARP pequena: com uma entrada so, o DNS (10.0.2.3 no QEMU) e o
+ * gateway se expulsavam e cada troca custava uma pergunta ARP. */
+#define ARP_N 8
+static uint32_t arp_ip[ARP_N];
+static uint8_t arp_mac[ARP_N][6];
+static uint32_t arp_age[ARP_N];
+static uint32_t arp_clock;
+static int arp_valid;  /* 0 = tabela vazia (zerar invalida todas as entradas) */
 static uint32_t arp_want;  /* IP que arp_resolve espera agora */
 static int hosts_loaded;   /* HOSTS.CFG lido (ver hosts_load) */
 
@@ -419,10 +424,23 @@ static void net_note(const char* what, uint32_t v) {
 
 static void arp_learn(uint32_t ip, const uint8_t* mac) {
   int i;
+  int k = 0;
   if (ip == 0 || ip == 0xFFFFFFFFu) return;
-  arp_ip = ip;
-  for (i = 0; i < 6; i++) arp_mac[i] = mac[i];
-  arp_valid = 1;
+  if (!arp_valid) {
+    for (i = 0; i < ARP_N; i++) arp_ip[i] = 0;
+    arp_valid = 1;
+  }
+  /* a mesma entrada, uma vazia ou a usada ha mais tempo */
+  for (i = 0; i < ARP_N; i++) {
+    if (arp_ip[i] == ip || arp_ip[i] == 0) {
+      k = i;
+      break;
+    }
+    if (arp_age[i] < arp_age[k]) k = i;
+  }
+  arp_ip[k] = ip;
+  for (i = 0; i < 6; i++) arp_mac[k][i] = mac[i];
+  arp_age[k] = ++arp_clock;
 }
 
 static void arp_send(uint16_t op, const uint8_t* dmac, uint32_t dip) {
@@ -446,9 +464,15 @@ static void arp_send(uint16_t op, const uint8_t* dmac, uint32_t dip) {
 
 static int arp_lookup(uint32_t ip, uint8_t* mac) {
   int i;
-  if (!arp_valid || arp_ip != ip) return -1;
-  for (i = 0; i < 6; i++) mac[i] = arp_mac[i];
-  return 0;
+  int k;
+  if (!arp_valid || ip == 0) return -1;
+  for (k = 0; k < ARP_N; k++)
+    if (arp_ip[k] == ip) {
+      for (i = 0; i < 6; i++) mac[i] = arp_mac[k][i];
+      arp_age[k] = ++arp_clock;
+      return 0;
+    }
+  return -1;
 }
 
 static int arp_resolve(uint32_t ip, uint8_t* mac) {
@@ -456,6 +480,15 @@ static int arp_resolve(uint32_t ip, uint8_t* mac) {
   int tries;
   int spins;
   if (arp_lookup(ip, mac) == 0) return 0;
+  if (polling) {
+    /* Chamado de dentro do nic_poll (um ACK saindo enquanto um quadro e
+     * tratado): o nic_poll aninhado nao le a placa, entao esperar aqui era
+     * 2 s com o mundo parado. Pergunta e desiste; a resposta entra na tabela
+     * (arp_want) e o TCP reenvia o segmento. */
+    arp_want = ip;
+    arp_send(1, bcast, ip);
+    return -1;
+  }
   for (tries = 0; tries < 4; tries++) {
     uint32_t t0;
     arp_want = ip;
@@ -484,7 +517,8 @@ static void arp_rx(const uint8_t* f, int len) {
   op = rd16(f + 20);
   sip = rd32(f + 28);
   tip = rd32(f + 38);
-  /* So uma entrada: o ARP de outra maquina da rede nao tira o gateway dela. */
+  /* So o que pedimos ou o que fala conosco: o ARP de outras maquinas da rede
+   * nao enche a tabela. */
   if (sip == arp_want || tip == our_ip || !arp_valid) arp_learn(sip, f + 22);
   if (op == 1 && tip == our_ip)
     arp_send(2, f + 22, sip);
