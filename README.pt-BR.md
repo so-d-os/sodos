@@ -60,12 +60,55 @@ Os comandos de shell abaixo assumem a raiz do repositório; quando precisam do c
 - **Desktop `win`**: janelas móveis e redimensionáveis, barra de tarefas, menu Iniciar, ícones, miniaturas, Bloco de notas, Gerenciador, Explorer em assembly e Command.
 - **Compilador C/C++** (`cc` + `link`) que roda no Linux e dentro do SO (`CC.EXE`, `LINK.EXE`), com libc própria, DLLs, realocação e *self-hosting* verificado.
 - **Navegador** com HTTP/1.1, HTML, subconjunto de CSS e JavaScript, imagens, cache em disco, busca (DuckDuckGo/Google/Bing/Imagens) e TLS 1.3 com verificação de certificado.
-- **Port do Firefox (início)**: `src13/firefox/` — camada de plataforma (`SODOS.DLL`) com pthreads cooperativos, `mmap` anônimo, `poll` e soquetes sobre TCP, port do **NSPR 4.35** (threads, locks, variáveis de condição, tempo e arquivos), runtime **C++ mínimo** (construtores globais/`.init_array`, `new/delete`, métodos virtuais) e um **núcleo da libc++** (containers, `string`, algoritmos, `chrono`, `std::thread`/`mutex`); 18 testes de plataforma, 16 do NSPR, 7 de C++ e 27 da libc++ passam no QEMU. O Firefox em si ainda não compila (veja `src13/firefox/docs/`).
+- **Port do Firefox (início)**: `src13/firefox/` — camada de plataforma (`SODOS.DLL`) com pthreads cooperativos, `mmap` anônimo, `poll` e soquetes sobre TCP, port do **NSPR 4.35** (threads, locks, variáveis de condição, tempo e arquivos), runtime **C++ mínimo** (construtores globais/`.init_array`, `new/delete`, métodos virtuais) e um **núcleo da libc++** (containers, `string`, algoritmos, `chrono`, `std::thread`/`mutex`); 18 testes de plataforma, 16 do NSPR, 7 de C++ e 27 da libc++ passam no QEMU. Desde 12/11 o Firefox compila e roda numa janela do desktop (`FIREFOX.EXE`), com Google e captcha funcionando; o vídeo do YouTube ainda não toca (veja `src13/firefox/docs/`).
 - **Rede**: NE2000 em polling, ARP, IPv4, ICMP, UDP (DNS) e TCP; IP fixo `10.0.2.15` no SLIRP do QEMU.
 - **Servidor HTTP na porta 8797** com rotas para executar comandos, listar/fechar janelas, mover o mouse e tirar *printscreen* em BMP — a interface que permite a uma IA comandar o SO.
 - **Mídia**: `IMG.DLL` (PNG, JPEG, GIF, ICO), `IMAGEVW.EXE`, `VIDPLAY.EXE` (MJPEG/RGB em AVI/MOV/MP4) e `FONTADV.EXE` com rasterizador TTF.
 - **Ferramentas de host**: `soxrun` (executa `.EXE` SOX no Linux), `mkthumb`, `mkvid.py`, testes e comparação de *self-host*.
 - **Depuração**: log serial em COM1, log do QEMU, `gdb`, anel de *trace*, despejo de exceção e comandos de diagnóstico (`free`, `df`, `dstat`, `dlls`).
+
+## Novidades (8 a 15 de novembro de 2026)
+
+O que mudou na última semana, por área. Os detalhes estão nas seções de cada assunto.
+
+**Firefox e QEMU rodando no SODOS**
+- **Firefox**: o port de `src13/firefox/` agora abre numa janela do desktop (`FIREFOX.EXE`, atalho `FFLAUNCH.EXE`) e navega no Google, inclusive com captcha. Funcionam popups, menus, `<select>`, segunda janela (vira aba), botão direito e roda do mouse. A saída de áudio é nula (o vídeo do YouTube ainda não toca). Falhas gravam a pilha em `\LOG\FIREFOX.LOG`, mais nova no topo (`firefox/sodos/scripts/crashlog.sh` traduz os endereços). O perfil e o cache ficam no ramdisk `Z:`.
+- **QEMU 9.2 dentro do SODOS** (`qemu-system-i386`, com zlib e glib 2.76 portadas): boota FreeDOS 1.3 (a tela de texto do guest aparece no console do SODOS) e Tiny Core Linux com X numa janela do WIN. O `make disk-files` copia para `D:\UTILS\QEMU` e para `U:\UTILS\QEMU`.
+
+**Kernel**
+- **SMP de verdade**: filas por CPU, timer do APIC local nos APs e trava global do kernel (BKL). Programas criam threads (`k_thread_*`, `k_futex_*`) que rodam em qualquer CPU; o desktop e o shell ficam na CPU 0.
+- **Preempção no WIN**: um programa de janela que não devolve a CPU é tirado dela pelo IRQ0 depois de 10 ms; mouse e teclado não travam mais com o Firefox carregando.
+- **Teclado e mouse por interrupção** (IRQ1/IRQ12 em filas, `kernel/ps2in.c`).
+- **Exceções da CPU viram sinais** (`k_fault_entry` + `sigaction` da libc): um trap de wasm no Firefox não derruba mais o SO.
+- **CRASH.LOG**: numa exceção o kernel grava um relatório (registradores, módulo+deslocamento, pilha) em `X:\CRASH.LOG` antes de mostrar a tela de erro. `CRASHT pf|gp|ud|div` testa.
+- **Memória**: alocador com listas livres por tamanho, `k_malloc_aligned`, memória acima de 1 GB corrigida (tabelas de página saíram de cima do trampolim do SMP) e encerramento de programa (`Ctrl+Backspace`, **Sair**) que devolve toda a memória do Firefox.
+- **ELF64 e bibliotecas `.so`** (`kernel/elf.c`, `k_dl_*`): `libc.so.6`, `libm`, `libpthread`, `libdl`, `libc++.so.1` em `D:\LIB` (fontes em `src13/libs/dso`).
+
+**Discos e arquivos**
+- **Nomes longos (VFAT)** no FAT16: leitura, criação e exclusão. Programas recebem nomes de até 31 caracteres (ou o apelido 8.3).
+- **FAT32 por `FAT32.DLL`**, carregado só quando aparece uma unidade FAT32 (o pendrive de fábrica): lê, cria pastas e, desde 15/11, **grava e apaga arquivos**.
+- **`SODOS.PAK`**: pacote de boot que vai para `Z:\SODOS` (com o `FAT32.DLL` e o `DISKSYNC.EXE`), então o pendrive FAT32 funciona sem disco `D:`.
+- **`Z:`, ramdisk de até 1 GB** formatado a cada boot (`Z:\TEMP`, `Z:\USER\DEFAULT`).
+- **Variáveis de ambiente** (`set`, `k_getenv`/`k_setenv`) e **`AUTOEXEC.BAT`** de `D:` (ou `U:`) no fim do boot.
+
+**Rede**
+- TCP com janela deslizante, *slow start*, *fast retransmit*; cache de DNS pelo TTL; até 64 soquetes (`k_sock_*`); ARP com 8 entradas; anel maior no NE2000. Download de 2 MB no QEMU: 21,5 s → 0,37 s.
+- `api start/stop/status` para o servidor HTTP; WiFi: canal do DS no scan, `WIFI.SIM` para testar no QEMU, vigia de queda e reconexão.
+
+**Desktop**
+- **Tecla PrintScreen**: a tela inteira vai em PNG para `Z:\SAVE\SCREENSHOT\printscreen-AAAAMMDD-HHMMSS.png`.
+- **Serviço `DISKSYNC`** (`SET DISKSYNC=1`): leva o que está em `Z:\SAVE` há mais de 10 s para a mesma pasta no pendrive e apaga de `Z:` (veja [PrintScreen e DISKSYNC](#printscreen-e-disksync)).
+- **Abrir com** (`SET LINKEXT=1`, `LINKEXT.CFG`, `LINKEXT.EXE` em Configurações): extensão → programa.
+- Atalhos `.LNK` no desktop, **Nova pasta**, **Renomear** e **Excluir** no Explorer; pasta do desktop abre no Explorer.
+- Botão de **maximizar** (e duplo clique no título), redimensionar por qualquer canto, janela pode sair parcialmente da tela.
+- Títulos e nomes de ícones em **TrueType** (Inter de `\SODOS\FONTS`), sem faixa atrás do nome.
+- **Área de transferência** única (DOS, Command, Bloco de notas, programas): `Ctrl+C`/`Ctrl+V`, duplo clique seleciona palavra.
+- Programas de tela de texto (TOP, EDIT) funcionam dentro da janela Command.
+
+**Shell e programas**
+- `Ctrl+F1`..`Ctrl+F12` (telas), `Ctrl+Backspace`, `Ctrl+C` cancela comandos internos (`dir /s`, `type`, `find`...); `find`, `grep`, `tail`; o Command mostra a saída em rajada.
+- `smp run`/`smp win`, aba **CPU** e **Video** no `TOP`.
+- Vídeo: `AMDGOP.DLL` (Radeon do notebook) com cursor pela placa; `LLAMA.EXE` com AVX2/FMA escolhidos em tempo de execução.
 
 ## Requisitos
 
@@ -165,9 +208,9 @@ gdb -ex "target remote :1234" -ex "symbol-file kernel.elf" -ex "break kmain" -ex
 1. A BIOS carrega o setor 0 em `0x7C00`. O stage 1 (`boot.asm`) lê o stage 2 (`stage2.asm`) para `0x7E00` por `INT 13h` (LBA com queda para CHS), passa a unidade e o LBA do kernel em `0x4FF0` e salta para o stage 2.
 2. O stage 2 habilita A20, coleta o mapa E820 em `0x5200`, valida as faixas do kernel/app contra RAM utilizável, carrega o kernel em `0x01000000` por um bounce buffer baixo + cópia em modo protegido, preenche o `BootInfo` em `0x5000` e chama `kernel_entry` com `EBX = BootInfo*`.
 3. `kernel_entry.asm` confere long mode, monta as tabelas de página (128 páginas de 2 MB = 256 MB de identidade + LFB), ativa PAE + paging e chama `kmain(BootInfo*)`. Sem long mode escreve `N` na serial e para; BootInfo inválido escreve `B`.
-4. `kmain` valida o BootInfo, zera o BSS, inicializa a memória (arena baixa do `kmalloc` + arena alta do `umalloc` escolhida pelo E820 após o kernel), a serial (COM1), remapeia e mascara o PIC, monta a IDT, captura a fonte 8×16 da BIOS, entra em modo texto, sobe a rede e o HTTP, registra os comandos, inicializa as unidades, monta `D:` se houver FAT16, roda `HTTPD.EXE` se ele existir em `D:` e abre o shell.
+4. `kmain` valida o BootInfo, zera o BSS, inicializa a memória (arena baixa do `kmalloc` + arena alta do `umalloc` escolhida pelo E820 após o kernel), a serial (COM1), remapeia e mascara o PIC, monta a IDT, captura a fonte 8×16 da BIOS, entra em modo texto, sobe a rede e o HTTP, registra os comandos, inicializa as unidades, monta `D:` se houver FAT16, cria o ramdisk `Z:` e desempacota nele o `SODOS.PAK`, roda o `AUTOEXEC.BAT` de `D:` (ou `U:`), roda `HTTPD.EXE` se ele existir e abre o shell.
 
-Só o **IRQ0 (PIT)** está habilitado, e o handler apenas conta ticks: teclado, mouse, rede, disco e o resto continuam em *polling*. A IDT captura exceções e IRQs; as demais IRQs seguem mascaradas.
+O **IRQ0 (PIT, 1000 Hz)** conta o tempo e preempta programas de janela; **IRQ1/IRQ12** enchem as filas de teclado e mouse PS/2. Rede, disco e USB continuam em *polling*. A IDT captura exceções e IRQs; as demais IRQs seguem mascaradas.
 
 ### Mapa de memória
 
@@ -192,9 +235,11 @@ Só o **IRQ0 (PIT)** está habilitado, e o handler apenas conta ticks: teclado, 
 
 ### Escalonamento
 
-Não há preempção: cada programa roda até devolver o controle em `gui_event`, `gui_present`, leitura de rede ou de disco. No desktop, até **8 programas** rodam como tarefas cooperativas, cada uma com pilha de 48 KB; o desktop alterna entre elas e desenha as janelas. O tick do PIT (IRQ0, ~1000 Hz) já é entregue e contado; ele é a base do escalonador preemptivo, que ainda não está ligado.
+A CPU 0 roda o "mundo": shell, desktop, drivers e as tarefas do WIN (até **8 programas** de janela, cada um com a sua pilha). O mundo nunca é preemptado, mas um programa de janela que fica mais de **10 ms** sem devolver a CPU é tirado dela pelo IRQ0 (com o estado SSE/AVX salvo) e o desktop continua respondendo.
 
-As demais CPUs já são acordadas: o kernel as descobre no MADT do ACPI, liga o APIC local e sobe cada AP com INIT-SIPI por um trampolim em modo real (`kernel/ap_tramp.asm`) que entra em long mode e chama `ap_main`. Os APs só provam que executam em paralelo (cada um conta o próprio laço por 200 ms, registrado na COM1) e ficam parados em `hlt`; o escalonador ainda roda só na BSP. O `make run` usa `-smp 4` (`SMP=1` desliga). O driver ATA salva e restaura a flag de interrupção em cada setor, e a sessão do WIN deixa o IRQ0 desmascarado, então o timer continua contando durante disco e vídeo; a aba **CPU** do `top` mostra a quantidade, o estado e o uso de cada CPU. O comando `smp` lista as CPUs e despacha trabalho por IPI: `smp run <cpu> <comando>` roda um comando ou `.EXE` naquele AP e `smp win <cpu>` abre o WIN lá. A BSP espera (`hlt`) enquanto a tarefa roda, então ela tem a máquina só para si; rodar duas tarefas em dois APs ao mesmo tempo exige os locks por subsistema (próximo passo).
+As outras CPUs são acordadas pelo MADT do ACPI (INIT-SIPI pelo trampolim `kernel/ap_tramp.asm`) e têm fila própria, tarefa ociosa com `hlt` e timer do APIC local a cada 4 ms. Threads de programa (`k_thread_create/join/detach/exit`, `k_futex_wait/wake`) rodam em qualquer CPU com fatia de 8 ms. Todo `k_*` passa por uma trava global do kernel (BKL), então o kernel em si roda numa CPU por vez. IPIs fazem reescalonamento, *shootdown* de TLB e param as outras CPUs numa exceção fatal. O `make run` usa `-smp 4` (`SMP=1` desliga). `smp` lista as CPUs; `smp run <cpu> <comando>` e `smp win <cpu>` mudam o mundo de CPU; a aba **CPU** do `top` mostra o uso de cada uma. Teste: `SMPT.EXE`.
+
+As telas de texto (`Ctrl+F1`..`Ctrl+F12`) são tarefas cooperativas: uma tela ao fundo anda quando a visível espera tecla. É assim que roda o serviço `DISKSYNC`.
 
 ## Discos e FAT
 
@@ -202,7 +247,8 @@ As demais CPUs já são acordadas: o kernel as descobre no MADT do ACPI, liga o 
 |---|---|
 | `C:` | Disco RAM: 7 arquivos embutidos + até 16 arquivos criados (começam com 1 KB, crescem até 32 KB). Some ao desligar |
 | `D:` | ATA 1 = `disk.img` (256 MB). Montado sozinho no boot se a partição 0 for FAT12/FAT16 |
-| `U:` | Pendrive USB (xHCI), FAT12/FAT16. Montado na primeira vez que `U:` é usado; veja [Pendrive USB](#pendrive-usb-u) |
+| `U:` | Pendrive USB (xHCI), FAT12/FAT16 ou FAT32 (pelo `FAT32.DLL`). Montado na primeira vez que `U:` é usado; veja [Pendrive USB](#pendrive-usb-u) |
+| `Z:` | Ramdisk FAT16 de até 1 GB (memória acima de 4 GB), formatado a cada boot. Recebe o `SODOS.PAK` (`Z:\SODOS`), o perfil do Firefox e `Z:\SAVE` (prints) |
 | outras letras | Criadas com `mount` a partir de qualquer ATA/partição (ou como disco RAM) |
 
 Várias unidades FAT podem ficar montadas ao mesmo tempo (`D:`, `E:`, `U:`...). O kernel guarda uma FAT na memória e a relê do disco quando um comando passa para outra unidade. `C:` é sempre RAM.
@@ -211,8 +257,9 @@ Várias unidades FAT podem ficar montadas ao mesmo tempo (`D:`, `E:`, `U:`...). 
 
 ### Sistema de arquivos
 
-- FAT12 e FAT16 para leitura; escrita, `md` e `rd` só em FAT16.
-- FAT32, exFAT e nomes longos (VFAT LFN) não são suportados: nomes são **8.3**, exibidos em maiúsculas.
+- FAT12 e FAT16 para leitura; escrita, `md` e `rd` em FAT16.
+- **FAT32** pelo `FAT32.DLL` (`src13/drivers/fat32`), carregado só quando aparece uma unidade FAT32. Ele é procurado em `%FAT32DLL%`, `Z:\SODOS\DRV` (vem no `SODOS.PAK`), `D:` e `U:`. Lê, cria pastas (`md`), grava arquivos inteiros (`copy`, `k_fsave`) e apaga (`del`); `rd` e renomear ainda não.
+- **Nomes longos (VFAT LFN)** em FAT16 e FAT32: o `dir` mostra o nome inteiro; programas recebem até 31 caracteres, ou o apelido 8.3 (`NOME~1.EXT`). Sem exFAT.
 - Subpastas até 8 componentes de 12 caracteres, com `.` e `..`.
 - Partições primárias MBR (4 entradas); sem partições estendidas, GPT ou lógica.
 - Escrita: a FAT e a raiz ficam em RAM e são gravadas no disco a cada alteração (só os setores da FAT que mudaram, em todas as cópias), sem cache adiado.
@@ -274,7 +321,7 @@ mcopy -o -i src13/disk.img@@512 MEUAPP.C ::/MEUAPP.C
 
 Um pendrive no controlador xHCI vira `U:` na primeira vez que `U:` é usado (`dir U:`, `U:`, `copy U:\HELLO.EXE D:`), numa porta do PC ou atrás de um hub USB 2 (muitos notebooks têm um soldado na placa). Tirar, recolocar ou trocar o pendrive é percebido no acesso seguinte.
 
-- `U:` é a primeira partição FAT12/FAT16 do MBR, ou o pendrive inteiro quando o setor 0 já é um boot sector FAT. FAT32, o formato de fábrica da maioria dos pendrives, é recusado com uma mensagem.
+- `U:` é a primeira partição FAT do MBR, ou o pendrive inteiro quando o setor 0 já é um boot sector FAT. FAT32, o formato de fábrica da maioria dos pendrives, funciona pelo `FAT32.DLL` (leitura, `md`, gravação e exclusão de arquivos).
 - Programas rodam direto de `U:`. As DLLs são procuradas na pasta atual e na raiz da unidade do programa, depois em `D:` e `C:`: num PC sem disco ATA, deixe-as em `U:\`.
 - `usb` lista os controladores e dispositivos (hub, mouse, pendrive, com o caminho da porta como o Linux mostra, ex.: `4.1`) e procura o pendrive; `mount U:` monta de novo.
 - A leitura vem em blocos de 16 KB (`READ(10)`); a escrita vai setor a setor, e só os setores da FAT que mudaram são gravados.
@@ -317,7 +364,7 @@ O laço principal lê uma linha e chama `shell_exec_line`. Se o primeiro token f
 | `Esc` | Limpa a linha inteira |
 | `Enter` | Executa |
 
-Não há edição com Ctrl na linha do prompt. As combinações do SO são `Ctrl+F1`..`Ctrl+F12` (telas; `Ctrl+F7` é o WIN), `Ctrl+Backspace` (fecha o WIN e libera a memória gráfica) e `Ctrl+Alt+Del` (reinicia a máquina), no shell e no desktop. A linha tem no máximo 255 caracteres; o tokenizador separa só por espaços e aceita até 16 argumentos. Não há curingas, pipes ou aspas.
+Não há edição com Ctrl na linha do prompt; `Ctrl+C` cancela um comando interno em andamento (`dir /s`, `type`, `find`...). As combinações do SO são `Ctrl+F1`..`Ctrl+F12` (telas; `Ctrl+F7` é o WIN), `Ctrl+Backspace` (fecha o WIN e libera a memória gráfica) e `Ctrl+Alt+Del` (reinicia a máquina), no shell e no desktop. A linha tem no máximo 255 caracteres; o tokenizador separa só por espaços e aceita até 16 argumentos. Não há curingas, pipes ou aspas.
 
 ### Comandos internos
 
@@ -360,6 +407,8 @@ Não há edição com Ctrl na linha do prompt. As combinações do SO são `Ctrl
 | `ping host [-n nº] [-l bytes]` | ICMP; ex.: `ping 10.0.2.2`, `ping example.com -n 2` |
 | `net [status]` / `net dhcp [renew]` / `net wifi ...` | Placa e endereço; DHCP; WiFi (ver [WiFi](#wifi-rtl8852be)) |
 | `api [status]` / `api start` / `api stop` / `api restart` | Serviço HTTP da API: mostra On/Off, endereço e porta; sobe quando a rede ficou pronta depois do boot; para e reinicia (ver [Servidor HTTP](#servidor-http)) |
+| `set [NOME=valor]` | Variáveis de ambiente do sistema (as mesmas do `AUTOEXEC.BAT` e de `k_getenv`). Sem argumento lista; `set NOME=` apaga. Algumas ligam recursos: `DISKSYNC`, `LINKEXT`, `FAT32DLL`, `PATHSODOS` |
+| `smp` / `smp run <cpu> <cmd>` / `smp win <cpu>` | Lista as CPUs; roda um comando ou o WIN noutra CPU |
 | `dlls` | Módulos SOX carregados |
 | `shutdown` | Desliga a máquina |
 
@@ -420,19 +469,23 @@ Os demais ícones vêm de `D:\USER\DEFAULT\DESKTOP` (até 24 itens, sem rolagem)
 
 | Tipo | Ação |
 |---|---|
-| Pasta | Janela de texto listando o conteúdo (não navega) |
+| Pasta | Abre no Explorer (`EXPLORER.EXE /P pasta`) |
+| `.LNK` | Atalho: abre o caminho gravado nele (o Explorer cria com **Criar atalho**) |
 | `.EXE` / `.BIN` | Executa como programa SOX |
 | `.PNG` `.JPG` `.JPE` `.GIF` `.ICO` `.BMP` | Abre no `IMAGEVW.EXE` (BMP não é decodificado; veja abaixo) |
 | `.MP4` `.MOV` `.M4V` `.AVI` `.MPG` `.MPE` `.MJG` `.MJP` `.3GP` `.MKV` `.WMV` `.FLV` `.OGV` | Abre no `VIDPLAY.EXE` |
-| Outros | Janela de texto com o nome |
+| Outros | Com `SET LINKEXT=1`, o programa associado no `LINKEXT.CFG`; senão, janela de texto com o nome |
 
 Miniaturas: `make disk-files` gera `NOME.THM` (formato `THM1`, até 64×64 RGBA) para cada imagem em `content/`; o desktop desenha a miniatura com transparência. Arquivos de vídeo ganham um triângulo vermelho desenhado; pastas, um ícone amarelo.
 
 ### Janelas
 
 - Até **12 janelas** no desktop e até **8 programas** rodando ao mesmo tempo (um por janela).
-- Arrastar a barra de título move; arrastar o canto inferior direito redimensiona (mínimo 180×100 em tela grande); o `x` fecha.
-- Clicar traz para a frente. Não há minimizar, maximizar, menu de sistema nem Alt+Tab.
+- Arrastar a barra de título move (a janela pode sair em parte da tela; 40 px do título ficam visíveis); arrastar qualquer canto redimensiona (mínimo 180×100 em tela grande); o `x` fecha.
+- O botão ao lado do `x`, ou duplo clique no título, maximiza e restaura; o programa recebe `GUI_EV_RESIZE`.
+- Clicar traz para a frente. Não há minimizar, menu de sistema nem Alt+Tab.
+- Títulos e nomes de ícones usam TrueType (`INTER.TTF`, `ROBOTO.TTF` ou `NOTOSANS.TTF` em `X:\SODOS\FONTS`); sem a fonte, volta a fonte de bitmap.
+- Área de transferência única: `Ctrl+C`/`Ctrl+V` no Command, Bloco de notas e programas de janela (o WIN digita o texto colado), duplo clique seleciona uma palavra.
 - Se o programa abrir uma janela canvas (`gui.h`), a janela de texto dele fica escondida.
 - Um `.EXE` digitado no Command escreve a saída ali e o Command fica sem prompt até ele terminar; o desktop e os outros programas seguem rodando. Sem o `win`, `k_gui_open` não tem onde desenhar.
 
@@ -448,7 +501,24 @@ Janela preta 80×40 com o mesmo interpretador do shell. Várias podem ficar aber
 
 - `visual` abre uma demonstração gráfica separada, sem janelas.
 - `mouse` mostra o pacote PS/2 cru (ou o relatório USB) e os botões.
-- Não existe tecla de *printscreen* dentro do SO; a captura é feita pelo HTTP (`/win/printscreen`).
+- A tecla **PrintScreen** grava a tela (veja abaixo); de fora, a captura também sai pelo HTTP (`/win/printscreen`).
+
+### PrintScreen e DISKSYNC
+
+`PrintScreen` (ou `Alt+PrtSc`) no WIN grava a tela inteira em PNG em `Z:\SAVE\SCREENSHOT\printscreen-AAAAMMDD-HHMMSS.png`. A hora é a do relógio da barra (o RTC). `Z:` é RAM: o arquivo some ao desligar, a menos que o `DISKSYNC` o leve para o pendrive.
+
+`DISKSYNC.EXE` (`src13/utils/disksync.c`) é um serviço ligado por variável:
+
+```text
+SET DISKSYNC=1      (no AUTOEXEC.BAT ou no prompt) liga
+SET DISKSYNC=0      desliga em até 1 s
+```
+
+Sem a variável nada roda. Ligado, o kernel abre o programa numa tela ao fundo (`Ctrl+F12` mostra o log). A cada segundo ele varre `Z:\SAVE` e as subpastas; um arquivo que ficou **10 s sem mudar** é copiado para a mesma pasta no pendrive, sem o `SAVE` (`Z:\SAVE\SCREENSHOT\X.PNG` → `U:\SCREENSHOT\X.PNG`), lido de volta, comparado e só então apagado de `Z:`. As pastas ficam. Sem pendrive, os arquivos esperam; uma cópia que falha é tentada de novo com intervalo crescente (até 5 min). `Q` na tela `Ctrl+F12` também para o serviço. Ele roda quando a tela visível está ociosa, então a cópia de um arquivo grande pode segurar o WIN por um instante.
+
+### Abrir com (LINKEXT)
+
+Com `SET LINKEXT=1` o kernel carrega `LINKEXT.DLL` (de `PATHSODOS\DRV`, `D:\SODOS\DRV` ou `Z:\SODOS\DRV`) e o desktop e o Explorer abrem arquivos pelo programa associado. As associações ficam em `\SODOS\LINKEXT.CFG`, uma por linha: `EXT[,EXT]=programa` (sem unidade = relativo a `PATHSODOS`; `@NOTEPAD`, `@IMAGEM` e `@VIDEO` são os visualizadores do WIN). `LINKEXT.EXE` (menu Iniciar → Configurações → **Abrir com**) edita a lista e liga/desliga a variável no `AUTOEXEC.BAT`. `SET LINKEXT=0` descarrega o DLL.
 
 ## Aplicativos do sistema
 
@@ -763,8 +833,9 @@ A pilha está em `net/net.c`: NE2000 (`ne2k_pci`) ou WiFi (RTL8852BE) em polling
 - No QEMU: IP fixo `10.0.2.15/24`, gateway `10.0.2.2`, DNS `10.0.2.3` (SLIRP). `net dhcp` pede um endereço por DHCP.
 - DHCP: o aluguel é renovado sozinho na metade do prazo, pedindo o mesmo IP (*INIT-REBOOT*); vencido, pede um do zero. `net dhcp renew` renova na hora e `net status` mostra quanto falta.
 - UDP: consultas DNS A com EDNS, até 4 respostas, seguindo CNAME.
-- TCP: **uma conexão de cliente** por vez, MSS 1460, janela de 16 KB, segmentos de até 1000 bytes, retransmissão a cada 500 ms (8 tentativas), timeout de recepção de 8 s. O servidor HTTP usa uma conexão separada.
-- Sem IPv6, fragmentação, SACK, *window scaling* ou controle de congestionamento.
+- TCP: o cliente simples (`k_tcp_*`, navegador, `HTTPS.EXE`) é **uma conexão** por vez. Os soquetes não bloqueantes `k_sock_*` (até 64, usados pelo Firefox) enviam com janela deslizante: MSS do par até 1400, *window scaling*, *slow start* com IW10, *fast retransmit* com 3 ACKs duplicados e go-back-N no estouro do relógio. O servidor HTTP usa uma conexão separada.
+- DNS: cache de 64 nomes pelo TTL da resposta (30 s a 1 h). ARP: 8 entradas.
+- Sem IPv6, fragmentação ou SACK.
 
 ```text
 ping 10.0.2.2
@@ -1012,7 +1083,7 @@ O `make run-log` apaga os logs anteriores e usa `-no-reboot -no-shutdown`; feche
 
 ### Exceções
 
-Uma exceção imprime na serial e na tela: vetor, código de erro, `RIP`, `RSP`, `RBP`, `CS`, `SS`, `DS`, `EFLAGS`, `CR2`, seis palavras da pilha e um *backtrace* de até 8 quadros por `RBP`, seguido do anel de trace (64 eventos) e `hlt`.
+Uma exceção imprime na serial e na tela: vetor, código de erro, `RIP`, `RSP`, `RBP`, `CS`, `SS`, `DS`, `EFLAGS`, `CR2`, seis palavras da pilha e um *backtrace* de até 8 quadros por `RBP`, seguido do anel de trace (64 eventos) e `hlt`. Antes da tela, o kernel grava o mesmo relatório (com o RIP como `MODULO+0xdeslocamento` e a lista de módulos) em `CRASH.LOG` na unidade do `.EXE` que estava rodando (ou `U:`, `D:`). Programas que registram `sigaction` (libc x64) recebem a falha como sinal em vez de parar o SO.
 
 ### Comandos úteis
 
@@ -1044,13 +1115,13 @@ dlls      módulos carregados, base, tamanho e referências
 
 ## Limitações conhecidas
 
-- **Sem preempção** e sem proteção de memória: tudo roda em ring 0, com um único espaço de endereçamento. Um laço infinito num programa trava a máquina.
-- **Sem FAT32**, exFAT, LFN, partições estendidas ou GPT; passar de uma unidade FAT para outra relê a FAT do disco.
-- **Um TCP de cliente por vez**; sem DHCP, IPv6 ou soquetes UDP genéricos.
-- **Sem áudio**, sem disquete, sem DMA.
+- **Sem proteção de memória**: tudo roda em ring 0, com um único espaço de endereçamento. Só programas de janela são preemptados; um laço infinito num programa de texto, ou dentro do kernel, trava a máquina. O kernel roda numa CPU por vez (BKL).
+- **FAT32 parcial** (sem `rd` e renomear), sem exFAT, partições estendidas ou GPT; passar de uma unidade FAT16 para outra relê a FAT do disco.
+- O cliente TCP antigo (`k_tcp_*`) é uma conexão por vez; os soquetes `k_sock_*` vão até 64. Sem IPv6, SACK ou soquetes UDP genéricos.
+- **Sem áudio** (o Firefox usa uma saída nula), sem disquete, sem DMA.
 - **USB só para o mouse e o pendrive**: um mouse HID boot e um disco mass storage bulk-only num controlador xHCI, nas portas do PC ou atrás de hubs USB 2; sem hubs USB 3, sem teclado USB, sem touchpad I2C.
-- **Nomes 8.3** no FAT; arquivos de `make disk-files` são copiados em maiúsculas.
-- **Sem edição com Ctrl** na linha do prompt; as combinações do SO são as telas `Ctrl+F1`..`Ctrl+F12` e o `Ctrl+Backspace`.
+- Programas veem nomes de até **31 caracteres** (mais longos chegam como o apelido 8.3); arquivos de `make disk-files` são copiados em maiúsculas.
+- **Sem edição com Ctrl** na linha do prompt; as combinações do SO são as telas `Ctrl+F1`..`Ctrl+F12`, o `Ctrl+Backspace` e o `Ctrl+C`.
 - **Sem controle de acesso**: o HTTP da porta 8797 executa comandos sem autenticação.
 - **Sem comando `reboot`**: `Ctrl+Alt+Del` reinicia (pulso do 8042, porta `0xCF9` ou triple fault, nessa ordem). `shutdown` usa ACPI/porta Bochs sem interpretar as tabelas ACPI e não desliga um PC real.
 - `IMG.DLL` não decodifica BMP, embora o desktop aceite `.BMP`.
