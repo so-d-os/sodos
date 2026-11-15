@@ -30,7 +30,7 @@ static int h_read(uint32_t disk, uint32_t lba, uint32_t n, void* buf) {
   while (n > 0) {
     uint32_t k = n > 128u ? 128u : n;
     /* Abaixo de 1 MB o ATA so aceita a janela baixa; o driver usa o heap. */
-    if ((uintptr_t)dst < 0x100000u && disk != DISK_USB && disk != DISK_RAM) return -1;
+    if ((uintptr_t)dst < 0x100000u && disk != DISK_USB && disk != DISK_RAM && disk != DISK_NVME) return -1;
     if (disk_read_sectors(disk, lba, k, dst) != 0) return -1;
     dst += k * 512u;
     lba += k;
@@ -43,7 +43,7 @@ static int h_write(uint32_t disk, uint32_t lba, uint32_t n, const void* buf) {
   const uint8_t* src = (const uint8_t*)buf;
   while (n > 0) {
     uint32_t k = n > 128u ? 128u : n;
-    if ((uintptr_t)src < 0x100000u && disk != DISK_USB && disk != DISK_RAM) return -1;
+    if ((uintptr_t)src < 0x100000u && disk != DISK_USB && disk != DISK_RAM && disk != DISK_NVME) return -1;
     if (disk_write_sectors(disk, lba, k, src) != 0) return -1;
     src += k * 512u;
     lba += k;

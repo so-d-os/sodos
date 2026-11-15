@@ -4,6 +4,7 @@
 #include "disk.h"
 #include "net.h"
 #include "xhci.h"
+#include "nvme.h"
 #include "fsdrv.h"
 #include "env.h"
 
@@ -181,7 +182,8 @@ static int ext_list(int idx, const char* name, char* out, int max) {
   }
   if (max > 0) out[pos < max ? pos : max - 1] = 0;
   kfree(it);
-  return n < 0 ? -1 : (pos > 0 ? 1 : 0);
+  /* bytes escritos, como fat_list_dir: quem chama le out ate esse tamanho */
+  return n < 0 ? -1 : pos;
 }
 
 /* Pendrive em U:: a primeira particao FAT do MBR ou, sem particao nenhuma,
@@ -414,6 +416,38 @@ void drives_automount(void) {
   puts_k("D: FAT16 montado (disco 1).\n");
 }
 
+/* Particao SODOSHD do SSD NVMe (PC real). Vai para D: quando nao ha disco
+ * ATA 1 (no QEMU o D: e o disk.img); senao para N:. Fica depois do SODOS.PAK,
+ * que traz o FAT32.DLL em Z:\\SODOS\\DRV. */
+int drives_mount_nvme(void) {
+  uint8_t bs[512];
+  int idx = letter_idx('D');
+  char L[3] = { 'D', ':', 0 };
+  if (drv_kind[idx] != DRV_NONE) idx = letter_idx('N');
+  L[0] = (char)('A' + idx);
+  if (drv_kind[idx] != DRV_NONE) return -1;
+  if (nvme_init() != 0) return -1;
+  if (read_boot(DISK_NVME, 0, bs) != 0) return -1;
+  if (fsdrv_is_fat32(bs)) {
+    if (ext_mount(idx, DISK_NVME, 0, bs) != 0) return -2;
+  } else {
+    fat_cur = -1;
+    fat_set_drive(DISK_NVME);
+    fat_set_partition_offset(0);
+    if (fat_mount() != 0) return -2;
+    drv_kind[idx] = DRV_FAT;
+    fat_cur = idx;
+  }
+  drv_ata[idx] = DISK_NVME;
+  drv_lba[idx] = 0;
+  cur_dir[idx][0] = '\0';
+  puts_k(L);
+  puts_k(" NVMe montado (");
+  puts_k(nvme_name());
+  puts_k(drv_kind[idx] == DRV_EXT ? ", FAT32).\n" : ", FAT16).\n");
+  return 0;
+}
+
 /* Z:: FAT16 num ramdisk de ate 1 GB, formatado a cada boot. Cache e perfil
  * do Firefox vao para la (HOME=/Z/USER/DEFAULT, TMPDIR=/Z/TEMP). Nada vai
  * para o disco nem para o pendrive; tudo some ao desligar. */
@@ -463,6 +497,9 @@ void drives_print_status(void) {
       uint32_to_string(ramdisk_sectors() / 2048u, n, sizeof(n));
       puts_k(n);
       puts_k(" MB");
+    } else if (is_tree(i) && drv_ata[i] == DISK_NVME) {
+      puts_k("  NVMe ");
+      puts_k(nvme_name());
     } else if (is_tree(i) && drv_ata[i] == DISK_USB) {
       puts_k("  USB ");
       puts_k(xhci_disk_name());
@@ -859,7 +896,7 @@ int file_list(const char* path, char* out, int max) {
     }
   }
   out[pos] = 0;
-  return pos > 0 ? 1 : 0;
+  return pos;
 }
 
 static void print_where(char L, const char* name) {

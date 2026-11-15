@@ -6,6 +6,8 @@
 #define DISK_USB 0x80u
 /* Ramdisk (Z:): setores numa area de RAM, sem disco. Some no reboot. */
 #define DISK_RAM 0x81u
+/* Particao SODOSHD de um SSD NVMe (kernel/nvme.c): setor 0 = inicio dela. */
+#define DISK_NVME 0x82u
 
 /* Reserva o ramdisk (ate max_bytes; tenta menos se faltar RAM).
  * Devolve quantos setores ficou (0 = sem ramdisk). */

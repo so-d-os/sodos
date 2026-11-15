@@ -13,6 +13,7 @@
 #include "shell.h"
 #include "drives.h"
 #include "xhci.h"
+#include "nvme.h"
 #include "ps2in.h"
  
 int strcmp(const char* a, const char* b); /* freestanding; definido mais abaixo */
@@ -206,6 +207,7 @@ static int disk_read_sector_locked(uint32_t drive, uint32_t lba, void* buffer) {
   trace_event("disk_read_args", drive, lba, (uint32_t)buffer);
   if (buffer == 0) return -2;
   if (drive == DISK_USB) return xhci_disk_read(lba, buffer);
+  if (drive == DISK_NVME) return nvme_read(lba, 1, buffer);
   if ((uint32_t)buffer < 0x1000u) return -1; /* evita IVT/IDT/BDA */
   uint32_t buf_addr = (uint32_t)buffer;
   if (buf_addr < 0x60000u || buf_addr + 512 > 0x100000u) return -1;
@@ -263,6 +265,7 @@ static int disk_read_sectors_locked(uint32_t drive, uint32_t lba, uint32_t count
   uint64_t bytes = (uint64_t)count * 512u;
   uint32_t s;
   if (buffer == 0 || count == 0 || count > 256) return -2;
+  if (drive == DISK_NVME) return nvme_read(lba, count, buffer);
   if (drive == DISK_USB) {
     for (s = 0; s < count; s++)
       if (xhci_disk_read(lba + s, (uint8_t*)buffer + s * 512u) != 0) return -3;
@@ -375,6 +378,7 @@ static int disk_write_sector_locked(uint32_t drive, uint32_t lba, void* buffer) 
   trace_event("disk_write_args", drive, lba, (uint32_t)buffer);
   if (buffer == 0) return -2;
   if (drive == DISK_USB) return xhci_disk_write(lba, buffer);
+  if (drive == DISK_NVME) return nvme_write(lba, 1, buffer);
   if ((uint32_t)buffer < 0x1000u) return -1;
   uint32_t buf_addr = (uint32_t)buffer;
   if (buf_addr < 0x60000u || buf_addr + 512 > 0x100000u) return -1;
@@ -419,6 +423,7 @@ static int disk_write_sectors_locked(uint32_t drive, uint32_t lba, uint32_t coun
   uint64_t bytes = (uint64_t)count * 512u;
   uint32_t s;
   if (buffer == 0 || count == 0 || count > 256) return -2;
+  if (drive == DISK_NVME) return nvme_write(lba, count, buffer);
   if (drive == DISK_USB) {
     for (s = 0; s < count; s++)
       if (xhci_disk_write(lba + s, (uint8_t*)buffer + s * 512u) != 0) return -3;
@@ -2059,6 +2064,7 @@ void kmain(const struct BootInfo* bi) {
   drives_automount();
   drives_mount_ramdisk();
   bootpak_install();   /* pacote de boot (SODOS.PAK) -> Z:\SODOS\DRV */
+  drives_mount_nvme(); /* PC real: particao SODOSHD do SSD vira D: (precisa do FAT32.DLL) */
   keyb_load_cfg();
   net_demo();
   /* Antes do HTTPD: o ambiente (SET FAT32DLL=...) ja vale para tudo depois. */

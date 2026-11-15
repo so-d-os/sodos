@@ -95,6 +95,37 @@ static int lookup(const char* ext, char* out, int max) {
   return 0;
 }
 
+/* O programa da associacao nao existe onde o CFG diz (CFG feito com D: e
+ * boot pelo pendrive, sem D:): tenta "X:\SODOS\resto" no PATHSODOS atual e,
+ * depois, so o nome do programa no PATHSODOS. 1 = achou (full trocado). */
+static int other_drive(const struct linkext_host* h, char* full, int max) {
+  char alt[LINKEXT_PATH_MAX];
+  const char* rest = 0;
+  const char* leaf = full;
+  int i;
+  if (!(full[0] && full[1] == ':' && full[2] == '\\')) return 0;
+  if (upc(full[3]) == 'S' && upc(full[4]) == 'O' && upc(full[5]) == 'D' &&
+      upc(full[6]) == 'O' && upc(full[7]) == 'S' && full[8] == '\\' && full[9])
+    rest = full + 9;
+  for (i = 0; full[i]; i++)
+    if (full[i] == '\\' || full[i] == '/') leaf = full + i + 1;
+  if (rest) {
+    h->sodos_path(rest, alt, (int)sizeof(alt));
+    if (h->fsize(alt) >= 0) {
+      scopy(full, alt, max);
+      return 1;
+    }
+  }
+  if (leaf[0]) {
+    h->sodos_path(leaf, alt, (int)sizeof(alt));
+    if (h->fsize(alt) >= 0) {
+      scopy(full, alt, max);
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int lx_open(const struct linkext_host* h, const char* file) {
   char path[LINKEXT_PATH_MAX];
   char ext[16];
@@ -117,7 +148,7 @@ static int lx_open(const struct linkext_host* h, const char* file) {
   } else {
     h->sodos_path(prog, full, (int)sizeof(full));
   }
-  if (full[0] != '@' && h->fsize(full) < 0) {
+  if (full[0] != '@' && h->fsize(full) < 0 && !other_drive(h, full, (int)sizeof(full))) {
     h->log("programa da associacao nao existe:");
     h->log(full);
     return 1;

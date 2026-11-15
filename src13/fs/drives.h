@@ -28,6 +28,8 @@ int drives_mount_ramdisk(void);
 int drives_use(char letter);
 void drives_print_status(void);
 void drives_automount(void);
+/* PC real sem disco ATA 1: a particao SODOSHD do NVMe vira D: (ou N:). */
+int drives_mount_nvme(void);
 
 /* Relativo a pasta atual da unidade. Comeca com \ para ir da raiz. */
 void path_parse(const char* path, char* letter_out, char* name_out, int name_max);
