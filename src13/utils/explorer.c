@@ -327,6 +327,18 @@ static void open_sel(void) {
     return;
   }
   {
+    /* Associacao de extensoes (LINKEXT.DLL): 1 = desligado ou sem programa. */
+    char full3[PATHMAX];
+    copy_str(full3, g_path, PATHMAX);
+    cat_str(full3, e->name, PATHMAX);
+    if (k_open_file(full3) == 0) {
+      char b[200];
+      snprintf(b, sizeof(b), "abrindo %s", e->name);
+      set_status(b);
+      return;
+    }
+  }
+  {
     char b[200];
     char sz[32];
     char dt[32];

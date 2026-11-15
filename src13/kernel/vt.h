@@ -44,3 +44,6 @@ void vt_out_tick(void);
 /* Comando WIN: abre o WIN na tarefa propria ou volta a ele.
  * Devolve 1 se o WIN continua aberto quando esta tela volta. */
 int vt_win(void);
+/* SET DISKSYNC=1: abre DISKSYNC.EXE numa tela ao fundo (Ctrl+F12) se ainda
+ * nao esta rodando. Sem a variavel nada acontece. env.c chama a cada SET. */
+void vt_service_check(void);

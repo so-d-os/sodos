@@ -40,7 +40,7 @@ CC_SRC = cc/main.c cc/util.c cc/lex.c cc/pp.c cc/type.c cc/parse.c cc/gen.c
 all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/HELLO.EXE $(O)/CRASHT.EXE $(O)/SOCKT.EXE $(O)/SIGT64.EXE $(O)/FAT32T.EXE \
 	$(O)/CC.EXE $(O)/LINK.EXE $(O)/TLS.DLL $(O)/HTTPS.EXE $(O)/GUI.DLL $(O)/IMG.DLL \
 	$(O)/BROWSER.EXE $(O)/IMAGEVW.EXE $(O)/VIDPLAY.EXE $(O)/FONTADV.EXE $(O)/COMMAND.EXE $(O)/HTTPD.EXE \
-	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE $(O)/VIDEOCFG.EXE $(O)/IMGBIG.DLL $(O)/AIPANEL.EXE $(O)/MENUCFG.EXE \
+	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE $(O)/VIDEOCFG.EXE $(O)/IMGBIG.DLL $(O)/AIPANEL.EXE $(O)/MENUCFG.EXE $(O)/LINKEXT.EXE $(O)/DISKSYNC.EXE \
 	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
 	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
 	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/TOP.EXE $(O)/COBRA.EXE $(O)/WIFI.EXE $(O)/GIT.EXE \
@@ -295,7 +295,14 @@ $(B)/drv_fat32.o: ../drivers/fat32/fat32.c ../fs/fsdrv.h | $(B)
 $(DRV)/FAT32.DLL: $(B)/drv_fat32.o $(LINK64) | $(DRV)
 	$(LINK64) /dll /export:fs_driver /out:$@ $(B)/drv_fat32.o
 
-drivers: $(DRV)/FAT32.DLL $(DRV)/GPUTEST.DLL $(DRV)/GPUFAIL.DLL $(DRV)/VIRTGPU.DLL $(DRV)/AMDGOP.DLL $(DRV)/AMDCUR.DLL
+# LINKEXT.DLL (kernel/linkext.h): associacao de extensoes, carregado so com
+# SET LINKEXT=1 (PATHSODOS\DRV ou D:\SODOS\DRV).
+$(B)/drv_linkext.o: ../drivers/linkext/linkext.c ../kernel/linkext.h | $(B)
+	$(DRVCC) -I../kernel -c $< -o $@
+$(DRV)/LINKEXT.DLL: $(B)/drv_linkext.o $(LINK64) | $(DRV)
+	$(LINK64) /dll /export:linkext_driver /out:$@ $(B)/drv_linkext.o
+
+drivers: $(DRV)/LINKEXT.DLL $(DRV)/FAT32.DLL $(DRV)/GPUTEST.DLL $(DRV)/GPUFAIL.DLL $(DRV)/VIRTGPU.DLL $(DRV)/AMDGOP.DLL $(DRV)/AMDCUR.DLL
 
 # LIBCX64 estatica: mesma libc, compilada -m64, ligada no HELLO64C.
 LIBC64_SRC = string ctype stdlib stdio printf scanf fpconv math time misc sigfault64 wchar setjmp64 ctors64
@@ -477,6 +484,14 @@ clean:
 # Configuracao do menu Iniciar: posicao, painel e transparencia.
 $(O)/MENUCFG.EXE: ../utils/menu_cfg.c $(O)/GUI.DLL include/widgets.h $(HCC) $(HEADERS)
 	$(HCC) -o $@ ../utils/menu_cfg.c $(O)/GUI.DLL
+
+# Abrir com: associacao extensao -> programa (LINKEXT.CFG) e SET LINKEXT.
+$(O)/LINKEXT.EXE: ../utils/linkext_cfg.c $(O)/GUI.DLL include/widgets.h $(HCC) $(HEADERS)
+	$(HCC) -o $@ ../utils/linkext_cfg.c $(O)/GUI.DLL
+
+# Servico SET DISKSYNC=1: Z:\SAVE -> pendrive (o kernel abre na tela Ctrl+F12).
+$(O)/DISKSYNC.EXE: ../utils/disksync.c $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
+	$(HCC) -o $@ ../utils/disksync.c
 
 # Painel de IA: janela docada na lateral direita (chat).
 # O painel inclui o ai_client.c (fonte unica): um objeto, como no AGENT.

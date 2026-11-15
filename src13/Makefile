@@ -142,7 +142,7 @@ DISKS_CMD_O = $(DISKS_CMD_C:.c=.o)
 
 CMD_O = $(SHELL_CMD_O) $(DISKS_CMD_O)
 
-kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c video/gpu.c video/wfont.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/ps2in.c kernel/smp.c kernel/reboot.c kernel/xhci.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c fs/fsdrv.c kernel/env.c kernel/bootpak.c kernel/mm.c net/net.c net/httpd.c net/png.c net/wpa.c net/rtw89.c net/wifi.c kernel/module.c kernel/elf.c kernel/sched.c kernel/kthread.c kernel/kexports.c kernel/keymap.c kernel/clip.c kernel/vt.c $(SHELL_CMD_C) $(DISKS_CMD_C) kernel/ap_blob.o shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
+kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c video/gpu.c video/wfont.c video/prtscr.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/ps2in.c kernel/smp.c kernel/reboot.c kernel/xhci.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c fs/fsdrv.c kernel/env.c kernel/linkext.c kernel/bootpak.c kernel/mm.c net/net.c net/httpd.c net/png.c net/wpa.c net/rtw89.c net/wifi.c kernel/module.c kernel/elf.c kernel/sched.c kernel/kthread.c kernel/kexports.c kernel/keymap.c kernel/clip.c kernel/vt.c $(SHELL_CMD_C) $(DISKS_CMD_C) kernel/ap_blob.o shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
 	$(CC) $(CFLAGS) -c kernel/kernel.c -o kernel/kernel.o
 	$(CC) $(CFLAGS) -c kernel/bootinfo.c -o kernel/bootinfo.o
 	$(CC) $(CFLAGS) -c kernel/mm.c -o kernel/mm.o
@@ -166,6 +166,7 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(CC) $(CFLAGS) -c fs/drives.c -o fs/drives.o
 	$(CC) $(CFLAGS) -c fs/fsdrv.c -o fs/fsdrv.o
 	$(CC) $(CFLAGS) -c kernel/env.c -o kernel/env.o
+	$(CC) $(CFLAGS) -c kernel/linkext.c -o kernel/linkext.o
 	$(CC) $(CFLAGS) -c kernel/bootpak.c -o kernel/bootpak.o
 	$(CC) $(CFLAGS) -c fs/partition.c -o fs/partition.o
 	$(CC) $(CFLAGS) -c fs/fat_format.c -o fs/fat_format.o
@@ -175,6 +176,7 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(CC) $(CFLAGS) -c video/fbcon.c -o video/fbcon.o
 	$(CC) $(CFLAGS) -c video/gpu.c -o video/gpu.o
 	$(CC) $(CFLAGS) -fno-tree-loop-distribute-patterns -c video/wfont.c -o video/wfont.o
+	$(CC) $(CFLAGS) -c video/prtscr.c -o video/prtscr.o
 	$(CC) $(CFLAGS) -c kernel/serial.c -o kernel/serial.o
 	$(CC) $(CFLAGS) -c kernel/idt.c -o kernel/idt.o
 	$(CC) $(CFLAGS) -c kernel/isr.c -o kernel/isr.o
@@ -225,11 +227,11 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(AS) -f elf64 kernel/irq_stubs.asm -o kernel/irq_stubs.o
 	$(AS) -f elf64 kernel/modrun.asm -o kernel/modrun.o
 	$(AS) -f elf64 kernel/kernel_entry.asm -o kernel/kernel_entry.o
-	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 # Mesmo kernel de kernel.elf, com o stub Multiboot2 na frente. O GRUB carrega este ELF.
 kernel_multiboot.elf: kernel.elf kernel/multiboot_header.o kernel/linker_multiboot.ld
-	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 
 kernel.bin: kernel.elf
@@ -331,7 +333,8 @@ executables.c: hello.bin testapp.bin editor.bin hello.elf testapp.elf editor.elf
 
 # Pacote de boot (kernel/bootpak.c): arquivos que vao para o Z: a cada boot.
 # Cada item: origem=caminho no Z: (sem letra, / vira \).
-PAK_FILES = c_compiler/out/DRV/FAT32.DLL=SODOS/DRV/FAT32.DLL
+PAK_FILES = c_compiler/out/DRV/FAT32.DLL=SODOS/DRV/FAT32.DLL \
+            c_compiler/out/DISKSYNC.EXE=SODOS/DISKSYNC.EXE
 
 tools/mkpak: tools/mkpak.c
 	gcc -O2 -Wall -Werror -o $@ $<
@@ -339,7 +342,10 @@ tools/mkpak: tools/mkpak.c
 c_compiler/out/DRV/FAT32.DLL: drivers/fat32/fat32.c fs/fsdrv.h
 	$(MAKE) -C c_compiler out/DRV/FAT32.DLL
 
-sodos.pak: tools/mkpak c_compiler/out/DRV/FAT32.DLL Makefile
+c_compiler/out/DISKSYNC.EXE: utils/disksync.c
+	$(MAKE) -C c_compiler out/DISKSYNC.EXE
+
+sodos.pak: tools/mkpak c_compiler/out/DRV/FAT32.DLL c_compiler/out/DISKSYNC.EXE Makefile
 	tools/mkpak $@ $(PAK_FILES)
 
 os.img: boot.bin stage2.bin kernel.bin app.bin sodos.pak Makefile tools/validate_layout.sh
@@ -592,6 +598,12 @@ disk-files: disk.img
 	@for f in c_compiler/out/DRV/*.DLL; do [ -f "$$f" ] && mcopy -o -i $(DISK)@@512 "$$f" ::/SODOS/DRV/ || true; done
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/AIPANEL.EXE ::/SODOS/AIPANEL.EXE
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/MENUCFG.EXE ::/SODOS/MENUCFG.EXE
+	@# Abrir com (LINKEXT.EXE + LINKEXT.DLL em \SODOS\DRV); o CFG de exemplo so
+	@# entra se o disco ainda nao tem um (o usuario edita pelo LINKEXT.EXE).
+	@mcopy -o -i $(DISK)@@512 c_compiler/out/LINKEXT.EXE ::/SODOS/LINKEXT.EXE
+	@# Servico SET DISKSYNC=1 (Z:\SAVE -> pendrive), aberto pelo kernel
+	@mcopy -o -i $(DISK)@@512 c_compiler/out/DISKSYNC.EXE ::/SODOS/DISKSYNC.EXE
+	@if ! mdir -i $(DISK)@@512 ::/SODOS/LINKEXT.CFG >/dev/null 2>&1; then mcopy -i $(DISK)@@512 content/LINKEXT.CFG ::/SODOS/LINKEXT.CFG; fi
 	@# Os READMEs vao para \SODOS: no disk.img e no pendrive (U:), se conectado
 	@mcopy -o -i $(DISK)@@512 ../README.md ::/SODOS/README.MD
 	@mcopy -o -i $(DISK)@@512 ../README.pt-BR.md ::/SODOS/README.PT-BR.MD

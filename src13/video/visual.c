@@ -20,6 +20,7 @@
 #include "sched.h"
 #include "irq.h"
 #include "visual.h"
+#include "prtscr.h"
 #include "keymap.h"
 #include "clip.h"
 #include "bootinfo.h"
@@ -29,6 +30,7 @@
 #include "env.h"
 #include "gpu.h"
 #include "wfont.h"
+#include "linkext.h"
 #include "c_compiler/sox.h"
 
 static inline void outl(uint16_t port, uint32_t v) {
@@ -677,7 +679,8 @@ static int ui_glass;      /* 1 = menu Iniciar translucido */
 static int ui_ia;         /* 1 = painel de IA ligado */
 static int ui_ia_launch;  /* pedido de abrir o AIPANEL pendente */
 /* pedido de abrir um programa no WIN (k_win_launch) */
-static char launch_path[64];
+static char launch_path[LINKEXT_PATH_MAX];
+static char launch_arg[LINKEXT_PATH_MAX];   /* arquivo (LINKEXT); "" = sem */
 static int launch_pending;
 
 static uint32_t gui_col(uint32_t rgb);   /* definido mais abaixo */
@@ -2926,7 +2929,24 @@ static void font_draw(struct wm_win* w, int title_h, int scale,
 #define CMD_COLS 80
 #define CMD_IN 128
 
+/* Tela 80x25 de um programa que roda no Command: k_vput, k_cursor e k_getc
+ * dele vem para ca (kexp_set_textscr). Pertence a tarefa; a janela so mostra. */
+#define TTY_KQ 64
+struct con_tty {
+  uint16_t cell[25 * 80];
+  int on;      /* o programa usou a tela de celulas: a janela mostra a grade */
+  int fit;     /* a janela ainda nao cresceu para caber 80x25 */
+  int r, c;    /* cursor (onde k_putc escreve) */
+  int hide;
+  int font_on; /* o programa trocou glifos: font vale */
+  uint8_t font[256 * 16];
+  int kq[TTY_KQ];
+  int kr, kn;
+  int gone;    /* a janela fechou: k_getc devolve -1 */
+};
+
 struct cmd_con {
+  struct con_tty* tty; /* programa rodando aqui (da tarefa), ou 0 */
   char line[CMD_ROWS][CMD_COLS];
   int n;
   char in[CMD_IN];
@@ -2947,6 +2967,7 @@ static void (*cons_paint)(void);
 static void cons_wipe(struct cmd_con* c);
 static void cmd_push(struct cmd_con* c, const char* s);
 static int in_task(void);
+static int tty_emit(struct cmd_con* c, char ch);
 static struct cmd_con* cons_dirty; /* Command com saida nova de uma tarefa */
 static int cons_late;              /* saida que ainda nao foi para a tela */
 static uint64_t cons_last;
@@ -2981,14 +3002,26 @@ static void cons_refresh(void) {
 static void cons_emit(char ch) {
   struct cmd_con* c = cons_cap;
   if (!c) return;
+  if (tty_emit(c, ch)) return;
   if (ch == '\f') {
     int busy = c->busy;
+    struct con_tty* tty = c->tty;
     cons_wipe(c);
     c->busy = busy;
+    c->tty = tty;
     cons_refresh();
     return;
   }
-  if (ch == '\r' || ch == '\b') return;
+  if (ch == '\b') {
+    /* eco do k_readline: apaga o ultimo caractere da linha */
+    if (c->ocol > 0 && c->n > 0) {
+      c->ocol--;
+      c->line[c->n - 1][c->ocol] = '\0';
+      cons_refresh();
+    }
+    return;
+  }
+  if (ch == '\r') return;
   if (ch == '\n') {
     if (c->ocol == 0) cmd_push(c, "");
     c->ocol = 0;
@@ -3004,6 +3037,8 @@ static void cons_emit(char ch) {
   }
   c->line[c->n - 1][c->ocol++] = ch;
   c->line[c->n - 1][c->ocol] = '\0';
+  /* Numa tarefa so marca: um prompt sem \n aparece quando ela ceder a vez. */
+  if (in_task()) cons_refresh();
 }
 
 static void cons_wipe(struct cmd_con* c) {
@@ -3038,6 +3073,7 @@ static int cmd_is_exit(const char* s) {
 
 static int desk_refresh(void);
 static int cmd_spawn(const char* path, int argc, char** argv);
+static int cmd_spawn_screen(int (*cmd)(int, char**), int argc, char** argv);
 
 /* Troca a linha digitada e sai da navegacao no historico (ESC, Enter). */
 static void cmd_set_input(struct cmd_con* c, const char* s) {
@@ -3085,9 +3121,11 @@ static int cmd_enter(struct wm_win* w) {
     cons_cap = c;
     shell_set_out(cons_emit);
     shell_set_exec(cmd_spawn);
+    shell_set_screen_exec(cmd_spawn_screen);
     shell_set_flush(cons_flush);
     shell_exec_line(buf);
     shell_set_flush(0);
+    shell_set_screen_exec(0);
     shell_set_exec(0);
     shell_set_out(0);
     cons_cap = 0;
@@ -3373,14 +3411,66 @@ static void cmd_hit_cell(struct wm_win* w, struct cmd_con* c, int title_h, int s
   cmd_hit(w, c, title_h, scale, mx - g.cell / 2, my, r, col);
 }
 
+/* Cores da VGA em modo texto. */
+static const uint32_t tty_pal[16] = {
+  0x000000, 0x0000AA, 0x00AA00, 0x00AAAA, 0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA,
+  0x555555, 0x5555FF, 0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF
+};
+
+/* Grade 80x25 do programa. O bit 7 do atributo e fundo claro (sem piscar). */
+static void tty_draw(struct wm_win* w, struct con_tty* y, int focus, int title_h, int scale) {
+  int rows = glyph_rows();
+  int cw = FONT_W * (scale < 1 ? 1 : scale);
+  int chh = rows * (scale < 1 ? 1 : scale);
+  int x0 = w->x + 6, y0 = w->y + title_h + 2;
+  int ncol = (w->w - 12) / cw, nrow = (w->h - title_h - 4) / chh;
+  int r, k, i, x;
+  uint32_t pal[16];
+  if (scale < 1) scale = 1;
+  if (ncol > 80) ncol = 80;
+  if (nrow > 25) nrow = 25;
+  for (i = 0; i < 16; i++) pal[i] = gui_col(tty_pal[i]);
+  fill_rect(w->x, w->y + title_h, w->w, w->h - title_h, pal[0]);
+  for (r = 0; r < nrow; r++) {
+    for (k = 0; k < ncol; k++) {
+      uint16_t v = y->cell[r * 80 + k];
+      unsigned char chr = (unsigned char)(v & 0xFF);
+      uint32_t fg = pal[(v >> 8) & 15], bg = pal[(v >> 12) & 15];
+      const uint8_t* g = y->font_on ? &y->font[chr * 16] : glyph16(chr);
+      int px = x0 + k * cw, py = y0 + r * chh;
+      for (i = 0; i < rows; i++) {
+        uint8_t bits = g[i];
+        if (scale == 1) {
+          for (x = 0; x < FONT_W; x++)
+            put_pixel(px + x, py + i, (bits & (uint8_t)(0x80 >> x)) ? fg : bg);
+        } else {
+          for (x = 0; x < FONT_W; x++)
+            fill_rect(px + x * scale, py + i * scale, scale, scale,
+                      (bits & (uint8_t)(0x80 >> x)) ? fg : bg);
+        }
+      }
+    }
+  }
+  if (focus && !y->hide && y->r >= 0 && y->r < nrow && y->c >= 0 && y->c < ncol) {
+    uint16_t v = y->cell[y->r * 80 + y->c];
+    fill_rect(x0 + y->c * cw, y0 + y->r * chh + chh - 2 * scale, cw, 2 * scale,
+              pal[(v >> 8) & 15] == pal[(v >> 12) & 15] ? pal[7] : pal[(v >> 8) & 15]);
+  }
+}
+
 static void cmd_draw(struct wm_win* w, int focus, int title_h, int scale,
                      uint32_t col_white, uint32_t col_black) {
   struct cmd_con* c = (struct cmd_con*)w->st;
   struct cmd_geo g;
   char row[CMD_COLS + 48];
   int r0 = 0, c0 = 0, r1 = 0, c1 = 0;
-  int has = cmd_sel_span(c, &r0, &c0, &r1, &c1);
+  int has;
   int li, k, last;
+  if (c->tty && c->tty->on) {
+    tty_draw(w, c->tty, focus, title_h, scale);
+    return;
+  }
+  has = cmd_sel_span(c, &r0, &c0, &r1, &c1);
   cmd_geom(w, c, title_h, scale, &g);
   fill_rect(w->x, g.y0, w->w, w->h - title_h, col_black);
   last = c->busy ? g.prompt_row - 1 : g.prompt_row;
@@ -3867,6 +3957,14 @@ struct gui_win {
   int maxed;    /* maximizada pelo botao/duplo clique no titulo */
 };
 
+static int (*task_pending_cmd)(int, char**); /* proximo task_spawn roda isto */
+
+/* Estado do shell (shell_out, exec, flush, pipe) de um lado da troca. */
+struct task_shell {
+  struct con_state cs;
+  int (*scr)(int (*)(int, char**), int, char**);
+};
+
 struct gui_task {
   int used;
   int wake;
@@ -3876,6 +3974,10 @@ struct gui_task {
   struct mod_cpu cpu;
   struct wm_win* run;
   struct cmd_con* con; /* aberto pelo Command: escreve la, nao numa janela propria */
+  struct con_tty* tty; /* tela de texto e teclas do programa do Command */
+  int (*cmd)(int, char**); /* comando interno (EDIT) em vez de .EXE */
+  struct task_shell sh;    /* shell da tarefa entre uma fatia e outra */
+  int sh_ok;
   int con_row, con_col;
   uint8_t* stack;
   uint8_t* xs_raw;     /* SSE/AVX salvos na preempcao (kmalloc, alinhado em uso) */
@@ -3897,6 +3999,246 @@ static int task_rr;
 
 static int in_task(void) {
   return host_on && task_cur >= 0;
+}
+
+/* ---------- tela de texto do programa do Command ---------- */
+static void gui_yield(int wake);
+
+void mod_exit(int code);
+
+/* Fechar o Command encerra o programa dele, como Ctrl+C no DOS: sem janela
+ * ele ficaria rodando para ninguem (TOP em laco de k_trygetc, por exemplo). */
+static struct con_tty* tty_cur(void) {
+  struct con_tty* y;
+  if (!in_task() || kt_in_thread()) return 0;
+  y = gtasks[task_cur].tty;
+  if (y && y->gone && !gtasks[task_cur].cmd) mod_exit(1);
+  return y;
+}
+
+/* Primeira vez: a grade comeca com o que o Command mostrava, como no DOS. */
+static void tty_start(struct con_tty* y) {
+  struct cmd_con* c = gtasks[task_cur].con;
+  int i, n = 0, first;
+  if (y->on) return;
+  y->on = 1;
+  y->fit = 1;
+  y->hide = 0;
+  for (i = 0; i < 25 * 80; i++) y->cell[i] = 0x0720;
+  y->r = y->c = 0;
+  if (!c) return;
+  n = c->n < 24 ? c->n : 24;
+  first = c->n - n;
+  for (i = 0; i < n; i++) {
+    const char* s = c->line[first + i];
+    int k;
+    for (k = 0; k < 80 && s[k]; k++) y->cell[i * 80 + k] = (uint16_t)(0x0700 | (unsigned char)s[k]);
+  }
+  if (c->ocol > 0 && n > 0) {
+    y->r = n - 1;
+    y->c = c->ocol < 80 ? c->ocol : 79;
+  } else {
+    y->r = n < 25 ? n : 24;
+  }
+}
+
+static void tty_scroll(struct con_tty* y) {
+  int i;
+  for (i = 0; i < 24 * 80; i++) y->cell[i] = y->cell[i + 80];
+  for (i = 24 * 80; i < 25 * 80; i++) y->cell[i] = 0x0720;
+}
+
+/* k_putc com a grade ligada: escreve no cursor, como o console do DOS. */
+static int tty_emit(struct cmd_con* c, char ch) {
+  struct con_tty* y = c->tty;
+  unsigned char u = (unsigned char)ch;
+  int i;
+  if (!y || !y->on) return 0;
+  if (u == '\f') {
+    for (i = 0; i < 25 * 80; i++) y->cell[i] = 0x0720;
+    y->r = y->c = 0;
+  } else if (u == '\r') {
+    y->c = 0;
+  } else if (u == '\n') {
+    y->c = 0;
+    y->r++;
+  } else if (u == '\b') {
+    if (y->c > 0) y->c--;
+  } else if (u == '\t') {
+    y->c = (y->c + 8) & ~7;
+  } else if (u >= 32) {
+    if (y->r < 0) y->r = 0;
+    if (y->c < 0) y->c = 0;
+    y->cell[y->r * 80 + y->c] = (uint16_t)(0x0700 | u);
+    y->c++;
+  }
+  if (y->c >= 80) {
+    y->c = 0;
+    y->r++;
+  }
+  while (y->r >= 25) {
+    tty_scroll(y);
+    y->r--;
+  }
+  cons_refresh();
+  return 1;
+}
+
+static int tty_vput(int row, int col, const uint16_t* cells, int n) {
+  struct con_tty* y = tty_cur();
+  int pos, i;
+  if (!y) return -1;
+  tty_start(y);
+  if (!cells || row < 0 || row >= 25 || col < 0 || col >= 80) return 0;
+  pos = row * 80 + col;
+  if (n > 80 * 25 - pos) n = 80 * 25 - pos;
+  for (i = 0; i < n; i++) y->cell[pos + i] = cells[i];
+  if (n > 0) cons_refresh();
+  return 0;
+}
+
+static void tty_cursor(int row, int col) {
+  struct con_tty* y = tty_cur();
+  if (!y) return;
+  if (row < 0 || row >= 25 || col < 0 || col >= 80) {
+    y->hide = 1;
+  } else {
+    tty_start(y);
+    y->hide = 0;
+    y->r = row;
+    y->c = col;
+  }
+  if (y->on) cons_refresh();
+}
+
+static void tty_clear(void) {
+  struct con_tty* y = tty_cur();
+  int i;
+  if (!y) return;
+  if (!y->on) {
+    cons_emit('\f');
+    return;
+  }
+  for (i = 0; i < 25 * 80; i++) y->cell[i] = 0x0720;
+  y->r = y->c = 0;
+  cons_refresh();
+}
+
+static int tty_font_get(int ch, uint8_t* glyph) {
+  struct con_tty* y = tty_cur();
+  const uint8_t* g;
+  int i;
+  if (ch < 0 || ch > 255 || !glyph) return -1;
+  g = (y && y->font_on) ? &y->font[ch * 16] : vga_font_glyph(ch);
+  for (i = 0; i < 16; i++) glyph[i] = g[i];
+  return 0;
+}
+
+/* Glifos trocados valem so nesta janela; o desktop segue com a fonte dele. */
+static int tty_font_set(int ch, const uint8_t* glyph) {
+  struct con_tty* y = tty_cur();
+  int i, k;
+  if (!y || ch < 0 || ch > 255 || !glyph || !vga_bios_font_ok) return -1;
+  if (!y->font_on) {
+    for (k = 0; k < 256; k++)
+      for (i = 0; i < 16; i++) y->font[k * 16 + i] = vga_bios_font[k * 32 + i];
+    y->font_on = 1;
+  }
+  for (i = 0; i < 16; i++) y->font[ch * 16 + i] = glyph[i];
+  if (y->on) cons_refresh();
+  return 0;
+}
+
+static void tty_font_reset(void) {
+  struct con_tty* y = tty_cur();
+  if (!y) return;
+  y->font_on = 0;
+  if (y->on) cons_refresh();
+}
+
+/* Tecla da fila que o WIN enche. Vazia: cede a vez ao desktop (que desenha). */
+static int tty_key(int wait) {
+  for (;;) {
+    struct con_tty* y = tty_cur();
+    int k;
+    if (!y) return -1;
+    if (y->kn > 0) {
+      k = y->kq[y->kr];
+      y->kr = (y->kr + 1) % TTY_KQ;
+      y->kn--;
+      return k;
+    }
+    if (y->gone) return -1;
+    gui_yield(WAKE_POLL);
+    if (!wait) {
+      y = tty_cur();
+      if (!y || y->kn == 0) return (y && !y->gone) ? 0 : -1;
+    }
+  }
+}
+
+static const struct kexp_textscr tty_ops = {
+  tty_vput, tty_cursor, tty_clear, tty_font_get, tty_font_set, tty_font_reset, tty_key
+};
+
+static void tty_push(struct con_tty* y, int k) {
+  if (!y || !k || y->kn >= TTY_KQ) return;
+  y->kq[(y->kr + y->kn) % TTY_KQ] = k;
+  y->kn++;
+}
+
+/* Scancode (sem 0x80) para o valor de k_getc, como get_key do kernel. */
+static int tty_key_of(uint8_t sc, int e0, int kp) {
+  if (kp) return kp;
+  if (e0) {
+    switch (sc) {
+      case 0x48: return KEY_UP;
+      case 0x50: return KEY_DOWN;
+      case 0x4B: return KEY_LEFT;
+      case 0x4D: return KEY_RIGHT;
+      case 0x49: return KEY_PGUP;
+      case 0x51: return KEY_PGDN;
+      case 0x47: return KEY_HOME;
+      case 0x4F: return KEY_END;
+      case 0x53: return KEY_DEL;
+      case 0x52: return KEY_INS;
+    }
+    return 0;
+  }
+  if (sc >= 0x3B && sc <= 0x44) return KEY_F(sc - 0x3A);
+  if (sc == 0x57 || sc == 0x58) return KEY_F(sc - 0x57 + 11);
+  {
+    int c = keymap_char(sc);
+    if (c && kbd_ctrl_down()) {
+      int l = c | 0x20;
+      if (l >= 'a' && l <= 'z') return l - 'a' + 1;
+    }
+    return c;
+  }
+}
+
+/* O programa acabou: o que ficou na grade vira o texto do Command. */
+static void tty_to_log(struct cmd_con* c, struct con_tty* y) {
+  int r, k, last = y->c > 0 ? y->r : y->r - 1;
+  int busy = c->busy;
+  for (r = 0; r < 25; r++)
+    for (k = 0; k < 80; k++) {
+      unsigned char u = (unsigned char)(y->cell[r * 80 + k] & 0xFF);
+      if (u > 32 && r > last) last = r;
+    }
+  cons_wipe(c);
+  c->busy = busy;
+  for (r = 0; r <= last && r < 25; r++) {
+    char s[CMD_COLS];
+    int n = 0;
+    for (k = 0; k < 80 && k < CMD_COLS - 1; k++) {
+      unsigned char u = (unsigned char)(y->cell[r * 80 + k] & 0xFF);
+      s[k] = (u >= 32 && u <= 126) ? (char)u : ' ';
+      if (s[k] != ' ') n = k + 1;
+    }
+    s[n] = '\0';
+    cmd_push(c, s);
+  }
 }
 
 static void gui_zero(void* mem, uint32_t n) {
@@ -4507,6 +4849,7 @@ static void console_detach(struct gui_task* t) {
     t->con_col = run_col;
   }
   kexp_set_console_hook(0);
+  kexp_set_textscr(0);
   run_out = 0;
   cons_cap = 0;
 }
@@ -4516,6 +4859,12 @@ static void console_attach(struct gui_task* t) {
   if (t->con) {
     cons_cap = t->con;
     kexp_set_console_hook(cons_emit);
+    if (t->tty) kexp_set_textscr(&tty_ops);
+  } else if (t->tty) {
+    /* O Command fechou: a saida se perde e k_getc devolve -1 (fim). */
+    cons_cap = 0;
+    kexp_set_console_hook(cons_emit);
+    kexp_set_textscr(&tty_ops);
   } else if (t->run && t->run->used && t->run->st) {
     run_out = t->run->st;
     run_row = t->con_row;
@@ -4967,6 +5316,11 @@ static void task_reap(int ti) {
   t->stack = 0;
   if (t->xs_raw) kfree(t->xs_raw);
   t->xs_raw = 0;
+  if (t->tty) {
+    if (t->con && t->con->tty == t->tty) t->con->tty = 0;
+    kfree(t->tty);
+  }
+  t->tty = 0;
   t->run = 0;
   t->con = 0;
   t->used = 0;
@@ -4990,8 +5344,14 @@ static void task_entry(void) {
   }
   av[i] = 0;
   console_attach(t);
-  rc = mod_exec(t->path, t->argc, av);
+  rc = t->cmd ? t->cmd(t->argc, av) : mod_exec(t->path, t->argc, av);
   console_detach(t);
+  if (t->tty) {
+    if (t->con && t->con->tty == t->tty) {
+      if (t->tty->on) tty_to_log(t->con, t->tty);
+      t->con->tty = 0;
+    }
+  }
   if (t->gid >= 0 && t->gid < GUI_MAX && gwins[t->gid].open) {
     gui_ix = t->gid;
     gui_close();
@@ -5014,7 +5374,34 @@ static void task_entry(void) {
   for (;;) __asm__ volatile ("hlt");
 }
 
+/* A tarefa nao herda o desvio do shell do desktop: o Command liga shell_out
+ * durante shell_exec_line, e a primeira fatia do programa roda ali dentro.
+ * Com ele ligado k_vput achava que a saida ia para um arquivo e recusava. */
+static void task_shell_enter(struct task_shell* s, struct gui_task* t) {
+  con_state_save(&s->cs);
+  s->scr = shell_get_screen_exec();
+  if (!t->sh_ok) {
+    /* Primeira vez: so o pipe ("type x | prog") passa para o programa. */
+    t->sh.cs = s->cs;
+    t->sh.cs.out = 0;
+    t->sh.cs.exec = 0;
+    t->sh.cs.flush = 0;
+    t->sh.scr = 0;
+    t->sh_ok = 1;
+  }
+  con_state_load(&t->sh.cs);
+  shell_set_screen_exec(t->sh.scr);
+}
+
+static void task_shell_leave(const struct task_shell* s, struct gui_task* t) {
+  con_state_save(&t->sh.cs);
+  t->sh.scr = shell_get_screen_exec();
+  con_state_load(&s->cs);
+  shell_set_screen_exec(s->scr);
+}
+
 static void task_switch_to(int ti) {
+  struct task_shell sh;
   struct gui_task* t = &gtasks[ti];
   if (!t->used || t->wake == WAKE_DEAD || t->wake == WAKE_NONE) return;
   mod_cpu_save(&host_cpu);
@@ -5022,7 +5409,9 @@ static void task_switch_to(int ti) {
   task_cur = ti;
   gui_ix = (t->gid >= 0 && t->gid < GUI_MAX) ? t->gid : 0;
   task_slice_t0 = (uint32_t)irq_ticks();
+  task_shell_enter(&sh, t);
   ctx_switch(&host_rsp, t->rsp);
+  task_shell_leave(&sh, t);
   task_cur = -1;
   /* Volta da preempcao com IF=0 (veio do IRQ0). */
   __asm__ volatile ("sti");
@@ -5031,11 +5420,14 @@ static void task_switch_to(int ti) {
 
 static void task_start(int ti) {
   struct gui_task* t = &gtasks[ti];
+  struct task_shell sh;
   mod_cpu_save(&host_cpu);
   task_cur = ti;
   gui_ix = 0;
   task_slice_t0 = (uint32_t)irq_ticks();
+  task_shell_enter(&sh, t);
   ctx_switch(&host_rsp, t->rsp);
+  task_shell_leave(&sh, t);
   task_cur = -1;
   __asm__ volatile ("sti");
   if (t->wake == WAKE_DEAD) task_reap(ti);
@@ -5079,12 +5471,25 @@ static int task_spawn(struct wm_win* wins, int* focus, int big, const char* path
   t->gid = -1;
   t->run = 0;
   t->con = con;
+  t->tty = 0;
+  t->cmd = task_pending_cmd;
+  t->sh_ok = 0;
   t->con_row = 0;
   t->con_col = 0;
   t->rsp = 0;
   t->xs_raw = 0;
+  if (con) {
+    t->tty = (struct con_tty*)kmalloc((uint32_t)sizeof(struct con_tty));
+    if (t->tty) {
+      gui_zero(t->tty, (uint32_t)sizeof(struct con_tty));
+      con->tty = t->tty;
+    }
+  }
   t->stack = (uint8_t*)kmalloc(TASK_STACK);
   if (!t->stack) {
+    if (t->tty) kfree(t->tty);
+    if (con) con->tty = 0;
+    t->tty = 0;
     t->used = 0;
     t->con = 0;
     serial_puts("[visual] sem pilha para o programa\n");
@@ -5179,8 +5584,11 @@ static void task_forget_win(struct wm_win* w) {
   if (!gtasks || !w) return;
   for (i = 0; i < TASK_MAX; i++) {
     if (gtasks[i].run == w) gtasks[i].run = 0;
-    if (w->kind == WM_KIND_CMD && w->st && gtasks[i].con == (struct cmd_con*)w->st)
+    if (w->kind == WM_KIND_CMD && w->st && gtasks[i].con == (struct cmd_con*)w->st) {
+      if (gtasks[i].tty) gtasks[i].tty->gone = 1;
+      ((struct cmd_con*)w->st)->tty = 0;
       gtasks[i].con = 0;
+    }
   }
 }
 
@@ -5239,7 +5647,9 @@ static void wm_exec_sox(struct wm_win* wins, int* focus, int big, const char* pa
   *focus = i;
 }
 
-static void wm_exec(struct wm_win* wins, int* focus, int big, const char* path) {
+/* arg != 0: arquivo passado como argv[1] (abrir com, LINKEXT). */
+static void wm_exec_arg(struct wm_win* wins, int* focus, int big, const char* path,
+                        const char* arg) {
   uint8_t* bak;
   int n;
   int i;
@@ -5255,10 +5665,11 @@ static void wm_exec(struct wm_win* wins, int* focus, int big, const char* path) 
   /* SOX (x32), SOX2 (LP64) ou ELF dinamico: o carregador de modulos decide. */
   if (file_load(path, (char*)magic, 5) == 4 &&
       (magic[0] == SOX_MAGIC || magic[0] == SOX_MAGIC2 || magic[0] == 0x464C457Fu)) {
-    char* argv[2];
+    char* argv[3];
     argv[0] = (char*)path;
-    argv[1] = 0;
-    wm_exec_sox(wins, focus, big, path, owner, 1, argv);
+    argv[1] = (char*)arg;
+    argv[2] = 0;
+    wm_exec_sox(wins, focus, big, path, owner, arg && arg[0] ? 2 : 1, argv);
     app_win = owner;
     if (owner && owner->st && gui_focus < 0) app_status_set("executou");
     return;
@@ -5296,6 +5707,10 @@ static void wm_exec(struct wm_win* wins, int* focus, int big, const char* path) 
   app_win = owner;
   if (owner && owner->st)
     app_status_set("executou");
+}
+
+static void wm_exec(struct wm_win* wins, int* focus, int big, const char* path) {
+  wm_exec_arg(wins, focus, big, path, 0);
 }
 
 /* Atalho gravado em D:\... e o arquivo ficou no pendrive: procura o mesmo
@@ -6264,7 +6679,7 @@ static void start_menu_geom(struct start_menu* m, int scr_w, int scr_h, int bar_
   m->h = menu_item_h * m->n + 4;
   m->y = scr_h - bar_h - m->h;
   m->sub_w = 18 * FONT_W * scale + 16;
-  m->sub_h = menu_item_h * 5 + 4;
+  m->sub_h = menu_item_h * 6 + 4;
   m->sub_x = m->x + m->w - 4;
   m->sub_y = m->y + 3 * menu_item_h;
   if (m->sub_x + m->sub_w > scr_w - 2)
@@ -6900,6 +7315,21 @@ static int cmd_spawn(const char* path, int argc, char** argv) {
   return 1;
 }
 
+/* Comando interno de tela cheia (EDIT): tarefa como um .EXE, com a tela da janela. */
+static int cmd_spawn_screen(int (*cmd)(int, char**), int argc, char** argv) {
+  struct cmd_con* c = cons_cap;
+  if (!host_on || task_cur >= 0 || !c_wins || !c) return 0;
+  c->busy = 1;
+  task_pending_cmd = cmd;
+  if (task_spawn(c_wins, c_focus, c_big, argv && argv[0] ? argv[0] : "EDIT", 0, argc, argv, c) != 0) {
+    task_pending_cmd = 0;
+    c->busy = 0;
+    return 0;
+  }
+  task_pending_cmd = 0;
+  return 1;
+}
+
 /* O programa do Command acabou e nada tem foco: o teclado volta para o Command. */
 static void cmd_refocus(struct cmd_con* c) {
   int i;
@@ -7099,6 +7529,8 @@ static void chrome_paint_over(void) {
                            gm.sub_y + 3 * gm.item_h, gm.sub_w, gm.item_h);
     int menu_hot = wm_pt((int)sys_mx, (int)sys_my, gm.sub_x,
                          gm.sub_y + 4 * gm.item_h, gm.sub_w, gm.item_h);
+    int lx_hot = wm_pt((int)sys_mx, (int)sys_my, gm.sub_x,
+                       gm.sub_y + 5 * gm.item_h, gm.sub_w, gm.item_h);
     menu_panel(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h);
     menu_row(gm.sub_x + 1, gm.sub_y + 2, gm.sub_w - 2, gm.item_h - 2,
              "Tela", tela_hot, 1, c_win, c_title, c_white, c_black, c_scale);
@@ -7110,6 +7542,8 @@ static void chrome_paint_over(void) {
              "Design", design_hot, 0, c_win, c_title, c_white, c_black, c_scale);
     menu_row(gm.sub_x + 1, gm.sub_y + 2 + 4 * gm.item_h, gm.sub_w - 2, gm.item_h - 2,
              "Menu", menu_hot, 0, c_win, c_title, c_white, c_black, c_scale);
+    menu_row(gm.sub_x + 1, gm.sub_y + 2 + 5 * gm.item_h, gm.sub_w - 2, gm.item_h - 2,
+             "Abrir com", lx_hot, 0, c_win, c_title, c_white, c_black, c_scale);
     menu_frame(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h, c_black);
   }
   if (c_cfg && *c_cfg && c_tela && *c_tela) {
@@ -7170,6 +7604,37 @@ static void host_open_menu_cfg(struct wm_win* wins, int* focus, int big) {
   wm_exec(wins, focus, big, exe);
 }
 
+/* Iniciar > Configuracoes > Abrir com: LINKEXT.EXE (associacoes). */
+static void host_open_linkext(struct wm_win* wins, int* focus, int big) {
+  char exe[48];
+  if (gui_raise_title("Abrir com")) return;
+  if (!desk_find("D:\\SODOS\\LINKEXT.EXE", exe, (int)sizeof(exe)))
+    wm_copy_str(exe, (int)sizeof(exe), "D:\\SODOS\\LINKEXT.EXE");
+  wm_exec(wins, focus, big, exe);
+}
+
+/* Pedido do LINKEXT.DLL (win_launch_arg): programa com o arquivo, ou um dos
+ * visores do proprio WIN (@NOTEPAD, @IMAGEM, @VIDEO). */
+static void wm_open_with(struct wm_win* wins, int* focus, int big, const char* exe,
+                         const char* file) {
+  if (exe[0] == '@') {
+    const char* k = exe + 1;
+    if ((k[0] == 'I' || k[0] == 'i') && (k[1] == 'M' || k[1] == 'm')) {
+      wm_open_image(wins, focus, big, file);
+    } else if ((k[0] == 'V' || k[0] == 'v') && (k[1] == 'I' || k[1] == 'i')) {
+      wm_open_video(wins, focus, big, file);
+    } else {
+      int ni;
+      wm_open_notepad(wins, focus, big);
+      note_load(file);
+      ni = wm_find_kind(wins, WM_KIND_NOTE);
+      if (ni >= 0) note_set_title(&wins[ni]);
+    }
+    return;
+  }
+  wm_exec_arg(wins, focus, big, exe, file);
+}
+
 static int chrome_in_browser(int x, int y) {
   return gui.open && x >= gui.ox && y >= gui.oy &&
          x < gui.ox + gui.cw && y < gui.oy + gui.title_h + gui.ch;
@@ -7214,11 +7679,16 @@ static int chrome_on_click(int x, int y) {
       *c_cfg = 0;
       *c_tela = 0;
       host_open_design(c_wins, c_focus, c_big);
-    } else {
+    } else if (item == 4) {
       *chrome_menu = 0;
       *c_cfg = 0;
       *c_tela = 0;
       host_open_menu_cfg(c_wins, c_focus, c_big);
+    } else {
+      *chrome_menu = 0;
+      *c_cfg = 0;
+      *c_tela = 0;
+      host_open_linkext(c_wins, c_focus, c_big);
     }
     return 1;
   }
@@ -7616,7 +8086,8 @@ static int win_wm_run(void) {
     my = sys_my;
     if (launch_pending) {
       launch_pending = 0;
-      wm_exec(wins, &focus, big, launch_path);
+      if (launch_arg[0]) wm_open_with(wins, &focus, big, launch_path, launch_arg);
+      else wm_exec(wins, &focus, big, launch_path);
       need_draw = 1;
     }
     if (run_close_pending) {
@@ -7653,6 +8124,23 @@ static int win_wm_run(void) {
       }
     }
     wm_no_partial = menu_open || pop_open || note_dlg || note_file_menu;
+    /* Programa do Command passou a usar a tela 80x25: a janela cresce. */
+    if (cons_dirty && cons_dirty->tty && cons_dirty->tty->on && cons_dirty->tty->fit) {
+      int fi;
+      cons_dirty->tty->fit = 0;
+      for (fi = 0; fi < WM_MAX; fi++) {
+        struct wm_win* fw = &wins[fi];
+        int need_w = 80 * FONT_W * scale + 12;
+        int need_h = title_h + 25 * glyph_rows() * scale + 6;
+        if (!fw->used || fw->kind != WM_KIND_CMD || fw->st != (struct app_state*)cons_dirty) continue;
+        if (wm_is_max(fw)) break;
+        if (fw->w < need_w) fw->w = need_w;
+        if (fw->h < need_h) fw->h = need_h;
+        wm_clamp_rect(&fw->x, &fw->y, &fw->w, &fw->h, big);
+        need_draw = 1;
+        break;
+      }
+    }
     if (need_draw) {
       cons_dirty = 0; /* o quadro inteiro ja mostra */
     } else if (cons_dirty && !dc.on) {
@@ -7737,6 +8225,8 @@ static int win_wm_run(void) {
                                gm.sub_w, gm.item_h);
         int menu_hot = wm_pt((int)mx, (int)my, gm.sub_x, gm.sub_y + 4 * gm.item_h,
                              gm.sub_w, gm.item_h);
+        int lx_hot = wm_pt((int)mx, (int)my, gm.sub_x, gm.sub_y + 5 * gm.item_h,
+                           gm.sub_w, gm.item_h);
         menu_panel(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h);
         menu_row(gm.sub_x + 1, gm.sub_y + 2, gm.sub_w - 2, gm.item_h - 2,
                  "Tela", tela_hot, 1, col_win, col_title, col_white, col_black, scale);
@@ -7748,6 +8238,8 @@ static int win_wm_run(void) {
                  "Design", design_hot, 0, col_win, col_title, col_white, col_black, scale);
         menu_row(gm.sub_x + 1, gm.sub_y + 2 + 4 * gm.item_h, gm.sub_w - 2, gm.item_h - 2,
                  "Menu", menu_hot, 0, col_win, col_title, col_white, col_black, scale);
+        menu_row(gm.sub_x + 1, gm.sub_y + 2 + 5 * gm.item_h, gm.sub_w - 2, gm.item_h - 2,
+                 "Abrir com", lx_hot, 0, col_win, col_title, col_white, col_black, scale);
         menu_frame(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h, col_black);
       }
       if (menu_open && menu_cfg && menu_tela) {
@@ -8222,11 +8714,16 @@ static int win_wm_run(void) {
                 menu_cfg = 0;
                 menu_tela = 0;
                 host_open_design(wins, &focus, big);
-              } else {
+              } else if (item == 4) {
                 menu_open = 0;
                 menu_cfg = 0;
                 menu_tela = 0;
                 host_open_menu_cfg(wins, &focus, big);
+              } else {
+                menu_open = 0;
+                menu_cfg = 0;
+                menu_tela = 0;
+                host_open_linkext(wins, &focus, big);
               }
               handled = 1;
               need_draw = 1;
@@ -8321,6 +8818,9 @@ static int win_wm_run(void) {
                 wm_exec(wins, &focus, big, exe);
               } else
                 app_status_set("atalho vazio");
+            } else if (linkext_fn && !app_is_prog(desk_items[desk_i].name) &&
+                       linkext_fn(desk_items[desk_i].path) == 0) {
+              /* LINKEXT.DLL achou o programa da extensao (abre no proximo quadro) */
             } else if (desk_items[desk_i].image == 1)
               wm_open_image(wins, &focus, big, desk_items[desk_i].path);
             else if (desk_items[desk_i].image == 2)
@@ -8448,7 +8948,9 @@ static int win_wm_run(void) {
                   if (app_open_req) {
                     int ni;
                     app_open_req = 0;
-                    if (desk_is_video(app_open_path))
+                    if (linkext_fn && linkext_fn(app_open_path) == 0) {
+                      /* LINKEXT.DLL abriu */
+                    } else if (desk_is_video(app_open_path))
                       wm_open_video(wins, &focus, big, app_open_path);
                     else {
                       wm_open_notepad(wins, &focus, big);
@@ -8663,6 +9165,14 @@ static int win_wm_run(void) {
         win_session_free(wins);
         return 0;
       }
+      /* PrintScreen (E0 2A E0 37; Alt+PrtSc manda 54): a tela inteira vai para
+       * Z:\SAVE\SCREENSHOT em PNG. Nenhuma janela recebe a tecla. */
+      if (!(sc & 0x80) && ((kbd_e0 && sc == 0x37) || sc == 0x54)) {
+        kbd_e0 = 0;
+        shift_on = 0;   /* o E0 2A da sequencia e um Shift falso */
+        prtscr_save(0, 0);
+        continue;
+      }
       if (keymap_kp_nav(sc)) kbd_e0 = 1; /* NumLock desligado: vira seta, Home... */
       if (kbd_e0 && !(sc & 0x80)) kp = keymap_ext_char(sc);
       if (desk_ren >= 0) {
@@ -8671,6 +9181,20 @@ static int win_wm_run(void) {
           desk_ren_key(kp ? kp : keymap_char(sc));
           need_draw = 1;
         }
+        kbd_e0 = 0;
+        continue;
+      }
+      /* Programa rodando no Command em foco: as teclas sao dele (k_getc). */
+      if (!(gwins && gui_focus >= 0 && gui_focus < GUI_MAX && gwins[gui_focus].open) &&
+          focus >= 0 && wins[focus].used && wins[focus].kind == WM_KIND_CMD && wins[focus].st &&
+          ((struct cmd_con*)wins[focus].st)->tty) {
+        struct con_tty* ty = ((struct cmd_con*)wins[focus].st)->tty;
+        if (sc == 0xE0) {
+          kbd_e0 = 1;
+          continue;
+        }
+        if (!(sc & 0x80) && sc != SCANCODE_LSHIFT && sc != SCANCODE_RSHIFT)
+          tty_push(ty, tty_key_of(sc, kbd_e0, kp));
         kbd_e0 = 0;
         continue;
       }
@@ -8970,6 +9494,20 @@ int win_launch(const char* path) {
     i++;
   }
   launch_path[i] = 0;
+  launch_arg[0] = 0;
+  launch_pending = 1;
+  return 0;
+}
+
+/* LINKEXT.DLL: abrir exe com o arquivo (o laco do WIN executa no proximo quadro). */
+int win_launch_arg(const char* exe, const char* arg) {
+  int i;
+  if (!exe || !exe[0] || !arg) return -1;
+  if (launch_pending) return -1;
+  for (i = 0; exe[i] && i < (int)sizeof(launch_path) - 1; i++) launch_path[i] = exe[i];
+  launch_path[i] = 0;
+  for (i = 0; arg[i] && i < (int)sizeof(launch_arg) - 1; i++) launch_arg[i] = arg[i];
+  launch_arg[i] = 0;
   launch_pending = 1;
   return 0;
 }

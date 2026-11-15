@@ -323,6 +323,9 @@ int k_ui_glass(int on);
 int k_ui_ia(int on);
 /* Pede ao WIN que abra um programa (janela); 0 = pedido aceito. */
 int k_win_launch(const char* path);
+/* Abre o arquivo com o programa associado a extensao (LINKEXT.DLL, SET
+ * LINKEXT=1). 0 = abriu; 1 = sem associacao ou LINKEXT desligado. */
+int k_open_file(const char* path);
 /* Area de transferencia do sistema (Ctrl+C/Ctrl+V do WIN e do DOS).
  * k_clip_set: n < 0 = ate o '\0'. k_clip_get devolve o tamanho copiado. */
 void k_clip_set(const char* s, int n);

@@ -142,7 +142,7 @@ static const struct fsdrv_ops* load_path(const char* path, int quiet) {
   }
   fn = (fsdrv_entry_fn)mod_dll_sym(h, FSDRV_SYM);
   ops = fn ? fn() : 0;
-  if (!ops || (ops->abi != FSDRV_ABI && ops->abi != FSDRV_ABI_MKDIR) || !ops->probe || !ops->mount || !ops->umount ||
+  if (!ops || (ops->abi < FSDRV_ABI || ops->abi > FSDRV_ABI_WRITE) || !ops->probe || !ops->mount || !ops->umount ||
       !ops->stat || !ops->read || !ops->items) {
     puts_k(path);
     puts_k(": nao e driver de sistema de arquivos\n");

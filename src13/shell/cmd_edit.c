@@ -3,6 +3,7 @@
 #include "mm.h"
 #include "fbcon.h"
 #include "reboot.h"
+#include "kexports.h"
 
 /* Tela: linha 0 = barra azul, 1..23 = texto, 24 = estado. */
 #define EDIT_COLS 80
@@ -28,6 +29,9 @@ static int edit_dirty;
 static int edit_crlf;
 static char edit_path[128];
 static char edit_msg[48];
+/* A tela e montada aqui e vai inteira por kx_vput: no DOS para a VGA, no
+ * Command do WIN para a janela. */
+static uint16_t edit_scr[EDIT_ROWS * EDIT_COLS];
 
 static void edit_set_msg(const char* s) {
   int i = 0;
@@ -119,7 +123,7 @@ static void edit_scroll(void) {
 
 static void edit_cell(int r, int c, unsigned char ch, unsigned char attr) {
   if (r < 0 || r >= EDIT_ROWS || c < 0 || c >= EDIT_COLS) return;
-  vga_text[r * EDIT_COLS + c] = (uint16_t)ch | (uint16_t)(attr << 8);
+  edit_scr[r * EDIT_COLS + c] = (uint16_t)ch | (uint16_t)(attr << 8);
 }
 
 /* Escreve s a partir de c; devolve a coluna seguinte. */
@@ -185,10 +189,10 @@ static void edit_draw(void) {
     edit_text(EDIT_ROWS - 1, c, edit_msg, ATTR_TEXT);
   }
 
-  fbcon_sync();
   if (ccol < 0) ccol = 0;
   if (ccol >= EDIT_COLS) ccol = EDIT_COLS - 1;
-  goto_xy(EDIT_TOP + row, ccol);
+  kx_vput(0, 0, edit_scr, EDIT_ROWS * EDIT_COLS);
+  kx_cursor(EDIT_TOP + row, ccol);
 }
 
 static void edit_insert(char ch) {
@@ -326,12 +330,12 @@ int cmd_edit(int argc, char** argv) {
   }
 
   if (!drives_is_mounted(path_letter(edit_path))) {
-    puts_k("Unidade nao montada. Use: mount D:\n");
+    kx_puts("Unidade nao montada. Use: mount D:\n");
     return 1;
   }
 
   if (edit_load() != 0) {
-    puts_k("sem memoria para abrir o arquivo\n");
+    kx_puts("sem memoria para abrir o arquivo\n");
     return 1;
   }
   edit_cur = 0;
@@ -341,14 +345,16 @@ int cmd_edit(int argc, char** argv) {
   edit_dirty = 0;
   edit_set_msg(edit_len ? "" : "(arquivo vazio ou novo)");
 
-  clear_screen();
+  kx_clear();
   edit_draw();
   for (;;) {
-    int k = shell_get_char();
+    int k = kx_getc();
     if (k == 0) continue;
-    if (k == 27) break;
+    if (k == 27 || k < 0) break; /* k < 0: a janela do Command fechou */
     edit_msg[0] = '\0';
-    if (kbd_ctrl_down() && k < 0x100) {
+    if (k == 23) {
+      edit_save(); /* Ctrl+W chega como 23 na janela do WIN */
+    } else if (kbd_ctrl_down() && k < 0x100) {
       if (k == 'w' || k == 'W' || k == 23) edit_save();
       else continue;
     } else if (k == KEY_LEFT) {
@@ -386,11 +392,11 @@ int cmd_edit(int argc, char** argv) {
 
   ufree(edit_buf);
   edit_buf = 0;
-  clear_screen();
+  kx_clear();
   if (edit_dirty) {
-    puts_k("Saiu sem salvar: ");
-    puts_k(edit_path);
-    puts_k("\n");
+    kx_puts("Saiu sem salvar: ");
+    kx_puts(edit_path);
+    kx_puts("\n");
   }
   return 0;
 }

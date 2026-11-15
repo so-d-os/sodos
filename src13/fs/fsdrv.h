@@ -21,6 +21,7 @@
 
 #define FSDRV_ABI 1      /* fsdrv_host e as ops ate space */
 #define FSDRV_ABI_MKDIR 2 /* ops->abi 2: tem mkdir (DLL antigo com 1 continua valendo) */
+#define FSDRV_ABI_WRITE 3 /* ops->abi 3: tambem grava e apaga arquivos */
 #define FSDRV_SYM "fs_driver"
 
 /* Igual a struct dir_item de drives.h (k_dirent dos programas). */
@@ -66,6 +67,15 @@ struct fsdrv_ops {
    * 0 = sem data). 0 ok; 1 ja existe; -1 erro (pai nao existe, nome invalido,
    * existe arquivo com o nome); -2 disco cheio; -3 erro de disco. */
   int (*mkdir)(void* vol, const char* path, uint16_t date, uint16_t time);
+  /* So com abi >= FSDRV_ABI_WRITE. Grava o arquivo inteiro (cria ou troca o
+   * conteudo; os dados novos vao para clusters novos e so depois os antigos
+   * sao liberados). 0 ok; -1 invalido (pai nao existe, e pasta, nome ruim);
+   * -2 disco cheio; -3 erro de disco. */
+  int (*write)(void* vol, const char* path, const void* data, uint32_t len, uint16_t date,
+               uint16_t time);
+  /* Apaga um arquivo (nao pasta). 0 ok; -1 nao existe; -3 e pasta; -4
+   * somente leitura; -5 erro de disco. */
+  int (*remove)(void* vol, const char* path);
 };
 
 typedef const struct fsdrv_ops* (*fsdrv_entry_fn)(void);

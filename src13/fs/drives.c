@@ -742,7 +742,14 @@ int file_save(const char* path, const char* data, int size) {
   if (!drv_ready(idx)) return -2;
   if (drv_kind[idx] == DRV_FAT)
     return fat_write_file(name, data, (uint32_t)size);
-  if (drv_kind[idx] == DRV_EXT) return -1;   /* FAT32: so leitura */
+  if (drv_kind[idx] == DRV_EXT) {
+    /* FAT32.DLL com escrita (abi 3); o antigo e so leitura */
+    const struct fsdrv_ops* o = drv_ops[idx];
+    uint16_t fd = 0, ft = 0;
+    if (o->abi < FSDRV_ABI_WRITE || !o->write) return -1;
+    fat_now(&fd, &ft);
+    return o->write(drv_vol[idx], name, data, (uint32_t)size, fd, ft) == 0 ? 0 : -1;
+  }
   if (L == 'D')
     return d_write(name, data, size);
   return write_mem_bytes(name, data, size);
@@ -1209,6 +1216,13 @@ static int d_delete(const char* name) {
 /* Apaga um arquivo (0) ou, com * e ? no nome, todos que casam (quantos).
  * -1 nao achou, -2 pasta/unidade invalida, -3 e pasta, -4 somente leitura,
  * -5 a unidade nao deixa apagar. */
+/* Apaga no FAT32.DLL; codigos como o fat_delete (-1 nao achou, -3 pasta,
+ * -4 somente leitura, -2 erro). */
+static int ext_remove(int idx, const char* name) {
+  int r = drv_ops[idx]->remove(drv_vol[idx], name);
+  return r == -5 ? -2 : r;
+}
+
 int drives_del(const char* spec) {
   char dspec[DRV_PATH];
   char pat[32];
@@ -1231,9 +1245,12 @@ int drives_del(const char* spec) {
   path_parse(dspec, &L, name, (int)sizeof(name));
   idx = letter_idx(L);
   if (idx < 0 || !drv_ready(idx)) return -2;
-  if (drv_kind[idx] == DRV_EXT) return -4;
-  if (drv_kind[idx] != DRV_FAT && !(L == 'D' && drv_kind[idx] == DRV_RAM)) return -5;
+  if (drv_kind[idx] == DRV_EXT && (drv_ops[idx]->abi < FSDRV_ABI_WRITE || !drv_ops[idx]->remove))
+    return -4;
+  if (drv_kind[idx] != DRV_FAT && drv_kind[idx] != DRV_EXT && !(L == 'D' && drv_kind[idx] == DRV_RAM))
+    return -5;
   if (!pat[0]) {
+    if (drv_kind[idx] == DRV_EXT) return ext_remove(idx, name);
     if (drv_kind[idx] == DRV_FAT) return fat_delete(name);
     return d_delete(name);
   }
@@ -1253,7 +1270,9 @@ int drives_del(const char* spec) {
       full[k++] = '\\';
     }
     copy_str(full + k, (int)sizeof(full) - k, it[i].name);
-    if (drv_kind[idx] == DRV_FAT) {
+    if (drv_kind[idx] == DRV_EXT) {
+      rc = ext_remove(idx, full);
+    } else if (drv_kind[idx] == DRV_FAT) {
       if (drv_ready(idx)) rc = fat_delete(full);
       else rc = -2;
     } else {

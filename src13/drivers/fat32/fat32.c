@@ -3,8 +3,10 @@
  *
  * O kernel so carrega este DLL quando acha uma unidade FAT32 (pendrive em U:,
  * mount de uma particao 0x0B/0x0C). Le pastas, arquivos e nomes longos (VFAT,
- * CP850 como o fs/fat.c). Escrita: so mkdir (FAT nas copias espelhadas,
- * FSInfo, nome longo + apelido 8.3 com ~N).
+ * CP850 como o fs/fat.c). Escrita: mkdir, arquivo inteiro (write) e apagar
+ * arquivo (FAT nas copias espelhadas, FSInfo, nome longo + apelido 8.3 com ~N).
+ * As mudancas na FAT ficam na janela fatc (marcada suja) e vao ao disco num
+ * so lote no fim de cada operacao (ou antes da janela trocar).
  *
  * Memoria por volume: um cluster (pastas e pontas de arquivo), uma janela de
  * 16 KB da FAT e a posicao do ultimo arquivo lido (k_fread em sequencia nao
@@ -51,6 +53,7 @@ struct vol {
   uint32_t* fatc;
   uint32_t fatc_first; /* primeiro setor (relativo a FAT) na janela */
   uint32_t fatc_n;     /* 0 = vazio */
+  uint32_t fatc_d0, fatc_d1; /* setores sujos da janela [d0, d1); d1 = 0: limpa */
   /* ultimo arquivo lido */
   char lpath[PATH_MAX];
   uint32_t lfirst, lsize, lidx, lclus;
@@ -65,6 +68,8 @@ struct ent {
   uint32_t clus;
   uint32_t size;
   uint16_t date, time;
+  /* posicao na pasta: o 8.3 e o primeiro slot (LFN, se houver); nslots no total */
+  uint32_t pos_clus, pos_off, first_clus, first_off, nslots;
 };
 
 /* ---------- utilidades ---------- */
@@ -190,20 +195,45 @@ static uint32_t clus_lba(const struct vol* v, uint32_t c) {
   return v->data_lba + (c - 2) * v->spc;
 }
 
+/* Setores sujos da janela vao para a FAT ativa (e as copias, se espelhadas).
+ * 0 ok. */
+static int fat_flush(struct vol* v) {
+  uint32_t i, d0 = v->fatc_d0, d1 = v->fatc_d1;
+  int rc = 0;
+  if (!d1 || !v->fatc_n) {
+    v->fatc_d1 = 0;
+    return 0;
+  }
+  for (i = 0; i < v->nfats; i++) {
+    uint32_t base = v->fat0_lba + i * v->fatsz;
+    if (!v->mirror && base != v->fat_lba) continue;
+    if (v->h->write(v->disk, base + d0, d1 - d0, v->fatc + (d0 - v->fatc_first) * 128u) != 0)
+      rc = -1;
+  }
+  v->fatc_d1 = 0;
+  return rc;
+}
+
+/* Janela da FAT com o setor sec (relativo a FAT). 0 ja estava, 1 leu, -1 erro. */
+static int fat_win(struct vol* v, uint32_t sec) {
+  uint32_t first, n;
+  if (sec >= v->fatsz) return -1;
+  if (v->fatc_n && sec >= v->fatc_first && sec < v->fatc_first + v->fatc_n) return 0;
+  if (fat_flush(v) != 0) return -1;
+  first = sec - sec % FATC_SECS;
+  n = v->fatsz - first;
+  if (n > FATC_SECS) n = FATC_SECS;
+  v->fatc_n = 0;
+  if (v->h->read(v->disk, v->fat_lba + first, n, v->fatc) != 0) return -1;
+  v->fatc_first = first;
+  v->fatc_n = n;
+  return 1;
+}
+
 /* Proximo cluster da cadeia; 0 se acabou ou e invalido. */
 static uint32_t fat_next(struct vol* v, uint32_t c) {
-  uint32_t sec = c / 128u;   /* 128 entradas de 4 bytes por setor */
   uint32_t n;
-  if (!valid_clus(v, c) || sec >= v->fatsz) return 0;
-  if (!v->fatc_n || sec < v->fatc_first || sec >= v->fatc_first + v->fatc_n) {
-    uint32_t first = sec - sec % FATC_SECS;
-    n = v->fatsz - first;
-    if (n > FATC_SECS) n = FATC_SECS;
-    v->fatc_n = 0;
-    if (v->h->read(v->disk, v->fat_lba + first, n, v->fatc) != 0) return 0;
-    v->fatc_first = first;
-    v->fatc_n = n;
-  }
+  if (!valid_clus(v, c) || fat_win(v, c / 128u) < 0) return 0;   /* 128 entradas por setor */
   n = v->fatc[c - v->fatc_first * 128u] & 0x0FFFFFFFu;
   if (n >= CL_END || !valid_clus(v, n)) return 0;
   return n;
@@ -225,9 +255,9 @@ static int load_clus(struct vol* v, uint32_t c) {
 typedef int (*scan_fn)(void* ctx, const struct ent* e);
 
 static int dir_scan(struct vol* v, uint32_t clus, scan_fn fn, void* ctx, struct ent* e) {
-  int need = 0, done = 0, len = 0;
+  int need = 0, done = 0, len = 0, total = 0;
   uint8_t sum = 0;
-  uint32_t guard = 0;
+  uint32_t guard = 0, lclus = 0, loff = 0;
   while (valid_clus(v, clus)) {
     uint32_t off;
     if (++guard > v->nclus) return -1;   /* cadeia em laco */
@@ -249,6 +279,9 @@ static int dir_scan(struct vol* v, uint32_t clus, scan_fn fn, void* ctx, struct 
             continue;
           }
           need = ord;
+          total = ord;
+          lclus = clus;
+          loff = off;
           sum = d[13];
           len = ord * 13;
           if (len > NAME_MAX - 1) len = NAME_MAX - 1;
@@ -274,8 +307,17 @@ static int dir_scan(struct vol* v, uint32_t clus, scan_fn fn, void* ctx, struct 
         continue;
       }
       short_name(d, e->sname);
-      if (done && len > 0 && sum11(d) == sum) e->lname[len] = 0;
-      else scopy(e->lname, e->sname, NAME_MAX);
+      e->pos_clus = e->first_clus = clus;
+      e->pos_off = e->first_off = off;
+      e->nslots = 1;
+      if (done && len > 0 && sum11(d) == sum) {
+        e->lname[len] = 0;
+        e->first_clus = lclus;
+        e->first_off = loff;
+        e->nslots = (uint32_t)total + 1;
+      } else {
+        scopy(e->lname, e->sname, NAME_MAX);
+      }
       need = done = 0;
       if (e->sname[0] == '.' && (!e->sname[1] || (e->sname[1] == '.' && !e->sname[2])))
         continue;
@@ -542,13 +584,9 @@ static int f_space(void* p, uint32_t* total_kb, uint32_t* free_kb) {
     uint32_t c, free_n = 0;
     for (c = 2; c < v->nclus + 2; c++) {
       uint32_t sec = c / 128u;
-      if (!v->fatc_n || sec < v->fatc_first || sec >= v->fatc_first + v->fatc_n) {
-        uint32_t first = sec - sec % FATC_SECS, n = v->fatsz - first;
-        if (n > FATC_SECS) n = FATC_SECS;
-        v->fatc_n = 0;
-        if (v->h->read(v->disk, v->fat_lba + first, n, v->fatc) != 0) return -1;
-        v->fatc_first = first;
-        v->fatc_n = n;
+      int w = fat_win(v, sec);
+      if (w < 0) return -1;
+      if (w > 0) {
         v->h->yield();
         /* outra chamada pode ter trocado a janela no yield: le de novo */
         if (sec < v->fatc_first || sec >= v->fatc_first + v->fatc_n) {
@@ -582,41 +620,33 @@ static void mzero(void* d, uint32_t n) {
 
 /* Entrada crua da FAT ativa (pela janela fatc). 0 ok. */
 static int fat_get(struct vol* v, uint32_t c, uint32_t* out) {
-  uint32_t sec = c / 128u;
-  if (!valid_clus(v, c) || sec >= v->fatsz) return -1;
-  if (!v->fatc_n || sec < v->fatc_first || sec >= v->fatc_first + v->fatc_n) {
-    uint32_t first = sec - sec % FATC_SECS, n = v->fatsz - first;
-    if (n > FATC_SECS) n = FATC_SECS;
-    v->fatc_n = 0;
-    if (v->h->read(v->disk, v->fat_lba + first, n, v->fatc) != 0) return -1;
-    v->fatc_first = first;
-    v->fatc_n = n;
-  }
+  if (!valid_clus(v, c) || fat_win(v, c / 128u) < 0) return -1;
   *out = v->fatc[c - v->fatc_first * 128u] & 0x0FFFFFFFu;
   return 0;
 }
 
-/* Grava val (28 bits, preserva os 4 de cima) em todas as FATs usadas. 0 ok. */
+/* val (28 bits, preserva os 4 de cima) na janela; vai ao disco no fat_flush.
+ * sbuf nao e mais usado (fica pela assinatura antiga). 0 ok. */
 static int fat_set(struct vol* v, uint32_t c, uint32_t val, uint8_t* sbuf) {
-  uint32_t sec = c / 128u, i, o = (c % 128u) * 4u;
-  if (!valid_clus(v, c)) return -1;
-  for (i = 0; i < v->nfats; i++) {
-    uint32_t lba = v->fat0_lba + i * v->fatsz + sec, old;
-    if (!v->mirror && lba - sec != v->fat_lba) continue;
-    if (v->h->read(v->disk, lba, 1, sbuf) != 0) return -1;
-    old = rd32(sbuf + o);
-    wr32(sbuf + o, (old & 0xF0000000u) | (val & 0x0FFFFFFFu));
-    if (v->h->write(v->disk, lba, 1, sbuf) != 0) return -1;
-  }
-  if (v->fatc_n && sec >= v->fatc_first && sec < v->fatc_first + v->fatc_n) {
-    uint32_t* e = &v->fatc[c - v->fatc_first * 128u];
-    *e = (*e & 0xF0000000u) | (val & 0x0FFFFFFFu);
+  uint32_t sec = c / 128u;
+  uint32_t* e;
+  (void)sbuf;
+  if (!valid_clus(v, c) || fat_win(v, sec) < 0) return -1;
+  e = &v->fatc[c - v->fatc_first * 128u];
+  *e = (*e & 0xF0000000u) | (val & 0x0FFFFFFFu);
+  if (!v->fatc_d1) {
+    v->fatc_d0 = sec;
+    v->fatc_d1 = sec + 1;
+  } else {
+    if (sec < v->fatc_d0) v->fatc_d0 = sec;
+    if (sec + 1 > v->fatc_d1) v->fatc_d1 = sec + 1;
   }
   return 0;
 }
 
 /* FSInfo com o contador e a dica atuais (falha aqui nao desfaz nada). */
 static void fsinfo_save(struct vol* v, uint8_t* sbuf) {
+  fat_flush(v);
   if (!v->fsinfo_lba || v->h->read(v->disk, v->fsinfo_lba, 1, sbuf) != 0) return;
   if (rd32(sbuf) != 0x41615252u || rd32(sbuf + 484) != 0x61417272u) return;
   wr32(sbuf + 488, v->free_clus);
@@ -790,35 +820,34 @@ static void sfn_tail(uint8_t* n11, const uint8_t* base, uint32_t num) {
   for (i = 0; i < tl; i++) n11[bl + i] = (uint8_t)t[i];
 }
 
-static int f_mkdir(void* p, const char* path, uint16_t date, uint16_t time) {
-  struct vol* v = (struct vol*)p;
-  struct ent e;
-  struct find_ctx fc;
-  char par[PATH_MAX];
-  const char* leaf;
-  uint8_t n11[11], base[11], nt, sum, ent[32];
-  uint8_t* sbuf;
-  uint32_t dir, nl, need, clus, off, run_clus = 0, run_off = 0, run = 0, last = 0, newc, guard = 0, i;
-  int kind, len, err = -3, r, s = -1;
-  if (!v || !path) return -1;
+/* Separa path em pai (*parent: "" na raiz, ou par cortado na barra) e ultimo
+ * nome (*leaf, dentro de par). 0 ok; -1 caminho invalido. */
+static int split_path(const char* path, char* par, const char** parent, const char** leaf) {
+  int len, i, s = -1;
   len = slen(path);
   while (len > 0 && (path[len - 1] == '\\' || path[len - 1] == '/')) len--;
   if (len <= 0 || len >= PATH_MAX) return -1;
-  for (i = 0; i < (uint32_t)len; i++) {
+  for (i = 0; i < len; i++) {
     par[i] = path[i];
-    if (path[i] == '\\' || path[i] == '/') s = (int)i;
+    if (path[i] == '\\' || path[i] == '/') s = i;
   }
   par[len] = 0;
-  leaf = par + s + 1;
-  if (!lfn_ok(leaf)) return -1;
-  /* pai */
+  *leaf = par + s + 1;
+  if (!lfn_ok(*leaf)) return -1;
   if (s >= 0) par[s] = 0;
-  if (lookup(v, s >= 0 ? par : "", &e) != 0 || !(e.attr & 0x10)) return -1;
-  dir = e.clus;
-  fc.want = leaf;
-  r = dir_scan(v, dir, find_cb, &fc, &e);
-  if (r < 0) return -3;
-  if (r == 1) return (e.attr & 0x10) ? 1 : -1;
+  *parent = s >= 0 ? par : "";
+  return 0;
+}
+
+/* Cria em dir as entradas de leaf (LFN se precisar + 8.3). tpl traz os 32
+ * bytes do 8.3 sem o nome (atributo, datas, cluster, tamanho). 0 ok; -1
+ * nome; -2 pasta/disco cheio; -3 disco. */
+static int dir_add(struct vol* v, uint32_t dir, const char* leaf, const uint8_t* tpl,
+                   uint8_t* sbuf) {
+  struct ent e;
+  uint8_t n11[11], base[11], nt, sum, ent[32];
+  uint32_t nl, need, clus, off, run_clus = 0, run_off = 0, run = 0, last = 0, newc, guard = 0;
+  int kind, err = -3, r = 0;
 
   /* nome: 8.3 exato ou LFN + apelido */
   kind = sfn_make(leaf, n11, &nt);
@@ -838,14 +867,11 @@ static int f_mkdir(void* p, const char* path, uint16_t date, uint16_t time) {
   nl = kind ? (uint32_t)(slen(leaf) + 12) / 13u : 0;
   need = nl + 1;
 
-  sbuf = (uint8_t*)v->h->alloc(512);
-  if (!sbuf) return -3;
-
   /* need entradas livres seguidas na pasta (estende se faltar) */
   clus = dir;
   while (valid_clus(v, clus)) {
-    if (++guard > v->nclus) goto out;
-    if (load_clus(v, clus) != 0) goto out;
+    if (++guard > v->nclus) return -3;
+    if (load_clus(v, clus) != 0) return -3;
     for (off = 0; off < v->csize; off += 32) {
       uint8_t b0 = v->cbuf[off];
       if (b0 == 0x00 || b0 == 0xE5) {
@@ -862,12 +888,9 @@ static int f_mkdir(void* p, const char* path, uint16_t date, uint16_t time) {
     clus = fat_next(v, clus);
   }
   while (run < need) {
-    if ((guard + 1) * (v->csize / 32u) > 65536u) {   /* pasta no limite */
-      err = -2;
-      goto out;
-    }
+    if ((guard + 1) * (v->csize / 32u) > 65536u) return -2;   /* pasta no limite */
     newc = clus_alloc(v, last, sbuf, &err);
-    if (!newc) goto out;
+    if (!newc) return err;
     guard++;
     if (!run) {
       run_clus = newc;
@@ -877,32 +900,8 @@ static int f_mkdir(void* p, const char* path, uint16_t date, uint16_t time) {
     last = newc;
   }
 found:
-  /* a pasta nova: cluster zerado com . e .. */
-  newc = clus_alloc(v, 0, sbuf, &err);
-  if (!newc) goto out;
-  if (load_clus(v, newc) != 0) goto out;
-  mzero(ent, 32);
-  for (i = 0; i < 11; i++) ent[i] = ' ';
-  ent[11] = 0x10;
-  wr16(ent + 14, time);
-  wr16(ent + 16, date);
-  wr16(ent + 18, date);
-  wr16(ent + 22, time);
-  wr16(ent + 24, date);
-  ent[0] = '.';
-  wr16(ent + 20, (uint16_t)(newc >> 16));
-  wr16(ent + 26, (uint16_t)newc);
-  mcopy(v->cbuf, ent, 32);
-  ent[1] = '.';
-  i = dir == v->root ? 0 : dir;
-  wr16(ent + 20, (uint16_t)(i >> 16));
-  wr16(ent + 26, (uint16_t)i);
-  mcopy(v->cbuf + 32, ent, 32);
-  if (v->h->write(v->disk, clus_lba(v, newc), 1, v->cbuf) != 0) {
-    v->cbuf_clus = 0;
-    goto out;
-  }
-
+  /* a FAT (cluster do conteudo, pasta estendida) antes da entrada que aponta */
+  if (fat_flush(v) != 0) return -3;
   /* LFN (do ultimo pedaco para o primeiro) e o 8.3 */
   sum = sum11(n11);
   clus = run_clus;
@@ -924,21 +923,75 @@ found:
       }
       wr16(ent + lfn_off[k], u);
     }
-    if (!valid_clus(v, clus) || slot_put(v, &clus, &off, ent) != 0) goto out;
+    if (!valid_clus(v, clus) || slot_put(v, &clus, &off, ent) != 0) return -3;
   }
-  mzero(ent, 32);
+  mcopy(ent, tpl, 32);
   mcopy(ent, n11, 11);
-  ent[11] = 0x10;
   ent[12] = kind == 0 ? nt : 0;
+  if (!valid_clus(v, clus) || slot_put(v, &clus, &off, ent) != 0) return -3;
+  return 0;
+}
+
+/* 8.3 sem nome: atributo, datas, primeiro cluster e tamanho. */
+static void ent_tpl(uint8_t* ent, uint8_t attr, uint16_t date, uint16_t time, uint32_t clus,
+                    uint32_t size) {
+  int i;
+  mzero(ent, 32);
+  for (i = 0; i < 11; i++) ent[i] = ' ';
+  ent[11] = attr;
   wr16(ent + 14, time);
   wr16(ent + 16, date);
   wr16(ent + 18, date);
   wr16(ent + 22, time);
   wr16(ent + 24, date);
-  wr16(ent + 20, (uint16_t)(newc >> 16));
-  wr16(ent + 26, (uint16_t)newc);
-  if (!valid_clus(v, clus) || slot_put(v, &clus, &off, ent) != 0) goto out;
-  err = 0;
+  wr16(ent + 20, (uint16_t)(clus >> 16));
+  wr16(ent + 26, (uint16_t)clus);
+  wr32(ent + 28, size);
+}
+
+static int f_mkdir(void* p, const char* path, uint16_t date, uint16_t time) {
+  struct vol* v = (struct vol*)p;
+  struct ent e;
+  struct find_ctx fc;
+  char par[PATH_MAX];
+  const char* leaf;
+  const char* parent;
+  uint8_t ent[32];
+  uint8_t* sbuf;
+  uint32_t dir, newc, i;
+  int err = -3, r;
+  if (!v || !path || split_path(path, par, &parent, &leaf) != 0) return -1;
+  if (lookup(v, parent, &e) != 0 || !(e.attr & 0x10)) return -1;
+  dir = e.clus;
+  fc.want = leaf;
+  r = dir_scan(v, dir, find_cb, &fc, &e);
+  if (r < 0) return -3;
+  if (r == 1) return (e.attr & 0x10) ? 1 : -1;
+
+  sbuf = (uint8_t*)v->h->alloc(512);
+  if (!sbuf) return -3;
+  /* a pasta nova: cluster zerado com . e .. */
+  newc = clus_alloc(v, 0, sbuf, &err);
+  if (!newc) goto out;
+  if (load_clus(v, newc) != 0) goto out;
+  ent_tpl(ent, 0x10, date, time, newc, 0);
+  ent[0] = '.';
+  mcopy(v->cbuf, ent, 32);
+  ent[1] = '.';
+  i = dir == v->root ? 0 : dir;
+  wr16(ent + 20, (uint16_t)(i >> 16));
+  wr16(ent + 26, (uint16_t)i);
+  mcopy(v->cbuf + 32, ent, 32);
+  if (v->h->write(v->disk, clus_lba(v, newc), 1, v->cbuf) != 0) {
+    v->cbuf_clus = 0;
+    goto out;
+  }
+  ent_tpl(ent, 0x10, date, time, newc, 0);
+  err = dir_add(v, dir, leaf, ent, sbuf);
+  if (err != 0) {
+    fat_set(v, newc, 0, sbuf);   /* devolve o cluster da pasta */
+    if (v->free_clus != 0xFFFFFFFFu) v->free_clus++;
+  }
 out:
   fsinfo_save(v, sbuf);
   v->h->free(sbuf);
@@ -946,9 +999,190 @@ out:
   return err;
 }
 
+/* Libera a cadeia que comeca em c (na janela; quem chama faz o flush). */
+static void chain_free(struct vol* v, uint32_t c, uint8_t* sbuf) {
+  uint32_t guard = 0;
+  while (valid_clus(v, c) && guard++ <= v->nclus) {
+    uint32_t nx = 0;
+    if (fat_get(v, c, &nx) != 0 || nx == 0) break;   /* ja livre: cadeia estranha, para */
+    if (fat_set(v, c, 0, sbuf) != 0) break;
+    if (v->free_clus != 0xFFFFFFFFu) v->free_clus++;
+    if (c < v->next_free) v->next_free = c;
+    c = nx >= CL_END ? 0 : nx;
+  }
+}
+
+/* Primeiro cluster livre a partir da dica (sem marcar). 0 = cheio/erro. */
+static uint32_t clus_free_find(struct vol* v, int* err) {
+  uint32_t c = v->next_free, n, val;
+  if (!valid_clus(v, c)) c = 2;
+  for (n = 0; n < v->nclus; n++) {
+    if (fat_get(v, c, &val) != 0) {
+      *err = -3;
+      return 0;
+    }
+    if (val == 0) return c;
+    if (++c >= v->nclus + 2) c = 2;
+  }
+  *err = -2;
+  return 0;
+}
+
+static int f_write(void* p, const char* path, const void* data, uint32_t len, uint16_t date,
+                   uint16_t time) {
+  struct vol* v = (struct vol*)p;
+  const uint8_t* src = (const uint8_t*)data;
+  struct ent e;
+  struct find_ctx fc;
+  char par[PATH_MAX];
+  const char* leaf;
+  const char* parent;
+  uint8_t ent[32];
+  uint8_t* sbuf;
+  uint32_t dir, nclus, first = 0, prev = 0, i, c, done;
+  int err = -3, r, exists;
+  if (!v || !path || (len && !data) || split_path(path, par, &parent, &leaf) != 0) return -1;
+  if (lookup(v, parent, &e) != 0 || !(e.attr & 0x10)) return -1;
+  dir = e.clus;
+  fc.want = leaf;
+  r = dir_scan(v, dir, find_cb, &fc, &e);
+  if (r < 0) return -3;
+  exists = r == 1;
+  if (exists && (e.attr & 0x10)) return -1;
+  if (exists && (e.attr & 0x01)) return -1;   /* somente leitura */
+
+  sbuf = (uint8_t*)v->h->alloc(512);
+  if (!sbuf) return -3;
+  v->cbuf_clus = 0;
+  v->lvalid = 0;
+
+  /* 1) cadeia nova inteira na FAT (marcada na janela) */
+  nclus = (len + v->csize - 1) / v->csize;
+  if (v->free_clus != 0xFFFFFFFFu && nclus > v->free_clus) {
+    err = -2;
+    goto out;
+  }
+  for (i = 0; i < nclus; i++) {
+    c = clus_free_find(v, &err);
+    if (!c) goto undo;
+    if (fat_set(v, c, 0x0FFFFFFFu, sbuf) != 0) goto undo;
+    if (prev && fat_set(v, prev, c, sbuf) != 0) goto undo;
+    if (!first) first = c;
+    prev = c;
+    if (v->free_clus != 0xFFFFFFFFu && v->free_clus) v->free_clus--;
+    v->next_free = c + 1 < v->nclus + 2 ? c + 1 : 2;
+  }
+  if (fat_flush(v) != 0) goto undo;
+
+  /* 2) dados: trechos de clusters seguidos direto do buffer; a ponta pelo cbuf */
+  c = first;
+  done = 0;
+  while (done < len && valid_clus(v, c)) {
+    uint32_t left = len - done;
+    if (left >= v->csize && (uintptr_t)(src + done) >= 0x100000u) {
+      uint32_t n = 1, cc = c, nx;
+      while ((n + 1) * v->csize <= left && (n + 1) * v->csize <= RUN_MAX &&
+             (nx = fat_next(v, cc)) == cc + 1) {
+        cc = nx;
+        n++;
+      }
+      if (v->h->write(v->disk, clus_lba(v, c), n * v->spc, src + done) != 0) goto undo;
+      done += n * v->csize;
+      c = fat_next(v, cc);
+    } else {
+      uint32_t k = left < v->csize ? left : v->csize;
+      mcopy(v->cbuf, src + done, k);
+      if (k < v->csize) mzero(v->cbuf + k, v->csize - k);
+      if (v->h->write(v->disk, clus_lba(v, c), v->spc, v->cbuf) != 0) goto undo;
+      v->cbuf_clus = 0;
+      done += k;
+      c = fat_next(v, c);
+    }
+    v->h->yield();
+    v->cbuf_clus = 0;
+  }
+  if (done < len) goto undo;
+
+  /* 3) entrada: troca no lugar ou cria; so depois solta a cadeia antiga */
+  if (exists) {
+    uint32_t old = e.clus;
+    if (load_clus(v, e.pos_clus) != 0) goto undo;
+    {
+      uint8_t* d = v->cbuf + e.pos_off;
+      d[11] = (uint8_t)((d[11] & 0x06) | 0x20);
+      wr16(d + 18, date);
+      wr16(d + 22, time);
+      wr16(d + 24, date);
+      wr16(d + 20, (uint16_t)(first >> 16));
+      wr16(d + 26, (uint16_t)first);
+      wr32(d + 28, len);
+    }
+    if (v->h->write(v->disk, clus_lba(v, e.pos_clus) + e.pos_off / 512u, 1,
+                    v->cbuf + (e.pos_off & ~511u)) != 0) {
+      v->cbuf_clus = 0;
+      goto undo;
+    }
+    if (valid_clus(v, old) && old != first) chain_free(v, old, sbuf);
+    err = 0;
+  } else {
+    ent_tpl(ent, 0x20, date, time, first, len);
+    err = dir_add(v, dir, leaf, ent, sbuf);
+    if (err != 0) goto undo_keep;
+  }
+  goto out;
+undo:
+  err = err == -2 ? -2 : -3;
+undo_keep:
+  if (first) chain_free(v, first, sbuf);
+out:
+  fsinfo_save(v, sbuf);
+  v->h->free(sbuf);
+  v->lvalid = 0;
+  return err;
+}
+
+static int f_remove(void* p, const char* path) {
+  struct vol* v = (struct vol*)p;
+  struct ent e;
+  uint8_t* sbuf;
+  uint32_t clus, off, i;
+  int err = 0;
+  if (!v || !path || !path[0]) return -1;
+  if (lookup(v, path, &e) != 0) return -1;
+  if (e.attr & 0x10) return -3;
+  if (e.attr & 0x01) return -4;
+  sbuf = (uint8_t*)v->h->alloc(512);
+  if (!sbuf) return -5;
+  /* LFN + 8.3 marcados como livres; depois a cadeia */
+  clus = e.first_clus;
+  off = e.first_off;
+  for (i = 0; i < e.nslots && valid_clus(v, clus); i++) {
+    if (load_clus(v, clus) != 0) {
+      err = -5;
+      break;
+    }
+    v->cbuf[off] = 0xE5;
+    if (v->h->write(v->disk, clus_lba(v, clus) + off / 512u, 1, v->cbuf + (off & ~511u)) != 0) {
+      v->cbuf_clus = 0;
+      err = -5;
+      break;
+    }
+    off += 32;
+    if (off >= v->csize) {
+      off = 0;
+      clus = fat_next(v, clus);
+    }
+  }
+  if (!err && valid_clus(v, e.clus)) chain_free(v, e.clus, sbuf);
+  fsinfo_save(v, sbuf);
+  v->h->free(sbuf);
+  v->lvalid = 0;
+  return err;
+}
+
 static const struct fsdrv_ops ops = {
-  FSDRV_ABI_MKDIR, FAT32_NAME, f_probe, f_mount, f_umount, f_stat, f_read, f_items, f_long_name,
-  f_space, f_mkdir,
+  FSDRV_ABI_WRITE, FAT32_NAME, f_probe, f_mount, f_umount, f_stat, f_read, f_items, f_long_name,
+  f_space, f_mkdir, f_write, f_remove,
 };
 
 const struct fsdrv_ops* fs_driver(void) { return &ops; }

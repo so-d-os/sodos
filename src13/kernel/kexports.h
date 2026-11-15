@@ -20,3 +20,26 @@ void kexp_cursor_apply(int hidden);
 /* Chamado por mod_exec quando o programa pid termina (inclusive por Ctrl+C):
  * fecha a conexao TCP que ele deixou aberta e volta a fonte e o piscar que ele mudou. */
 void kexp_release_pid(uint32_t pid);
+
+/* Tela de texto de uma janela do WIN (Command): enquanto um programa roda la,
+ * k_vput, k_cursor, k_clear, k_font_*, k_blink, k_getc, k_trygetc e
+ * k_readline usam estas funcoes em vez da VGA e da porta do teclado.
+ * key(wait): tecla (como k_getc), 0 se nao ha, -1 se a janela fechou. */
+struct kexp_textscr {
+  int (*vput)(int row, int col, const uint16_t* cells, int n);
+  void (*cursor)(int row, int col);
+  void (*clear)(void);
+  int (*font_get)(int ch, uint8_t* glyph);
+  int (*font_set)(int ch, const uint8_t* glyph);
+  void (*font_reset)(void);
+  int (*key)(int wait);
+};
+void kexp_set_textscr(const struct kexp_textscr* ops);
+
+/* As mesmas funcoes de k_vput/k_cursor/k_getc/k_clear/k_puts para comandos
+ * internos de tela cheia (EDIT): no DOS vao a VGA, no Command do WIN a janela. */
+int kx_vput(int row, int col, const uint16_t* cells, int n);
+void kx_cursor(int row, int col);
+int kx_getc(void);
+void kx_clear(void);
+void kx_puts(const char* s);

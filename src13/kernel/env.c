@@ -10,6 +10,8 @@
 #include <stdint.h>
 #include "env.h"
 #include "shell.h"
+#include "linkext.h"
+#include "vt.h"
 
 #define ENV_N 32
 
@@ -43,7 +45,7 @@ const char* env_get(const char* name) {
   return (i >= 0 && env_val[i][0]) ? env_val[i] : 0;
 }
 
-int env_set(const char* name, const char* val) {
+static int env_set_raw(const char* name, const char* val) {
   int i, k;
   if (!name || !name[0]) return -1;
   for (k = 0; name[k]; k++)
@@ -68,6 +70,17 @@ int env_set(const char* name, const char* val) {
   env_val[i][k] = 0;
   gen++;
   return 0;
+}
+
+/* LINKEXT liga/desliga o LINKEXT.DLL na hora (sem SET LINKEXT nada roda);
+ * DISKSYNC abre o servico DISKSYNC.EXE (vt.c). */
+int env_set(const char* name, const char* val) {
+  uint32_t g = gen;
+  int rc = env_set_raw(name, val);
+  if (gen != g && (name_is(name, "LINKEXT") || name_is(name, "PATHSODOS")))
+    linkext_env_changed();
+  if (gen != g && name_is(name, "DISKSYNC")) vt_service_check();
+  return rc;
 }
 
 uint32_t env_gen(void) { return gen; }

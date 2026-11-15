@@ -11,6 +11,7 @@
 #include "visual.h"
 #include "drives.h"
 #include "shell.h"
+#include "env.h"
 
 #define VT_CELLS (80 * 25)
 #define VT_STACK (64 * 1024)
@@ -83,6 +84,13 @@ static void vt_switch_to(int j) {
     kfree(vts[VT_WIN].stack);
     vts[VT_WIN].stack = 0;
     serial_puts("[vt] pilha do WIN liberada\n");
+  }
+  /* Tela de texto cujo programa de servico acabou (vt_svc_entry): livre de novo. */
+  for (j = 0; j < VT_TEXT; j++) {
+    if (j == vt_cur || vts[j].state != VS_DEAD) continue;
+    if (vts[j].stack) kfree(vts[j].stack);
+    vts[j].stack = 0;
+    vts[j].state = VS_FREE;
   }
 }
 
@@ -191,6 +199,81 @@ static void vt_win_entry(void) {
   for (;;) __asm__ volatile ("hlt");
 }
 
+/* ---- servico DISKSYNC (SET DISKSYNC=1) ----
+ * DISKSYNC.EXE roda numa tela de texto ao fundo (Ctrl+F12, ou outra livre),
+ * como um programa qualquer de tela ao fundo: anda quando a tela visivel (o
+ * WIN ou um prompt) espera tecla. O programa le DISKSYNC sozinho e sai com
+ * SET DISKSYNC=0; a tela volta a ficar livre. */
+#define VT_SVC 10                 /* Ctrl+F12 */
+static int svc_vt = -1;
+static char svc_exe[DRV_PATH];
+
+static int svc_wanted(void) {
+  const char* v = env_get("DISKSYNC");
+  return v && v[0] && !(v[0] == '0' && v[1] == 0);
+}
+
+static int svc_find(char* out, int max) {
+  static const char* const dirs[] = { "D:\\SODOS\\DISKSYNC.EXE", "Z:\\SODOS\\DISKSYNC.EXE",
+                                      "U:\\SODOS\\DISKSYNC.EXE" };
+  unsigned i;
+  env_sodos_path("DISKSYNC.EXE", out, max);
+  if (file_size(out) > 0) return 0;
+  for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+    int k = 0;
+    while (dirs[i][k] && k < max - 1) {
+      out[k] = dirs[i][k];
+      k++;
+    }
+    out[k] = 0;
+    if (file_size(out) > 0) return 0;
+  }
+  return mod_find_exe("DISKSYNC", out, max);
+}
+
+static void vt_svc_entry(void) {
+  char line[DRV_PATH + 4];
+  int i;
+  puts_k("SO DOS - servico DISKSYNC (SET DISKSYNC=0 para parar)\n\n");
+  for (i = 0; svc_exe[i] && i < (int)sizeof(line) - 1; i++) line[i] = svc_exe[i];
+  line[i] = 0;
+  shell_exec_quiet(line);
+  serial_puts("[vt] DISKSYNC terminou\n");
+  vts[vt_cur].state = VS_DEAD;
+  svc_vt = -1;
+  /* A pilha desta tarefa e liberada pela proxima troca (vt_switch_to). */
+  if (vt_fg == vt_cur) vt_select(0);
+  else vt_switch_to(vt_fg);
+  for (;;) __asm__ volatile ("hlt");
+}
+
+void vt_service_check(void) {
+  int i;
+  if (!vt_on || !svc_wanted()) return;
+  if (svc_vt >= 0 && vts[svc_vt].state != VS_FREE && vts[svc_vt].state != VS_DEAD) return;
+  if (svc_find(svc_exe, (int)sizeof(svc_exe)) != 0) {
+    serial_puts("[vt] SET DISKSYNC=1, mas DISKSYNC.EXE nao foi achado\n");
+    if (!win_screen_size(0, 0)) puts_k("DISKSYNC.EXE nao encontrado (PATHSODOS, D:\\SODOS, Z:\\SODOS)\n");
+    return;
+  }
+  /* Ctrl+F12; se o usuario ja abriu essa tela, a livre mais alta. */
+  for (i = VT_SVC; i > 0 && vts[i].state != VS_FREE; i--) { }
+  if (i <= 0) {
+    serial_puts("[vt] DISKSYNC: nenhuma tela livre\n");
+    return;
+  }
+  if (vt_new(i, VT_STACK, vt_svc_entry) != 0) return;
+  /* Pode vir de um k_setenv (BKL pego pelo thunk): a tarefa nova comeca como
+   * codigo do kernel do mundo, com o BKL em profundidade 1. */
+  vts[i].cpu.bkl = 1;
+  svc_vt = i;
+  serial_puts("[vt] DISKSYNC na tela ");
+  serial_hex32((uint32_t)i);
+  serial_puts(": ");
+  serial_puts(svc_exe);
+  serial_puts("\n");
+}
+
 void vt_init(void) {
   if (vt_on) return;
   vt_hw = vga_text;
@@ -201,6 +284,7 @@ void vt_init(void) {
   vts[0].back = -1;
   vts[VT_WIN].back = -1;
   vt_on = 1;
+  vt_service_check();   /* SET DISKSYNC=1 do AUTOEXEC (antes das telas existirem) */
 }
 
 int vt_bg(void) {

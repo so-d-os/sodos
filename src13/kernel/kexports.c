@@ -20,6 +20,7 @@
 #include "vt.h"
 #include "smp.h"
 #include "kthread.h"
+#include "linkext.h"
 
 void mod_exit(int code);
 void shell_read_line(char* buf, int max);
@@ -28,6 +29,17 @@ static void (*con_hook)(char c);
 
 void kexp_set_console_hook(void (*hook)(char c)) { con_hook = hook; }
 void (*kexp_get_console_hook(void))(char c) { return con_hook; }
+
+/* Tela de texto de uma janela do Command (visual.c). Sem pipe: com a saida ou
+ * a entrada desviada o programa ve o pipe, como no DOS. */
+static const struct kexp_textscr* tscr;
+void kexp_set_textscr(const struct kexp_textscr* ops) { tscr = ops; }
+static const struct kexp_textscr* tscr_on(void) {
+  return (tscr && con_hook && !shell_get_out()) ? tscr : 0;
+}
+static const struct kexp_textscr* tkey_on(void) {
+  return (tscr && con_hook && !shell_pipe_active()) ? tscr : 0;
+}
 
 /* ---------- console ---------- */
 /* Cada chamada de console e um ponto de Ctrl+C (con_break_poll). */
@@ -67,6 +79,12 @@ static void k_puts(const char* s) {
 static int k_getc(void) {
   int c;
   if (shell_pipe_active()) return shell_pipe_getc();
+  if (tkey_on()) {
+    do {
+      c = tscr->key(1);
+    } while (c == 0);
+    return c;
+  }
   do {
     c = shell_get_char();
   } while (c == 0);
@@ -77,6 +95,10 @@ static int k_getc(void) {
 static int k_trygetc(void) {
   int c;
   if (shell_pipe_active()) return shell_pipe_getc();
+  if (tkey_on()) {
+    c = tscr->key(0);
+    return c > 0 ? c : -1;
+  }
   c = shell_try_char();
   return c ? c : -1;
 }
@@ -91,12 +113,45 @@ static int k_readline(char* buf, int max) {
     buf[n] = '\0';
     return (c < 0 && n == 0) ? -1 : n;
   }
+  if (tkey_on()) {
+    /* Janela do Command: linha com eco, Backspace apaga. */
+    for (;;) {
+      int c = tscr->key(1);
+      if (c < 0) {
+        buf[n] = '\0';
+        return n ? n : -1;
+      }
+      if (c == '\n' || c == '\r') {
+        con_out('\n');
+        break;
+      }
+      if (c == '\b') {
+        if (n > 0) {
+          n--;
+          con_out('\b');
+        }
+        continue;
+      }
+      if (c >= 32 && c < 256 && n < max - 1) {
+        buf[n++] = (char)c;
+        con_out(c);
+      }
+    }
+    buf[n] = '\0';
+    return n;
+  }
   shell_read_line(buf, max);
   while (buf[n]) n++;
   return n;
 }
 
-static void k_clear(void) { clear_screen(); }
+static void k_clear(void) {
+  if (tscr_on()) {
+    tscr->clear();
+    return;
+  }
+  clear_screen();
+}
 
 /* ---------- arquivos ---------- */
 static int k_fsize(const char* path) { return file_size(path); }
@@ -209,6 +264,7 @@ static int text_screen_ok(void) {
 
 static int k_vput(int row, int col, const uint16_t* cells, int n) {
   int pos, i;
+  if (tscr_on()) return tscr->vput(row, col, cells, n);
   if (!text_screen_ok()) return -1;
   if (!cells || row < 0 || row >= 25 || col < 0 || col >= 80) return 0;
   pos = row * 80 + col;
@@ -222,10 +278,14 @@ static int k_vput(int row, int col, const uint16_t* cells, int n) {
  * programa termina, kexp_release_pid volta ao desenho padrao. */
 static uint32_t font_pid;
 
-static int k_font_get(int ch, uint8_t* glyph) { return vga_font_get(ch, glyph); }
+static int k_font_get(int ch, uint8_t* glyph) {
+  if (tscr_on()) return tscr->font_get(ch, glyph);
+  return vga_font_get(ch, glyph);
+}
 
 static int k_font_set(int ch, const uint8_t* glyph) {
   int rc;
+  if (tscr_on()) return tscr->font_set(ch, glyph);
   if (!text_screen_ok() || vt_bg()) return -1;
   rc = vga_font_set(ch, glyph);
   if (rc == 0 && !font_pid) font_pid = mod_current_pid();
@@ -233,6 +293,10 @@ static int k_font_set(int ch, const uint8_t* glyph) {
 }
 
 static void k_font_reset(void) {
+  if (tscr_on()) {
+    tscr->font_reset();
+    return;
+  }
   if (!text_screen_ok() || vt_bg()) return;
   vga_font_reset();
   font_pid = 0;
@@ -242,6 +306,8 @@ static void k_font_reset(void) {
 static uint32_t blink_pid;
 
 static int k_blink(int on) {
+  /* A janela sempre mostra o fundo claro: nada a trocar. */
+  if (tscr_on()) return 0;
   if (!text_screen_ok() || vt_bg()) return -1;
   vga_text_blink(on);
   blink_pid = on ? 0 : mod_current_pid();
@@ -271,6 +337,10 @@ void kexp_cursor_apply(int hidden) {
 }
 
 static void k_cursor(int row, int col) {
+  if (tscr_on()) {
+    tscr->cursor(row, col);
+    return;
+  }
   if (!text_screen_ok()) return;
   /* Ao fundo, o cursor de verdade e de outra tela: so a posicao muda. */
   if (vt_bg()) {
@@ -295,6 +365,12 @@ static void k_cursor(int row, int col) {
   cur_hidden = 0;
   goto_xy(row, col);
 }
+
+int kx_vput(int row, int col, const uint16_t* cells, int n) { return k_vput(row, col, cells, n); }
+void kx_cursor(int row, int col) { k_cursor(row, col); }
+int kx_getc(void) { return k_getc(); }
+void kx_clear(void) { k_clear(); }
+void kx_puts(const char* s) { k_puts(s); }
 
 /* ---------- memoria ---------- */
 static void* k_malloc(uint32_t n) { return umalloc(n); }
@@ -578,6 +654,13 @@ static int k_win_bg(uint32_t rgb) { return win_bg_set(rgb); }
 static int k_win_key(int ch) { return win_api_key(ch); }
 
 static int k_win_launch(const char* path) { return kt_in_thread() ? -1 : win_launch(path); }
+
+/* Abrir um arquivo pelo programa associado (LINKEXT.DLL). 0 = abriu; 1 = sem
+ * associacao ou LINKEXT desligado (o programa segue com o padrao dele). */
+static int k_open_file(const char* path) {
+  if (kt_in_thread() || !path) return 1;
+  return linkext_fn ? linkext_fn(path) : 1;
+}
 
 /* area de transferencia do kernel (a mesma do Ctrl+C/Ctrl+V do WIN e do DOS) */
 static void k_clip_set(const char* s, int n) { clip_set(s, n); }
@@ -1018,6 +1101,7 @@ static const struct kexp table[] = {
   EXP_NOLOCK(k_thread_tls),
   EXP(k_futex_wait),
   EXP_NOLOCK(k_futex_wake),
+  EXP(k_open_file),
 };
 
 #define NEXP (sizeof(table) / sizeof(table[0]))

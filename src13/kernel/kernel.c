@@ -548,6 +548,16 @@ static int (*shell_exec_fn)(const char* path, int argc, char** argv);
 
 void shell_set_exec(int (*fn)(const char* path, int argc, char** argv)) { shell_exec_fn = fn; }
 
+static int (*shell_screen_fn)(int (*cmd)(int, char**), int argc, char** argv);
+
+void shell_set_screen_exec(int (*fn)(int (*cmd)(int, char**), int argc, char** argv)) {
+  shell_screen_fn = fn;
+}
+
+int (*shell_get_screen_exec(void))(int (*cmd)(int, char**), int argc, char** argv) {
+  return shell_screen_fn;
+}
+
 static void (*shell_flush_fn)(void);
 
 void shell_set_flush(void (*fn)(void)) { shell_flush_fn = fn; }
@@ -1826,8 +1836,13 @@ static int exec_line(char* line, int history) {
     return 0;
   }
   for (i = 0; i < cmd_count; ++i) {
-    if (!stricmp(argv[0], commands[i].name))
+    if (!stricmp(argv[0], commands[i].name)) {
+      /* EDIT usa a tela inteira: no Command do WIN vira tarefa com tela propria. */
+      if (shell_screen_fn && commands[i].fn == cmd_edit &&
+          shell_screen_fn(commands[i].fn, argc, argv))
+        return 0;
       return run_builtin(commands[i].fn, argc, argv);
+    }
   }
   if (ends_ci(argv[0], ".BAT") || ends_ci(argv[0], ".CMD")) {
     char bpath[DRV_PATH];

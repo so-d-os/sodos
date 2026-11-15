@@ -23,6 +23,10 @@ void (*shell_get_out(void))(char c);
 /* Enquanto fn nao e nulo, o .EXE achado por shell_exec_line vai para fn.
  * fn devolve 0 quando nao quer o programa, e ai roda o mod_exec de sempre. */
 void shell_set_exec(int (*fn)(const char* path, int argc, char** argv));
+/* Comando interno de tela cheia (EDIT): enquanto fn nao e nulo, vai para fn,
+ * que o roda como tarefa na janela do Command. 0 = roda aqui como sempre. */
+void shell_set_screen_exec(int (*fn)(int (*cmd)(int, char**), int argc, char** argv));
+int (*shell_get_screen_exec(void))(int (*cmd)(int, char**), int argc, char** argv);
 /* Enquanto fn nao e nulo, e chamada antes de ler o teclado: quem guarda a saida
  * para mostrar em rajada mostra agora (o Command do WIN). */
 void shell_set_flush(void (*fn)(void));
