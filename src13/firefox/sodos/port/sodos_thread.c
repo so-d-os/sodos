@@ -8,6 +8,15 @@
  * Nao ha preempcao: a troca so acontece em pthread_* bloqueante, sched_yield,
  * sodos_sleep_ms ou poll. E o bastante para o NSPR em um nucleo; a troca por
  * IRQ de timer e trabalho de kernel (ver docs/03-fases.md, M1).
+ *
+ * Modo FFTHREADS (LP64, padrao com mais de uma CPU; SET FFTHREADS=0 desliga):
+ * cada pthread vira uma k_thread do kernel (kernel/kthread.c), que roda em
+ * qualquer CPU, preemptada pelo timer local. A thread principal continua no
+ * "mundo" (CPU0, tarefa do WIN). TLS: cada thread recebe o proprio bloco e
+ * aponta o FS para ele (k_thread_tls); o ponteiro da sodos_thread fica no TCB,
+ * em %fs:0x40. Mutex/cond/sem (sodos_sync.c) e o futex da libc passam a usar
+ * k_futex_wait/wake; o resto do port e serializado pelo lock grande
+ * (sodos_big_lock).
  */
 #include <so.h>
 #include <errno.h>
@@ -88,6 +97,55 @@ static struct sodos_thread* sleep_h;
 static struct sodos_thread* zombie_h;
 static int sched_inited;
 static int in_finish;
+
+/* ---------- modo FFTHREADS (k_thread) ---------- */
+int sodos__kt;
+#define KT_TCB_SELF 0x40      /* slot livre do TCB (sodos_tls.c: TCB_SIZE 256) */
+#define KT_STACK_SLACK (32 * 1024)  /* IRQs e codigo do kernel usam a mesma pilha */
+#define KT_STACK_MIN (128 * 1024)
+static volatile int kt_zlock;           /* lista de threads destacadas */
+static struct sodos_thread* kt_zombies;
+
+/* O bloco TLS da principal so existe depois do construtor 101 (sodos_tls.c);
+ * antes disso o FS aponta para outra coisa e %fs:0x40 nao e nosso. */
+static int kt_tls_ok;
+
+#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+static inline struct sodos_thread* kt_self_get(void) {
+  struct sodos_thread* s;
+  if (__builtin_expect(!kt_tls_ok, 0)) {
+    if (!sodos__tls_main()) return NULL;
+    kt_tls_ok = 1;
+  }
+  __asm__ volatile("movq %%fs:0x40, %0" : "=r"(s));
+  return s;
+}
+
+static inline void kt_self_set(struct sodos_thread* s) {
+  __asm__ volatile("movq %0, %%fs:0x40" : : "r"(s) : "memory");
+}
+#else
+/* x32 (SODOS.DLL): sem TLS por thread, o modo k_thread nunca liga. */
+static inline struct sodos_thread* kt_self_get(void) { return NULL; }
+static inline void kt_self_set(struct sodos_thread* s) { (void)s; (void)kt_tls_ok; }
+#endif
+
+/* SET FFTHREADS=0 volta ao cooperativo; sem TLS ou com uma CPU so tambem. */
+static int kt_choose(void) {
+#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+  char v[16];
+  int n = k_getenv("FFTHREADS", v, (int)sizeof(v) - 1);
+  if (n > 0) {
+    v[n] = 0;
+    if (v[0] == '0' || v[0] == 'n' || v[0] == 'N') return 0;
+  }
+  if (!sodos__tls_present()) return 0;
+  if (k_cpu_count() < 2 && !(n > 0 && v[0] == '2')) return 0; /* FFTHREADS=2 forca */
+  return 1;
+#else
+  return 0;
+#endif
+}
 
 static void q_push(struct sodos_thread** head, struct sodos_thread** tail,
                    struct sodos_thread* t) {
@@ -299,6 +357,7 @@ void sodos__sched_init(void) {
   main_thread.magic = MAIN_MAGIC;
   main_thread.state = ST_RUN;
   cur = &main_thread;
+  sodos__kt = kt_choose();
   {
     /* Nao ha como passar ambiente pela linha de comando: vale tambem o
      * arquivo D:\\SODOS\\STACKS.AT com o numero de segundos. */
@@ -312,17 +371,79 @@ void sodos__sched_init(void) {
     if (e && atoi(e) > 0) stacks_at = sodos__ms() + (uint64_t)atoi(e) * 1000u;
   }
   sodos__sync_init();
+  {
+    sodos_log(SODOS_LOG_INFO, "threads: %s (%d CPUs)",
+              sodos__kt ? "k_thread (FFTHREADS)" : "cooperativas", k_cpu_count());
+    ser_txt(sodos__kt ? "[ffthr] pthreads = k_threads (SET FFTHREADS=0 desliga)\n"
+                      : "[ffthr] pthreads cooperativas\n");
+  }
 }
 
 int sodos__started(void) { return sched_inited; }
 
+/* CPUs que o programa deve achar que tem (sysconf, sched_getaffinity): com
+ * k_threads, as do kernel; cooperativo, uma (mais threads so atrapalham). */
+int sodos_ncpu(void) {
+  int n;
+  if (!sched_inited) sodos__sched_init();
+  if (!sodos__kt) return 1;
+  n = k_cpu_count();
+  return n < 1 ? 1 : n;
+}
+
 struct sodos_thread* sodos__self(void) {
   if (!sched_inited) sodos__sched_init();
+  if (sodos__kt) {
+    struct sodos_thread* s = kt_self_get();
+    return s ? s : &main_thread;
+  }
   return cur;
+}
+
+/* Erro de uso de pthread no modo k_thread: vai para a serial (o log do port
+ * so e gravado com sodos_init) com o endereco de quem chamou. */
+void sodos__kt_warn(const char* what, const void* obj) {
+  ser_txt("[ffthr] ");
+  ser_txt(what);
+  ser_txt(" obj=");
+  ser_hex((uint64_t)(uintptr_t)obj);
+  ser_txt(" thr=");
+  ser_hex((uint64_t)(uintptr_t)kt_self_get());
+  ser_txt(" ret=");
+  ser_hex((uint64_t)(uintptr_t)__builtin_return_address(0) - (uintptr_t)__executable_start);
+  ser_txt("\n");
+}
+
+/* errno por thread (c_compiler/lib/stdlib.c chama se existir); NULL = o global. */
+int* __sodos_errno(void) {
+  struct sodos_thread* s;
+  if (!sodos__kt) return NULL;
+  s = kt_self_get();
+  return s ? &s->err : &main_thread.err;
+}
+
+static void kt_yield(void) {
+  int d = sodos__big_release();
+  if (kt_self_get() != &main_thread) {
+    k_thread_yield();
+  } else {
+    /* Principal (mundo/WIN): o WIN ja a preempta no IRQ0; cede de vez em
+     * quando para o desktop ler entrada mesmo se ela girar em sched_yield. */
+    uint64_t now = sodos__ms();
+    if (now - os_last >= OS_SLICE_MS) {
+      k_yield();
+      os_last = sodos__ms();
+    }
+  }
+  sodos__big_reacquire(d);
 }
 
 void sodos__yield(void) {
   if (!sched_inited) sodos__sched_init();
+  if (sodos__kt) {
+    kt_yield();
+    return;
+  }
   if (cur->state != ST_RUN) return;
   make_ready(cur);
   resched();
@@ -354,6 +475,16 @@ void sodos__sleep_ms(unsigned ms) {
   if (!sched_inited) sodos__sched_init();
   if (ms == 0) {
     sodos__yield();
+    return;
+  }
+  if (sodos__kt) {
+    /* Espera num futex que ninguem acorda: o kernel devolve no prazo. No
+     * mundo (WIN) o desktop roda enquanto isso; nas k_threads a CPU fica
+     * livre para as outras. */
+    volatile int z = 0;
+    int d = sodos__big_release();
+    k_futex_wait(&z, 0, (int)(ms > 0x7FFFFFFFu ? 0x7FFFFFFFu : ms));
+    sodos__big_reacquire(d);
     return;
   }
   deadline = sodos__ms() + ms;
@@ -405,6 +536,120 @@ static uint32_t alloc_stack(struct sodos_thread* t, size_t size) {
   return (uint32_t)(uintptr_t)sp;
 }
 
+/* ---------- FFTHREADS: criacao e fim ---------- */
+
+static int kt_entry(void* p) {
+  struct sodos_thread* t = (struct sodos_thread*)p;
+  k_thread_tls((unsigned long long)(uintptr_t)t->tls_tp);
+  kt_self_set(t);
+  sodos_thread_finish(t->fn(t->arg));
+  return 0;
+}
+
+static void kt_free(struct sodos_thread* t) {
+  free(t->tls_raw);
+  t->magic = 0;
+  free(t);
+}
+
+/* Threads destacadas que ja terminaram: o kernel solta o slot e a pilha no
+ * k_thread_join; o bloco TLS so pode sair depois (o codigo do kernel que a
+ * thread roda ate o fim le o guarda de pilha em %fs:0x28). */
+static void kt_reap(void) {
+  struct sodos_thread** pp;
+  struct sodos_thread* done = NULL;
+  sodos__fl_lock(&kt_zlock);
+  pp = &kt_zombies;
+  while (*pp) {
+    struct sodos_thread* z = *pp;
+    if (__atomic_load_n(&z->finished, __ATOMIC_ACQUIRE)) {
+      *pp = z->znext;
+      z->znext = done;
+      done = z;
+      continue;
+    }
+    pp = &z->znext;
+  }
+  sodos__fl_unlock(&kt_zlock);
+  while (done) {
+    struct sodos_thread* z = done;
+    done = z->znext;
+    k_thread_join(z->ktid, NULL);
+    kt_free(z);
+  }
+}
+
+static void kt_zombie_add(struct sodos_thread* t) {
+  sodos__fl_lock(&kt_zlock);
+  t->znext = kt_zombies;
+  kt_zombies = t;
+  sodos__fl_unlock(&kt_zlock);
+}
+
+static int kt_create(pthread_t* out, const pthread_attr_t* attr,
+                     void* (*fn)(void*), void* arg) {
+  struct sodos_thread* t;
+  size_t stacksize;
+  int tid;
+
+  kt_reap();
+  t = (struct sodos_thread*)calloc(1, sizeof(*t));
+  if (!t) return EAGAIN;
+  t->fn = fn;
+  t->arg = arg;
+  t->magic = THREAD_MAGIC;
+  t->detached = attr ? attr->detached : 0;
+  t->state = ST_RUN;
+  t->tls_tp = sodos__tls_new(&t->tls_raw);
+  if (!t->tls_tp) {
+    free(t);
+    return EAGAIN;
+  }
+  stacksize = (attr && attr->stacksize) ? attr->stacksize : DEFAULT_STACK;
+  if (stacksize < KT_STACK_MIN) stacksize = KT_STACK_MIN;
+  stacksize += KT_STACK_SLACK;
+  if (stacksize > 0x10000000u) stacksize = 0x10000000u;
+  t->stack_size = (uint32_t)stacksize;
+  /* Antes de criar: a thread pode terminar antes de k_thread_create voltar. */
+  if (t->detached) kt_zombie_add(t);
+  tid = k_thread_create(kt_entry, t, (unsigned)stacksize, 0);
+  if (tid <= 0) {
+    sodos_log(SODOS_LOG_ERROR, "pthread_create: k_thread_create=%d (pilha %u)", tid,
+              (unsigned)stacksize);
+    sodos__kt_warn("pthread_create: k_thread_create falhou", (void*)(intptr_t)tid);
+    if (t->detached) {
+      /* tira da lista de novo */
+      struct sodos_thread** pp;
+      sodos__fl_lock(&kt_zlock);
+      for (pp = &kt_zombies; *pp; pp = &(*pp)->znext)
+        if (*pp == t) {
+          *pp = t->znext;
+          break;
+        }
+      sodos__fl_unlock(&kt_zlock);
+    }
+    kt_free(t);
+    return EAGAIN;
+  }
+  /* kt_reap so le ktid depois de finished (que a thread grava no fim). */
+  __atomic_store_n(&t->ktid, tid, __ATOMIC_RELEASE);
+  if (out) *out = t;
+  return 0;
+}
+
+static void kt_finish(struct sodos_thread* t, void* retval) {
+  t->retval = retval;
+  sodos__tls_run_destructors(t);
+  while (sodos__big_release()) {
+  }
+  /* Espera o criador gravar o tid (kt_reap faz k_thread_join com ele). */
+  while (!__atomic_load_n(&t->ktid, __ATOMIC_ACQUIRE)) k_thread_yield();
+  t->state = ST_DEAD;
+  __atomic_store_n(&t->finished, 1, __ATOMIC_RELEASE);
+  k_thread_exit(0);
+  for (;;) {}
+}
+
 int pthread_create(pthread_t* out, const pthread_attr_t* attr,
                    void* (*fn)(void*), void* arg) {
   struct sodos_thread* t;
@@ -412,6 +657,7 @@ int pthread_create(pthread_t* out, const pthread_attr_t* attr,
 
   if (!fn) return EINVAL;
   if (!sched_inited) sodos__sched_init();
+  if (sodos__kt) return kt_create(out, attr, fn, arg);
 
   t = (struct sodos_thread*)calloc(1, sizeof(*t));
   if (!t) return EAGAIN;
@@ -437,6 +683,13 @@ void sodos_thread_finish(void* retval) {
   struct sodos_thread* t = cur;
   struct sodos_thread* j;
 
+  if (sodos__kt) {
+    t = kt_self_get();
+    if (t && t != &main_thread) kt_finish(t, retval);
+    k_exit(0);   /* pthread_exit na principal: o programa acaba */
+    for (;;) {}
+  }
+
   t->retval = retval;
   t->state = ST_DEAD;
   t->finished = 1;
@@ -461,6 +714,16 @@ void pthread_exit(void* retval) {
 int pthread_join(pthread_t t, void** retval) {
   if (!t || t->magic != THREAD_MAGIC) return ESRCH;
   if (t->detached) return EINVAL;
+  if (sodos__kt) {
+    int d;
+    if (t == sodos__self()) return EDEADLK;
+    d = sodos__big_release();
+    k_thread_join(t->ktid, NULL);
+    sodos__big_reacquire(d);
+    if (retval) *retval = t->retval;
+    kt_free(t);
+    return 0;
+  }
   while (!t->finished)
     sodos__block((void**)&t->join_head, (void**)&t->join_tail);
   if (retval) *retval = t->retval;
@@ -474,6 +737,12 @@ int pthread_join(pthread_t t, void** retval) {
 
 int pthread_detach(pthread_t t) {
   if (!t || t->magic != THREAD_MAGIC) return ESRCH;
+  if (sodos__kt) {
+    if (t->detached) return EINVAL;
+    t->detached = 1;
+    kt_zombie_add(t);
+    return 0;
+  }
   t->detached = 1;
   if (t->finished && t->state == ST_DEAD) {
     t->qnext = zombie_h;
@@ -482,10 +751,7 @@ int pthread_detach(pthread_t t) {
   return 0;
 }
 
-pthread_t pthread_self(void) {
-  if (!sched_inited) sodos__sched_init();
-  return cur;
-}
+pthread_t pthread_self(void) { return sodos__self(); }
 
 int pthread_equal(pthread_t a, pthread_t b) { return a == b; }
 
@@ -507,6 +773,7 @@ int sched_yield(void) {
  * de eventos com fd sempre pronto nao pode prender as outras threads. */
 int sodos_coop_due(void) {
   uint64_t now;
+  if (sodos__kt) return 0;   /* k_threads: o timer do kernel ja preempta */
   if (coop_flag) return 1;
   if (++coop_n & 63) return 0;
   now = sodos__ms();
@@ -631,6 +898,18 @@ int sodos_futex_wait(volatile int* addr, int val, uint64_t deadline_ms) {
   struct fx_wait w;
   if (!sched_inited) sodos__sched_init();
   if (*addr != val) return 1;
+  if (sodos__kt) {
+    int tmo = -1, r;
+    if (deadline_ms) {
+      uint64_t now = sodos__ms();
+      if (now >= deadline_ms) return 2;
+      tmo = deadline_ms - now > 0x7FFFFFFFu ? 0x7FFFFFFF : (int)(deadline_ms - now);
+    }
+    r = k_futex_wait(addr, val, tmo);
+    if (r == -11) return 1;
+    if (r == -110) return 2;
+    return 0;
+  }
   w.addr = addr;
   w.t = cur;
   w.woken = 0;
@@ -657,6 +936,7 @@ int sodos_futex_wait(volatile int* addr, int val, uint64_t deadline_ms) {
 int sodos_futex_wake(volatile int* addr, int n) {
   struct fx_wait* w;
   int k = 0;
+  if (sodos__kt) return k_futex_wake(addr, n);
   for (w = fx_head; w && k < n; w = w->next) {
     if (w->addr != addr || w->woken) continue;
     w->woken = 1;

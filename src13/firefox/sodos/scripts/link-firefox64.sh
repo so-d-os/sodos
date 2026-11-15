@@ -5,11 +5,12 @@
 # e os demais entram no executavel. As listas de objetos sao as que o build gera.
 # Rode depois de: build-browser64.sh build pre-export export compile
 #
-# Saida: $FIREFOX_OBJ/dist/bin/FIREFOX.EXE
+# Saida: $FIREFOX_OBJ/dist/bin/FIREFOX.EXE (ou FIREFOX_OUT; lista de objetos em
+# SODOS_LINK_DIR), para ligar de outro checkout sem tocar no binario de la.
 set -e
 S=$(cd "$(dirname "$0")/../.." && pwd)
 O=${FIREFOX_OBJ:-$HOME/ffsrc/obj-browser64}
-T=$O/sodos-link
+T=${SODOS_LINK_DIR:-$O/sodos-link}
 mkdir -p "$T"
 : > "$T/objs.list"
 
@@ -59,6 +60,6 @@ print("objetos:", len(out))
 EOF
 
 export PATH="$S/toolchain/bin:$PATH"
-x86_64-sodos-g++64 -o "$O/dist/bin/FIREFOX.EXE" "@$T/objs.list" \
+x86_64-sodos-g++64 -o "${FIREFOX_OUT:-$O/dist/bin/FIREFOX.EXE}" "@$T/objs.list" \
   "$O/x86_64-sodos/release/libgkrust.a" "$O/build/pure_virtual/libpure_virtual.a"
-ls -la "$O/dist/bin/FIREFOX.EXE"
+ls -la "${FIREFOX_OUT:-$O/dist/bin/FIREFOX.EXE}"

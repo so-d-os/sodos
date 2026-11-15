@@ -9,6 +9,7 @@
 
 #include "poll.h"
 #include "sodos.h"
+#include "sodos_internal.h"
 
 #if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
 extern int sodos_pipe_is(int fd);
@@ -34,6 +35,7 @@ int __syscall_poll(struct pollfd* fds, unsigned long nfds, int timeout_ms) {
 }
 
 int poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
+  SODOS_BIG_GUARD;
   uint64_t start = sodos_now_ms();
 
 #if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8

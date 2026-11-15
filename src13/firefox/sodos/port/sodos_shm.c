@@ -19,6 +19,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "sodos_internal.h"
 
 #include "sys/mman.h"
 #include "sodos.h"
@@ -98,6 +99,7 @@ static int fd_new(struct shm_obj* o, int flags) {
 }
 
 int shm_open(const char* name, int flags, mode_t mode) {
+  SODOS_BIG_GUARD;
   struct shm_obj* o;
   int fd;
   (void)mode;
@@ -135,6 +137,7 @@ int shm_open(const char* name, int flags, mode_t mode) {
 }
 
 int shm_unlink(const char* name) {
+  SODOS_BIG_GUARD;
   struct shm_obj* o = name ? obj_find(name) : NULL;
   if (!o) {
     errno = ENOENT;
@@ -146,6 +149,7 @@ int shm_unlink(const char* name) {
 }
 
 int sodos_shm_close(int fd) {
+  SODOS_BIG_GUARD;
   struct shm_fd* f = get_fd(fd);
   struct shm_obj* o;
   if (!f) {
@@ -159,6 +163,7 @@ int sodos_shm_close(int fd) {
 }
 
 int sodos_shm_dup(int fd) {
+  SODOS_BIG_GUARD;
   struct shm_fd* f = get_fd(fd);
   if (!f) {
     errno = EBADF;
@@ -168,6 +173,7 @@ int sodos_shm_dup(int fd) {
 }
 
 int sodos_shm_ftruncate(int fd, off_t len) {
+  SODOS_BIG_GUARD;
   struct shm_fd* f = get_fd(fd);
   struct shm_obj* o;
   if (!f || len < 0) {
@@ -211,6 +217,7 @@ int sodos_shm_ftruncate(int fd, off_t len) {
 }
 
 int sodos_shm_fstat(int fd, struct stat* st) {
+  SODOS_BIG_GUARD;
   struct shm_fd* f = get_fd(fd);
   if (!f || !st) {
     errno = EBADF;
@@ -225,6 +232,7 @@ int sodos_shm_fstat(int fd, struct stat* st) {
 }
 
 off_t sodos_shm_lseek(int fd, off_t off, int whence) {
+  SODOS_BIG_GUARD;
   struct shm_fd* f = get_fd(fd);
   off_t np;
   if (!f) {
@@ -241,6 +249,7 @@ off_t sodos_shm_lseek(int fd, off_t off, int whence) {
 }
 
 ssize_t sodos_shm_read(int fd, void* buf, size_t n) {
+  SODOS_BIG_GUARD;
   struct shm_fd* f = get_fd(fd);
   if (!f) {
     errno = EBADF;
@@ -254,6 +263,7 @@ ssize_t sodos_shm_read(int fd, void* buf, size_t n) {
 }
 
 ssize_t sodos_shm_write(int fd, const void* buf, size_t n) {
+  SODOS_BIG_GUARD;
   struct shm_fd* f = get_fd(fd);
   if (!f) {
     errno = EBADF;
@@ -268,6 +278,7 @@ ssize_t sodos_shm_write(int fd, const void* buf, size_t n) {
 /* mmap de um descritor de memoria compartilhada: o proprio bloco. Um mapa
  * MAP_PRIVATE tambem ve o bloco (sem copia na escrita). */
 void* sodos_shm_map(int fd, size_t len, off_t off) {
+  SODOS_BIG_GUARD;
   struct shm_fd* f = get_fd(fd);
   struct shm_obj* o;
   int i;
@@ -295,6 +306,7 @@ void* sodos_shm_map(int fd, size_t len, off_t off) {
 
 /* 1 se a faixa era um mapa daqui (e foi solta). */
 int sodos_shm_unmap(void* addr, size_t len) {
+  SODOS_BIG_GUARD;
   int i;
   (void)len;
   for (i = 0; i < SHM_MAP_MAX; i++) {

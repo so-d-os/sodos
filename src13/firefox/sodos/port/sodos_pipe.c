@@ -20,6 +20,7 @@
 #define recv sodos_hdr_recv
 #define send sodos_hdr_send
 #include "sys/socket.h"
+#include "sodos_internal.h"
 #undef recv
 #undef send
 
@@ -87,6 +88,7 @@ ssize_t sodos_shm_read(int fd, void* buf, size_t n);
 ssize_t sodos_shm_write(int fd, const void* buf, size_t n);
 
 int sodos_pipe_close(int fd) {
+  SODOS_BIG_GUARD;
   struct pipe_end* e = get_end(fd);
   struct ring* rx;
   struct ring* tx;
@@ -107,6 +109,7 @@ int sodos_pipe_close(int fd) {
 }
 
 ssize_t sodos_pipe_read(int fd, void* buf, size_t n) {
+  SODOS_BIG_GUARD;
   struct pipe_end* e = get_end(fd);
   struct ring* r;
   size_t i;
@@ -139,6 +142,7 @@ ssize_t sodos_pipe_read(int fd, void* buf, size_t n) {
 }
 
 ssize_t sodos_pipe_write(int fd, const void* buf, size_t n) {
+  SODOS_BIG_GUARD;
   struct pipe_end* e = get_end(fd);
   struct ring* r;
   size_t done = 0;
@@ -179,6 +183,7 @@ ssize_t sodos_pipe_write(int fd, const void* buf, size_t n) {
 }
 
 short sodos_pipe_poll(int fd, short events) {
+  SODOS_BIG_GUARD;
   struct pipe_end* e = get_end(fd);
   short ev = 0;
   if (!e) return POLLNVAL;
@@ -196,6 +201,7 @@ short sodos_pipe_poll(int fd, short events) {
 static struct ring* new_ring(void) { return (struct ring*)calloc(1, sizeof(struct ring)); }
 
 int pipe2(int fds[2], int flags) {
+  SODOS_BIG_GUARD;
   struct ring* r = new_ring();
   int a, b;
   if (!r) {
@@ -219,6 +225,7 @@ int pipe2(int fds[2], int flags) {
 int pipe(int fds[2]) { return pipe2(fds, 0); }
 
 int socketpair(int domain, int type, int protocol, int sv[2]) {
+  SODOS_BIG_GUARD;
   struct ring* r1;
   struct ring* r2;
   int flags = (type & SOCK_NONBLOCK) ? O_NONBLOCK : 0;
@@ -249,6 +256,7 @@ int socketpair(int domain, int type, int protocol, int sv[2]) {
 }
 
 int fcntl(int fd, int cmd, ...) {
+  SODOS_BIG_GUARD;
   struct pipe_end* e = get_end(fd);
   va_list ap;
   long arg;
@@ -290,6 +298,7 @@ int fcntl(int fd, int cmd, ...) {
 /* ---- operacoes de soquete sobre o par ------------------------------------ */
 
 ssize_t recv(int fd, void* buf, size_t n, int flags) {
+  SODOS_BIG_GUARD;
   if (SOCK_FD(fd)) return sodos_sock_recv(fd, buf, n, flags);
   if (!get_end(fd)) {
     errno = ENOSYS;
@@ -299,6 +308,7 @@ ssize_t recv(int fd, void* buf, size_t n, int flags) {
 }
 
 ssize_t send(int fd, const void* buf, size_t n, int flags) {
+  SODOS_BIG_GUARD;
   if (SOCK_FD(fd)) return sodos_sock_send(fd, buf, n, flags);
   if (!get_end(fd)) {
     errno = ENOSYS;
@@ -308,6 +318,7 @@ ssize_t send(int fd, const void* buf, size_t n, int flags) {
 }
 
 ssize_t recvmsg(int fd, struct msghdr* m, int flags) {
+  SODOS_BIG_GUARD;
   ssize_t total = 0;
   size_t i;
   (void)flags;
@@ -329,6 +340,7 @@ ssize_t recvmsg(int fd, struct msghdr* m, int flags) {
 }
 
 ssize_t sendmsg(int fd, const struct msghdr* m, int flags) {
+  SODOS_BIG_GUARD;
   ssize_t total = 0;
   size_t i;
   (void)flags;

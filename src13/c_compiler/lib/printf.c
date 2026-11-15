@@ -3,6 +3,24 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Lock do stdio (stdlib.c): as threads do Firefox (FFTHREADS) escrevem em
+ * paralelo. Recursivo; some nos alvos de 32 bits. */
+#if defined(__GNUC__) && defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+void __so_io_lock(void);
+void __so_io_unlock(void);
+static inline int io_guard_(void) {
+  __so_io_lock();
+  return 0;
+}
+static inline void io_guard_end_(int* p) {
+  (void)p;
+  __so_io_unlock();
+}
+#define IO_GUARD int io_g_ __attribute__((cleanup(io_guard_end_), unused)) = io_guard_()
+#else
+#define IO_GUARD typedef int io_guard_unused_t
+#endif
+
 /* gcc -mx32 -mno-sse (LIBCX): sem double; o argumento nem vem na pilha. */
 #if defined(__GNUC__) && defined(__x86_64__) && !defined(__SSE2__)
 #define NO_FLOAT 1
@@ -404,6 +422,7 @@ int vsprintf(char* buf, const char* fmt, va_list ap) {
 }
 
 int vfprintf(FILE* f, const char* fmt, va_list ap) {
+  IO_GUARD;
   struct sink s;
   s.f = f;
   s.buf = NULL;
@@ -415,6 +434,7 @@ int vfprintf(FILE* f, const char* fmt, va_list ap) {
 int vprintf(const char* fmt, va_list ap) { return vfprintf(stdout, fmt, ap); }
 
 int printf(const char* fmt, ...) {
+  IO_GUARD;
   va_list ap;
   int r;
   va_start(ap, fmt);
@@ -424,6 +444,7 @@ int printf(const char* fmt, ...) {
 }
 
 int fprintf(FILE* f, const char* fmt, ...) {
+  IO_GUARD;
   va_list ap;
   int r;
   va_start(ap, fmt);

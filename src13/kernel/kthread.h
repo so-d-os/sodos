@@ -17,7 +17,7 @@
 #include <stdint.h>
 
 #define KT_CPU_MAX 8
-#define KT_MAX     64
+#define KT_MAX     256   /* o Firefox (FFTHREADS) cria ~60-100 threads */
 
 /* Uma vez no kmain, antes do sti: CPU0, o mundo, GS base, thunks. */
 void kt_early_init(void);

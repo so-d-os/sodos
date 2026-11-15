@@ -58,6 +58,7 @@ int net_srv_write(const void* data, int len, int fin);
 int net_srv_send(const void* data, int len);
 /* Relogio em ms do PIT; so anda enquanto alguem consulta (polling). */
 uint32_t net_ms(void);
+uint32_t net_ms_fast(void); /* sem estado: pode rodar sem o BKL (threads) */
 
 /* Outra placa no lugar da NE2000 (o WiFi). tx manda um quadro Ethernet
  * (0 = ok); rx copia o proximo quadro recebido e devolve o tamanho, 0 sem

@@ -14,7 +14,36 @@
 #include <so.h>
 #include "../../c_compiler/lib/unixdrv.h"
 
+/* LP64 + libsodos com FFTHREADS: as threads do Firefox rodam em paralelo e a
+ * tabela de fds/objetos daqui e uma so; cada funcao publica segura o lock
+ * grande do port (recursivo, solto enquanto a thread dorme). Sem libsodos os
+ * simbolos fracos sao nulos e nada muda. */
+#if defined(__GNUC__) && defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+extern void sodos_big_lock(void) __attribute__((weak));
+extern void sodos_big_unlock(void) __attribute__((weak));
+extern int sodos_ncpu(void) __attribute__((weak));
+static inline int px_guard_(void) {
+  if (sodos_big_lock) sodos_big_lock();
+  return 0;
+}
+static inline void px_guard_end_(int* p) {
+  (void)p;
+  if (sodos_big_unlock) sodos_big_unlock();
+}
+#define PX_GUARD int px_g_ __attribute__((cleanup(px_guard_end_), unused)) = px_guard_()
+#else
+#define PX_GUARD typedef int px_guard_unused_t
+#endif
+
+/* LP64 (Firefox): o SQLite abre places/favicons com ~12 conexoes cada, e com
+ * as threads em paralelo (FFTHREADS) passava de 64: o open("/dev/urandom")
+ * do nsID::GenerateUUID falhava e o Firefox abortava. Fds de pipe (2000+),
+ * soquete (1000+) e shm (3000+) ficam acima. */
+#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+#define FD_MAX 256
+#else
 #define FD_MAX 64
+#endif
 #define DIR_MAX 8
 #undef PATH_MAX
 #define PATH_MAX 260
@@ -206,6 +235,7 @@ static int path_is_dir(const char* path) {
 }
 
 __export int chdir(const char* path) {
+  PX_GUARD;
   char full[PATH_MAX];
   if (!path) {
     errno = EINVAL;
@@ -221,6 +251,7 @@ __export int chdir(const char* path) {
 }
 
 __export char* getcwd(char* buf, size_t size) {
+  PX_GUARD;
   char tmp[64];
   if (!buf || size < 2) {
     errno = EINVAL;
@@ -247,6 +278,7 @@ static int err_from_k(int r) {
 }
 
 __export int unlink(const char* path) {
+  PX_GUARD;
   char full[PATH_MAX];
   int r;
   if (!path) {
@@ -272,6 +304,7 @@ __export int unlink(const char* path) {
 }
 
 __export int rmdir(const char* path) {
+  PX_GUARD;
   char full[PATH_MAX];
   int r;
   if (!path) {
@@ -287,6 +320,7 @@ __export int rmdir(const char* path) {
 }
 
 __export int mkdir(const char* path, mode_t mode) {
+  PX_GUARD;
   char full[PATH_MAX];
   int r;
   (void)mode;
@@ -308,6 +342,7 @@ __export int mkdir(const char* path, mode_t mode) {
 }
 
 __export int access(const char* path, int mode) {
+  PX_GUARD;
   struct stat st;
   (void)mode;
   return stat(path, &st);
@@ -346,6 +381,13 @@ __export long sysconf(int name) {
   if (name == _SC_PAGESIZE) return 4096;
   if (name == _SC_CLK_TCK) return 1000;
   if (name == _SC_OPEN_MAX) return FD_MAX;
+  if (name == _SC_NPROCESSORS_CONF || name == _SC_NPROCESSORS_ONLN) {
+#if defined(__GNUC__) && defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+    /* libsodos: com FFTHREADS as threads usam todas as CPUs */
+    if (sodos_ncpu) return sodos_ncpu();
+#endif
+    return 1;
+  }
   errno = EINVAL;
   return -1;
 }
@@ -397,14 +439,32 @@ static unsigned long path_ino(const char* full) {
   return h ? h : 1;
 }
 
+static void fd_full_report(void) {
+#if defined(__GNUC__) && defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+  /* Diagnostico (serial): quem esta segurando os fds quando acabam. */
+  static int shown;
+  int i;
+  if (shown++ > 2) return;
+  for (i = 3; i < FD_MAX; i++) {
+    const char* p = fds[i].rnd ? "/dev/urandom" : fds[i].f ? fds[i].f->path : "?";
+    const char* q = "[posix] fds esgotados: ";
+    while (*q) __asm__ volatile("outb %0, %1" :: "a"((unsigned char)*q++), "d"((unsigned short)0x3F8));
+    while (*p) __asm__ volatile("outb %0, %1" :: "a"((unsigned char)*p++), "d"((unsigned short)0x3F8));
+    __asm__ volatile("outb %0, %1" :: "a"((unsigned char)'\n'), "d"((unsigned short)0x3F8));
+  }
+#endif
+}
+
 static int fd_alloc(void) {
   int i;
   for (i = 3; i < FD_MAX; i++)
     if (!fds[i].used) return i;
+  fd_full_report();
   return -1;
 }
 
 __export int open(const char* path, int flags, ...) {
+  PX_GUARD;
   char full[PATH_MAX];
   int fd, sz, mode = 0;
   struct fd_ent* e;
@@ -519,6 +579,7 @@ __export int open(const char* path, int flags, ...) {
 }
 
 __export int creat(const char* path, mode_t mode) {
+  PX_GUARD;
   return open(path, O_WRONLY | O_CREAT | O_TRUNC, (int)mode);
 }
 
@@ -547,6 +608,7 @@ extern int sodos_shm_dup(int fd);
 #endif
 
 __export int close(int fd) {
+  PX_GUARD;
   struct fd_ent* e;
   int r = 0;
   if (PIPE_FD(fd)) return sodos_pipe_close(fd);
@@ -610,6 +672,7 @@ __export int sodos_stdin_ready(void) {
 }
 
 __export ssize_t read(int fd, void* buf, size_t n) {
+  PX_GUARD;
   if (PIPE_FD(fd)) return sodos_pipe_read(fd, buf, n);
   struct fd_ent* e;
   size_t left;
@@ -690,6 +753,7 @@ static void con_write_ansi(const char* s, size_t n) {
 }
 
 __export ssize_t write(int fd, const void* buf, size_t n) {
+  PX_GUARD;
   if (PIPE_FD(fd)) return sodos_pipe_write(fd, buf, n);
   struct fd_ent* e;
   struct fobj* o;
@@ -734,6 +798,7 @@ __export ssize_t write(int fd, const void* buf, size_t n) {
 }
 
 __export off_t lseek(int fd, off_t off, int whence) {
+  PX_GUARD;
   struct fd_ent* e;
   int np;
   if (SHM_FD(fd)) return sodos_shm_lseek(fd, off, whence);
@@ -759,6 +824,7 @@ __export off_t lseek(int fd, off_t off, int whence) {
 
 /* grava o que mudou sem fechar */
 __export int fsync(int fd) {
+  PX_GUARD;
   struct fd_ent* e;
   if (fd < 3 || fd >= FD_MAX || !fds[fd].used) {
     errno = EBADF;
@@ -776,6 +842,7 @@ __export int fsync(int fd) {
 }
 
 __export int ftruncate(int fd, off_t len) {
+  PX_GUARD;
   struct fd_ent* e;
   struct fobj* o;
   if (SHM_FD(fd)) return sodos_shm_ftruncate(fd, len);
@@ -803,6 +870,7 @@ __export int ftruncate(int fd, off_t len) {
 }
 
 __export int dup(int fd) {
+  PX_GUARD;
   int nfd;
   struct fd_ent* e;
   if (SHM_FD(fd)) return sodos_shm_dup(fd);
@@ -823,6 +891,7 @@ __export int dup(int fd) {
 }
 
 __export int fstat(int fd, struct stat* st) {
+  PX_GUARD;
   struct fd_ent* e;
   if (SHM_FD(fd)) return sodos_shm_fstat(fd, st);
   if (!st) {
@@ -851,6 +920,7 @@ __export int fstat(int fd, struct stat* st) {
 }
 
 __export int stat(const char* path, struct stat* st) {
+  PX_GUARD;
   char full[PATH_MAX];
   int sz;
   if (!path || !st) {
@@ -891,6 +961,7 @@ __export int stat(const char* path, struct stat* st) {
 }
 
 __export DIR* opendir(const char* path) {
+  PX_GUARD;
   char full[PATH_MAX];
   int i, n;
   struct __so_DIR* d;
@@ -918,6 +989,7 @@ __export DIR* opendir(const char* path) {
 }
 
 __export struct dirent* readdir(DIR* dp) {
+  PX_GUARD;
   struct __so_DIR* d = (struct __so_DIR*)dp;
   int i = 0;
   char* p;
@@ -946,11 +1018,13 @@ __export struct dirent* readdir(DIR* dp) {
 }
 
 __export void rewinddir(DIR* dp) {
+  PX_GUARD;
   struct __so_DIR* d = (struct __so_DIR*)dp;
   if (d && d->used) d->pos = 0;
 }
 
 __export int closedir(DIR* dp) {
+  PX_GUARD;
   struct __so_DIR* d = (struct __so_DIR*)dp;
   if (!d || !d->used) {
     errno = EBADF;
@@ -962,6 +1036,7 @@ __export int closedir(DIR* dp) {
 
 /* getrandom(2): o SODOS nao tem entropia do kernel; usamos o PRNG do shim. */
 __export ssize_t getrandom(void* buf, size_t n, unsigned int flags) {
+  PX_GUARD;
   (void)flags;
   if (!buf && n) {
     errno = EINVAL;
@@ -971,6 +1046,6 @@ __export ssize_t getrandom(void* buf, size_t n, unsigned int flags) {
   return (ssize_t)n;
 }
 
-__export void arc4random_buf(void* buf, size_t n) { rng_fill(buf, n); }
+__export void arc4random_buf(void* buf, size_t n) { PX_GUARD; rng_fill(buf, n); }
 
-__export unsigned int arc4random(void) { return (unsigned int)(rng_next() >> 16); }
+__export unsigned int arc4random(void) { PX_GUARD; return (unsigned int)(rng_next() >> 16); }

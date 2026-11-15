@@ -506,10 +506,18 @@ static uint32_t rdtsc_lo(uint32_t* hi) {
 }
 
 static uint32_t k_rdtsc(uint32_t* hi) { return rdtsc_lo(hi); }
-/* Lacos de espera costumam ler o relogio: tambem e ponto de Ctrl+C. */
+/* Lacos de espera costumam ler o relogio: tambem e ponto de Ctrl+C.
+ * Sem BKL no thunk (EXP_NOLOCK): o relogio e o k_* mais chamado pelas threads
+ * do Firefox (clock_gettime) e esperar o BKL do mundo por ele custava caro.
+ * Thread: so le os ticks. Mundo: pega o BKL como o thunk faria. */
 static uint32_t k_ms(void) {
+  uint32_t r;
+  if (kt_in_thread()) return net_ms_fast();
+  kt_bkl_enter();
   con_break_poll();
-  return net_ms();
+  r = net_ms();
+  kt_bkl_leave();
+  return r;
 }
 
 static int cmos_in(int reg) {
@@ -1022,10 +1030,25 @@ static void k_thread_exit(int code) { kt_thread_exit(code); }
 static int k_thread_self(void) { return kt_thread_self(); }
 static int k_thread_cpu(void) { return kt_cpu_index(); }
 static int k_thread_affinity(int tid, unsigned mask) { return kt_thread_affinity(tid, mask); }
-static void k_thread_yield(void) { kt_thread_yield(); }
+/* yield e futex_wait: a thread solta o BKL logo em seguida, entao o thunk
+ * nao o pega (EXP_NOLOCK); so o mundo precisa dele. */
+static void k_thread_yield(void) {
+  if (kt_in_thread()) {
+    kt_yield_in_thread();
+    return;
+  }
+  kt_bkl_enter();
+  kt_thread_yield();
+  kt_bkl_leave();
+}
 static int k_thread_tls(unsigned long long fs) { return kt_thread_tls(fs); }
 static int k_futex_wait(volatile int* addr, int val, int timeout_ms) {
-  return kt_futex_wait(addr, val, timeout_ms);
+  int r;
+  if (kt_in_thread()) return kt_futex_wait(addr, val, timeout_ms);
+  kt_bkl_enter();
+  r = kt_futex_wait(addr, val, timeout_ms);
+  kt_bkl_leave();
+  return r;
 }
 static int k_futex_wake(volatile int* addr, int n) { return kt_futex_wake(addr, n); }
 
@@ -1105,7 +1128,7 @@ static const struct kexp table[] = {
   EXP(k_dl_fini_next),
   EXP(k_dl_addr),
   EXP(k_rdtsc),
-  EXP(k_ms),
+  EXP_NOLOCK(k_ms),
   EXP(k_date),
   EXP(k_time),
   EXP(k_random),
@@ -1156,9 +1179,9 @@ static const struct kexp table[] = {
   EXP_NOLOCK(k_thread_self),
   EXP_NOLOCK(k_thread_cpu),
   EXP(k_thread_affinity),
-  EXP(k_thread_yield),
+  EXP_NOLOCK(k_thread_yield),
   EXP_NOLOCK(k_thread_tls),
-  EXP(k_futex_wait),
+  EXP_NOLOCK(k_futex_wait),
   EXP_NOLOCK(k_futex_wake),
   EXP(k_open_file),
   EXP(k_pendrive),

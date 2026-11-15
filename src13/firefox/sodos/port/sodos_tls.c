@@ -114,6 +114,8 @@ unsigned long long sodos__tls_offset(unsigned modid) {
   return g_off_by_id[modid];
 }
 
+int sodos__tls_present(void) { return 1; }
+
 /* Chamada por __libc_start_main antes de qualquer construtor. */
 void sodos__tls_init_main(void) {
   void* raw;
@@ -121,6 +123,9 @@ void sodos__tls_init_main(void) {
   g_main_tp = sodos__tls_new(&raw);
   if (g_main_tp) set_fs_base(g_main_tp);
 }
+
+/* Bloco TLS da thread principal (NULL = programa sem TLS). */
+void* sodos__tls_main(void) { return g_main_tp; }
 
 #elif defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
 
@@ -184,12 +189,18 @@ void sodos__tls_switch(void* tp) {
   if (tp) set_fs_base(tp);
 }
 
+/* 1 se o programa tem TLS (o bloco da principal pode ainda nao existir). */
+int sodos__tls_present(void) { return !TLS_ABSENT(); }
+
 /* Roda antes de qualquer outro construtor. */
 __attribute__((constructor(101))) static void sodos_tls_init_main(void) {
   void* raw;
   g_main_tp = sodos__tls_new(&raw);
   if (g_main_tp) set_fs_base(g_main_tp);
 }
+
+/* Bloco TLS da thread principal (NULL = programa sem TLS). */
+void* sodos__tls_main(void) { return g_main_tp; }
 
 #else
 
@@ -199,5 +210,8 @@ void* sodos__tls_new(void** raw) {
 }
 
 void sodos__tls_switch(void* tp) { (void)tp; }
+
+void* sodos__tls_main(void) { return NULL; }
+int sodos__tls_present(void) { return 0; }
 
 #endif

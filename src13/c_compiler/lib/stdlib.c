@@ -68,7 +68,73 @@ static struct heap_state hs;
 static int err_value;
 static unsigned nchunks = 1; /* 1 = primeira alocacao ainda nao feita */
 
+#if defined(__GNUC__) && defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+/* ---------- threads reais (LP64) ----------
+ * O Firefox (libsodos com FFTHREADS) roda pthreads como k_threads em varias
+ * CPUs ao mesmo tempo: as listas do malloc e os FILE do stdio precisam de
+ * lock, e o errno passa a ser da thread (__sodos_errno, se o programa tiver).
+ * Sem disputa o custo e um cmpxchg; com disputa espera no futex do kernel. */
+static inline void lk_take(volatile int* w) {
+  int c = 0, i;
+  if (__atomic_compare_exchange_n(w, &c, 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
+  for (i = 0; i < 64; i++) {
+    __asm__ volatile("pause" ::: "memory");
+    c = 0;
+    if (__atomic_load_n(w, __ATOMIC_RELAXED) == 0 &&
+        __atomic_compare_exchange_n(w, &c, 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+      return;
+  }
+  c = __atomic_exchange_n(w, 2, __ATOMIC_ACQUIRE);
+  while (c != 0) {
+    k_futex_wait(w, 2, -1);
+    c = __atomic_exchange_n(w, 2, __ATOMIC_ACQUIRE);
+  }
+}
+
+static inline void lk_drop(volatile int* w) {
+  if (__atomic_exchange_n(w, 0, __ATOMIC_RELEASE) == 2) k_futex_wake(w, 1);
+}
+
+static volatile int m_lock;
+#define M_LOCK() lk_take(&m_lock)
+#define M_UNLOCK() lk_drop(&m_lock)
+
+/* stdio: recursivo (vfprintf -> fputc). Dono = k_thread_self (0 = mundo). */
+static volatile int io_lock;
+static volatile int io_owner = -1;
+static int io_depth_n;
+
+void __so_io_lock(void) {
+  int me = k_thread_self();
+  if (__atomic_load_n(&io_owner, __ATOMIC_RELAXED) == me) {
+    io_depth_n++;
+    return;
+  }
+  lk_take(&io_lock);
+  __atomic_store_n(&io_owner, me, __ATOMIC_RELAXED);
+  io_depth_n = 1;
+}
+
+void __so_io_unlock(void) {
+  if (--io_depth_n > 0) return;
+  __atomic_store_n(&io_owner, -1, __ATOMIC_RELAXED);
+  lk_drop(&io_lock);
+}
+
+extern int* __sodos_errno(void) __attribute__((weak));
+
+int* __so_errno(void) {
+  if (__sodos_errno) {
+    int* p = __sodos_errno();
+    if (p) return p;
+  }
+  return &err_value;
+}
+#else
+#define M_LOCK() ((void)0)
+#define M_UNLOCK() ((void)0)
 int* __so_errno(void) { return &err_value; }
+#endif
 
 #define class_size(c) (16u << (c))
 
@@ -109,9 +175,11 @@ void* malloc(size_t n) {
     h->pad = (unsigned)((char*)h - raw);
     return h + 1;
   }
+  M_LOCK();
   if (hs.free_list[c]) {
     void** p = (void**)hs.free_list[c];
     hs.free_list[c] = *p;
+    M_UNLOCK();
     h = (struct hdr*)p - 1;
     h->magic = HDR_MAGIC;
     return p;
@@ -125,7 +193,8 @@ void* malloc(size_t n) {
         dbg_u32(nchunks);
         dbg_txt("\n");
         hs.left = 0;
-        err_value = ENOMEM;
+        M_UNLOCK();
+        errno = ENOMEM;
         return NULL;
       }
       nchunks++;
@@ -135,6 +204,7 @@ void* malloc(size_t n) {
     h = (struct hdr*)hs.cur;
     hs.cur += need;
     hs.left -= need;
+    M_UNLOCK();
     h->cls = (unsigned short)c;
     h->magic = HDR_MAGIC;
     h->size = class_size(c);
@@ -209,8 +279,10 @@ void free(void* p) {
     k_free((char*)h - h->pad);
     return;
   }
+  M_LOCK();
   *(void**)p = hs.free_list[h->cls];
   hs.free_list[h->cls] = p;
+  M_UNLOCK();
 }
 
 void* calloc(size_t n, size_t sz) {

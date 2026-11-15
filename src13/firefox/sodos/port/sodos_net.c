@@ -21,6 +21,7 @@
 static int net_fd = -1;
 
 int sodos_net_connect(const char* host, int port) {
+  SODOS_BIG_GUARD;
   int rc;
   if (!host || port <= 0 || port > 65535) {
     errno = EINVAL;
@@ -37,6 +38,7 @@ int sodos_net_connect(const char* host, int port) {
 }
 
 int sodos_net_send(const void* buf, int len) {
+  SODOS_BIG_GUARD;
   int sent = 0;
   if (net_fd < 0 || !buf || len < 0) return -1;
   while (sent < len) {
@@ -49,11 +51,13 @@ int sodos_net_send(const void* buf, int len) {
 }
 
 int sodos_net_recv(void* buf, int cap) {
+  SODOS_BIG_GUARD;
   if (net_fd < 0 || !buf || cap < 2) return -2;
   return k_tcp_recv(buf, cap);
 }
 
 int sodos_net_pending(void) {
+  SODOS_BIG_GUARD;
   if (net_fd < 0) return -1;
   return k_net_pending();
 }
@@ -61,6 +65,7 @@ int sodos_net_pending(void) {
 int sodos_net_connected(void) { return net_fd >= 0; }
 
 void sodos_net_close(void) {
+  SODOS_BIG_GUARD;
   if (net_fd >= 0) k_tcp_close();
   net_fd = -1;
 }

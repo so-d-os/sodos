@@ -22,6 +22,7 @@
 #include <netinet/in.h>
 
 #include "sodos.h"
+#include "sodos_internal.h"
 
 #ifndef EAFNOSUPPORT
 #define EAFNOSUPPORT 97
@@ -102,6 +103,7 @@ static int sock_errno(struct ssock* s) {
 }
 
 int socket(int domain, int type, int protocol) {
+  SODOS_BIG_GUARD;
   int i;
   (void)protocol;
   if (domain != AF_INET) {
@@ -125,6 +127,7 @@ int socket(int domain, int type, int protocol) {
 }
 
 int connect(int fd, const struct sockaddr* addr, socklen_t len) {
+  SODOS_BIG_GUARD;
   struct ssock* s = get(fd);
   const struct sockaddr_in* a = (const struct sockaddr_in*)addr;
   int port, h;
@@ -205,16 +208,19 @@ static ssize_t sock_recv(struct ssock* s, void* buf, size_t n, int peek) {
 }
 
 ssize_t sodos_sock_read(int fd, void* buf, size_t n) {
+  SODOS_BIG_GUARD;
   struct ssock* s = get(fd);
   return s ? sock_recv(s, buf, n, 0) : -1;
 }
 
 ssize_t sodos_sock_write(int fd, const void* buf, size_t n) {
+  SODOS_BIG_GUARD;
   struct ssock* s = get(fd);
   return s ? sock_send(s, buf, n) : -1;
 }
 
 ssize_t sodos_sock_recv(int fd, void* buf, size_t n, int flags) {
+  SODOS_BIG_GUARD;
   struct ssock* s = get(fd);
   int saved;
   ssize_t r;
@@ -227,6 +233,7 @@ ssize_t sodos_sock_recv(int fd, void* buf, size_t n, int flags) {
 }
 
 ssize_t sodos_sock_send(int fd, const void* buf, size_t n, int flags) {
+  SODOS_BIG_GUARD;
   struct ssock* s = get(fd);
   int saved;
   ssize_t r;
@@ -239,6 +246,7 @@ ssize_t sodos_sock_send(int fd, const void* buf, size_t n, int flags) {
 }
 
 int sodos_sock_close(int fd) {
+  SODOS_BIG_GUARD;
   struct ssock* s = get(fd);
   if (!s) return -1;
   if (s->h) k_sock_close(s->h);
@@ -248,6 +256,7 @@ int sodos_sock_close(int fd) {
 }
 
 int sodos_sock_fcntl(int fd, int cmd, long arg) {
+  SODOS_BIG_GUARD;
   struct ssock* s = get(fd);
   if (!s) return -1;
   switch (cmd) {
@@ -262,6 +271,7 @@ int sodos_sock_fcntl(int fd, int cmd, long arg) {
 }
 
 short sodos_sock_poll(int fd, short events) {
+  SODOS_BIG_GUARD;
   struct ssock* s = get(fd);
   short ev = 0;
   int m;
@@ -281,6 +291,7 @@ short sodos_sock_poll(int fd, short events) {
 }
 
 int getsockopt(int fd, int level, int opt, void* val, socklen_t* len) {
+  SODOS_BIG_GUARD;
   struct ssock* s = get(fd);
   int v = 0;
   if (!s) return -1;
@@ -300,6 +311,7 @@ int getsockopt(int fd, int level, int opt, void* val, socklen_t* len) {
 }
 
 int setsockopt(int fd, int level, int opt, const void* val, socklen_t len) {
+  SODOS_BIG_GUARD;
   (void)level;
   (void)opt;
   (void)val;
@@ -308,6 +320,7 @@ int setsockopt(int fd, int level, int opt, const void* val, socklen_t len) {
 }
 
 int getsockname(int fd, struct sockaddr* addr, socklen_t* len) {
+  SODOS_BIG_GUARD;
   struct ssock* s = get(fd);
   unsigned lip = 0;
   int lport = 0;
@@ -318,6 +331,7 @@ int getsockname(int fd, struct sockaddr* addr, socklen_t* len) {
 }
 
 int getpeername(int fd, struct sockaddr* addr, socklen_t* len) {
+  SODOS_BIG_GUARD;
   struct ssock* s = get(fd);
   unsigned rip = 0;
   int rport = 0;
@@ -332,11 +346,13 @@ int getpeername(int fd, struct sockaddr* addr, socklen_t* len) {
 }
 
 int shutdown(int fd, int how) {
+  SODOS_BIG_GUARD;
   (void)how;
   return get(fd) ? 0 : -1;
 }
 
 int ioctl(int fd, unsigned long req, ...) {
+  SODOS_BIG_GUARD;
   va_list ap;
   void* arg;
   struct ssock* s;
@@ -511,6 +527,7 @@ int gethostbyname_r(const char* name, struct hostent* ret, char* buf, size_t buf
 }
 
 struct hostent* gethostbyname2(const char* name, int af) {
+  SODOS_BIG_GUARD;
   static struct hostent he;
   static char buf[512];
   struct hostent* r = NULL;

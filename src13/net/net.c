@@ -191,6 +191,9 @@ static void time_init(void) {
  * com a consulta barata um laco de espera do port passa de 64K chamadas
  * dentro de 1 ms; com 64K o PIT voltava a ser lido o tempo todo (11% da CPU)
  * e o relogio atrasava 1,4%. */
+static volatile int tp_started;       /* time_poll ja fixou tick_adj */
+static volatile uint32_t tick_adj_g;  /* ms_now - irq_ticks (so cresce) */
+
 static void time_poll(void) {
   static int started, stuck;
   static uint64_t last_tick;
@@ -217,6 +220,8 @@ static void time_poll(void) {
     same_n = 0;
     m = (uint32_t)tk + tick_adj;
     if ((int32_t)(m - ms_now) > 0) ms_now = m;
+    tick_adj_g = tick_adj;
+    tp_started = 1;
     return;
   }
   if (!stuck) {
@@ -2751,6 +2756,15 @@ void net_tcp_close(void) { api_close(); }
 uint32_t net_ms(void) {
   time_poll();
   return ms_now;
+}
+
+/* Relogio para threads de programa (outras CPUs, sem o BKL): os ticks do
+ * IRQ0 mais o ajuste que o time_poll do mundo calculou. Nao mexe em estado. */
+uint32_t net_ms_fast(void) {
+  uint32_t now = ms_now, m;
+  if (!pit_ok || !tp_started) return now;
+  m = (uint32_t)irq_ticks() + tick_adj_g;
+  return (int32_t)(m - now) > 0 ? m : now;
 }
 
 int net_has_clock(void) {

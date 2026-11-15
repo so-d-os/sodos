@@ -270,14 +270,16 @@ size_t strftime(char* s, size_t max, const char* fmt, const struct tm* tm) {
 /* REALTIME: segundos do RTC + ms do relogio de maquina (o RTC so tem segundos) */
 #if __SIZEOF_POINTER__ == 8
 extern int sched_yield(void) __attribute__((weak));
+extern int sodos__kt __attribute__((weak)); /* libsodos: 1 = k_threads (FFTHREADS) */
 #endif
 
 int clock_gettime(clockid_t id, struct timespec* ts) {
   unsigned ms = k_ms();
 #if __SIZEOF_POINTER__ == 8
-  /* Threads cooperativas: quem espera olhando o relogio tambem precisa ceder. */
+  /* Threads cooperativas: quem espera olhando o relogio tambem precisa ceder.
+   * Com k_threads o timer do kernel ja preempta. */
   static unsigned calls;
-  if (sched_yield && (++calls & 63u) == 0) sched_yield();
+  if (sched_yield && !(&sodos__kt && sodos__kt) && (++calls & 63u) == 0) sched_yield();
 #endif
   if (id == CLOCK_MONOTONIC) {
     ts->tv_sec = (time_t)(ms / 1000);

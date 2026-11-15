@@ -70,6 +70,7 @@ void sodos_init(void) {
 const char* sodos_log_path(void) { return log_path; }
 
 void sodos_vlog(int level, const char* fmt, va_list ap) {
+  SODOS_BIG_GUARD;
   char body[768];
   char line[900];
   char ts[16];
@@ -106,6 +107,7 @@ void sodos_log(int level, const char* fmt, ...) {
 }
 
 void sodos_log_flush(void) {
+  SODOS_BIG_GUARD;
   int old, total, n;
   char* buf;
   if (!log_on || log_len <= 0) return;

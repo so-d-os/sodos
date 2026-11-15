@@ -8,6 +8,24 @@
 #include <so.h>
 #include "unixdrv.h"
 
+/* Lock do stdio (stdlib.c): as threads do Firefox (FFTHREADS) escrevem em
+ * paralelo. Recursivo; some nos alvos de 32 bits. */
+#if defined(__GNUC__) && defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+void __so_io_lock(void);
+void __so_io_unlock(void);
+static inline int io_guard_(void) {
+  __so_io_lock();
+  return 0;
+}
+static inline void io_guard_end_(int* p) {
+  (void)p;
+  __so_io_unlock();
+}
+#define IO_GUARD int io_g_ __attribute__((cleanup(io_guard_end_), unused)) = io_guard_()
+#else
+#define IO_GUARD typedef int io_guard_unused_t
+#endif
+
 #define F_READ 1
 #define F_WRITE 2
 #define F_APPEND 4
@@ -92,6 +110,7 @@ static void ser_write(const char* s, int n) { (void)s; (void)n; }
 #endif
 
 void __so_stdio_flush_out(void) {
+  IO_GUARD;
   if (olen > 0) {
     ser_write(obuf, olen);
     k_write(obuf, olen);
@@ -123,6 +142,7 @@ static int mem_save(FILE* f) {
 }
 
 void __so_stdio_flush_all(void) {
+  IO_GUARD;
   FILE* f;
   for (f = io.open_list; f; f = f->next)
     if (f->flags & F_WRITE) mem_save(f);
@@ -131,6 +151,7 @@ void __so_stdio_flush_all(void) {
 
 /* O buffer passa a ser do FILE. fclose libera. */
 FILE* fopen_mem(char* data, int size) {
+  IO_GUARD;
   FILE* f;
   if (!data || size < 0) return NULL;
   f = (FILE*)calloc(1, sizeof(FILE));
@@ -190,6 +211,7 @@ static int dev_random_path(const char* p) {
 #endif
 
 FILE* fopen(const char* upath, const char* mode) {
+  IO_GUARD;
   FILE* f;
   int fl = 0;
   int load = 0;
@@ -278,6 +300,7 @@ FILE* fopen(const char* upath, const char* mode) {
 }
 
 int fclose(FILE* f) {
+  IO_GUARD;
   FILE** pp;
   int rc = 0;
   if (!f) return EOF;
@@ -311,6 +334,7 @@ int fclose(FILE* f) {
 }
 
 int fflush(FILE* f) {
+  IO_GUARD;
   if (!f) {
     __so_stdio_flush_all();
     return 0;
@@ -352,6 +376,7 @@ static int fill_stdin(void) {
 }
 
 int fgetc(FILE* f) {
+  IO_GUARD;
   if (!f) return EOF;
   if (f->unget >= 0) {
     int c = f->unget;
@@ -390,6 +415,7 @@ int getc(FILE* f) { return fgetc(f); }
 int getchar(void) { return fgetc(stdin); }
 
 int ungetc(int c, FILE* f) {
+  IO_GUARD;
   if (!f || c == EOF) return EOF;
   f->unget = c & 255;
   f->eof = 0;
@@ -397,6 +423,7 @@ int ungetc(int c, FILE* f) {
 }
 
 char* fgets(char* s, int n, FILE* f) {
+  IO_GUARD;
   int i = 0;
   if (n <= 0) return NULL;
   while (i < n - 1) {
@@ -411,6 +438,7 @@ char* fgets(char* s, int n, FILE* f) {
 }
 
 size_t fread(void* buf, size_t sz, size_t n, FILE* f) {
+  IO_GUARD;
   size_t total = sz * n;
   size_t got = 0;
   char* d = (char*)buf;
@@ -453,6 +481,7 @@ static void out_char(char c) {
 }
 
 size_t fwrite(const void* buf, size_t sz, size_t n, FILE* f) {
+  IO_GUARD;
   size_t total = sz * n;
   const char* s = (const char*)buf;
   size_t i;
@@ -482,6 +511,7 @@ size_t fwrite(const void* buf, size_t sz, size_t n, FILE* f) {
 }
 
 int fputc(int c, FILE* f) {
+  IO_GUARD;
   char ch = (char)c;
   if (f && f->kind == K_STDOUT) {
     out_char(ch);
@@ -494,16 +524,19 @@ int putc(int c, FILE* f) { return fputc(c, f); }
 int putchar(int c) { return fputc(c, stdout); }
 
 int fputs(const char* s, FILE* f) {
+  IO_GUARD;
   size_t n = strlen(s);
   return fwrite(s, 1, n, f) == n || n == 0 ? 0 : EOF;
 }
 
 int puts(const char* s) {
+  IO_GUARD;
   if (fputs(s, stdout) == EOF) return EOF;
   return putchar('\n') == EOF ? EOF : 0;
 }
 
 int fseek(FILE* f, long off, int whence) {
+  IO_GUARD;
   long base;
   if (!f || f->kind != K_MEM) return -1;
   if (whence == SEEK_SET) base = 0;
@@ -518,11 +551,13 @@ int fseek(FILE* f, long off, int whence) {
 }
 
 long ftell(FILE* f) {
+  IO_GUARD;
   if (!f || f->kind != K_MEM) return -1;
   return (long)f->pos - (f->unget >= 0 ? 1 : 0);
 }
 
 void rewind(FILE* f) {
+  IO_GUARD;
   fseek(f, 0, SEEK_SET);
   if (f) f->err = 0;
 }
@@ -531,6 +566,7 @@ int feof(FILE* f) { return f ? f->eof : 1; }
 int ferror(FILE* f) { return f ? f->err : 1; }
 
 void clearerr(FILE* f) {
+  IO_GUARD;
   if (f) {
     f->eof = 0;
     f->err = 0;
@@ -612,6 +648,7 @@ FILE* tmpfile(void) {
 }
 
 void perror(const char* s) {
+  IO_GUARD;
   if (s && *s) fprintf(stderr, "%s: %s\n", s, strerror(errno));
   else fprintf(stderr, "%s\n", strerror(errno));
 }
@@ -619,6 +656,7 @@ void perror(const char* s) {
 /* ---------- funcoes que a libc++ espera do <cstdio> ---------- */
 
 int setvbuf(FILE* f, char* buf, int mode, size_t size) {
+  IO_GUARD;
   (void)f;
   (void)buf;
   (void)mode;
@@ -629,6 +667,7 @@ int setvbuf(FILE* f, char* buf, int mode, size_t size) {
 void setbuf(FILE* f, char* buf) { (void)f; (void)buf; }
 
 FILE* freopen(const char* path, const char* mode, FILE* f) {
+  IO_GUARD;
   if (f) fclose(f);
   return fopen(path, mode);
 }

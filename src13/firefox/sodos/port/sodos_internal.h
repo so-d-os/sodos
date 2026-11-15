@@ -36,11 +36,16 @@ struct sodos_thread {
   unsigned magic;
   void* tls_tp;         /* ponteiro de thread (TLS estatico); NULL = thread principal */
   void* tls_raw;        /* bloco a liberar */
+  int ktid;             /* FFTHREADS: tid da k_thread (0 = principal/cooperativa) */
+  int err;              /* FFTHREADS: errno desta thread */
+  struct sodos_thread* znext;  /* FFTHREADS: lista de threads destacadas */
 };
 
 /* sodos_tls.c */
 void* sodos__tls_new(void** raw);
 void sodos__tls_switch(void* tp);
+void* sodos__tls_main(void);
+int sodos__tls_present(void);
 
 void sodos__sched_init(void);
 struct sodos_thread* sodos__self(void);
@@ -51,6 +56,37 @@ void sodos__park(void);
 void sodos__wake(struct sodos_thread* t);
 int sodos__started(void);
 uint64_t sodos__ms(void);
+
+/* Modo das threads (fixado no sodos__sched_init):
+ * 0 = cooperativo (todas as threads no "mundo", CPU0);
+ * 1 = FFTHREADS: cada pthread e uma k_thread do kernel e roda em qualquer CPU;
+ *     mutex/cond/sem viram futex do kernel (k_futex_*). */
+extern int sodos__kt;
+
+/* Lock grande do port (recursivo; no-op no modo cooperativo): protege as
+ * tabelas de fd (posix-lite, soquetes, pipes, shm), o mmap e o log.
+ * sodos__sleep_ms/sodos__yield o soltam enquanto a thread espera. */
+void sodos_big_lock(void);
+void sodos_big_unlock(void);
+int sodos__big_release(void);
+void sodos__big_reacquire(int depth);
+static inline int sodos__big_guard(void) {
+  sodos_big_lock();
+  return 0;
+}
+static inline void sodos__big_guard_end(int* p) {
+  (void)p;
+  sodos_big_unlock();
+}
+#define SODOS_BIG_GUARD \
+  int sodos_big_g_ __attribute__((cleanup(sodos__big_guard_end), unused)) = sodos__big_guard()
+
+/* Aviso de uso errado de pthread no modo k_thread (vai para a serial). */
+void sodos__kt_warn(const char* what, const void* obj);
+
+/* futex de usuario (lock simples 0/1/2) usado pelo modo FFTHREADS */
+void sodos__fl_lock(volatile int* w);
+void sodos__fl_unlock(volatile int* w);
 
 /* sodos_sync.c */
 void sodos__sync_init(void);

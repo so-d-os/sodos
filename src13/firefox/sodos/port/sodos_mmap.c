@@ -16,6 +16,7 @@
 
 #include "sys/mman.h"
 #include "sodos.h"
+#include "sodos_internal.h"
 
 #ifdef __x86_64__
 static void dbg_ch(unsigned char c) {
@@ -91,6 +92,7 @@ static struct sodos_map* find_map(char* a, size_t len) {
 }
 
 void* mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off) {
+  SODOS_BIG_GUARD;
   void* raw;
   uintptr_t al;
   struct sodos_base* b;
@@ -207,6 +209,7 @@ void* mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off) {
 }
 
 int munmap(void* addr, size_t len) {
+  SODOS_BIG_GUARD;
   struct sodos_map** pp = &maps;
   char* a = (char*)addr;
 
@@ -273,6 +276,7 @@ int munmap(void* addr, size_t len) {
 }
 
 int mprotect(void* addr, size_t len, int prot) {
+  SODOS_BIG_GUARD;
 #ifdef SODOS_MMAP_TRACE
   if (len >= 0x10000u) {
     dbg_txt("!MT a=");
@@ -288,6 +292,7 @@ int mprotect(void* addr, size_t len, int prot) {
 }
 
 int madvise(void* addr, size_t len, int advice) {
+  SODOS_BIG_GUARD;
 #ifdef SODOS_MMAP_TRACE
   if (len >= 0x10000u) {
     dbg_txt("!MV a=");
@@ -306,6 +311,7 @@ int madvise(void* addr, size_t len, int advice) {
 }
 
 int msync(void* addr, size_t len, int flags) {
+  SODOS_BIG_GUARD;
   (void)addr;
   (void)len;
   (void)flags;

@@ -22,6 +22,11 @@ O código do Firefox em si não é copiado para o repositório; `setup.sh` baixa
 > Ver [docs/05-firefox-build.md](docs/05-firefox-build.md#estado-em-2026-11-12-googlecom)
 > e a captura [docs/img/firefox-google-sodos.png](docs/img/firefox-google-sodos.png).
 
+> **Estado em 2026-11-15:** as pthreads do Firefox viram **k_threads** e rodam
+> nas outras CPUs (`SET FFTHREADS=0` volta ao cooperativo). No QEMU/KVM com 4
+> CPUs o app C8X (Flutter/wasm) carrega em ~13 s em vez de ~26 s. Ver
+> [docs/06-threads-smp.md](docs/06-threads-smp.md).
+
 ## O que já funciona
 
 **M0 — `SODOS.DLL` + `FBOOT.EXE`** (17 testes, 18 com rede): threads

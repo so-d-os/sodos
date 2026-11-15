@@ -28,9 +28,11 @@
 #include <sched.h>
 #include <semaphore.h>
 #include <time.h>
+#include "sodos_internal.h"
 
 extern void k_exit(int code);
 extern void sodos_sleep_ms(unsigned ms);
+extern int k_thread_cpu(void);
 
 #define FAIL_ERRNO(e) \
   do {                \
@@ -106,6 +108,7 @@ void* mmap64(void* addr, size_t len, int prot, int flags, int fd, long off) {
 }
 
 ssize_t pread(int fd, void* buf, size_t n, off_t off) {
+  SODOS_BIG_GUARD;
   off_t cur = lseek(fd, 0, SEEK_CUR);
   ssize_t r;
   if (cur < 0 || lseek(fd, off, SEEK_SET) < 0) return -1;
@@ -115,6 +118,7 @@ ssize_t pread(int fd, void* buf, size_t n, off_t off) {
 }
 
 ssize_t pwrite(int fd, const void* buf, size_t n, off_t off) {
+  SODOS_BIG_GUARD;
   off_t cur = lseek(fd, 0, SEEK_CUR);
   ssize_t r;
   if (cur < 0 || lseek(fd, off, SEEK_SET) < 0) return -1;
@@ -132,6 +136,7 @@ struct so_iovec {
 };
 
 ssize_t readv(int fd, const struct so_iovec* v, int cnt) {
+  SODOS_BIG_GUARD;
   ssize_t total = 0;
   int i;
   for (i = 0; i < cnt; i++) {
@@ -144,6 +149,7 @@ ssize_t readv(int fd, const struct so_iovec* v, int cnt) {
 }
 
 ssize_t writev(int fd, const struct so_iovec* v, int cnt) {
+  SODOS_BIG_GUARD;
   ssize_t total = 0;
   int i;
   for (i = 0; i < cnt; i++) {
@@ -156,6 +162,7 @@ ssize_t writev(int fd, const struct so_iovec* v, int cnt) {
 }
 
 ssize_t preadv(int fd, const struct so_iovec* v, int cnt, long off) {
+  SODOS_BIG_GUARD;
   ssize_t total = 0;
   int i;
   for (i = 0; i < cnt; i++) {
@@ -168,6 +175,7 @@ ssize_t preadv(int fd, const struct so_iovec* v, int cnt, long off) {
 }
 
 ssize_t pwritev(int fd, const struct so_iovec* v, int cnt, long off) {
+  SODOS_BIG_GUARD;
   ssize_t total = 0;
   int i;
   for (i = 0; i < cnt; i++) {
@@ -336,16 +344,22 @@ int sigaltstack(const stack_t* ss, stack_t* old) {
   return 0;
 }
 
+extern int sodos_ncpu(void); /* sodos_thread.c */
+
 int sched_getaffinity(pid_t pid, size_t n, cpu_set_t* mask) {
+  int i, c = sodos_ncpu();
   (void)pid;
   if (n) {
     memset(mask, 0, n);
-    mask->bits[0] = 1;
+    for (i = 0; i < c && (size_t)i < n * 8; i++)
+      ((unsigned char*)mask)[i >> 3] |= (unsigned char)(1u << (i & 7));
   }
   return 0;
 }
 
-int sched_getcpu(void) { return 0; }
+int sched_getcpu(void) { return k_thread_cpu(); }
+int get_nprocs(void) { return sodos_ncpu(); }
+int get_nprocs_conf(void) { return sodos_ncpu(); }
 int sched_setaffinity(pid_t pid, size_t n, const cpu_set_t* set) {
   (void)pid;
   (void)n;
@@ -709,6 +723,7 @@ char* strptime(const char* s, const char* fmt, struct tm* tm) {
 }
 
 void* mremap(void* old, size_t oldsz, size_t newsz, int flags, ...) {
+  SODOS_BIG_GUARD;
   (void)old;
   (void)oldsz;
   (void)newsz;
@@ -1125,7 +1140,10 @@ static int crash_save(char drv) {
   } else {
     old = 0;
   }
-  if (k_fsave(path, crash_buf, crash_len + old) < 0) return -1;
+  if (k_fsave(path, crash_buf, crash_len + old) < 0) {
+    fprintf(stderr, "[crash] nao gravou %s\n", path);
+    return -1;
+  }
   fprintf(stderr, "[crash] registrado em %s\n", path);
   return 0;
 }
@@ -1187,6 +1205,7 @@ static void crash_log(const char* why) {
 void sodos_dump_stack(void) {
   uintptr_t* sp = (uintptr_t*)__builtin_frame_address(0);
   int i, shown = 0;
+  if (crash_first_set && crash_first) fprintf(stderr, "[stk] motivo: %s\n", crash_first);
   fprintf(stderr, "[stk] base %lx\n", (unsigned long)__executable_start);
   for (i = 0; i < 4000 && shown < 40; i++) {
     uintptr_t v = sp[i];
