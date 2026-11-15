@@ -662,6 +662,25 @@ static int k_open_file(const char* path) {
   return linkext_fn ? linkext_fn(path) : 1;
 }
 
+/* Pendrive (PENDRIVE.EXE, DISKSYNC). op 0: letra atual (0 = SET PENDRIVE=0),
+ * negativa se ainda nao montado; 1: SCAN, texto em out, devolve a letra
+ * montada; 2: montar na letra arg; 3: soltar (EJECT). */
+static int k_pendrive(int op, int arg, char* out, int max) {
+  int L;
+  if (kt_in_thread()) return -1;
+  switch (op) {
+    case 0:
+      L = drives_usb_letter();
+      if (!L) return 0;
+      (void)drives_is_mounted((char)L);   /* monta sozinho se puder */
+      return drives_usb_mounted() ? L : -L;
+    case 1: return drives_usb_scan(out, max);
+    case 2: return drives_usb_mount_at((char)arg);
+    case 3: return drives_usb_eject();
+    default: return -2;
+  }
+}
+
 /* area de transferencia do kernel (a mesma do Ctrl+C/Ctrl+V do WIN e do DOS) */
 static void k_clip_set(const char* s, int n) { clip_set(s, n); }
 
@@ -1102,6 +1121,7 @@ static const struct kexp table[] = {
   EXP(k_futex_wait),
   EXP_NOLOCK(k_futex_wake),
   EXP(k_open_file),
+  EXP(k_pendrive),
 };
 
 #define NEXP (sizeof(table) / sizeof(table[0]))

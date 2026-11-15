@@ -22,7 +22,6 @@
 #include <so.h>
 
 #define SRC_ROOT "Z:\\SAVE"
-#define DST_ROOT "U:"
 #define STABLE_MS 10000u
 #define SCAN_MS 1000u
 #define MAX_TRACK 256
@@ -56,7 +55,15 @@ static void stamp(void) {
   printf("%02d:%02d:%02d ", t / 10000, (t / 100) % 100, t % 100);
 }
 
-static int u_mounted(void) { return (k_drive_mask() >> ('U' - 'A')) & 1; }
+/* Pendrive na letra atual (PENDRIVE MOUNT G: muda; SET PENDRIVE=0 desliga). */
+static char dst_root[3] = "U:";
+static int u_mounted(void) {
+  int l = k_pendrive(0, 0, 0, 0);
+  if (l == 0) return 0;
+  dst_root[0] = (char)(l < 0 ? -l : l);
+  return l > 0;
+}
+#define DST_ROOT dst_root
 
 static struct track* find(const char* path) {
   int i;
@@ -226,7 +233,8 @@ int main(void) {
     int u = u_mounted();
     if (u != was_u) {
       stamp();
-      printf(u ? "pendrive U: presente\n" : "sem pendrive em U:, os arquivos esperam em Z:\n");
+      if (u) printf("pendrive %s presente\n", DST_ROOT);
+      else printf("sem pendrive em %s, os arquivos esperam em Z:\n", DST_ROOT);
       was_u = u;
     }
     pass();

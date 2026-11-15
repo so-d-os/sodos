@@ -1840,6 +1840,21 @@ static int exec_line(char* line, int history) {
     }
     return 0;
   }
+  /* PENDRIVE e o PENDRIVE.EXE (so carregado quando chamado). Com SET
+   * PENDRIVE=0 nem o EXE e procurado. */
+  if (!stricmp(argv[0], "pendrive") || !stricmp(argv[0], "pendrive.exe")) {
+    const char* v = env_get("PENDRIVE");
+    char path[DRV_PATH];
+    if (v && v[0] == '0' && v[1] == 0) {
+      puts_k("Pendrive desligado (SET PENDRIVE=0). Ligue com: SET PENDRIVE=1\n");
+      return 1;
+    }
+    if (mod_find_exe("PENDRIVE.EXE", path, sizeof(path)) != 0) {
+      puts_k("PENDRIVE.EXE nao encontrado (PATH, PATHSODOS). Sem ele: mount pendrive G:, usb\n");
+      return 1;
+    }
+    return finish_exe(path, argc, argv);
+  }
   for (i = 0; i < cmd_count; ++i) {
     if (!stricmp(argv[0], commands[i].name)) {
       /* EDIT usa a tela inteira: no Command do WIN vira tarefa com tela propria. */

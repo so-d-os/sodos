@@ -49,8 +49,12 @@ static char cur_dir[26][DRV_PATH];
 static uint32_t drv_lba[26];   /* inicio da particao FAT */
 /* fat.c guarda um FAT por vez: a unidade dele agora (-1 = nenhuma valida). */
 static int fat_cur = -1;
-#define USB_LETTER 'U'
-static uint32_t usb_gen;       /* xhci_disk_gen() do pendrive montado em U: */
+/* Letra do pendrive: U: no boot; PENDRIVE MOUNT G: (ou mount pendrive G:)
+ * troca. SET PENDRIVE=0 desliga tudo: nem procura o pendrive. */
+static char usb_letter = 'U';
+#define USB_LETTER usb_letter
+static int usb_hold;           /* 1 depois de PENDRIVE EJECT: nao monta sozinho */
+static uint32_t usb_gen;       /* xhci_disk_gen() do pendrive montado */
 static uint32_t usb_try_ms;    /* ultima procura sem achar (0 = nenhuma) */
 static const struct fsdrv_ops* drv_ops[26];   /* DRV_EXT */
 static void* drv_vol[26];
@@ -189,8 +193,14 @@ static int ext_list(int idx, const char* name, char* out, int max) {
 /* Pendrive em U:: a primeira particao FAT do MBR ou, sem particao nenhuma,
  * o disco inteiro (alguns pendrives vem assim). FAT12/16 fica com o fat.c;
  * FAT32 vai para o FAT32.DLL (so carregado se aparecer um). */
+static int pendrive_on(void) {
+  const char* v = env_get("PENDRIVE");
+  return !(v && v[0] == '0' && v[1] == 0);
+}
+
 static int usb_mount(void) {
   int idx = letter_idx(USB_LETTER);
+  char L[3] = { USB_LETTER, ':', 0 };
   uint32_t lba = 0;
   uint8_t type = 0;
   uint8_t s0[512];
@@ -217,7 +227,8 @@ static int usb_mount(void) {
       found = 1;
   }
   if (!found) {
-    puts_k("U: o pendrive nao tem particao FAT.\n");
+    puts_k(L);
+    puts_k(" o pendrive nao tem particao FAT.\n");
     return -2;
   }
   if (lba == 0) {
@@ -234,7 +245,10 @@ static int usb_mount(void) {
     fat_set_partition_offset(lba);
     rc = fat_mount();
     if (rc == -2) rc = ext_mount(idx, DISK_USB, lba, bs) == 0 ? 0 : -3;
-    else if (rc != 0) puts_k("U: o pendrive nao tem FAT12/FAT16/FAT32.\n");
+    else if (rc != 0) {
+      puts_k(L);
+      puts_k(" o pendrive nao tem FAT12/FAT16/FAT32.\n");
+    }
     if (rc != 0) return -2;
     if (drv_kind[idx] != DRV_EXT) {
       drv_kind[idx] = DRV_FAT;
@@ -244,7 +258,8 @@ static int usb_mount(void) {
   drv_ata[idx] = DISK_USB;
   drv_lba[idx] = lba;
   usb_gen = xhci_disk_gen();
-  puts_k("U: pendrive montado (");
+  puts_k(L);
+  puts_k(" pendrive montado (");
   puts_k(xhci_disk_name());
   if (drv_kind[idx] == DRV_EXT) {
     puts_k(", ");
@@ -258,7 +273,13 @@ static int usb_mount(void) {
  * quando ele e trocado; sem pendrive, procura no maximo uma vez por segundo. */
 static int drv_present(int idx) {
   if (idx < 0) return 0;
-  if (idx == letter_idx(USB_LETTER) &&
+  if (idx == letter_idx(USB_LETTER) && drv_kind[idx] != DRV_NONE && drv_ata[idx] == DISK_USB &&
+      !pendrive_on()) {
+    ext_drop(idx);   /* SET PENDRIVE=0 com ele montado: solta */
+    drv_kind[idx] = DRV_NONE;
+    if (fat_cur == idx) fat_cur = -1;
+  }
+  if (idx == letter_idx(USB_LETTER) && pendrive_on() && !usb_hold &&
       (drv_kind[idx] == DRV_NONE || !xhci_disk_sectors() || usb_gen != xhci_disk_gen())) {
     if (drv_kind[idx] != DRV_NONE && !xhci_disk_sectors()) {
       ext_drop(idx);
@@ -286,8 +307,165 @@ int drives_use(char letter) {
 }
 
 int drives_mount_usb(void) {
+  if (!pendrive_on()) return -4;
   usb_try_ms = 0;
+  usb_hold = 0;
   return usb_mount();
+}
+
+/* Solta o pendrive da letra atual (se for dele). */
+static void usb_unmount(void) {
+  int idx = letter_idx(USB_LETTER);
+  if (drv_kind[idx] == DRV_NONE || drv_ata[idx] != DISK_USB) return;
+  if (fat_cur == idx) fat_cur = -1;
+  ext_drop(idx);
+  drv_kind[idx] = DRV_NONE;
+  cur_dir[idx][0] = '\0';
+  if (cur_letter == USB_LETTER) cur_letter = 'C';
+}
+
+int drives_usb_letter(void) { return pendrive_on() ? USB_LETTER : 0; }
+
+int drives_usb_mounted(void) {
+  int idx = letter_idx(USB_LETTER);
+  return pendrive_on() && drv_kind[idx] != DRV_NONE && drv_ata[idx] == DISK_USB;
+}
+
+/* Monta o pendrive em L. 0 ok; -1 sem pendrive; -2 sem FAT; -4 PENDRIVE=0;
+ * -5 letra ocupada por outra unidade; -6 letra invalida. */
+int drives_usb_mount_at(char L) {
+  int idx = letter_idx(L);
+  if (!pendrive_on()) return -4;
+  if (idx < 0 || L == 'C' || L == 'c' || L == 'Z' || L == 'z') return -6;
+  L = norm_letter(L);
+  if (L != USB_LETTER && drv_kind[idx] != DRV_NONE) return -5;
+  if (L != USB_LETTER) {
+    usb_unmount();
+    usb_letter = L;
+  }
+  usb_try_ms = 0;
+  usb_hold = 0;
+  usb_gen = 0;
+  return usb_mount();
+}
+
+struct sbuf { char* p; int n, max; };
+
+static void sb_s(struct sbuf* b, const char* s) {
+  while (*s && b->n < b->max - 1) b->p[b->n++] = *s++;
+  if (b->max > 0) b->p[b->n] = 0;
+}
+
+static void sb_u(struct sbuf* b, uint32_t v) {
+  char t[12];
+  uint32_to_string(v, t, sizeof(t));
+  sb_s(b, t);
+}
+
+/* Tamanho em MB (ou KB abaixo de 1 MB) de n setores. */
+static void sb_size(struct sbuf* b, uint32_t secs) {
+  if (secs >= 2048u) { sb_u(b, secs / 2048u); sb_s(b, " MB"); }
+  else { sb_u(b, secs / 2u); sb_s(b, " KB"); }
+}
+
+static const char* part_name(uint8_t t) {
+  switch (t) {
+    case 0x01: return "FAT12";
+    case 0x04: case 0x06: case 0x0E: return "FAT16";
+    case 0x0B: case 0x0C: return "FAT32";
+    case 0x07: return "NTFS/exFAT";
+    case 0x83: return "Linux";
+    case 0xEE: return "GPT";
+    case 0xEF: return "EFI";
+    default: return "outro";
+  }
+}
+
+/* Rotulo do setor de boot FAT (11 bytes) sem os espacos do fim. */
+static void sb_label(struct sbuf* b, const uint8_t* bs) {
+  char l[12];
+  int i, off = fsdrv_is_fat32(bs) ? 71 : 43, n = 11;
+  for (i = 0; i < 11; i++) l[i] = (char)bs[off + i];
+  while (n > 0 && (l[n - 1] == ' ' || l[n - 1] == 0)) n--;
+  l[n] = 0;
+  for (i = 0; i < n; i++) if ((uint8_t)l[i] < 32 || (uint8_t)l[i] > 126) return;
+  if (n && !(n == 7 && l[0] == 'N' && l[1] == 'O' && l[2] == ' ')) {
+    sb_s(b, "  rotulo ");
+    sb_s(b, l);
+  }
+}
+
+/* PENDRIVE SCAN: liga o USB, procura o pendrive e descreve disco, particoes
+ * e onde esta montado. Devolve a letra montada, 0 se nao montou, -4 desligado. */
+int drives_usb_scan(char* out, int max) {
+  struct sbuf b = { out, 0, max };
+  uint8_t s0[512], bs[512];
+  uint32_t secs;
+  int p, any = 0;
+  if (!out || max < 2) return -1;
+  out[0] = 0;
+  if (!pendrive_on()) {
+    sb_s(&b, "Pendrive desligado (SET PENDRIVE=0). Ligue com SET PENDRIVE=1.\n");
+    return -4;
+  }
+  (void)xhci_disk_init();
+  secs = xhci_disk_sectors();
+  if (!secs) {
+    sb_s(&b, "Nenhum pendrive (porta do PC ou hub USB 2).\n");
+    return 0;
+  }
+  sb_s(&b, "Pendrive: ");
+  sb_s(&b, xhci_disk_name());
+  sb_s(&b, ", ");
+  sb_size(&b, secs);
+  sb_s(&b, "\n");
+  if (disk_read_sector(DISK_USB, 0, s0) != 0) {
+    sb_s(&b, "  erro ao ler o setor 0\n");
+    return 0;
+  }
+  if ((s0[54] == 'F' && s0[55] == 'A' && s0[56] == 'T') ||
+      (s0[82] == 'F' && s0[83] == 'A' && s0[84] == 'T') || fsdrv_is_fat32(s0)) {
+    sb_s(&b, "  sem tabela de particoes: FAT no disco inteiro");
+    sb_label(&b, s0);
+    sb_s(&b, "\n");
+    any = 1;
+  } else if (s0[510] == 0x55 && s0[511] == 0xAA) {
+    for (p = 0; p < 4; p++) {
+      const uint8_t* e = s0 + 446 + p * 16;
+      uint32_t lba = e[8] | ((uint32_t)e[9] << 8) | ((uint32_t)e[10] << 16) | ((uint32_t)e[11] << 24);
+      uint32_t n = e[12] | ((uint32_t)e[13] << 8) | ((uint32_t)e[14] << 16) | ((uint32_t)e[15] << 24);
+      if (!e[4] || !n) continue;
+      any = 1;
+      sb_s(&b, "  particao ");
+      sb_u(&b, (uint32_t)p + 1u);
+      sb_s(&b, ": ");
+      sb_s(&b, part_name(e[4]));
+      sb_s(&b, ", ");
+      sb_size(&b, n);
+      if (disk_read_sector(DISK_USB, lba, bs) == 0 && bs[510] == 0x55 && bs[511] == 0xAA)
+        sb_label(&b, bs);
+      sb_s(&b, "\n");
+    }
+  }
+  if (!any) sb_s(&b, "  nenhuma particao reconhecida\n");
+  usb_hold = 0;
+  usb_try_ms = 0;
+  if (usb_mount() == 0) {
+    char L[4] = { USB_LETTER, ':', '\n', 0 };
+    sb_s(&b, "Montado em ");
+    sb_s(&b, L);
+    return USB_LETTER;
+  }
+  sb_s(&b, "Nao montou (precisa de FAT12/16/32 na 1a particao FAT).\n");
+  return 0;
+}
+
+/* PENDRIVE EJECT: solta e nao monta sozinho ate PENDRIVE MOUNT/SCAN. */
+int drives_usb_eject(void) {
+  if (!drives_usb_mounted()) return -1;
+  usb_unmount();
+  usb_hold = 1;
+  return 0;
 }
 
 void drives_init(void) {
