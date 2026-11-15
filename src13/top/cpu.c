@@ -5,8 +5,8 @@
 
 #define CR 1
 #define CC 0
-#define CH 22
-#define CW 78
+#define CH (ROWS - 3)
+#define CW (COLS - 2)
 #define ATUALIZA 500
 #define CPU_MAX 8
 

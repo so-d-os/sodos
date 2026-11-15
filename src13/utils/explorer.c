@@ -786,6 +786,8 @@ static void ask_answer(int yes) {
 
 /* --------------------------------------------------------------- desenho */
 static void draw_folder(int x, int y, int on_sel) {
+  /* tema com icones (Configuracoes > Temas): o desenho da pasta do tema */
+  if (wg_icon("PASTA", x - 1, y, 17)) return;
   unsigned body = on_sel ? 0xFFE9A0 : 0xF0C860;
   unsigned dark = on_sel ? 0xC8A040 : 0xC09030;
   gui_fill(x, y + 2, 16, 3, dark);
@@ -795,6 +797,8 @@ static void draw_folder(int x, int y, int on_sel) {
 }
 
 static void draw_file(int x, int y, int on_sel) {
+  /* tema com icones (Configuracoes > Temas): o desenho da pasta do tema */
+  if (wg_icon("ARQUIVO", x - 1, y, 17)) return;
   unsigned p = on_sel ? 0xFFFFFF : 0xF8F8F8;
   gui_fill(x + 2, y + 2, 11, 12, p);
   gui_fill(x + 2, y + 2, 11, 1, 0x909090);
@@ -945,8 +949,8 @@ int main(int argc, char** argv) {
   if (argc > 2 && argv[1] && (argv[1][0] == '/' || argv[1][0] == '-') &&
       (argv[1][1] == 'P' || argv[1][1] == 'p') && argv[2] && argv[2][0])
     g_folder = 1;
-  /* um terco da largura e metade da altura da tela */
-  if (gui_open_pct("Explorer", 33, 50) != 0) {
+  /* dois tercos da largura e metade da altura da tela */
+  if (gui_open_pct("Explorer", 67, 50) != 0) {
     printf("EXPLORER: nao abriu a janela\n");
     return 1;
   }
@@ -1035,7 +1039,7 @@ int main(int argc, char** argv) {
     /* -------------------------------------------------------- coluna esquerda */
     lx = 10;
     ly = by + bh + 10;
-    lw = sw < 760 ? 160 : 210; /* janela estreita (1/3 da tela) */
+    lw = sw < 760 ? 160 : 210; /* janela estreita (tela pequena) */
     lh = sh - ly - (ch + 26) - 10;
     if (lh < 200) lh = 200;
     /* visao de pasta (aberta do desktop): sem unidades nem atalhos */

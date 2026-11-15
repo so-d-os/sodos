@@ -1,0 +1,14 @@
+Icones do tema Moderno
+=====================
+
+Cada icone e NOME.ICN (o kernel le) com o NOME.PNG de origem ao lado.
+O .ICN e "ICN1", largura e altura (16 bits) e os pixels RGBA. O TEMAS.EXE
+converte os PNG que nao tem .ICN quando o tema e aplicado: para trocar um
+icone basta por o PNG novo aqui e apagar o .ICN antigo.
+
+Ordem de procura de um icone do desktop: NOME.ICN do programa (FIREFOX.EXE
+-> FIREFOX.ICN), depois o do tipo (PASTA, ARQUIVO, IMAGEM, VIDEO, ATALHO,
+PROGRAMA). Sem nenhum, o kernel desenha o icone classico.
+
+Um tema novo e uma pasta nova em \SODOS\ICONS com TEMA.CFG (copie o de
+MODERNO) e os icones. Ele aparece sozinho em Configuracoes > Temas.

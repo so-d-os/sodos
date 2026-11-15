@@ -73,6 +73,14 @@ unsigned k_drive_mask(void);
 int k_vput(int row, int col, const unsigned short* cells, int n);
 /* cursor na linha/coluna; row < 0 esconde */
 void k_cursor(int row, int col);
+/* Tamanho da tela de celulas (k_vput usa o passo cols). 80x25 no DOS; numa
+ * janela do Command do WIN, depois desta chamada a grade segue o tamanho da
+ * janela e cada mudanca chega a k_getc/k_trygetc como KEY_RESIZE.
+ * 0 ok; -1 sem tela de celulas (preenche 80x25 mesmo assim). */
+int k_textsize(int* cols, int* rows);
+#ifndef KEY_RESIZE
+#define KEY_RESIZE 0x1F0
+#endif
 /* Desenho do caractere ch na tela de texto: 16 bytes, um por linha, bit 7 a
  * esquerda. Vale para ch em toda a tela, inclusive o que ja esta escrito.
  * 0 ok; -1 ch invalido. k_font_set tambem da -1 no WIN ou com a saida desviada.
@@ -323,8 +331,42 @@ int k_win_wallpaper(const void* rgba, int w, int h);
 int k_ui_menu_pos(int pos);
 int k_ui_glass(int on);
 int k_ui_ia(int on);
+/* Tema (Configuracoes > Temas): pastas em \SODOS\ICONS, escolha gravada em
+ * D:\SODOS\TEMA.CFG pelo TEMAS.EXE. Os widgets (GUI.DLL) seguem sozinhos. */
+typedef struct {
+  unsigned gen;        /* muda a cada troca de tema */
+  int modern;          /* 0 classico (relevo), 1 moderno (chapado, redondo) */
+  int icons;           /* 1 = a pasta tem icones (.ICN) */
+  char name[16];       /* pasta em \SODOS\ICONS */
+  char dir[40];        /* "X:\SODOS\ICONS\NOME\" ou "" */
+  unsigned face, bg, panel, text, text_dim, text_dis, sel_bg, sel_text, field_bg,
+      border, accent;
+  int radius, btn_h, row_h;   /* 0 = o padrao do GUI.DLL */
+} k_ui_theme_t;
+/* set: pasta do tema a carregar (NULL so consulta); out: estado atual.
+ * Devolve gen (set NULL) ou 0 / -1 (sem a pasta). */
+int k_ui_theme(const char* set, k_ui_theme_t* out);
 /* Pede ao WIN que abra um programa (janela); 0 = pedido aceito. */
 int k_win_launch(const char* path);
+/* Alt+Tab (WINTAB.EXE). k_win_list: janelas da frente para tras, como estavam
+ * ao apertar Alt+Tab (o proprio painel fica de fora). k_win_thumb: miniatura i
+ * em w x h RGBA. k_win_shot: pixels da tela agora, RGBA. k_win_activate(id):
+ * poe a janela na frente. k_alttab: 1 enquanto o Alt segue apertado; *tabs =
+ * Tabs desde o Alt (Shift+Tab desconta). k_win_size: tamanho da tela.
+ * k_gui_panel: janela sem titulo nem moldura no retangulo (x, y, w, h). */
+typedef struct {
+  int id;
+  int x, y, w, h;
+  int tw, th;
+  char title[64];
+} k_win_t;
+int k_win_list(k_win_t* out, int max);
+int k_win_thumb(int i, void* rgba, int w, int h);
+int k_win_shot(int x, int y, int w, int h, void* rgba);
+int k_win_activate(int id);
+int k_alttab(int* tabs);
+int k_win_size(int* w, int* h);
+int k_gui_panel(const char* title, int x, int y, int w, int h);
 /* Abre o arquivo com o programa associado a extensao (LINKEXT.DLL, SET
  * LINKEXT=1). 0 = abriu; 1 = sem associacao ou LINKEXT desligado. */
 int k_open_file(const char* path);

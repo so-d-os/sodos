@@ -5,12 +5,12 @@
 
 #define MR 1           /* janela */
 #define MC 0
-#define MH 22
-#define MW 78
+#define MH (ROWS - 3)
+#define MW (COLS - 2)
 #define GR (MR + 2)    /* quadro */
 #define GC 3
-#define GL 15
-#define GW 72
+#define GL (MH - 7)
+#define GW (MW - 6)
 #define ATUALIZA 2000
 
 static const char* const rotulos[10] = {

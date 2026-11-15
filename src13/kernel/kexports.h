@@ -33,6 +33,7 @@ struct kexp_textscr {
   int (*font_set)(int ch, const uint8_t* glyph);
   void (*font_reset)(void);
   int (*key)(int wait);
+  void (*size)(int* cols, int* rows); /* k_textsize */
 };
 void kexp_set_textscr(const struct kexp_textscr* ops);
 
@@ -43,3 +44,4 @@ void kx_cursor(int row, int col);
 int kx_getc(void);
 void kx_clear(void);
 void kx_puts(const char* s);
+int kx_textsize(int* cols, int* rows);

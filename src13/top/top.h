@@ -91,9 +91,15 @@
 #define K_ENTER '\n'
 #define K_TAB '\t'
 #define K_EOF 26
-#define K_NADA (-1)     /* o tempo de atualizar venceu */
+#define K_NADA (-1)     /* o tempo de atualizar venceu (ou a janela mudou de tamanho) */
+#define K_RESIZE 0x1F0  /* KEY_RESIZE do k_getc: a janela do WIN mudou */
 
 /* ---------- tela.c ---------- */
+/* Tamanho da tela: 80x25 no DOS; no Command do WIN, o da janela (k_textsize).
+ * As telas se desenham com COLS e ROWS e se ajustam quando ele muda. */
+#define TMAXC 256
+#define TMAXR 96
+extern int COLS, ROWS;
 int tela_inicia(void);   /* -1 fora da tela de texto (WIN, saida desviada) */
 void tela_fim(void);
 void tela_mostra(void);
@@ -120,7 +126,7 @@ void aviso(const char* titulo, const char* msg);
 
 /* ---------- dados.c ---------- */
 #define MAX_PROC 48
-#define MAPA_MAX 2048
+#define MAPA_MAX 16384
 
 struct proc {
   struct k_proc k;

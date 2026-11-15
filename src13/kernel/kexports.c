@@ -366,6 +366,23 @@ static void k_cursor(int row, int col) {
   goto_xy(row, col);
 }
 
+/* Tamanho da tela de celulas: 80x25 no DOS; numa janela do Command do WIN, o
+ * tamanho da janela (e cada mudanca dele chega a k_getc como KEY_RESIZE). */
+static int k_textsize(int* cols, int* rows) {
+  int c = 80, r = 25;
+  if (tscr_on() && tscr->size) {
+    tscr->size(&c, &r);
+  } else if (!text_screen_ok()) {
+    if (cols) *cols = c;
+    if (rows) *rows = r;
+    return -1;
+  }
+  if (cols) *cols = c;
+  if (rows) *rows = r;
+  return 0;
+}
+
+int kx_textsize(int* cols, int* rows) { return k_textsize(cols, rows); }
 int kx_vput(int row, int col, const uint16_t* cells, int n) { return k_vput(row, col, cells, n); }
 void kx_cursor(int row, int col) { k_cursor(row, col); }
 int kx_getc(void) { return k_getc(); }
@@ -699,11 +716,29 @@ static int k_ui_glass(int on) {
   if (on < 0) return ui_glass_get();
   return ui_glass_set(on);
 }
+/* tema: set = pasta em \SODOS\ICONS (NULL so consulta), out = estado */
+static int k_ui_theme(const char* set, struct ui_theme_info* out) {
+  return ui_theme_api(set, out);
+}
 static int k_ui_ia(int on) {
   if (on < 0) return ui_ia_get();
   return ui_ia_set(on);
 }
 static int k_gui_dock(const char* title, int w) { return gui_dock_open(title, w); }
+/* Alt+Tab: o WINTAB.EXE le a pilha de janelas e as miniaturas. */
+static int k_win_list(struct k_win_info* out, int max) { return kt_in_thread() ? -1 : win_list_api(out, max); }
+static int k_win_thumb(int i, void* rgba, int w, int h) {
+  return kt_in_thread() ? -1 : win_thumb_api(i, rgba, w, h);
+}
+static int k_win_shot(int x, int y, int w, int h, void* rgba) {
+  return kt_in_thread() ? -1 : win_shot_api(x, y, w, h, rgba);
+}
+static int k_win_activate(int id) { return kt_in_thread() ? -1 : win_activate_api(id); }
+static int k_alttab(int* tabs) { return alttab_api(tabs); }
+static int k_win_size(int* w, int* h) { return win_screen_size(w, h) ? 0 : -1; }
+static int k_gui_panel(const char* title, int x, int y, int w, int h) {
+  return kt_in_thread() ? -1 : gui_panel_open(title, x, y, w, h);
+}
 static int k_gui_open_pct(const char* title, int wpct, int hpct) {
   return gui_open_pct(title, wpct, hpct);
 }
@@ -1111,6 +1146,7 @@ static const struct kexp table[] = {
   EXP(k_ui_menu_pos),
   EXP(k_ui_glass),
   EXP(k_ui_ia),
+  EXP(k_ui_theme),
   EXP(k_gui_dock),
   EXP(k_gui_open_pct),
   EXP(k_thread_create),
@@ -1126,6 +1162,14 @@ static const struct kexp table[] = {
   EXP_NOLOCK(k_futex_wake),
   EXP(k_open_file),
   EXP(k_pendrive),
+  EXP(k_textsize),
+  EXP(k_win_list),
+  EXP(k_win_thumb),
+  EXP(k_win_shot),
+  EXP(k_win_activate),
+  EXP(k_alttab),
+  EXP(k_win_size),
+  EXP(k_gui_panel),
 };
 
 #define NEXP (sizeof(table) / sizeof(table[0]))

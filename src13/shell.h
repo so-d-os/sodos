@@ -83,6 +83,8 @@ int shell_break(void);
 #define KEY_INS   0x109
 /* F1..F12 = KEY_F(1)..KEY_F(12), como no curses */
 #define KEY_F(n)  (0x140 + (n))
+/* a janela do Command mudou de tamanho (so para quem chamou k_textsize) */
+#define KEY_RESIZE 0x1F0
 
 int strcmp(const char* a, const char* b);
 uint32_t str_to_uint32(const char* str, uint32_t base);

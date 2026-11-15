@@ -66,13 +66,29 @@ static const unsigned char glifos[N_GLIFOS][16] = {
 };
 
 static unsigned char salvo[N_GLIFOS][16];
-static unsigned short tela[25 * 80];
-static unsigned short vista[25 * 80];
-static unsigned short copia[25 * 80];
+/* Celulas com passo TMAXC: a tela muda de tamanho sem copiar nada. */
+static unsigned short tela[TMAXR * TMAXC];
+static unsigned short vista[TMAXR * TMAXC];
+static unsigned short copia[TMAXR * TMAXC];
+int COLS = 80, ROWS = 25;
+
+/* Le o tamanho da tela; a proxima tela_mostra manda tudo de novo. */
+static void tamanho(void) {
+  int i, c = 80, r = 25;
+  k_textsize(&c, &r);
+  if (c < 40) c = 40;
+  if (r < 12) r = 12;
+  if (c > TMAXC) c = TMAXC;
+  if (r > TMAXR) r = TMAXR;
+  COLS = c;
+  ROWS = r;
+  for (i = 0; i < TMAXR * TMAXC; i++) vista[i] = 0xFFFF;
+}
 
 int tela_inicia(void) {
   int i;
   if (k_vput(0, 0, tela, 0) != 0) return -1;
+  tamanho();
   if (k_blink(0) != 0) return -1;
   for (i = 0; i < N_GLIFOS; i++)
     if (k_font_get(G_BASE + i, salvo[i]) != 0) return -1;
@@ -81,7 +97,6 @@ int tela_inicia(void) {
       tela_fim();
       return -1;
     }
-  for (i = 0; i < 25 * 80; i++) vista[i] = 0xFFFF;
   k_cursor(-1, 0);
   return 0;
 }
@@ -96,23 +111,25 @@ void tela_fim(void) {
 
 void tela_mostra(void) {
   int r, c;
-  for (r = 0; r < 25; r++) {
+  for (r = 0; r < ROWS; r++) {
     int a = -1, b = -1;
-    for (c = 0; c < 80; c++) {
-      if (tela[r * 80 + c] != vista[r * 80 + c]) {
+    unsigned short* t = tela + r * TMAXC;
+    unsigned short* v = vista + r * TMAXC;
+    for (c = 0; c < COLS; c++) {
+      if (t[c] != v[c]) {
         if (a < 0) a = c;
         b = c;
       }
     }
     if (a < 0) continue;
-    k_vput(r, a, tela + r * 80 + a, b - a + 1);
-    for (c = a; c <= b; c++) vista[r * 80 + c] = tela[r * 80 + c];
+    k_vput(r, a, t + a, b - a + 1);
+    for (c = a; c <= b; c++) v[c] = t[c];
   }
 }
 
 void poe(int r, int c, int ch, int cor) {
-  if (r < 0 || r >= 25 || c < 0 || c >= 80) return;
-  tela[r * 80 + c] = (unsigned short)((ch & 0xFF) | ((cor & 0xFF) << 8));
+  if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return;
+  tela[r * TMAXC + c] = (unsigned short)((ch & 0xFF) | ((cor & 0xFF) << 8));
 }
 
 void texto(int r, int c, const char* s, int cor) {
@@ -134,8 +151,8 @@ void linha(int r, int c, int n, int ch, int cor) {
 
 void pinta(int r, int c, int n, int cor) {
   for (; n > 0; n--, c++) {
-    if (r < 0 || r >= 25 || c < 0 || c >= 80) continue;
-    tela[r * 80 + c] = (unsigned short)((tela[r * 80 + c] & 0xFF) | ((cor & 0xFF) << 8));
+    if (r < 0 || r >= ROWS || c < 0 || c >= COLS) continue;
+    tela[r * TMAXC + c] = (unsigned short)((tela[r * TMAXC + c] & 0xFF) | ((cor & 0xFF) << 8));
   }
 }
 
@@ -143,7 +160,7 @@ int tam(const char* s) { return (int)strlen(s); }
 
 void fundo(void) {
   int r;
-  for (r = 1; r < 24; r++) linha(r, 0, 80, G_DESK, C_FUNDO);
+  for (r = 1; r < ROWS - 1; r++) linha(r, 0, COLS, G_DESK, C_FUNDO);
 }
 
 /* Como o menu do MC: abas na barra ciano, a ativa em preto. */
@@ -151,7 +168,7 @@ void menu_topo(int aba) {
   static const char* abas[4] = { " Processos ", " Mapa ", " Video ", " CPU " };
   char buf[32];
   int c = 7, i, t;
-  linha(0, 0, 80, ' ', C_MENU);
+  linha(0, 0, COLS, ' ', C_MENU);
   texto(0, 1, "TOP", COR(CIANO, BRANCO));
   for (i = 0; i < 4; i++) {
     int cor = i == aba ? C_MENUSEL : C_MENU;
@@ -162,12 +179,12 @@ void menu_topo(int aba) {
   t = k_time();
   if (t >= 0) {
     sprintf(buf, "%02d:%02d:%02d UTC", t / 10000, t / 100 % 100, t % 100);
-    texto(0, 66, buf, C_MENU);
+    texto(0, COLS - 14, buf, C_MENU);
   }
   {
     unsigned s = k_ms() / 1000;
     sprintf(buf, "ligado %u:%02u:%02u", s / 3600, s / 60 % 60, s % 60);
-    texto(0, 46, buf, C_MENU);
+    texto(0, COLS - 34, buf, C_MENU);
   }
 }
 
@@ -175,12 +192,13 @@ void menu_topo(int aba) {
 void teclas(const char* const* rotulos) {
   int i, c = 0;
   char n[4];
-  linha(24, 0, 80, ' ', C_ROTULO);
+  int kw = COLS / 10;
+  linha(ROWS - 1, 0, COLS, ' ', C_ROTULO);
   for (i = 0; i < 10; i++) {
-    int w = i == 9 ? 80 - c : 8;
+    int w = i == 9 ? COLS - c : kw;
     sprintf(n, "%d", i + 1);
-    texto(24, c, n, C_TECLA);
-    textow(24, c + tam(n), rotulos[i], w - tam(n), C_ROTULO);
+    texto(ROWS - 1, c, n, C_TECLA);
+    textow(ROWS - 1, c + tam(n), rotulos[i], w - tam(n), C_ROTULO);
     c += w;
   }
 }
@@ -244,6 +262,10 @@ int tecla(int ms) {
     }
   }
   if (k < 0) return K_EOF;
+  if (k == K_RESIZE) {
+    tamanho();
+    return K_NADA;
+  }
   if (k == '\r') return K_ENTER;
   return k;
 }
@@ -259,10 +281,10 @@ void aviso(const char* titulo, const char* msg) {
       w = l + 8;
     }
   }
-  if (w > 76) w = 76;
+  if (w > COLS - 4) w = COLS - 4;
   h = n + 6;
-  r = (24 - h) / 2;
-  c = (80 - w) / 2;
+  r = (ROWS - 1 - h) / 2;
+  c = (COLS - w) / 2;
   memcpy(copia, tela, sizeof tela);
   janela(r, c, h, w, titulo);
   for (i = 0, p = msg; i < n; i++) {

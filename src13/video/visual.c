@@ -663,6 +663,453 @@ static void gfx_clear(uint32_t c) {
 }
 
 /* ---------------------------------------------------------------------------
+ * Temas (Configuracoes > Temas, TEMAS.EXE).
+ *
+ * Cada tema e uma pasta \SODOS\ICONS\<NOME> com TEMA.CFG (cores, estilo) e os
+ * icones NOME.ICN. A escolha do usuario fica em D:\SODOS\TEMA.CFG
+ * ("tema=MODERNO"); sem esse arquivo vale CLASSICO, que e o WIN de sempre: as
+ * cores abaixo sao as dele e os icones continuam desenhados pelo kernel. Chave
+ * que falta no TEMA.CFG de um tema fica com o valor classico, entao um tema
+ * novo so precisa dizer o que muda.
+ * Em 8bpp (modo 13h) nao ha mistura: tudo fica solido e sem icones de arquivo.
+ * ------------------------------------------------------------------------- */
+struct ui_theme {
+  uint32_t bar, panel, title_a, title_i, text, ttext, dim, accent, border;
+  uint32_t hot, hot_text, close, tbtn, desk, label, label_sh;
+  int bar_a, panel_a, radius, label_sh_on, icon_px;
+  int modern;          /* estilo=moderno: claro, chapado, cantos maiores */
+  int icons;           /* icones=arquivo: usa os .ICN da pasta */
+  char plate[12];      /* prato atras dos icones do desktop (FUNDO) */
+  /* widgets dos programas (GUI.DLL, k_ui_theme) */
+  uint32_t w_face, w_bg, w_panel, w_text, w_dim, w_dis, w_sel, w_sel_text, w_field,
+      w_border, w_accent;
+  int w_radius, w_btn_h, w_row_h;
+  char name[16];       /* pasta em \SODOS\ICONS */
+  char dir[40];        /* "X:\SODOS\ICONS\NOME\" ou "" */
+  uint32_t gen;        /* muda a cada troca: programas redesenham */
+};
+
+static const struct ui_theme ui_th_classic = {
+  0x0B1522u, 0x101C2Bu, 0x16283Eu, 0x1B2230u, 0xE8F0FAu, 0xE8F0FAu, 0x93A8C4u,
+  0x2F80D0u, 0x2E4A6Cu, 0x2F80D0u, 0xE8F0FAu, 0xC23440u, 0x3A4250u, 0, 0xFFFFFFu, 0,
+  205, 230, 8, 1, 32,
+  0, 0, "",
+  0xC0C0C0u, 0xC0C0C0u, 0xD4D0C8u, 0x000000u, 0x404040u, 0x808080u, 0x000080u,
+  0xFFFFFFu, 0xFFFFFFu, 0x808080u, 0x000080u,
+  0, 0, 0,
+  "CLASSICO", "", 0
+};
+static struct ui_theme ui_th = {
+  0x0B1522u, 0x101C2Bu, 0x16283Eu, 0x1B2230u, 0xE8F0FAu, 0xE8F0FAu, 0x93A8C4u,
+  0x2F80D0u, 0x2E4A6Cu, 0x2F80D0u, 0xE8F0FAu, 0xC23440u, 0x3A4250u, 0, 0xFFFFFFu, 0,
+  205, 230, 8, 1, 32,
+  0, 0, "",
+  0xC0C0C0u, 0xC0C0C0u, 0xD4D0C8u, 0x000000u, 0x404040u, 0x808080u, 0x000080u,
+  0xFFFFFFu, 0xFFFFFFu, 0x808080u, 0x000080u,
+  0, 0, 0,
+  "CLASSICO", "", 0
+};
+
+#define UI_BAR        ui_th.bar
+#define UI_BAR_A      ui_th.bar_a
+#define UI_PANEL      ui_th.panel
+#define UI_PANEL_A    ui_th.panel_a
+#define UI_TITLE_A    ui_th.title_a
+#define UI_TITLE_I    ui_th.title_i
+#define UI_TEXT       ui_th.text
+#define UI_TTEXT      ui_th.ttext
+#define UI_DIM        ui_th.dim
+#define UI_ACCENT     ui_th.accent
+#define UI_BORDER     ui_th.border
+#define UI_HOT        ui_th.hot
+#define UI_HOT_TEXT   ui_th.hot_text
+#define UI_RADIUS     ui_th.radius
+
+static int th_streq(const char* a, const char* b) {
+  while (*a && *a == *b) {
+    a++;
+    b++;
+  }
+  return *a == *b;
+}
+
+static void th_copy(char* d, int max, const char* s, int n) {
+  int i;
+  for (i = 0; i < n && s[i] && i < max - 1; i++) {
+    char c = s[i];
+    if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+    d[i] = c;
+  }
+  d[i] = 0;
+}
+
+static int th_hex(const char* s, int n, uint32_t* out) {
+  uint32_t v = 0;
+  int i;
+  if (n >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+    s += 2;
+    n -= 2;
+  }
+  if (n < 6) return 0;
+  for (i = 0; i < 6; i++) {
+    char c = s[i];
+    int d;
+    if (c >= '0' && c <= '9') d = c - '0';
+    else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+    else return 0;
+    v = v * 16u + (uint32_t)d;
+  }
+  *out = v;
+  return 1;
+}
+
+static int th_int(const char* s, int n) {
+  int v = 0, i;
+  for (i = 0; i < n && s[i] >= '0' && s[i] <= '9'; i++) v = v * 10 + (s[i] - '0');
+  return v;
+}
+
+/* Uma linha chave=valor do TEMA.CFG da pasta do tema. */
+static void th_key(struct ui_theme* t, const char* k, int kn, const char* v, int vn) {
+  static const struct { const char* k; int off; } cols[] = {
+#define TC(n, f) { n, (int)__builtin_offsetof(struct ui_theme, f) }
+    TC("barra", bar), TC("painel", panel), TC("titulo", title_a), TC("tituloin", title_i),
+    TC("texto", text), TC("textotitulo", ttext), TC("fraco", dim), TC("destaque", accent),
+    TC("borda", border), TC("realce", hot), TC("realcetexto", hot_text),
+    TC("fechar", close), TC("botaotitulo", tbtn), TC("desk", desk), TC("rotulo", label),
+    TC("w_face", w_face), TC("w_bg", w_bg), TC("w_panel", w_panel), TC("w_texto", w_text),
+    TC("w_fraco", w_dim), TC("w_desab", w_dis), TC("w_sel", w_sel),
+    TC("w_seltexto", w_sel_text), TC("w_campo", w_field), TC("w_borda", w_border),
+    TC("w_destaque", w_accent),
+#undef TC
+  };
+  char key[16];
+  int i;
+  if (kn <= 0 || kn >= (int)sizeof(key)) return;
+  for (i = 0; i < kn; i++) key[i] = (char)(k[i] >= 'A' && k[i] <= 'Z' ? k[i] + 32 : k[i]);
+  key[kn] = 0;
+  for (i = 0; i < (int)(sizeof(cols) / sizeof(cols[0])); i++) {
+    if (th_streq(key, cols[i].k)) {
+      th_hex(v, vn, (uint32_t*)((char*)t + cols[i].off));
+      return;
+    }
+  }
+  if (th_streq(key, "estilo")) t->modern = vn >= 7 && (v[0] == 'm' || v[0] == 'M');
+  else if (th_streq(key, "icones")) t->icons = vn >= 7 && (v[0] == 'a' || v[0] == 'A');
+  else if (th_streq(key, "prato")) th_copy(t->plate, (int)sizeof(t->plate), v, vn);
+  else if (th_streq(key, "rotulosombra")) {
+    t->label_sh_on = th_hex(v, vn, &t->label_sh);
+  } else if (th_streq(key, "barraalfa")) t->bar_a = th_int(v, vn);
+  else if (th_streq(key, "painelalfa")) t->panel_a = th_int(v, vn);
+  else if (th_streq(key, "raio")) t->radius = th_int(v, vn);
+  else if (th_streq(key, "icone")) t->icon_px = th_int(v, vn);
+  else if (th_streq(key, "w_raio")) t->w_radius = th_int(v, vn);
+  else if (th_streq(key, "w_btn")) t->w_btn_h = th_int(v, vn);
+  else if (th_streq(key, "w_linha")) t->w_row_h = th_int(v, vn);
+}
+
+/* Le chave=valor de um arquivo de texto; ';' e '#' comecam comentario. */
+static void th_parse(const char* cfg, int n, struct ui_theme* t, char* tema, int tmax) {
+  int i = 0;
+  while (i < n) {
+    int j = i, e, kq;
+    while (j < n && cfg[j] != '\n' && cfg[j] != '\r') j++;
+    while (i < j && (cfg[i] == ' ' || cfg[i] == '\t')) i++;
+    if (i < j && cfg[i] != ';' && cfg[i] != '#') {
+      for (kq = i; kq < j && cfg[kq] != '='; kq++) { }
+      if (kq < j) {
+        int ke = kq, vs = kq + 1;
+        while (ke > i && cfg[ke - 1] == ' ') ke--;
+        while (vs < j && cfg[vs] == ' ') vs++;
+        e = j;
+        while (e > vs && (cfg[e - 1] == ' ' || cfg[e - 1] == '\t')) e--;
+        if (tema && ke - i == 4 && (cfg[i] == 't' || cfg[i] == 'T') &&
+            (cfg[i + 1] == 'e' || cfg[i + 1] == 'E'))
+          th_copy(tema, tmax, cfg + vs, e - vs);
+        else if (t)
+          th_key(t, cfg + i, ke - i, cfg + vs, e - vs);
+      }
+    }
+    while (j < n && (cfg[j] == '\n' || cfg[j] == '\r')) j++;
+    i = j;
+  }
+}
+
+/* Acha "X:\SODOS\ICONS\<nome>\" na primeira unidade que tem a pasta. */
+static int th_find_dir(const char* name, char* out, int max) {
+  static const char order[] = "DUCEFGHIJKLMNOPQRSTVWXYZ";
+  static const char pre[] = "X:\\SODOS\\ICONS\\";
+  int d;
+  for (d = 0; order[d]; d++) {
+    char path[56];
+    int i = 0, j;
+    if (order[d] != 'U' && !drives_is_mounted(order[d])) continue;
+    if (order[d] == 'U' && !drives_is_mounted('U')) continue;
+    for (j = 0; pre[j]; j++) path[i++] = pre[j];
+    for (j = 0; name[j] && i < 44; j++) path[i++] = name[j];
+    path[i++] = '\\';
+    path[i] = 0;
+    path[0] = order[d];
+    {
+      char cfgp[64];
+      int k;
+      for (k = 0; path[k]; k++) cfgp[k] = path[k];
+      for (j = 0; "TEMA.CFG"[j]; j++) cfgp[k++] = "TEMA.CFG"[j];
+      cfgp[k] = 0;
+      if (file_size(cfgp) < 0) continue;
+    }
+    if (i >= max) return 0;
+    for (j = 0; j <= i; j++) out[j] = path[j];
+    return 1;
+  }
+  return 0;
+}
+
+static void icn_flush(void);   /* cache de icones, mais abaixo */
+static int win_api_dirty;
+
+/* Carrega o tema 'name' (pasta em \SODOS\ICONS). Sem a pasta, so CLASSICO
+ * vale (as cores de sempre). 0 = trocou. */
+static int ui_theme_load(const char* name) {
+  struct ui_theme t = ui_th_classic;
+  char nm[16];
+  static char cfg[2048];
+  int n;
+  th_copy(nm, (int)sizeof(nm), name && name[0] ? name : "CLASSICO", 15);
+  for (n = 0; nm[n]; n++)
+    if (nm[n] == '\\' || nm[n] == '/' || nm[n] == ':' || nm[n] == '.') return -1;
+  th_copy(t.name, (int)sizeof(t.name), nm, 15);
+  if (th_find_dir(nm, t.dir, (int)sizeof(t.dir))) {
+    char p[64];
+    int i, j;
+    for (i = 0; t.dir[i]; i++) p[i] = t.dir[i];
+    for (j = 0; "TEMA.CFG"[j]; j++) p[i++] = "TEMA.CFG"[j];
+    p[i] = 0;
+    n = file_load(p, cfg, (int)sizeof(cfg));
+    if (n > 0) th_parse(cfg, n, &t, 0, 0);
+  } else if (!th_streq(nm, "CLASSICO")) {
+    serial_puts("[tema] sem \\SODOS\\ICONS\\");
+    serial_puts(nm);
+    serial_puts("\n");
+    return -1;
+  }
+  if (t.radius < 0 || t.radius > 20) t.radius = 8;
+  if (t.icon_px < 16 || t.icon_px > 96) t.icon_px = 32;
+  t.gen = ui_th.gen + 1;
+  ui_th = t;
+  icn_flush();
+  win_api_dirty = 1;
+  serial_puts("[tema] ");
+  serial_puts(ui_th.name);
+  serial_puts(ui_th.dir[0] ? " em " : " (interno)");
+  if (ui_th.dir[0]) serial_puts(ui_th.dir);
+  serial_puts("\n");
+  return 0;
+}
+
+/* D:\SODOS\TEMA.CFG (escolha do usuario). */
+static void ui_theme_boot(void) {
+  static char cfg[256];
+  char tema[16];
+  int n;
+  tema[0] = 0;
+  n = file_load("D:\\SODOS\\TEMA.CFG", cfg, (int)sizeof(cfg));
+  if (n <= 0) n = file_load("U:\\SODOS\\TEMA.CFG", cfg, (int)sizeof(cfg));
+  if (n > 0) th_parse(cfg, n, 0, tema, (int)sizeof(tema));
+  if (!tema[0] || ui_theme_load(tema) != 0) ui_theme_load("CLASSICO");
+}
+
+/* ---- icones do tema (NOME.ICN: "ICN1", u16 w, u16 h, RGBA) --------------
+ * Cache por nome (inclusive os que faltam, para nao reler o disco a cada
+ * quadro) e uma copia ja reduzida, em alfa pre-multiplicado, no ultimo
+ * tamanho pedido. Memoria do alto (umalloc_top): sai na troca de tema. */
+#define ICN_MAX 96
+struct icn_ent {
+  char name[12];
+  uint8_t* src;     /* arquivo inteiro (cabecalho + RGBA) */
+  int w, h;
+  uint32_t* sc;     /* reduzida: 0xAARRGGBB pre-multiplicada */
+  int ss, sw, sh;   /* lado pedido e tamanho real da reduzida */
+  int miss;
+};
+static struct icn_ent icn_tab[ICN_MAX];
+static int icn_n;
+
+static void icn_flush(void) {
+  int i;
+  for (i = 0; i < icn_n; i++) {
+    if (icn_tab[i].src) ufree(icn_tab[i].src);
+    if (icn_tab[i].sc) ufree(icn_tab[i].sc);
+    icn_tab[i].src = 0;
+    icn_tab[i].sc = 0;
+  }
+  icn_n = 0;
+}
+
+static struct icn_ent* icn_get(const char* name) {
+  struct icn_ent* e;
+  char path[64];
+  int i, j, sz, w, h;
+  uint8_t* b;
+  if (!ui_th.icons || !ui_th.dir[0] || !gfx_bochs || !um_ready() || !name || !name[0])
+    return 0;
+  for (i = 0; i < icn_n; i++)
+    if (th_streq(icn_tab[i].name, name)) return icn_tab[i].miss ? 0 : &icn_tab[i];
+  if (icn_n >= ICN_MAX) return 0;
+  e = &icn_tab[icn_n++];
+  th_copy(e->name, (int)sizeof(e->name), name, 11);
+  e->miss = 1;
+  e->src = 0;
+  e->sc = 0;
+  e->ss = 0;
+  for (i = 0; ui_th.dir[i] && i < 40; i++) path[i] = ui_th.dir[i];
+  for (j = 0; e->name[j]; j++) path[i++] = e->name[j];
+  path[i++] = '.';
+  path[i++] = 'I';
+  path[i++] = 'C';
+  path[i++] = 'N';
+  path[i] = 0;
+  sz = file_size(path);
+  if (sz < 9 || sz > 8 + 128 * 128 * 4) return 0;
+  b = (uint8_t*)umalloc_top((uint32_t)sz + 1);
+  if (!b) return 0;
+  if (file_load(path, (char*)b, sz + 1) != sz || b[0] != 'I' || b[1] != 'C' || b[2] != 'N' ||
+      b[3] != '1') {
+    ufree(b);
+    return 0;
+  }
+  w = b[4] | (b[5] << 8);
+  h = b[6] | (b[7] << 8);
+  if (w < 1 || h < 1 || w > 128 || h > 128 || 8 + w * h * 4 > sz) {
+    ufree(b);
+    return 0;
+  }
+  e->src = b;
+  e->w = w;
+  e->h = h;
+  e->miss = 0;
+  return e;
+}
+
+/* Reduz para caber em s x s (media da area; para cima, vizinho mais perto). */
+static int icn_scale(struct icn_ent* e, int s) {
+  int iw, ih, x, y;
+  const uint8_t* px;
+  if (s < 1) return 0;
+  if (e->sc && e->ss == s) return 1;
+  if (e->sc) ufree(e->sc);
+  e->sc = 0;
+  if (e->w >= e->h) {
+    iw = s;
+    ih = e->h * s / e->w;
+  } else {
+    ih = s;
+    iw = e->w * s / e->h;
+  }
+  if (iw < 1) iw = 1;
+  if (ih < 1) ih = 1;
+  e->sc = (uint32_t*)umalloc_top((uint32_t)(iw * ih * 4));
+  if (!e->sc) return 0;
+  px = e->src + 8;
+  for (y = 0; y < ih; y++) {
+    int y0 = y * e->h / ih, y1 = (y + 1) * e->h / ih;
+    if (y1 <= y0) y1 = y0 + 1;
+    for (x = 0; x < iw; x++) {
+      int x0 = x * e->w / iw, x1 = (x + 1) * e->w / iw, sx, sy;
+      uint32_t ar = 0, ag = 0, ab = 0, aa = 0, n = 0;
+      if (x1 <= x0) x1 = x0 + 1;
+      for (sy = y0; sy < y1; sy++)
+        for (sx = x0; sx < x1; sx++) {
+          const uint8_t* p = px + (sy * e->w + sx) * 4;
+          uint32_t a = p[3];
+          ar += p[0] * a;
+          ag += p[1] * a;
+          ab += p[2] * a;
+          aa += a;
+          n++;
+        }
+      ar /= 255u * n;
+      ag /= 255u * n;
+      ab /= 255u * n;
+      aa /= n;
+      e->sc[y * iw + x] = (aa << 24) | (ar << 16) | (ag << 8) | ab;
+    }
+  }
+  e->ss = s;
+  e->sw = iw;
+  e->sh = ih;
+  return 1;
+}
+
+/* Desenha centrado no quadrado (x,y,s), misturando com o que ja esta na tela. */
+static void icn_draw(struct icn_ent* e, int x, int y, int s) {
+  int ox, oy, r;
+  if (!e || !icn_scale(e, s)) return;
+  ox = x + (s - e->sw) / 2;
+  oy = y + (s - e->sh) / 2;
+  for (r = 0; r < e->sh; r++) {
+    int dy = oy + r, c0 = 0, c1 = e->sw, c;
+    const uint32_t* src = e->sc + r * e->sw;
+    volatile uint32_t* row;
+    if (dy < 0 || dy >= (int)gfx_h) continue;
+    if (ox < 0) c0 = -ox;
+    if (ox + c1 > (int)gfx_w) c1 = (int)gfx_w - ox;
+    if (c0 >= c1) continue;
+    row = gfx_offscreen
+      ? (volatile uint32_t*)(gfx_back + ((uint32_t)dy * gfx_w + (uint32_t)ox) * 4u)
+      : (volatile uint32_t*)(gfx_lfb + ((uint32_t)dy + gfx_draw_y0) * gfx_pitch_bytes +
+                             (uint32_t)ox * 4u);
+    for (c = c0; c < c1; c++) {
+      uint32_t p = src[c], a = p >> 24, k, d;
+      if (!a) continue;
+      if (a == 255) {
+        row[c] = p & 0xFFFFFFu;
+        continue;
+      }
+      k = 255u - a;
+      d = row[c];
+      row[c] = ((((d >> 16) & 0xFFu) * k / 255u + ((p >> 16) & 0xFFu)) << 16) |
+               ((((d >> 8) & 0xFFu) * k / 255u + ((p >> 8) & 0xFFu)) << 8) |
+               ((d & 0xFFu) * k / 255u + (p & 0xFFu));
+    }
+  }
+}
+
+/* Icone do desktop no tema: prato (FUNDO) e o glifo no centro dele.
+ * O prato do mkicons.py tem o circulo centrado em 29/64. 1 = desenhou. */
+static int th_desk_icon(const char* name, int x, int y, int s) {
+  struct icn_ent* g = icn_get(name);
+  struct icn_ent* p;
+  if (!g) return 0;
+  p = ui_th.plate[0] ? icn_get(ui_th.plate) : 0;
+  if (p) {
+    int gs = s * 54 / 100, c = s * 29 / 64;
+    icn_draw(p, x, y, s);
+    icn_draw(g, x + c - gs / 2, y + c - gs / 2, gs);
+  } else {
+    icn_draw(g, x, y, s);
+  }
+  return 1;
+}
+
+/* Icone de uma linha de menu, pelo texto dela. */
+static const char* th_menu_icon(const char* label) {
+  static const char* const map[][2] = {
+    {"Bloco de notas", "NOTAS"}, {"Gerenciador", "GERENC"}, {"Explorer", "EXPLORER"},
+    {"Configuracoes", "CONFIG"}, {"Navegador", "NAVEGA"}, {"Command", "COMMAND"},
+    {"Sair", "SAIR"}, {"Tela", "TELA"}, {"Fontes", "FONTES"},
+    {"Fontes avancadas", "FONTADV"}, {"Design", "DESIGN"}, {"Menu", "MENU"},
+    {"Abrir com", "ABRIRCOM"}, {"Temas", "TEMAS"}, {"Nova pasta", "PASTA"},
+    {"Console", "CMD"}, {"Configuracoes de tela", "TELA"},
+  };
+  int i;
+  for (i = 0; i < (int)(sizeof(map) / sizeof(map[0])); i++)
+    if (th_streq(map[i][0], label)) return map[i][1];
+  return 0;
+}
+
+/* ---------------------------------------------------------------------------
  * Configuracao de video escolhida pelo VIDEOCFG.EXE:
  *   gfx_quality  0 = retro (como sempre foi: alfa binario, sem mistura)
  *                1 = avancado (mistura alfa em gui_pixels)
@@ -709,7 +1156,8 @@ static void gfx_desk_clear(void) {
     gfx_clear(0);
     return;
   }
-  gfx_clear(desk_rgb ? rgb_to_pixa(desk_rgb) : gui_col(0x008080));
+  gfx_clear(desk_rgb ? rgb_to_pixa(desk_rgb)
+            : ui_th.desk ? rgb_to_pixa(ui_th.desk) : gui_col(0x008080));
 }
 
 static void fill_rect(int x, int y, int w, int h, uint32_t color) {
@@ -740,21 +1188,6 @@ static void fill_rect(int x, int y, int w, int h, uint32_t color) {
   }
 }
 
-/* ---------------------------------------------------------------------------
- * Tema "vidro escuro" (VIDEOCFG -> Avancado): preenchimentos translucidos e
- * cantos arredondados. Em 8bpp (modo 13h) nao ha mistura: fica solido.
- * ------------------------------------------------------------------------- */
-#define UI_BAR        0x0B1522u
-#define UI_BAR_A      205
-#define UI_PANEL      0x101C2Bu
-#define UI_PANEL_A    230
-#define UI_TITLE_A    0x16283Eu
-#define UI_TITLE_I    0x1B2230u
-#define UI_TEXT       0xE8F0FAu
-#define UI_DIM        0x93A8C4u
-#define UI_ACCENT     0x2F80D0u
-#define UI_BORDER     0x2E4A6Cu
-#define UI_RADIUS     8
 
 /* Retangulo com alfa sobre o que ja esta na tela (alpha <= 0 = opaco). */
 static void fill_rect_a(int x, int y, int w, int h, uint32_t rgb, int alpha) {
@@ -2929,11 +3362,20 @@ static void font_draw(struct wm_win* w, int title_h, int scale,
 #define CMD_COLS 80
 #define CMD_IN 128
 
-/* Tela 80x25 de um programa que roda no Command: k_vput, k_cursor e k_getc
- * dele vem para ca (kexp_set_textscr). Pertence a tarefa; a janela so mostra. */
+/* Tela de texto de um programa que roda no Command: k_vput, k_cursor e k_getc
+ * dele vem para ca (kexp_set_textscr). Pertence a tarefa; a janela so mostra.
+ * E 80x25 ate o programa perguntar k_textsize: dai a grade segue o tamanho da
+ * janela (cols x rows) e cada mudanca chega como a tecla KEY_RESIZE. As celulas
+ * ficam sempre com o passo TTY_MC, para mudar de tamanho sem copiar nada. */
 #define TTY_KQ 64
+#define TTY_MC 256
+#define TTY_MR 96
+#define TCELL(y, r, k) ((y)->cell[(r) * TTY_MC + (k)])
 struct con_tty {
-  uint16_t cell[25 * 80];
+  uint16_t cell[TTY_MR * TTY_MC];
+  int cols, rows; /* tamanho que o programa ve */
+  int dyn;        /* perguntou k_textsize: a grade acompanha a janela */
+  int wcols, wrows; /* quanto cabe na janela agora (o desenho mede) */
   int on;      /* o programa usou a tela de celulas: a janela mostra a grade */
   int fit;     /* a janela ainda nao cresceu para caber 80x25 */
   int r, c;    /* cursor (onde k_putc escreve) */
@@ -3474,7 +3916,29 @@ static const uint32_t tty_pal[16] = {
   0x555555, 0x5555FF, 0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF
 };
 
-/* Grade 80x25 do programa. O bit 7 do atributo e fundo claro (sem piscar). */
+static void tty_push(struct con_tty* y, int k);
+
+/* A janela mudou de tamanho: a grade de quem perguntou k_textsize muda junto.
+ * O que aparece de novo vem em branco; o programa redesenha com KEY_RESIZE. */
+static void tty_fit_window(struct con_tty* y, int ncol, int nrow) {
+  int r, k;
+  if (ncol > TTY_MC) ncol = TTY_MC;
+  if (nrow > TTY_MR) nrow = TTY_MR;
+  if (ncol < 20) ncol = 20;
+  if (nrow < 5) nrow = 5;
+  y->wcols = ncol;
+  y->wrows = nrow;
+  if (!y->dyn || y->fit || (ncol == y->cols && nrow == y->rows)) return;
+  for (r = 0; r < nrow; r++)
+    for (k = (r < y->rows ? y->cols : 0); k < ncol; k++) TCELL(y, r, k) = 0x0720;
+  y->cols = ncol;
+  y->rows = nrow;
+  if (y->r >= nrow) y->r = nrow - 1;
+  if (y->c >= ncol) y->c = ncol - 1;
+  tty_push(y, KEY_RESIZE);
+}
+
+/* Grade do programa. O bit 7 do atributo e fundo claro (sem piscar). */
 static void tty_draw(struct wm_win* w, struct con_tty* y, int focus, int title_h, int scale) {
   int rows = glyph_rows();
   int cw = FONT_W * (scale < 1 ? 1 : scale);
@@ -3484,13 +3948,14 @@ static void tty_draw(struct wm_win* w, struct con_tty* y, int focus, int title_h
   int r, k, i, x;
   uint32_t pal[16];
   if (scale < 1) scale = 1;
-  if (ncol > 80) ncol = 80;
-  if (nrow > 25) nrow = 25;
+  tty_fit_window(y, ncol, nrow);
+  if (ncol > y->cols) ncol = y->cols;
+  if (nrow > y->rows) nrow = y->rows;
   for (i = 0; i < 16; i++) pal[i] = gui_col(tty_pal[i]);
   fill_rect(w->x, w->y + title_h, w->w, w->h - title_h, pal[0]);
   for (r = 0; r < nrow; r++) {
     for (k = 0; k < ncol; k++) {
-      uint16_t v = y->cell[r * 80 + k];
+      uint16_t v = TCELL(y, r, k);
       unsigned char chr = (unsigned char)(v & 0xFF);
       uint32_t fg = pal[(v >> 8) & 15], bg = pal[(v >> 12) & 15];
       const uint8_t* g = y->font_on ? &y->font[chr * 16] : glyph16(chr);
@@ -3509,7 +3974,7 @@ static void tty_draw(struct wm_win* w, struct con_tty* y, int focus, int title_h
     }
   }
   if (focus && !y->hide && y->r >= 0 && y->r < nrow && y->c >= 0 && y->c < ncol) {
-    uint16_t v = y->cell[y->r * 80 + y->c];
+    uint16_t v = TCELL(y, y->r, y->c);
     fill_rect(x0 + y->c * cw, y0 + y->r * chh + chh - 2 * scale, cw, 2 * scale,
               pal[(v >> 8) & 15] == pal[(v >> 12) & 15] ? pal[7] : pal[(v >> 8) & 15]);
   }
@@ -3680,13 +4145,14 @@ static void wm_draw_inner(struct wm_win* w, int focus, int title_h, int scale,
             gui_col(focus ? UI_TITLE_A : UI_TITLE_I));
   fill_rect(w->x, w->y + title_h, w->w, w->h - title_h, col_win);
   if (wf_on())
-    wf_text(w->x + 12, w->y + (title_h - wfont_height()) / 2, w->title, gui_col(UI_TEXT),
+    wf_text(w->x + 12, w->y + (title_h - wfont_height()) / 2, w->title, gui_col(UI_TTEXT),
             close_x - close_s - 10);
   else
-    draw_text_t(w->x + 12, ty, w->title, gui_col(UI_TEXT), scale);
-  fill_round(close_x, w->y + 3, close_s, close_s, 5, gui_col(0xC23440));
+    draw_text_t(w->x + 12, ty, w->title, gui_col(UI_TTEXT), scale);
+  fill_round(close_x, w->y + 3, close_s, close_s, ui_th.modern ? close_s / 2 : 5,
+             gui_col(ui_th.close));
   draw_text_t(close_x + (close_s > FONT_W * scale ? (close_s - FONT_W * scale) / 2 : 0),
-              ty, "x", gui_col(UI_TEXT), scale);
+              ty, "x", gui_col(ui_th.modern ? 0xFFFFFFu : UI_TEXT), scale);
   title_max_btn(close_x - close_s - 4, w->y + 3, close_s, wm_is_max(w));
   fill_rect(w->x + w->w - 12, w->y + w->h - 12, 10, 10, col_black);
   fill_rect(w->x + w->w - 11, w->y + w->h - 11, 8, 8, col_btn);
@@ -3805,7 +4271,12 @@ static int wm_find_kind(struct wm_win* wins, int kind) {
 static int wm_alloc(struct wm_win* wins) {
   int i;
   for (i = 0; i < WM_MAX; i++)
-    if (!wins[i].used) return i;
+    if (!wins[i].used) {
+      /* vaga de uma janela RUN que fechou sem passar pelo laco do auto_close:
+       * a marca velha fecharia a janela nova no proximo programa que acabar */
+      wins[i].auto_close = 0;
+      return i;
+    }
   return -1;
 }
 
@@ -4012,6 +4483,7 @@ struct gui_win {
   int raw_btn;  /* botoes apertados dentro da janela (captura do arrasto) */
   int clip;     /* k_gui_clip: o programa trata Ctrl+V (recebe 22) */
   int maxed;    /* maximizada pelo botao/duplo clique no titulo */
+  int panel;    /* k_gui_panel: sem titulo nem moldura (WINTAB) */
 };
 
 static int (*task_pending_cmd)(int, char**); /* proximo task_spawn roda isto */
@@ -4073,6 +4545,12 @@ static struct con_tty* tty_cur(void) {
   return y;
 }
 
+static void tty_blank(struct con_tty* y) {
+  int i;
+  for (i = 0; i < TTY_MR * TTY_MC; i++) y->cell[i] = 0x0720;
+  y->r = y->c = 0;
+}
+
 /* Primeira vez: a grade comeca com o que o Command mostrava, como no DOS. */
 static void tty_start(struct con_tty* y) {
   struct cmd_con* c = gtasks[task_cur].con;
@@ -4081,39 +4559,41 @@ static void tty_start(struct con_tty* y) {
   y->on = 1;
   y->fit = 1;
   y->hide = 0;
-  for (i = 0; i < 25 * 80; i++) y->cell[i] = 0x0720;
-  y->r = y->c = 0;
+  if (!y->dyn) {
+    y->cols = 80;
+    y->rows = 25;
+  }
+  tty_blank(y);
   if (!c) return;
-  n = c->n < 24 ? c->n : 24;
+  n = c->n < y->rows - 1 ? c->n : y->rows - 1;
   first = c->n - n;
   for (i = 0; i < n; i++) {
     const char* s = c->line[first + i];
     int k;
-    for (k = 0; k < 80 && s[k]; k++) y->cell[i * 80 + k] = (uint16_t)(0x0700 | (unsigned char)s[k]);
+    for (k = 0; k < y->cols && s[k]; k++) TCELL(y, i, k) = (uint16_t)(0x0700 | (unsigned char)s[k]);
   }
   if (c->ocol > 0 && n > 0) {
     y->r = n - 1;
-    y->c = c->ocol < 80 ? c->ocol : 79;
+    y->c = c->ocol < y->cols ? c->ocol : y->cols - 1;
   } else {
-    y->r = n < 25 ? n : 24;
+    y->r = n < y->rows ? n : y->rows - 1;
   }
 }
 
 static void tty_scroll(struct con_tty* y) {
-  int i;
-  for (i = 0; i < 24 * 80; i++) y->cell[i] = y->cell[i + 80];
-  for (i = 24 * 80; i < 25 * 80; i++) y->cell[i] = 0x0720;
+  int r, k;
+  for (r = 0; r + 1 < y->rows; r++)
+    for (k = 0; k < y->cols; k++) TCELL(y, r, k) = TCELL(y, r + 1, k);
+  for (k = 0; k < y->cols; k++) TCELL(y, y->rows - 1, k) = 0x0720;
 }
 
 /* k_putc com a grade ligada: escreve no cursor, como o console do DOS. */
 static int tty_emit(struct cmd_con* c, char ch) {
   struct con_tty* y = c->tty;
   unsigned char u = (unsigned char)ch;
-  int i;
   if (!y || !y->on) return 0;
   if (u == '\f') {
-    for (i = 0; i < 25 * 80; i++) y->cell[i] = 0x0720;
-    y->r = y->c = 0;
+    tty_blank(y);
   } else if (u == '\r') {
     y->c = 0;
   } else if (u == '\n') {
@@ -4126,14 +4606,14 @@ static int tty_emit(struct cmd_con* c, char ch) {
   } else if (u >= 32) {
     if (y->r < 0) y->r = 0;
     if (y->c < 0) y->c = 0;
-    y->cell[y->r * 80 + y->c] = (uint16_t)(0x0700 | u);
+    TCELL(y, y->r, y->c) = (uint16_t)(0x0700 | u);
     y->c++;
   }
-  if (y->c >= 80) {
+  if (y->c >= y->cols) {
     y->c = 0;
     y->r++;
   }
-  while (y->r >= 25) {
+  while (y->r >= y->rows) {
     tty_scroll(y);
     y->r--;
   }
@@ -4146,10 +4626,10 @@ static int tty_vput(int row, int col, const uint16_t* cells, int n) {
   int pos, i;
   if (!y) return -1;
   tty_start(y);
-  if (!cells || row < 0 || row >= 25 || col < 0 || col >= 80) return 0;
-  pos = row * 80 + col;
-  if (n > 80 * 25 - pos) n = 80 * 25 - pos;
-  for (i = 0; i < n; i++) y->cell[pos + i] = cells[i];
+  if (!cells || row < 0 || row >= y->rows || col < 0 || col >= y->cols) return 0;
+  pos = row * y->cols + col;
+  if (n > y->cols * y->rows - pos) n = y->cols * y->rows - pos;
+  for (i = 0; i < n; i++, pos++) TCELL(y, pos / y->cols, pos % y->cols) = cells[i];
   if (n > 0) cons_refresh();
   return 0;
 }
@@ -4157,7 +4637,7 @@ static int tty_vput(int row, int col, const uint16_t* cells, int n) {
 static void tty_cursor(int row, int col) {
   struct con_tty* y = tty_cur();
   if (!y) return;
-  if (row < 0 || row >= 25 || col < 0 || col >= 80) {
+  if (row < 0 || row >= y->rows || col < 0 || col >= y->cols) {
     y->hide = 1;
   } else {
     tty_start(y);
@@ -4170,14 +4650,12 @@ static void tty_cursor(int row, int col) {
 
 static void tty_clear(void) {
   struct con_tty* y = tty_cur();
-  int i;
   if (!y) return;
   if (!y->on) {
     cons_emit('\f');
     return;
   }
-  for (i = 0; i < 25 * 80; i++) y->cell[i] = 0x0720;
-  y->r = y->c = 0;
+  tty_blank(y);
   cons_refresh();
 }
 
@@ -4234,8 +4712,31 @@ static int tty_key(int wait) {
   }
 }
 
+/* k_textsize: quem pergunta passa a ter a grade do tamanho da janela. Antes de
+ * a janela crescer para o programa (fit) vale 80x25, como no DOS. */
+static void tty_size(int* cols, int* rows) {
+  struct con_tty* y = tty_cur();
+  if (!y) return;
+  if (!y->dyn) {
+    y->dyn = 1;
+    if (!y->on) {
+      y->cols = 80;
+      y->rows = 25;
+    }
+    if (!y->fit && y->wcols > 0 && (y->wcols != y->cols || y->wrows != y->rows)) {
+      int r, k;
+      for (r = 0; r < y->wrows; r++)
+        for (k = (r < y->rows ? y->cols : 0); k < y->wcols; k++) TCELL(y, r, k) = 0x0720;
+      y->cols = y->wcols;
+      y->rows = y->wrows;
+    }
+  }
+  if (cols) *cols = y->cols;
+  if (rows) *rows = y->rows;
+}
+
 static const struct kexp_textscr tty_ops = {
-  tty_vput, tty_cursor, tty_clear, tty_font_get, tty_font_set, tty_font_reset, tty_key
+  tty_vput, tty_cursor, tty_clear, tty_font_get, tty_font_set, tty_font_reset, tty_key, tty_size
 };
 
 static void tty_push(struct con_tty* y, int k) {
@@ -4278,18 +4779,19 @@ static int tty_key_of(uint8_t sc, int e0, int kp) {
 static void tty_to_log(struct cmd_con* c, struct con_tty* y) {
   int r, k, last = y->c > 0 ? y->r : y->r - 1;
   int busy = c->busy;
-  for (r = 0; r < 25; r++)
-    for (k = 0; k < 80; k++) {
-      unsigned char u = (unsigned char)(y->cell[r * 80 + k] & 0xFF);
+  for (r = 0; r < y->rows; r++)
+    for (k = 0; k < y->cols; k++) {
+      unsigned char u = (unsigned char)(TCELL(y, r, k) & 0xFF);
       if (u > 32 && r > last) last = r;
     }
   cons_wipe(c);
   c->busy = busy;
-  for (r = 0; r <= last && r < 25; r++) {
+  if (last - CMD_ROWS + 1 > 0) r = last - CMD_ROWS + 1; else r = 0;
+  for (; r <= last && r < y->rows; r++) {
     char s[CMD_COLS];
     int n = 0;
-    for (k = 0; k < 80 && k < CMD_COLS - 1; k++) {
-      unsigned char u = (unsigned char)(y->cell[r * 80 + k] & 0xFF);
+    for (k = 0; k < y->cols && k < CMD_COLS - 1; k++) {
+      unsigned char u = (unsigned char)(TCELL(y, r, k) & 0xFF);
       s[k] = (u >= 32 && u <= 126) ? (char)u : ' ';
       if (s[k] != ' ') n = k + 1;
     }
@@ -4507,6 +5009,7 @@ int gui_open(const char* title) {
   gui.drag = 0;
   gui.clip = 0;
   gui.maxed = 0;
+  gui.panel = 0;
   gui.z = ++zseq;
   gui_focus = gui_ix;
   gui_stole = 1;
@@ -4564,7 +5067,7 @@ void gui_pixels(int x, int y, int w, int h, const void* rgba, int stride) {
       int dx = x + xx;
       const uint8_t* p = row + xx * 4;
       if (dx < 0 || dx >= gui.cw) continue;
-      if (gfx_quality < 1) {
+      if (gfx_quality < 1 && !ui_th.modern) {
         /* retro: alfa binario (custo zero, como sempre foi) */
         if (p[3] < 128) continue;
         gui.pix[dy * gui.cw + dx] =
@@ -5570,6 +6073,8 @@ static int task_spawn(struct wm_win* wins, int* focus, int big, const char* path
     t->tty = (struct con_tty*)kmalloc((uint32_t)sizeof(struct con_tty));
     if (t->tty) {
       gui_zero(t->tty, (uint32_t)sizeof(struct con_tty));
+      t->tty->cols = 80;
+      t->tty->rows = 25;
       con->tty = t->tty;
     }
   }
@@ -6316,12 +6821,38 @@ static void desk_blit(int x, int y, int side, const uint8_t* rgba, int tw, int t
 
 /* Rotulo de icone do desktop: letras com sombra direto sobre o fundo (cor ou
  * papel de parede aparecem); so o icone marcado ganha a faixa de selecao. */
-static void desk_label(int x, int y, const char* s, int marked, uint32_t fg, uint32_t shadow,
-                       int scale) {
+/* iw = largura do icone: o rotulo fica centralizado embaixo dele. */
+static void desk_label(int x, int iw, int y, const char* s, int marked, uint32_t fg,
+                       uint32_t shadow, int scale) {
   int n = 0;
+  {
+    int tw;
+    while (s[n]) n++;
+    tw = wf_on() ? wfont_width(s) : n * FONT_W * scale;
+    n = 0;
+    /* prato do tema: o circulo tem o centro em 29/64 do icone */
+    if (ui_th.icons && ui_th.plate[0] && icn_get(ui_th.plate)) iw = iw * 58 / 64;
+    x += (iw - tw) / 2;
+    if (x < 2) x = 2;
+  }
+  /* cores do tema so sobre o fundo do tema; com papel de parede ou cor do
+   * usuario fica o rotulo claro com sombra de sempre */
+  if (ui_th.modern && !desk_wall && !desk_rgb) {
+    fg = gui_col(marked ? 0xFFFFFFu : ui_th.label);
+    shadow = gui_col(ui_th.label_sh);
+    if (!ui_th.label_sh_on && !marked) {
+      if (wf_on()) {
+        wf_text(x, y + 1, s, fg, 0);
+        return;
+      }
+      draw_text_t(x, y, s, fg, scale);
+      return;
+    }
+  }
   if (wf_on()) {
     if (marked)
-      fill_rect(x - 3, y, wfont_width(s) + 6, wfont_height() + 2, desk_color(32, 96, 200));
+      fill_round(x - 3, y, wfont_width(s) + 6, wfont_height() + 2, ui_th.modern ? 5 : 0,
+                 ui_th.modern ? gui_col(UI_ACCENT) : desk_color(32, 96, 200));
     else
       wf_text(x + 1, y + 2, s, shadow, 0);
     wf_text(x, y + 1, s, fg, 0);
@@ -6336,6 +6867,24 @@ static void desk_label(int x, int y, const char* s, int marked, uint32_t fg, uin
   draw_text_t(x, y, s, fg, scale);
 }
 
+/* Icone do tema para um item do desktop: o do proprio programa (FIREFOX.EXE
+ * -> FIREFOX.ICN), senao o do tipo. */
+static int desk_theme_icon(const struct desk_item* it, int x, int y, int s) {
+  char base[12];
+  const char* kind;
+  int i;
+  for (i = 0; it->name[i] && it->name[i] != '.' && i < 11; i++) base[i] = it->name[i];
+  base[i] = 0;
+  if (!it->dir && th_desk_icon(base, x, y, s)) return 1;
+  if (it->dir) kind = "PASTA";
+  else if (it->image == 1) kind = "IMAGEM";
+  else if (it->image == 2) kind = "VIDEO";
+  else if (it->lnk) kind = "ATALHO";
+  else if (desk_ext_is(it->name, "EXE") || desk_ext_is(it->name, "BAT")) kind = "PROGRAMA";
+  else kind = "ARQUIVO";
+  return th_desk_icon(kind, x, y, s);
+}
+
 static void desk_draw(int icon, int ch, int scale, int sw, int sh, int bar_h,
                       uint32_t col_desk, uint32_t col_white, uint32_t col_black) {
   int i;
@@ -6346,6 +6895,8 @@ static void desk_draw(int icon, int ch, int scale, int sw, int sh, int bar_h,
     if (!desk_place(i, icon, ch, scale, sw, sh, bar_h, &x, &y)) break;
     if (it->px && it->tw > 0) {
       desk_blit(x, y, icon, it->px + 8, it->tw, it->th);
+    } else if (ui_th.icons && desk_theme_icon(it, x, y, icon)) {
+      /* icone do tema */
     } else if (it->image == 2) {
       uint32_t bg = desk_color(24, 24, 28);
       uint32_t fg = desk_color(220, 48, 48);
@@ -6418,9 +6969,9 @@ static void desk_draw(int icon, int ch, int scale, int sw, int sh, int bar_h,
         k++;
       }
       lab[k] = 0;
-      desk_label(x, y + icon + 2, lab, i == desk_mark, col_white, col_black, scale);
+      desk_label(x, icon, y + icon + 2, lab, i == desk_mark, col_white, col_black, scale);
     } else
-      desk_label(x, y + icon + 2, it->name, i == desk_mark, col_white, col_black, scale);
+      desk_label(x, icon, y + icon + 2, it->name, i == desk_mark, col_white, col_black, scale);
   }
 }
 
@@ -6755,6 +7306,7 @@ struct start_menu {
 static void start_menu_geom(struct start_menu* m, int scr_w, int scr_h, int bar_h,
                             int menu_w, int menu_item_h, int scale) {
   m->n = 7;
+  if (ui_th.icons) menu_w += menu_item_h * 6 / 10 + 10;
   {
     int big = scr_h >= 400;
     int lw = (big ? 7 : 4) * FONT_W * scale + (big ? 16 : 8);
@@ -6766,8 +7318,8 @@ static void start_menu_geom(struct start_menu* m, int scr_w, int scr_h, int bar_
   m->item_h = menu_item_h;
   m->h = menu_item_h * m->n + 4;
   m->y = scr_h - bar_h - m->h;
-  m->sub_w = 18 * FONT_W * scale + 16;
-  m->sub_h = menu_item_h * 6 + 4;
+  m->sub_w = 18 * FONT_W * scale + 16 + (ui_th.icons ? menu_item_h * 6 / 10 + 10 : 0);
+  m->sub_h = menu_item_h * 7 + 4;
   m->sub_x = m->x + m->w - 4;
   m->sub_y = m->y + 3 * menu_item_h;
   if (m->sub_x + m->sub_w > scr_w - 2)
@@ -6794,8 +7346,16 @@ static void menu_row(int x, int y, int w, int h, const char* label, int hot, int
   (void)col_black;
   (void)col_title;
   (void)col_white;
-  if (hot) fill_round(x + 2, y, w - 4, h, 6, gui_col(UI_ACCENT));
-  draw_text_t(x + 12, ty, label, gui_col(UI_TEXT), scale);
+  const char* ic = th_menu_icon(label);
+  struct icn_ent* ie = ic ? icn_get(ic) : 0;
+  int tx = x + 12;
+  if (hot) fill_round(x + 2, y, w - 4, h, ui_th.modern ? 8 : 6, gui_col(UI_HOT));
+  if (ie) {
+    int is = h * 6 / 10;
+    icn_draw(ie, x + 12, y + (h - is) / 2, is);
+    tx += is + 10;
+  }
+  draw_text_t(tx, ty, label, gui_col(hot ? UI_HOT_TEXT : UI_TEXT), scale);
   if (arrow)
     draw_text_t(x + w - FONT_W * scale - 14, ty, ">", gui_col(UI_DIM), scale);
 }
@@ -7108,8 +7668,8 @@ static int max_bar_h(int scale) {
 static void title_max_btn(int x, int y, int s, int maxed) {
   int m = s / 4 > 2 ? s / 4 : 2;
   int t = s >= 20 ? 2 : 1;
-  uint32_t fg = gui_col(UI_TEXT);
-  fill_round(x, y, s, s, 5, gui_col(0x3A4250));
+  uint32_t fg = gui_col(UI_TTEXT);
+  fill_round(x, y, s, s, ui_th.modern ? s / 2 : 5, gui_col(ui_th.tbtn));
   if (!maxed) {
     int bx = x + m, by = y + m, bw = s - 2 * m, bh = s - 2 * m;
     fill_rect(bx, by, bw, t * 2, fg);
@@ -7218,15 +7778,20 @@ static void gui_draw_frame(struct gui_win* w, int active, uint32_t col_title, ui
   int hh = w->title_h + w->ch;
   (void)col_title;
   (void)col_inactive;
+  if (w->panel) {
+    gui_blit_win(w);
+    return;
+  }
   round_top(w->ox, w->oy, w->cw, w->title_h, UI_RADIUS,
             gui_col(active ? UI_TITLE_A : UI_TITLE_I));
   if (wf_on())
-    wf_text(w->ox + 12, w->oy + (w->title_h - wfont_height()) / 2, w->title, gui_col(UI_TEXT),
+    wf_text(w->ox + 12, w->oy + (w->title_h - wfont_height()) / 2, w->title, gui_col(UI_TTEXT),
             close_x - close_s - 10);
   else
-    draw_text_t(w->ox + 12, ty, w->title, gui_col(UI_TEXT), scale);
-  fill_round(close_x, w->oy + 3, close_s, close_s, 5, gui_col(0xC23440));
-  draw_text_t(close_x + xoff, ty, "x", gui_col(UI_TEXT), scale);
+    draw_text_t(w->ox + 12, ty, w->title, gui_col(UI_TTEXT), scale);
+  fill_round(close_x, w->oy + 3, close_s, close_s, ui_th.modern ? close_s / 2 : 5,
+             gui_col(ui_th.close));
+  draw_text_t(close_x + xoff, ty, "x", gui_col(ui_th.modern ? 0xFFFFFFu : UI_TEXT), scale);
   title_max_btn(close_x - close_s - 4, w->oy + 3, close_s, gw_is_max(w));
   gui_blit_win(w);
   (void)col_black;
@@ -7308,7 +7873,7 @@ static void paint_stacked(struct wm_win* wins, int title_h, int scale, uint32_t 
       paint_shadow(sw->z, sw->x, sw->y, sw->w, sw->h);
     } else {
       struct gui_win* sg = &gwins[order[i]];
-      paint_shadow(sg->z, sg->ox, sg->oy, sg->cw, sg->title_h + sg->ch);
+      if (!sg->panel) paint_shadow(sg->z, sg->ox, sg->oy, sg->cw, sg->title_h + sg->ch);
     }
     if (kind[i] == 1)
       wm_draw_window(&wins[order[i]], wins[order[i]].z == top && top > 0, title_h, scale,
@@ -7317,6 +7882,262 @@ static void paint_stacked(struct wm_win* wins, int title_h, int scale, uint32_t 
       gui_draw_frame(&gwins[order[i]], gwins[order[i]].z == top && top > 0,
                      col_title, col_white, col_black, col_btn, col_inactive);
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * Alt+Tab. O WIN so guarda o pedido e as miniaturas; quem mostra a pilha e
+ * escolhe e o WINTAB.EXE (\SODOS), que so roda enquanto o Alt esta apertado.
+ * Ao apertar, cada janela e desenhada sozinha no quadro e reduzida para uma
+ * miniatura (a de tras aparece inteira, sem o que a cobre); o quadro inteiro
+ * sai de novo logo depois. Sem o WINTAB.EXE, Alt+Tab so passa para a proxima.
+ * ------------------------------------------------------------------------- */
+#define AT_MAX (WM_MAX + GUI_MAX)
+#define AT_TW 360
+#define AT_TH 240
+#define AT_GUI 1000 /* id de janela de programa: AT_GUI + indice em gwins */
+
+struct at_shot {
+  int id;
+  int x, y, w, h;
+  int tw, th;
+  char title[64];
+  uint32_t* pix; /* 0xRRGGBB, tw x th */
+};
+
+static struct at_shot at_list[AT_MAX];
+static int at_n;
+static int at_on;        /* Alt+Tab em curso */
+static int at_req;       /* o laco do WIN tira as miniaturas e chama o WINTAB */
+static int at_tabs;      /* Tabs desde o Alt (Shift+Tab desconta) */
+static int at_alt;       /* o Alt continua apertado */
+static int at_gid = -1;  /* janela (painel) do WINTAB */
+static int at_act = -1;  /* janela pedida por k_win_activate */
+static uint32_t at_t0;
+static int at_held;      /* Alt apertado, pelos bytes que o WIN ja leu */
+
+/* Pixel do quadro em 0xRRGGBB (get_pixel devolve no formato do PIXA). */
+static uint32_t at_rgb(int x, int y) {
+  uint32_t v = get_pixel(x, y);
+  if (gfx_bochs) return (v & 0xFFu) << 16 | (v & 0xFF00u) | ((v >> 16) & 0xFFu);
+  return gui_ega[v & 15u];
+}
+
+/* Reduz o retangulo (x,y,w,h) do quadro para s->tw x s->th, media de ate 3x3. */
+static void at_grab(struct at_shot* s, int x, int y, int w, int h) {
+  int tx, ty;
+  for (ty = 0; ty < s->th; ty++) {
+    int sy0 = y + ty * h / s->th, sy1 = y + (ty + 1) * h / s->th;
+    if (sy1 <= sy0) sy1 = sy0 + 1;
+    for (tx = 0; tx < s->tw; tx++) {
+      int sx0 = x + tx * w / s->tw, sx1 = x + (tx + 1) * w / s->tw;
+      uint32_t r = 0, g = 0, b = 0, n = 0;
+      int dx = (sx1 - sx0 + 2) / 3, dy = (sy1 - sy0 + 2) / 3, px, py;
+      if (sx1 <= sx0) sx1 = sx0 + 1;
+      if (dx < 1) dx = 1;
+      if (dy < 1) dy = 1;
+      for (py = sy0; py < sy1; py += dy)
+        for (px = sx0; px < sx1; px += dx) {
+          uint32_t c = at_rgb(px, py);
+          r += (c >> 16) & 0xFFu;
+          g += (c >> 8) & 0xFFu;
+          b += c & 0xFFu;
+          n++;
+        }
+      if (!n) n = 1;
+      s->pix[ty * s->tw + tx] = (r / n) << 16 | (g / n) << 8 | (b / n);
+    }
+  }
+}
+
+static void at_free(void) {
+  int i;
+  for (i = 0; i < at_n; i++) {
+    if (at_list[i].pix) ufree(at_list[i].pix);
+    at_list[i].pix = 0;
+  }
+  at_n = 0;
+}
+
+static void at_end(void) {
+  at_free();
+  at_on = 0;
+  at_req = 0;
+  at_alt = 0;
+  at_tabs = 0;
+  at_gid = -1;
+}
+
+/* Lista da frente para tras e miniaturas. Desenha por cima do quadro atual:
+ * quem chama pede o quadro inteiro depois. */
+static void at_snap(struct wm_win* wins, int title_h, int scale, uint32_t col_win,
+                    uint32_t col_title, uint32_t col_white, uint32_t col_black,
+                    uint32_t col_btn, uint32_t col_inactive) {
+  int used[AT_MAX];
+  int i, top = stack_top_z(wins);
+  at_free();
+  for (i = 0; i < AT_MAX; i++) used[i] = 0;
+  for (;;) {
+    int best = -1, bz = -1;
+    struct at_shot* s;
+    int x, y, w, h;
+    for (i = 0; i < AT_MAX; i++) {
+      int z;
+      if (used[i]) continue;
+      if (i < WM_MAX) {
+        if (!wins[i].used || run_hidden(&wins[i])) continue;
+        z = wins[i].z;
+      } else {
+        struct gui_win* g = gwins ? &gwins[i - WM_MAX] : 0;
+        if (!g || !g->open || g->panel) continue;
+        z = g->z;
+      }
+      if (z > bz) {
+        bz = z;
+        best = i;
+      }
+    }
+    if (best < 0 || at_n >= AT_MAX) break;
+    used[best] = 1;
+    s = &at_list[at_n];
+    if (best < WM_MAX) {
+      struct wm_win* ww = &wins[best];
+      s->id = best;
+      x = ww->x;
+      y = ww->y;
+      w = ww->w;
+      h = ww->h;
+      app_copy(s->title, (int)sizeof(s->title), ww->title);
+      wm_draw_window(ww, ww->z == top, title_h, scale, col_win, col_title, col_white, col_black,
+                     col_btn, col_inactive);
+    } else {
+      struct gui_win* g = &gwins[best - WM_MAX];
+      s->id = AT_GUI + best - WM_MAX;
+      x = g->ox;
+      y = g->oy;
+      w = g->cw;
+      h = g->title_h + g->ch;
+      app_copy(s->title, (int)sizeof(s->title), g->title);
+      gui_draw_frame(g, g->z == top, col_title, col_white, col_black, col_btn, col_inactive);
+    }
+    s->x = x;
+    s->y = y;
+    s->w = w;
+    s->h = h;
+    /* so o pedaco na tela (a janela pode estar arrastada para fora) */
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > (int)gfx_w) w = (int)gfx_w - x;
+    if (y + h > (int)gfx_h) h = (int)gfx_h - y;
+    if (w < 8 || h < 8) continue;
+    s->tw = AT_TW;
+    s->th = h * AT_TW / w;
+    if (s->th > AT_TH) {
+      s->th = AT_TH;
+      s->tw = w * AT_TH / h;
+    }
+    if (s->tw < 1) s->tw = 1;
+    if (s->th < 1) s->th = 1;
+    s->pix = (uint32_t*)umalloc_owned((uint32_t)(s->tw * s->th * 4), 0);
+    if (!s->pix) continue;
+    at_grab(s, x, y, w, h);
+    at_n++;
+  }
+}
+
+/* --- chamadas do WINTAB.EXE (k_win_*, k_alttab, k_gui_panel) --- */
+
+int win_list_api(struct k_win_info* out, int max) {
+  int i;
+  if (!out || max <= 0) return at_n;
+  for (i = 0; i < at_n && i < max; i++) {
+    out[i].id = at_list[i].id;
+    out[i].x = at_list[i].x;
+    out[i].y = at_list[i].y;
+    out[i].w = at_list[i].w;
+    out[i].h = at_list[i].h;
+    out[i].tw = at_list[i].tw;
+    out[i].th = at_list[i].th;
+    app_copy(out[i].title, (int)sizeof(out[i].title), at_list[i].title);
+  }
+  return i;
+}
+
+/* Miniatura i reduzida/ampliada para w x h, RGBA (A = 255). */
+int win_thumb_api(int i, void* rgba, int w, int h) {
+  struct at_shot* s;
+  uint8_t* d = (uint8_t*)rgba;
+  int x, y;
+  if (i < 0 || i >= at_n || !d || w < 1 || h < 1) return -1;
+  s = &at_list[i];
+  for (y = 0; y < h; y++) {
+    const uint32_t* row = s->pix + (y * s->th / h) * s->tw;
+    for (x = 0; x < w; x++) {
+      uint32_t c = row[x * s->tw / w];
+      d[0] = (uint8_t)(c >> 16);
+      d[1] = (uint8_t)(c >> 8);
+      d[2] = (uint8_t)c;
+      d[3] = 255;
+      d += 4;
+    }
+  }
+  return 0;
+}
+
+/* O que esta na tela agora (antes do painel abrir), RGBA. */
+int win_shot_api(int x, int y, int w, int h, void* rgba) {
+  uint8_t* d = (uint8_t*)rgba;
+  int px, py;
+  if (!gfx_live || !d || w < 1 || h < 1) return -1;
+  for (py = y; py < y + h; py++)
+    for (px = x; px < x + w; px++) {
+      uint32_t c = at_rgb(px, py);
+      d[0] = (uint8_t)(c >> 16);
+      d[1] = (uint8_t)(c >> 8);
+      d[2] = (uint8_t)c;
+      d[3] = 255;
+      d += 4;
+    }
+  return 0;
+}
+
+/* O laco do WIN poe a janela na frente (ele tem o foco das janelas internas). */
+int win_activate_api(int id) {
+  at_act = id;
+  win_api_dirty = 1;
+  return 0;
+}
+
+int alttab_api(int* tabs) {
+  if (tabs) *tabs = at_tabs;
+  return at_on && at_alt;
+}
+
+/* Janela sem barra de titulo nem moldura, no retangulo pedido (painel). */
+int gui_panel_open(const char* title, int x, int y, int w, int h) {
+  int rc = gui_open(title);
+  uint32_t* pix;
+  if (rc != 0) return rc;
+  if (w < 16) w = 16;
+  if (h < 16) h = 16;
+  if (w > (int)gfx_w) w = (int)gfx_w;
+  if (h > (int)gfx_h) h = (int)gfx_h;
+  pix = (uint32_t*)umalloc_owned((uint32_t)w * (uint32_t)h * 4u, 0);
+  if (!pix) {
+    gui_close();
+    return -2;
+  }
+  ufree(gui.pix);
+  gui.pix = pix;
+  fill32(gui.pix, 0, (uint32_t)w * (uint32_t)h);
+  gui.ox = x;
+  gui.oy = y;
+  gui.cw = w;
+  gui.ch = h;
+  gui.title_h = 0;
+  gui.panel = 1;
+  if (at_on) at_gid = gui_ix;
+  win_api_dirty = 1;
+  return 0;
 }
 
 #define HIT_NONE 0
@@ -7495,17 +8316,20 @@ static void chrome_paint_under(void) {
   int h = (int)gfx_h;
   gfx_desk_clear();
   if (!c_wins) return;
-  fill_rect(12, 12, c_icon, c_icon, c_win);
-  desk_label(12, 12 + c_icon + 2, "DOS", desk_mark == DESK_MARK_FIXED + 0, c_white, c_black,
+  if (!th_desk_icon("DOS", 12, 12, c_icon)) fill_rect(12, 12, c_icon, c_icon, c_win);
+  desk_label(12, c_icon, 12 + c_icon + 2, "DOS", desk_mark == DESK_MARK_FIXED + 0, c_white, c_black,
              c_scale);
-  fill_rect(12, c_icon2_y, c_icon, c_icon, c_title);
-  desk_label(12, c_icon2_y + c_icon + 2, "ARQ", desk_mark == DESK_MARK_FIXED + 1, c_white,
+  if (!th_desk_icon("ARQ", 12, c_icon2_y, c_icon))
+    fill_rect(12, c_icon2_y, c_icon, c_icon, c_title);
+  desk_label(12, c_icon, c_icon2_y + c_icon + 2, "ARQ", desk_mark == DESK_MARK_FIXED + 1, c_white,
              c_black, c_scale);
-  draw_nav_icon(12, c_icon3_y, c_icon, c_title, c_white);
-  desk_label(12, c_icon3_y + c_icon + 2, "WEB", desk_mark == DESK_MARK_FIXED + 2, c_white,
+  if (!th_desk_icon("WEB", 12, c_icon3_y, c_icon))
+    draw_nav_icon(12, c_icon3_y, c_icon, c_title, c_white);
+  desk_label(12, c_icon, c_icon3_y + c_icon + 2, "WEB", desk_mark == DESK_MARK_FIXED + 2, c_white,
              c_black, c_scale);
-  draw_cmd_icon(12, c_icon4_y, c_icon, c_white, c_black);
-  desk_label(12, c_icon4_y + c_icon + 2, "CMD", desk_mark == DESK_MARK_FIXED + 3, c_white,
+  if (!th_desk_icon("CMD", 12, c_icon4_y, c_icon))
+    draw_cmd_icon(12, c_icon4_y, c_icon, c_white, c_black);
+  desk_label(12, c_icon, c_icon4_y + c_icon + 2, "CMD", desk_mark == DESK_MARK_FIXED + 3, c_white,
              c_black, c_scale);
   desk_draw(c_icon, (vga_bios_font_ok ? FONT_H : 8) * c_scale, c_scale, w, h, c_bar_h,
             c_desk, c_white, c_black);
@@ -7542,10 +8366,14 @@ static void draw_taskbar(int w, int h, int bar_h, int ch, int scale, int start_w
   char dat[12];
 
   int lx = ui_logo_x(w, lw);
-  fill_rect(0, by, w, bar_h, gui_col(UI_BAR));
+  if (ui_th.modern && gfx_bochs && UI_BAR_A < 255)
+    fill_rect_a(0, by, w, bar_h, gui_col(UI_BAR), UI_BAR_A);
+  else
+    fill_rect(0, by, w, bar_h, gui_col(UI_BAR));
   fill_rect(0, by, w, 1, gui_col(UI_BORDER));
   fill_round(lx, by + 5, lw, bar_h - 10, UI_RADIUS, gui_col(UI_ACCENT));
-  draw_text_t(lx + (lw - cw) / 2, by + (bar_h - ch) / 2, "S", gui_col(UI_TEXT), scale);
+  draw_text_t(lx + (lw - cw) / 2, by + (bar_h - ch) / 2, "S",
+              gui_col(ui_th.modern ? 0xFFFFFFu : UI_TEXT), scale);
   if (ui_menu_pos == 1)
     draw_text_t(lx - 14 - 5 * cw, ty, "SODOS", gui_col(UI_TEXT), scale);
   else
@@ -7619,6 +8447,8 @@ static void chrome_paint_over(void) {
                          gm.sub_y + 4 * gm.item_h, gm.sub_w, gm.item_h);
     int lx_hot = wm_pt((int)sys_mx, (int)sys_my, gm.sub_x,
                        gm.sub_y + 5 * gm.item_h, gm.sub_w, gm.item_h);
+    int th_hot = wm_pt((int)sys_mx, (int)sys_my, gm.sub_x,
+                       gm.sub_y + 6 * gm.item_h, gm.sub_w, gm.item_h);
     menu_panel(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h);
     menu_row(gm.sub_x + 1, gm.sub_y + 2, gm.sub_w - 2, gm.item_h - 2,
              "Tela", tela_hot, 1, c_win, c_title, c_white, c_black, c_scale);
@@ -7632,6 +8462,8 @@ static void chrome_paint_over(void) {
              "Menu", menu_hot, 0, c_win, c_title, c_white, c_black, c_scale);
     menu_row(gm.sub_x + 1, gm.sub_y + 2 + 5 * gm.item_h, gm.sub_w - 2, gm.item_h - 2,
              "Abrir com", lx_hot, 0, c_win, c_title, c_white, c_black, c_scale);
+    menu_row(gm.sub_x + 1, gm.sub_y + 2 + 6 * gm.item_h, gm.sub_w - 2, gm.item_h - 2,
+             "Temas", th_hot, 0, c_win, c_title, c_white, c_black, c_scale);
     menu_frame(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h, c_black);
   }
   if (c_cfg && *c_cfg && c_tela && *c_tela) {
@@ -7698,6 +8530,15 @@ static void host_open_linkext(struct wm_win* wins, int* focus, int big) {
   if (gui_raise_title("Abrir com")) return;
   if (!desk_find("D:\\SODOS\\LINKEXT.EXE", exe, (int)sizeof(exe)))
     wm_copy_str(exe, (int)sizeof(exe), "D:\\SODOS\\LINKEXT.EXE");
+  wm_exec(wins, focus, big, exe);
+}
+
+/* Iniciar > Configuracoes > Temas: TEMAS.EXE (\SODOS\ICONS\<tema>). */
+static void host_open_temas(struct wm_win* wins, int* focus, int big) {
+  char exe[48];
+  if (gui_raise_title("Temas")) return;
+  if (!desk_find("D:\\SODOS\\TEMAS.EXE", exe, (int)sizeof(exe)))
+    wm_copy_str(exe, (int)sizeof(exe), "D:\\SODOS\\TEMAS.EXE");
   wm_exec(wins, focus, big, exe);
 }
 
@@ -7772,11 +8613,16 @@ static int chrome_on_click(int x, int y) {
       *c_cfg = 0;
       *c_tela = 0;
       host_open_menu_cfg(c_wins, c_focus, c_big);
-    } else {
+    } else if (item == 5) {
       *chrome_menu = 0;
       *c_cfg = 0;
       *c_tela = 0;
       host_open_linkext(c_wins, c_focus, c_big);
+    } else {
+      *chrome_menu = 0;
+      *c_cfg = 0;
+      *c_tela = 0;
+      host_open_temas(c_wins, c_focus, c_big);
     }
     return 1;
   }
@@ -8069,12 +8915,13 @@ static int win_wm_run(void) {
   int start_w = (big ? 7 : 4) * FONT_W * scale + (big ? 16 : 8);
   int menu_w = 14 * FONT_W * scale + FONT_W * scale + 20;
   int menu_item_h = ch + (big ? 8 : 4);
-  int icon = big ? gfx_sx(32) : 14;
+  int icon = big ? gfx_sx(ui_th.icon_px) : 14;
   int icon_gap = big ? gfx_sy(36) : 18;
   int icon2_y = 12 + icon + icon_gap;
   int icon3_y = icon2_y + icon + icon_gap;
   int icon4_y = icon3_y + icon + icon_gap;
   uint32_t col_desk, col_win, col_title, col_bar, col_white, col_black, col_btn, col_cursor, col_inactive;
+  uint32_t th_gen_seen;
   int need_draw = 1;
   int i;
   int desk_i;
@@ -8130,10 +8977,23 @@ static int win_wm_run(void) {
               start_w, menu_w, menu_item_h, icon, icon2_y, icon3_y, icon4_y,
               col_desk, col_win, col_title, col_bar, col_white, col_black, col_btn, col_inactive);
 
+  th_gen_seen = ui_th.gen;
   for (;;) {
     uint8_t data = 0;
 
-    kt_bkl_breathe();   /* threads de programas esperando o kernel */
+    kt_bkl_breathe();
+    if (th_gen_seen != ui_th.gen) {
+      /* tema novo (TEMAS.EXE): tamanho dos icones do desktop pode mudar */
+      th_gen_seen = ui_th.gen;
+      icon = big ? gfx_sx(ui_th.icon_px) : 14;
+      icon2_y = 12 + icon + icon_gap;
+      icon3_y = icon2_y + icon + icon_gap;
+      icon4_y = icon3_y + icon + icon_gap;
+      chrome_bind(wins, &focus, &menu_open, &menu_cfg, &menu_tela, big, scale, bar_h, title_h,
+                  start_w, menu_w, menu_item_h, icon, icon2_y, icon3_y, icon4_y, col_desk,
+                  col_win, col_title, col_bar, col_white, col_black, col_btn, col_inactive);
+      need_draw = 1;
+    }   /* threads de programas esperando o kernel */
     if (gui_stole) {
       focus = -1;
       gui_stole = 0;
@@ -8211,6 +9071,44 @@ static int win_wm_run(void) {
         need_draw = 1;
       }
     }
+    /* Alt+Tab: miniaturas com o quadro de agora, depois o WINTAB.EXE. */
+    if (at_req) {
+      char exe[48];
+      at_req = 0;
+      at_snap(wins, title_h, scale, col_win, col_title, col_white, col_black, col_btn,
+              col_inactive);
+      need_draw = 1;
+      if (at_n < 2) {
+        at_end();
+      } else if (desk_find("D:\\SODOS\\WINTAB.EXE", exe, (int)sizeof(exe))) {
+        wm_exec(wins, &focus, big, exe);
+      } else {
+        /* sem o WINTAB: so passa para a janela de tras */
+        at_act = at_list[1].id;
+      }
+    }
+    if (at_act >= 0) {
+      int id = at_act;
+      at_act = -1;
+      if (id >= AT_GUI && id < AT_GUI + GUI_MAX && gwins && gwins[id - AT_GUI].open) {
+        gwins[id - AT_GUI].z = ++zseq;
+        gui_focus = id - AT_GUI;
+        focus = -1;
+      } else if (id >= 0 && id < WM_MAX && wins[id].used) {
+        wm_raise(&wins[id]);
+        focus = id;
+      }
+      at_end();
+      need_draw = 1;
+    }
+    if (at_on && !at_req) {
+      /* painel fechado (Esc ou fim do WINTAB), ou o WINTAB nunca abriu */
+      if (at_gid >= 0 ? !(gwins && gwins[at_gid].open)
+                      : (uint32_t)irq_ticks() - at_t0 > 1500u) {
+        at_end();
+        need_draw = 1;
+      }
+    }
     wm_no_partial = menu_open || pop_open || note_dlg || note_file_menu;
     /* Programa do Command passou a usar a tela 80x25: a janela cresce. */
     if (cons_dirty && cons_dirty->tty && cons_dirty->tty->on && cons_dirty->tty->fit) {
@@ -8263,17 +9161,20 @@ static int win_wm_run(void) {
       gfx_frame_begin();
       cursor_saved = 0;
       gfx_desk_clear();
-      fill_rect(12, 12, icon, icon, col_win);
-      desk_label(12, 12 + icon + 2, "DOS", desk_mark == DESK_MARK_FIXED + 0, col_white,
+      if (!th_desk_icon("DOS", 12, 12, icon)) fill_rect(12, 12, icon, icon, col_win);
+      desk_label(12, icon, 12 + icon + 2, "DOS", desk_mark == DESK_MARK_FIXED + 0, col_white,
                  col_black, scale);
-      fill_rect(12, icon2_y, icon, icon, col_title);
-      desk_label(12, icon2_y + icon + 2, "ARQ", desk_mark == DESK_MARK_FIXED + 1, col_white,
+      if (!th_desk_icon("ARQ", 12, icon2_y, icon))
+        fill_rect(12, icon2_y, icon, icon, col_title);
+      desk_label(12, icon, icon2_y + icon + 2, "ARQ", desk_mark == DESK_MARK_FIXED + 1, col_white,
                  col_black, scale);
-      draw_nav_icon(12, icon3_y, icon, col_title, col_white);
-      desk_label(12, icon3_y + icon + 2, "WEB", desk_mark == DESK_MARK_FIXED + 2, col_white,
+      if (!th_desk_icon("WEB", 12, icon3_y, icon))
+        draw_nav_icon(12, icon3_y, icon, col_title, col_white);
+      desk_label(12, icon, icon3_y + icon + 2, "WEB", desk_mark == DESK_MARK_FIXED + 2, col_white,
                  col_black, scale);
-      draw_cmd_icon(12, icon4_y, icon, col_white, col_black);
-      desk_label(12, icon4_y + icon + 2, "CMD", desk_mark == DESK_MARK_FIXED + 3, col_white,
+      if (!th_desk_icon("CMD", 12, icon4_y, icon))
+        draw_cmd_icon(12, icon4_y, icon, col_white, col_black);
+      desk_label(12, icon, icon4_y + icon + 2, "CMD", desk_mark == DESK_MARK_FIXED + 3, col_white,
                  col_black, scale);
       desk_draw(icon, ch, scale, w, h, bar_h, col_desk, col_white, col_black);
       paint_stacked(wins, title_h, scale, col_win, col_title, col_white, col_black,
@@ -8315,6 +9216,8 @@ static int win_wm_run(void) {
                              gm.sub_w, gm.item_h);
         int lx_hot = wm_pt((int)mx, (int)my, gm.sub_x, gm.sub_y + 5 * gm.item_h,
                            gm.sub_w, gm.item_h);
+        int th_hot = wm_pt((int)mx, (int)my, gm.sub_x, gm.sub_y + 6 * gm.item_h,
+                           gm.sub_w, gm.item_h);
         menu_panel(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h);
         menu_row(gm.sub_x + 1, gm.sub_y + 2, gm.sub_w - 2, gm.item_h - 2,
                  "Tela", tela_hot, 1, col_win, col_title, col_white, col_black, scale);
@@ -8328,6 +9231,8 @@ static int win_wm_run(void) {
                  "Menu", menu_hot, 0, col_win, col_title, col_white, col_black, scale);
         menu_row(gm.sub_x + 1, gm.sub_y + 2 + 5 * gm.item_h, gm.sub_w - 2, gm.item_h - 2,
                  "Abrir com", lx_hot, 0, col_win, col_title, col_white, col_black, scale);
+        menu_row(gm.sub_x + 1, gm.sub_y + 2 + 6 * gm.item_h, gm.sub_w - 2, gm.item_h - 2,
+                 "Temas", th_hot, 0, col_win, col_title, col_white, col_black, scale);
         menu_frame(gm.sub_x, gm.sub_y, gm.sub_w, gm.sub_h, col_black);
       }
       if (menu_open && menu_cfg && menu_tela) {
@@ -8807,11 +9712,16 @@ static int win_wm_run(void) {
                 menu_cfg = 0;
                 menu_tela = 0;
                 host_open_menu_cfg(wins, &focus, big);
-              } else {
+              } else if (item == 5) {
                 menu_open = 0;
                 menu_cfg = 0;
                 menu_tela = 0;
                 host_open_linkext(wins, &focus, big);
+              } else {
+                menu_open = 0;
+                menu_cfg = 0;
+                menu_tela = 0;
+                host_open_temas(wins, &focus, big);
               }
               handled = 1;
               need_draw = 1;
@@ -8954,7 +9864,10 @@ static int win_wm_run(void) {
               gui_focus = id;
               focus = -1;
               int rc;
-              if (wm_pt((int)mx, (int)my, gw->ox + gw->cw - close_s - TB_PAD, gw->oy + 2,
+              if (gw->panel) {
+                gq_push(gw, GUI_EV_DOWN, relx, rely, 1);
+                g_cap = id;
+              } else if (wm_pt((int)mx, (int)my, gw->ox + gw->cw - close_s - TB_PAD, gw->oy + 2,
                         close_s, close_s)) {
                 gq_push(gw, GUI_EV_CLOSE, 0, 0, 0);
               } else if (wm_pt((int)mx, (int)my, gw->ox + gw->cw - 2 * close_s - TB_PAD - 4,
@@ -9259,6 +10172,24 @@ static int win_wm_run(void) {
         kbd_e0 = 0;
         shift_on = 0;   /* o E0 2A da sequencia e um Shift falso */
         prtscr_save(0, 0);
+        continue;
+      }
+      /* Alt+Tab: troca de janela. O WINTAB.EXE mostra a pilha enquanto o Alt
+       * esta apertado e soltar o Alt escolhe; nenhuma janela recebe o Tab. */
+      if ((sc & 0x7F) == 0x38) {
+        at_held = !(sc & 0x80);
+        if (!at_held && at_on) at_alt = 0;
+      }
+      if (sc == 0x0F && !kbd_e0 && at_held) {
+        if (!at_on) {
+          at_on = 1;
+          at_req = 1;
+          at_tabs = 0;
+          at_gid = -1;
+          at_t0 = (uint32_t)irq_ticks();
+        }
+        at_alt = 1;
+        at_tabs += shift_on ? -1 : 1;
         continue;
       }
       if (keymap_kp_nav(sc)) kbd_e0 = 1; /* NumLock desligado: vira seta, Home... */
@@ -9609,6 +10540,36 @@ int ui_ia_set(int on) {
 }
 
 int ui_menu_pos_get(void) { return ui_menu_pos; }
+
+int ui_theme_api(const char* set, struct ui_theme_info* out) {
+  int rc = 0;
+  if (set) rc = ui_theme_load(set);
+  if (out) {
+    int i;
+    out->gen = ui_th.gen;
+    out->modern = ui_th.modern;
+    out->icons = ui_th.icons;
+    for (i = 0; i < 15 && ui_th.name[i]; i++) out->name[i] = ui_th.name[i];
+    out->name[i] = 0;
+    for (i = 0; i < 39 && ui_th.dir[i]; i++) out->dir[i] = ui_th.dir[i];
+    out->dir[i] = 0;
+    out->face = ui_th.w_face;
+    out->bg = ui_th.w_bg;
+    out->panel = ui_th.w_panel;
+    out->text = ui_th.w_text;
+    out->text_dim = ui_th.w_dim;
+    out->text_dis = ui_th.w_dis;
+    out->sel_bg = ui_th.w_sel;
+    out->sel_text = ui_th.w_sel_text;
+    out->field_bg = ui_th.w_field;
+    out->border = ui_th.w_border;
+    out->accent = ui_th.w_accent;
+    out->radius = ui_th.w_radius;
+    out->btn_h = ui_th.w_btn_h;
+    out->row_h = ui_th.w_row_h;
+  }
+  return set ? rc : (int)ui_th.gen;
+}
 int ui_glass_get(void) { return ui_glass; }
 int ui_ia_get(void) { return ui_ia; }
 
@@ -9738,6 +10699,7 @@ static void win_load_cfg(void) {
   gfx_quality = mode ? 1 : 0;
   desk_rgb = bg;
   if (wall) win_load_wall();
+  ui_theme_boot();
   serial_puts("[visual] cfg mode=");
   serial_u16((uint16_t)(mode + 1));
   serial_puts(" bg=");

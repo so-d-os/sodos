@@ -4,9 +4,9 @@
 
 #define PR 1           /* janela */
 #define PC 0
-#define PH 22
-#define PW 78
-#define LINHAS 12      /* linhas da lista */
+#define PH (ROWS - 3)
+#define PW (COLS - 2)
+#define LINHAS (PH - 10) /* linhas da lista */
 #define ATUALIZA 2000  /* ms */
 
 static const char* const rotulos[10] = {
@@ -35,9 +35,9 @@ static void resumo_topo(void) {
   sprintf(buf, "RAM %s   em uso %s   livre %s   fora da RAM %s", a, b, d, e);
   textow(r + 1, c + 3, buf, PW - 6, C_FORTE);
   texto(r + 2, c + 3, "Ocupada", C_JANELA);
-  barra(r + 2, c + 12, 52, usado, res.ram_kb);
+  barra(r + 2, c + 12, PW - 26, usado, res.ram_kb);
   sprintf(buf, "%3u,%u%%", pm / 10, pm % 10);
-  texto(r + 2, c + 66, buf, C_FORTE);
+  texto(r + 2, c + PW - 12, buf, C_FORTE);
   fmt_kb(a, res.kernel_kb);
   fmt_kb(b, res.progs_kb);
   sprintf(buf, "Sistema %s   Programas %s   EXE %d  DLL %d  servicos ativos %d",
@@ -140,9 +140,9 @@ static void desenha(void) {
     if (topo + i < n_procs) item(y, &procs[topo + i], topo + i == sel);
     else linha(y, c + 1, PW - 2, ' ', C_PAINEL);
   }
-  separador(r + 18, c, PW);
+  separador(r + PH - 4, c, PW);
   if (n_procs) {
-    detalhe(r + 19, &procs[sel]);
+    detalhe(r + PH - 3, &procs[sel]);
     strcpy(sel_nome, procs[sel].k.name);
   }
 }

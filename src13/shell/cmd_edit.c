@@ -5,9 +5,13 @@
 #include "reboot.h"
 #include "kexports.h"
 
-/* Tela: linha 0 = barra azul, 1..23 = texto, 24 = estado. */
-#define EDIT_COLS 80
-#define EDIT_ROWS 25
+/* Tela: linha 0 = barra azul, 1..rows-2 = texto, rows-1 = estado. 80x25 no
+ * DOS; no Command do WIN o tamanho da janela (kx_textsize, KEY_RESIZE). */
+#define EDIT_MAXC 256
+#define EDIT_MAXR 96
+static int edit_cols = 80, edit_rows = 25;
+#define EDIT_COLS edit_cols
+#define EDIT_ROWS edit_rows
 #define EDIT_TOP 1
 #define EDIT_LINES (EDIT_ROWS - 2)
 #define EDIT_TAB 8
@@ -31,7 +35,18 @@ static char edit_path[128];
 static char edit_msg[48];
 /* A tela e montada aqui e vai inteira por kx_vput: no DOS para a VGA, no
  * Command do WIN para a janela. */
-static uint16_t edit_scr[EDIT_ROWS * EDIT_COLS];
+static uint16_t* edit_scr; /* EDIT_MAXC * EDIT_MAXR, na memoria alta */
+
+static void edit_size(void) {
+  int c = 80, r = 25;
+  kx_textsize(&c, &r);
+  if (c < 30) c = 30;
+  if (r < 5) r = 5;
+  if (c > EDIT_MAXC) c = EDIT_MAXC;
+  if (r > EDIT_MAXR) r = EDIT_MAXR;
+  edit_cols = c;
+  edit_rows = r;
+}
 
 static void edit_set_msg(const char* s) {
   int i = 0;
@@ -149,7 +164,7 @@ static void edit_draw(void) {
   c = edit_text(0, 1, "EDIT ", ATTR_HOT);
   c = edit_text(0, c, edit_path, ATTR_BAR);
   if (edit_dirty) edit_text(0, c, " *", ATTR_HOT);
-  c = EDIT_COLS - 26;
+  c = EDIT_COLS - 26 > c + 2 ? EDIT_COLS - 26 : c + 2;
   c = edit_text(0, c, "CTRL+W", ATTR_HOT);
   c = edit_text(0, c, "=Salvar  ", ATTR_BAR);
   c = edit_text(0, c, "ESC", ATTR_HOT);
@@ -334,10 +349,14 @@ int cmd_edit(int argc, char** argv) {
     return 1;
   }
 
-  if (edit_load() != 0) {
+  edit_scr = (uint16_t*)umalloc_owned((uint32_t)(EDIT_MAXC * EDIT_MAXR * 2), 0);
+  if (!edit_scr || edit_load() != 0) {
+    if (edit_scr) ufree(edit_scr);
+    edit_scr = 0;
     kx_puts("sem memoria para abrir o arquivo\n");
     return 1;
   }
+  edit_size();
   edit_cur = 0;
   edit_top = 0;
   edit_top_line = 0;
@@ -351,6 +370,12 @@ int cmd_edit(int argc, char** argv) {
     int k = kx_getc();
     if (k == 0) continue;
     if (k == 27 || k < 0) break; /* k < 0: a janela do Command fechou */
+    if (k == KEY_RESIZE) {
+      edit_size();
+      edit_scroll();
+      edit_draw();
+      continue;
+    }
     edit_msg[0] = '\0';
     if (k == 23) {
       edit_save(); /* Ctrl+W chega como 23 na janela do WIN */
@@ -392,6 +417,8 @@ int cmd_edit(int argc, char** argv) {
 
   ufree(edit_buf);
   edit_buf = 0;
+  ufree(edit_scr);
+  edit_scr = 0;
   kx_clear();
   if (edit_dirty) {
     kx_puts("Saiu sem salvar: ");

@@ -61,6 +61,10 @@ int kbd_ctrl_down(void) {
   return kw_ctrl != 0;
 }
 
+int kbd_alt_down(void) {
+  return kw_alt != 0;
+}
+
 int kbd_break_take(void) {
   int b = kw_break;
   kw_break = 0;

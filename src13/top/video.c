@@ -4,12 +4,12 @@
 
 #define VR 1           /* janela */
 #define VC 0
-#define VH 22
-#define VW 78
+#define VH (ROWS - 3)
+#define VW (COLS - 2)
 #define QR (VR + 6)    /* quadro da VRAM */
 #define QC 3
-#define QL 4
-#define QW 72
+#define QL (VH - 18)
+#define QW (VW - 6)
 #define ATUALIZA 2000
 
 /* partes da VRAM no quadro */

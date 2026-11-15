@@ -19,3 +19,5 @@ void kbd_break_arm(int on);
 /* 1 enquanto um dos Ctrl esta apertado (ja vale para a tecla que
  * get_char acabou de devolver). */
 int kbd_ctrl_down(void);
+/* 1 enquanto um dos Alt esta apertado. */
+int kbd_alt_down(void);

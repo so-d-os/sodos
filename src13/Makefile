@@ -599,6 +599,32 @@ disk-files: disk.img
 	@for f in c_compiler/out/DRV/*.DLL; do [ -f "$$f" ] && mcopy -o -i $(DISK)@@512 "$$f" ::/SODOS/DRV/ || true; done
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/AIPANEL.EXE ::/SODOS/AIPANEL.EXE
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/MENUCFG.EXE ::/SODOS/MENUCFG.EXE
+	@# Temas (Configuracoes > Temas): TEMAS.EXE e \SODOS\ICONS\<TEMA> com
+	@# TEMA.CFG, LEIAME.TXT e cada icone em PNG (fonte) + ICN (o kernel le).
+	@# A escolha do usuario (D:\SODOS\TEMA.CFG) nunca e sobrescrita.
+	@mcopy -o -i $(DISK)@@512 c_compiler/out/TEMAS.EXE ::/SODOS/TEMAS.EXE
+	@# Alt+Tab do WIN: o WIN abre o WINTAB.EXE so enquanto o Alt esta apertado
+	@mcopy -o -i $(DISK)@@512 c_compiler/out/WINTAB.EXE ::/SODOS/WINTAB.EXE
+	@gcc -O2 -D__export= -idirafter c_compiler/include -o c_compiler/build/mkicon \
+	  c_compiler/img/img.c utils/mkicon.c
+	@if ! mdir -i $(DISK)@@512 ::/SODOS/ICONS >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS/ICONS; fi
+	@for d in content/icons/*/; do \
+	  t=$$(basename "$$d" | tr 'a-z' 'A-Z'); \
+	  mkdir -p "c_compiler/build/icons/$$t"; \
+	  if ! mdir -i $(DISK)@@512 "::/SODOS/ICONS/$$t" >/dev/null 2>&1; then mmd -i $(DISK)@@512 "::/SODOS/ICONS/$$t"; fi; \
+	  for f in "$$d"*; do \
+	    [ -f "$$f" ] || continue; \
+	    n=$$(basename "$$f" | tr 'a-z' 'A-Z'); \
+	    mcopy -o -i $(DISK)@@512 "$$f" "::/SODOS/ICONS/$$t/$$n" || exit 1; \
+	    case "$$n" in *.PNG) \
+	      b=$${n%.*}; \
+	      if grep -qi '^icones=arquivo' "$$d/TEMA.CFG"; then \
+	        ./c_compiler/build/mkicon "$$f" "c_compiler/build/icons/$$t/$$b.ICN" || exit 1; \
+	        mcopy -o -i $(DISK)@@512 "c_compiler/build/icons/$$t/$$b.ICN" "::/SODOS/ICONS/$$t/$$b.ICN" || exit 1; \
+	      fi;; \
+	    esac; \
+	  done; \
+	done
 	@# Abrir com (LINKEXT.EXE + LINKEXT.DLL em \SODOS\DRV); o CFG de exemplo so
 	@# entra se o disco ainda nao tem um (o usuario edita pelo LINKEXT.EXE).
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/LINKEXT.EXE ::/SODOS/LINKEXT.EXE

@@ -69,6 +69,21 @@ void mouse_api(int x, int y, int click);
 void mouse_api_pos(int* x, int* y);
 /* 1 se o WIN (ou o modo grafico) esta na tela. */
 int win_screen_size(int* w, int* h);
+/* Alt+Tab (WINTAB.EXE): janelas da frente para tras, tiradas ao apertar. */
+struct k_win_info {
+  int id;          /* para win_activate_api */
+  int x, y, w, h;  /* na tela */
+  int tw, th;      /* tamanho da miniatura guardada */
+  char title[64];
+};
+int win_list_api(struct k_win_info* out, int max);
+int win_thumb_api(int i, void* rgba, int w, int h);
+int win_shot_api(int x, int y, int w, int h, void* rgba);
+int win_activate_api(int id);
+/* 1 enquanto o Alt do Alt+Tab continua apertado; tabs = Tabs ate agora. */
+int alttab_api(int* tabs);
+/* Janela sem titulo nem moldura no retangulo (painel do WINTAB). */
+int gui_panel_open(const char* title, int x, int y, int w, int h);
 /* Injeta uma tecla ASCII na janela GUI com foco (automacao/testes). */
 int win_api_key(int ch);
 /* Linha y em BGR. Devolve a largura, ou -1. */
@@ -88,6 +103,21 @@ int ui_ia_set(int on);
 int ui_menu_pos_get(void);
 int ui_glass_get(void);
 int ui_ia_get(void);
+/* Tema da interface (Configuracoes > Temas). A mesma estrutura do so.h
+ * (k_ui_theme_t): campos novos so no fim. */
+struct ui_theme_info {
+  unsigned gen;        /* muda a cada troca de tema */
+  int modern;          /* 0 classico (relevo), 1 moderno (chapado, redondo) */
+  int icons;           /* 1 = a pasta tem icones (.ICN) */
+  char name[16];       /* pasta em \SODOS\ICONS */
+  char dir[40];        /* "X:\SODOS\ICONS\NOME\" ou "" */
+  unsigned face, bg, panel, text, text_dim, text_dis, sel_bg, sel_text, field_bg,
+      border, accent;
+  int radius, btn_h, row_h;   /* 0 = o padrao do GUI.DLL */
+};
+/* set != NULL: carrega o tema (0 ok, -1 sem a pasta). out != NULL: copia o
+ * atual. Devolve gen (set NULL) ou o resultado da troca. */
+int ui_theme_api(const char* set, struct ui_theme_info* out);
 /* abre a janela canvas docada na lateral direita (painel de IA). */
 int gui_dock_open(const char* title, int w);
 int gui_open_pct(const char* title, int wpct, int hpct);
