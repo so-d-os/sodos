@@ -7,6 +7,7 @@
 #include "serial.h"
 #include "drives.h"
 #include "mm.h"
+#include "env.h"
 
 static struct wifi_cfg cfg;                /* a rede escolhida */
 static struct wifi_cfg nets[WIFI_CFG_MAX];  /* todas as redes do WIFI.CFG */
@@ -32,20 +33,29 @@ static void say(const char* s) {
   rtw_log(s);
 }
 
-/* Grava o log da tentativa. Pendrive (U:); sem ele, o D:\NET do disk.img,
- * que e o que existe no QEMU. */
-static void save_log(void) {
+/* Grava o log: PATHSODOS\NET\WIFI.LOG; sem ela, U:\NET e o D:\NET do
+ * disk.img, que e o que existe no QEMU. Devolve onde gravou ou 0. */
+static const char* log_write(const char* t, int n) {
+  static char p[DRV_PATH];
+  env_sodos_path("NET\\WIFI.LOG", p, (int)sizeof p);
+  if (file_save(p, t, n) == 0) return p;
+  if (file_save(WIFI_LOG_PATH, t, n) == 0) return WIFI_LOG_PATH;
+  if (file_save("D:\\NET\\WIFI.LOG", t, n) == 0) return "D:\\NET\\WIFI.LOG";
+  return 0;
+}
+
+static const char* save_log(void) {
   int n;
   const char* t = rtw_log_text(&n);
-  if (file_save(WIFI_LOG_PATH, t, n) == 0) {
-    puts_k("  log gravado em " WIFI_LOG_PATH "\n");
-    return;
+  const char* p = log_write(t, n);
+  if (p) {
+    puts_k("  log gravado em ");
+    puts_k(p);
+    puts_k("\n");
+  } else {
+    puts_k("  nao consegui gravar o WIFI.LOG\n");
   }
-  if (file_save("D:\\NET\\WIFI.LOG", t, n) == 0) {
-    puts_k("  log gravado em D:\\NET\\WIFI.LOG\n");
-    return;
-  }
-  puts_k("  nao consegui gravar o WIFI.LOG\n");
+  return p;
 }
 
 static void put_u(uint32_t n) {
@@ -130,13 +140,20 @@ static void junta(char* d, const char* a, const char* b, int max) {
   copy_str(d + n, b, max - n);
 }
 
-/* Arquivo do NET: o pendrive (U:) manda; sem ele, D:\NET do disk.img, que e
- * o caso do QEMU (nao ha RTL8852BE nem pendrive). 0 = achou. */
+/* Arquivo do NET: PATHSODOS\NET (padrao U:\SODOS\NET) manda; depois o
+ * U:\NET antigo e o D:\NET do disk.img, que e o caso do QEMU (nao ha
+ * RTL8852BE nem pendrive). 0 = achou; sem achar, out fica no PATHSODOS. */
 static int net_path(const char* nome, char* out, int max) {
+  char rel[40];
+  junta(rel, "NET\\", nome, (int)sizeof rel);
+  env_sodos_path(rel, out, max);
+  if (file_size(out) >= 0) return 0;
   junta(out, "U:\\NET\\", nome, max);
   if (file_size(out) >= 0) return 0;
   junta(out, "D:\\NET\\", nome, max);
   if (file_size(out) >= 0) return 0;
+  junta(rel, "NET\\", nome, (int)sizeof rel);
+  env_sodos_path(rel, out, max);
   return -1;
 }
 
@@ -383,7 +400,7 @@ static int sim_n;
  * e o nome. 1 = tem APs falsos. */
 static int sim_carrega(void) {
   static char txt[1024];
-  char p[40];
+  char p[DRV_PATH];
   char* l;
   sim_n = 0;
   if (net_path("WIFI.SIM", p, (int)sizeof p) != 0) return 0;
@@ -525,8 +542,17 @@ static void save_regs(void) {
   uint8_t* buf = (uint8_t*)umalloc_owned(RTW_DUMP_SIZE, 0);
   if (!buf) return;
   rtw_dump_regs(buf);
-  if (file_save(WIFI_REGS_PATH, (const char*)buf, (int)RTW_DUMP_SIZE) == 0)
-    puts_k("  registradores gravados em " WIFI_REGS_PATH "\n");
+  {
+    static char rp[DRV_PATH];
+    env_sodos_path("NET\\REGS.BIN", rp, (int)sizeof rp);
+    if (file_save(rp, (const char*)buf, (int)RTW_DUMP_SIZE) == 0) {
+      puts_k("  registradores gravados em ");
+      puts_k(rp);
+      puts_k("\n");
+    } else if (file_save(WIFI_REGS_PATH, (const char*)buf, (int)RTW_DUMP_SIZE) == 0) {
+      puts_k("  registradores gravados em " WIFI_REGS_PATH "\n");
+    }
+  }
   ufree(buf);
 }
 
@@ -797,11 +823,18 @@ static int w_dhcp;           /* DHCP pendente (vigia tenta a cada 15 s) */
 static uint32_t w_dhcp_at;   /* ultima tentativa */
 static int w_dhcp_fails;
 
+/* RTW8852B.BIN: PATHSODOS\NET (padrao U:\SODOS\NET), depois U:\NET e D:\NET. */
 static int load_firmware(void) {
-  int sz = file_size(WIFI_FW_PATH);
+  static char fw_path[DRV_PATH];
+  int sz;
   uint32_t off = 0;
+  net_path("RTW8852B.BIN", fw_path, (int)sizeof fw_path);
+  sz = file_size(fw_path);
   if (sz <= 0) {
-    say("Firmware " WIFI_FW_PATH " nao encontrado.\n");
+    char msg[DRV_PATH + 64];
+    junta(msg, "Firmware nao encontrado em ", fw_path, (int)sizeof msg);
+    junta(msg, msg, " nem em U:\\NET ou D:\\NET.\n", (int)sizeof msg);
+    say(msg);
     puts_k("  (copie /lib/firmware/rtw89/rtw8852b_fw-1.bin do Linux para la)\n");
     return -1;
   }
@@ -815,7 +848,7 @@ static int load_firmware(void) {
   }
   while (off < (uint32_t)sz) {
     int want = (uint32_t)sz - off > 65536u ? 65536 : (int)((uint32_t)sz - off);
-    int got = file_read_at(WIFI_FW_PATH, off, (char*)fw_buf + off, want);
+    int got = file_read_at(fw_path, off, (char*)fw_buf + off, want);
     if (got <= 0) {
       say("Erro lendo o firmware.\n");
       return -1;
@@ -827,12 +860,12 @@ static int load_firmware(void) {
 }
 
 static int start_steps(const char* path) {
-  static char cfg_alvo[40];
+  static char cfg_alvo[DRV_PATH];
   int rc;
   stage = 0;
   if (!path) {
-    path = WIFI_CFG_PATH;
-    if (net_path("WIFI.CFG", cfg_alvo, (int)sizeof cfg_alvo) == 0) path = cfg_alvo;
+    net_path("WIFI.CFG", cfg_alvo, (int)sizeof cfg_alvo);
+    path = cfg_alvo;
   }
 
   puts_k("WiFi: lendo ");
@@ -1306,7 +1339,7 @@ static void reconnect(void) {
   }
   {
     const char* t = rtw_log_text(&n);
-    file_save(WIFI_LOG_PATH, t, n);
+    log_write(t, n);
   }
 }
 
@@ -1409,7 +1442,7 @@ void wifi_note(const char* what, uint32_t v) {
     rtw_log("\n");
   }
   t = rtw_log_text(&n);
-  file_save(WIFI_LOG_PATH, t, n);  /* sem mensagem: pode estar no desktop */
+  log_write(t, n);  /* sem mensagem: pode estar no desktop */
 }
 
 /* net wifi watch: pinga o gateway a cada 2 s por 'secs' segundos e anota
@@ -1519,10 +1552,9 @@ int wifi_scan(const char* arg) {
 
   /* marca com "*" no log as redes do cfg que aparecerem no ar */
   {
-    static char cfg_alvo[40];
-    const char* cfg = WIFI_CFG_PATH;
-    if (net_path("WIFI.CFG", cfg_alvo, (int)sizeof cfg_alvo) == 0) cfg = cfg_alvo;
-    nets_n = wifi_cfg_load(cfg, nets, WIFI_CFG_MAX);
+    static char cfg_alvo[DRV_PATH];
+    net_path("WIFI.CFG", cfg_alvo, (int)sizeof cfg_alvo);
+    nets_n = wifi_cfg_load(cfg_alvo, nets, WIFI_CFG_MAX);
     if (nets_n < 0) nets_n = 0;
   }
 
@@ -1618,7 +1650,6 @@ int wifi_scan(const char* arg) {
   rtw_power_off();
   stage = 0;
   save_log();
-  puts_k("  varredura gravada em " WIFI_LOG_PATH "\n");
   return 0;
 }
 

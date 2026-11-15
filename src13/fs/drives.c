@@ -25,6 +25,7 @@ extern int fat_long_name(const char* path, char* out, int max);
 extern int fat_delete(const char* path);
 extern int fat_rename(const char* from, const char* to);
 extern int fat_mkdir(const char* path);
+extern void fat_now(uint16_t* date, uint16_t* time);
 extern int fat_rmdir(const char* path);
 extern int fat_get_space_info(uint32_t* total_bytes, uint32_t* free_bytes);
 extern int get_partition_info(uint32_t drive, uint8_t partition_num, uint32_t* lba_start,
@@ -1355,7 +1356,14 @@ static int dir_op(const char* path, int make) {
   path_parse(path, &L, name, (int)sizeof(name));
   idx = letter_idx(L);
   if (!name[0] || idx < 0 || !drv_ready(idx)) return -1;
-  if (drv_kind[idx] == DRV_EXT) return -1;   /* FAT32: so leitura */
+  if (drv_kind[idx] == DRV_EXT) {
+    /* FAT32: o driver so cria pastas (sem rd) */
+    const struct fsdrv_ops* o = drv_ops[idx];
+    uint16_t fd, ft;
+    if (!make || o->abi < FSDRV_ABI_MKDIR || !o->mkdir) return -1;
+    fat_now(&fd, &ft);
+    return o->mkdir(drv_vol[idx], name, fd, ft);
+  }
   if (drv_kind[idx] != DRV_FAT) return -5;
   return make ? fat_mkdir(name) : fat_rmdir(name);
 }

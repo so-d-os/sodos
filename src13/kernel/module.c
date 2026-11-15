@@ -11,6 +11,7 @@
 #include "kexports.h"
 #include "module_priv.h"
 #include "isr.h"
+#include "env.h"
 
 void* kexport_find(const char* name);
 int mod_call_entry(void* fn, int argc, char** argv, void* stack_top);
@@ -180,7 +181,36 @@ static int locate(const char* name, char pref, char* out, int max) {
   return -1;
 }
 
-int mod_locate(const char* name, char pref, char* out, int max) { return locate(name, pref, out, max); }
+/* Sem unidade nem pasta no nome: cada pasta do PATH (SET PATH=C:\\BIN;U:\\SODOS\\BIN)
+ * e por fim a pasta do sistema (PATHSODOS, padrao U:\\SODOS). Assim o BAT.EXE
+ * e as DLLs de U:\\SODOS sao achados antes de qualquer SET PATH (START.BAT). */
+static int locate_dirs(const char* name, char* out, int max) {
+  char dir[DRV_PATH];
+  const char* p;
+  int i;
+  if (has_drive(name)) return -1;
+  for (p = name; *p; p++)
+    if (*p == '\\' || *p == '/') return -1;
+  for (i = 0; env_path_at(i, dir, (int)sizeof(dir)); i++) {
+    int n = 0;
+    while (dir[n]) n++;
+    cat3(out, max, dir, (dir[n - 1] == '\\' || dir[n - 1] == ':') ? 0 : "\\", name);
+    if (file_size(out) >= 0) return 0;
+  }
+  env_sodos_path(name, out, max);
+  if (file_size(out) >= 0) return 0;
+  return -1;
+}
+
+static int locate_path(const char* name, char* out, int max) {
+  if (locate(name, 0, out, max) == 0) return 0;
+  return locate_dirs(name, out, max);
+}
+
+int mod_locate(const char* name, char pref, char* out, int max) {
+  if (locate(name, pref, out, max) == 0) return 0;
+  return locate_dirs(name, out, max);
+}
 
 void mod_base_name(const char* path, char* out, int max) { base_name(path, out, max); }
 
@@ -194,14 +224,14 @@ int mod_free_slot(void) {
 int mod_find_exe(const char* name, char* out, int max) {
   char tmp[DRV_PATH];
   if (!name || !name[0]) return -1;
-  if (locate(name, 0, out, max) == 0) {
+  if (locate_path(name, out, max) == 0) {
     char b[32];
     base_name(out, b, sizeof(b));
     if (has_dot(b)) return 0;
   }
   if (has_dot(name)) return -1;
   cat3(tmp, sizeof(tmp), name, ".EXE", 0);
-  return locate(tmp, 0, out, max);
+  return locate_path(tmp, out, max);
 }
 
 static int ends_ci(const char* s, const char* suf) {
@@ -219,10 +249,10 @@ int mod_find_batch(const char* name, char* out, int max) {
   char tmp[DRV_PATH];
   if (!name || !name[0]) return -1;
   if (ends_ci(name, ".BAT") || ends_ci(name, ".CMD"))
-    return locate(name, 0, out, max);
+    return locate_path(name, out, max);
   if (has_dot(name)) return -1;
   cat3(tmp, sizeof(tmp), name, ".BAT", 0);
-  return locate(tmp, 0, out, max);
+  return locate_path(tmp, out, max);
 }
 
 /* Cada programa tem a sua copia da DLL: a LIBC e a GUI guardam estado
@@ -346,7 +376,8 @@ static int load(const char* req, int want_dll) {
     set_err("DLLs aninhadas demais: ", req);
     return -1;
   }
-  if (locate(req, exe_drive, path, sizeof(path)) != 0) {
+  if (locate(req, exe_drive, path, sizeof(path)) != 0 &&
+      locate_dirs(req, path, sizeof(path)) != 0) {
     set_err("nao achei ", req);
     return -1;
   }

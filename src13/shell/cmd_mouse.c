@@ -3,6 +3,7 @@
 #include "net.h"
 #include "xhci.h"
 #include "vt.h"
+#include "ps2in.h"
 
 #define SCANCODE_ESC 0x01
 
@@ -38,7 +39,11 @@ static int ps2_mouse_init(void) {
 int cmd_mouse(int argc, char** argv) {
   (void)argc;
   (void)argv;
-  int ps2_ok = ps2_mouse_init();
+  int ps2_ok;
+  ps2in_raw(1);        /* o ACK do F4 e lido aqui, nao pela IRQ12 */
+  ps2_ok = ps2_mouse_init();
+  ps2in_raw(0);
+  ps2in_flush();
   int usb = xhci_mouse_init(ps2_ok) == 0;
   if (!ps2_ok && !usb) {
     puts_k("Mouse: nenhum mouse PS/2 nem USB (xHCI).\n");
@@ -74,11 +79,18 @@ int cmd_mouse(int argc, char** argv) {
       packet[1] = (uint8_t)dx;
       packet[2] = (uint8_t)dy;
     } else {
-      if (!(shell_inb(0x64) & 1)) continue;
-      if (shell_inb(0x64) & 0x20) {
-        uint8_t b = shell_inb(0x60);
-        if (pkt_idx == 0 && !(b & 0x08)) continue;
-        packet[pkt_idx] = b;
+      uint8_t ab, sc;
+      if (ps2in_kbd(&sc, 0)) {
+        /* kbd_watch ja viu a tecla (IRQ1 / ps2in_pump).
+         * Ctrl+F1..F12 e do SO: troca de tela mesmo com o teste aberto. */
+        if (!(sc & 0x80) && kbd_ctrl_down() && vt_hotkey(sc) >= 0) {
+          vt_select(vt_hotkey(sc));
+          continue;
+        }
+        if (sc == SCANCODE_ESC) break;
+      } else if (ps2in_aux(&ab, 0)) {
+        if (pkt_idx == 0 && !(ab & 0x08)) continue;
+        packet[pkt_idx] = ab;
         pkt_idx++;
         if (pkt_idx >= 3) {
           pkt_idx = 0;
@@ -93,14 +105,7 @@ int cmd_mouse(int argc, char** argv) {
           }
         }
       } else {
-        uint8_t sc = shell_inb(0x60);
-        kbd_watch(sc);
-        /* Ctrl+F1..F12 e do SO: troca de tela mesmo com o teste aberto. */
-        if (!(sc & 0x80) && kbd_ctrl_down() && vt_hotkey(sc) >= 0) {
-          vt_select(vt_hotkey(sc));
-          continue;
-        }
-        if (sc == SCANCODE_ESC) break;
+        continue;
       }
     }
 

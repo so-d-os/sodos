@@ -13,8 +13,10 @@
 
 #define ENV_N 32
 
-static char env_name[ENV_N][ENV_NAME_MAX];
-static char env_val[ENV_N][ENV_VAL_MAX];
+/* PATHSODOS ja vem com o padrao (pasta do sistema no pendrive); o
+ * AUTOEXEC.BAT pode trocar com SET PATHSODOS=... */
+static char env_name[ENV_N][ENV_NAME_MAX] = {"PATHSODOS"};
+static char env_val[ENV_N][ENV_VAL_MAX] = {ENV_SODOS_DEFAULT};
 static uint32_t gen = 1;
 
 static char up(char c) { return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c; }
@@ -69,6 +71,36 @@ int env_set(const char* name, const char* val) {
 }
 
 uint32_t env_gen(void) { return gen; }
+
+void env_sodos_path(const char* rel, char* out, int max) {
+  const char* d = env_get("PATHSODOS");
+  int i = 0;
+  if (max <= 0) return;
+  if (!d) d = ENV_SODOS_DEFAULT;
+  while (*d && i < max - 1) out[i++] = *d++;
+  if (i > 0 && out[i - 1] != '\\' && out[i - 1] != ':' && i < max - 1) out[i++] = '\\';
+  while (rel && (*rel == '\\' || *rel == '/')) rel++;
+  while (rel && *rel && i < max - 1) out[i++] = *rel++;
+  out[i] = 0;
+}
+
+int env_path_at(int index, char* out, int max) {
+  const char* p = env_get("PATH");
+  int n = 0, i;
+  if (!p || max <= 0) return 0;
+  for (;;) {
+    while (*p == ';' || *p == ' ') p++;
+    if (!*p) return 0;
+    i = 0;
+    while (*p && *p != ';') {
+      if (i < max - 1) out[i++] = *p;
+      p++;
+    }
+    while (i > 0 && out[i - 1] == ' ') i--;
+    out[i] = 0;
+    if (i > 0 && n++ == index) return 1;
+  }
+}
 
 int env_at(int index, const char** name, const char** val) {
   int i, n = 0;

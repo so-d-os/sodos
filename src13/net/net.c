@@ -12,6 +12,7 @@
 #include "drives.h"
 #include "vt.h"
 #include "irq.h"
+#include "env.h"
 
 #define SLIRP_IP   0x0A00020Fu
 #define SLIRP_MASK 0xFFFFFF00u
@@ -948,7 +949,7 @@ static int parse_ip(const char* s, uint32_t* out) {
   return 0;
 }
 
-/* U:\NET\HOSTS.CFG, lido no primeiro nome depois de ligar a placa:
+/* PATHSODOS\NET\HOSTS.CFG (ou o U:\NET\HOSTS.CFG antigo), lido no primeiro nome depois de ligar a placa:
  *   dns=1.1.1.1          servidor DNS (ate 3), perguntado antes do que veio do DHCP
  *   93.184.215.14 nome   endereco fixo, sem perguntar ao DNS
  * Linha com # e comentario. */
@@ -1013,8 +1014,16 @@ static void hosts_load(void) {
   hosts_loaded = 1;
   hosts_n = 0;
   hosts_dns_n = 0;
-  if (!drives_is_mounted('U') || file_size(HOSTS_PATH) <= 0) return;
-  n = file_load(HOSTS_PATH, buf, (int)sizeof(buf));
+  {
+    static char hp[DRV_PATH];
+    env_sodos_path("NET\\HOSTS.CFG", hp, (int)sizeof hp);
+    if (file_size(hp) <= 0) {
+      if (!drives_is_mounted('U') || file_size(HOSTS_PATH) <= 0) return;
+      n = file_load(HOSTS_PATH, buf, (int)sizeof(buf));
+    } else {
+      n = file_load(hp, buf, (int)sizeof(buf));
+    }
+  }
   if (n <= 0) return;
   for (i = 0; i < n;) {
     k = 0;

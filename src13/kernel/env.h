@@ -14,3 +14,11 @@ uint32_t env_gen(void);
 /* index-esima variavel (para listar). 0 quando acaba. */
 int env_at(int index, const char** name, const char** val);
 int cmd_set(int argc, char** argv);
+
+/* Pasta do sistema: PATHSODOS (padrao U:\SODOS). Os comandos do sistema
+ * (NET WIFI START, HOSTS.CFG...) procuram as configuracoes nela. */
+#define ENV_SODOS_DEFAULT "U:\\SODOS"
+/* PATHSODOS + "\" + rel em out. Ex.: "NET\WIFI.CFG" -> U:\SODOS\NET\WIFI.CFG */
+void env_sodos_path(const char* rel, char* out, int max);
+/* index-esima pasta do PATH (PATH=C1;C2;C3) em out; 0 quando acaba. */
+int env_path_at(int index, char* out, int max);

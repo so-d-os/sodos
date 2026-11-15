@@ -1,8 +1,9 @@
 /* wifi.h - WiFi do SODOS: WIFI.CFG, a placa (rtw89) e o WPA2 (wpa).
  *
- * net wifi start le U:\NET\WIFI.CFG (uma ou mais redes: ssid=, psk=, bssid=,
- * channel=, ip=dhcp) e o firmware U:\NET\RTW8852B.BIN, liga a placa e segue
- * as etapas que o driver ja tem. Cada etapa sai na tela; o log vai para WIFI.LOG. */
+ * net wifi start le PATHSODOS\NET\WIFI.CFG (padrao U:\SODOS; depois U:\NET
+ * e D:\NET), com uma ou mais redes (ssid=, psk=, bssid=, channel=, ip=dhcp),
+ * e o firmware RTW8852B.BIN (mesma busca), liga a placa e segue as etapas que o
+ * driver ja tem. Cada etapa sai na tela; o log vai para WIFI.LOG. */
 #pragma once
 #include <stdint.h>
 

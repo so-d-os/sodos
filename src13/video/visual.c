@@ -10,6 +10,7 @@
 #include "serial.h"
 #include "shell.h"
 #include "pic.h"
+#include "ps2in.h"
 #include "reboot.h"
 #include "drives.h"
 #include "mm.h"
@@ -25,6 +26,7 @@
 #include "fbcon.h"
 #include "xhci.h"
 #include "vt.h"
+#include "env.h"
 #include "gpu.h"
 #include "c_compiler/sox.h"
 
@@ -1756,6 +1758,7 @@ static int tablet_hw_init(void) {
  * Byte 5 segue o HID: positivo = roda para cima. tablet_dz guarda o contrario
  * (positivo desce), que e o que as janelas usam para rolar. */
 static void lat_note(uint32_t now);   /* medida da latencia, mais abaixo */
+static void in_note(uint32_t t);      /* idem, com o tick de chegada da IRQ */
 
 static int tablet_take(void) {
   struct uhci_td* td = tablet_td;
@@ -1806,8 +1809,7 @@ static int mouse_wheel(void) {
  * Devolve 0 e o scancode em *sc. Devolve -1 se nao ha nada.
  * Byte de teclado tem prioridade para nao perder tecla enquanto o rato anda. */
 static int input_poll(uint8_t packet[3], int* pkt_idx, uint8_t* sc, int* abs_pos) {
-  uint8_t st, data;
-  int is_aux;
+  uint8_t data;
   *abs_pos = 0;
   {
     /* A placa de rede no maximo uma vez por tick (1 ms): cada volta do laco
@@ -1830,31 +1832,33 @@ static int input_poll(uint8_t packet[3], int* pkt_idx, uint8_t* sc, int* abs_pos
     else api_arm = 0;
     return 1;
   }
-  __asm__ volatile ("cli");
-  st = inb(0x64);
-  if (st & 1) {
-    is_aux = (st >> 5) & 1;
-    data = inb(0x60);
-    lat_note((uint32_t)irq_ticks());
-    __asm__ volatile ("sti");
-    if (!(mouse_abs_mode && is_aux)) {
-      if (!mouse_abs_mode && *pkt_idx > 0) {
-        packet[(*pkt_idx)++] = data;
-        if (*pkt_idx < 3) return -1;
-        *pkt_idx = 0;
-        return 1;
-      }
-      if (!mouse_abs_mode && is_aux && (data & 0x08)) {
-        packet[0] = data;
-        *pkt_idx = 1;
-        return -1;
-      }
-      kbd_watch(data);
+  {
+    /* Bytes ja tirados do 8042 pela IRQ1/IRQ12 (kernel/ps2in.c), com o tick
+     * de chegada. Teclado primeiro: uma tecla nunca espera o mouse, e um
+     * byte de teclado nao entra mais no meio de um pacote do mouse. */
+    uint32_t t;
+    if (ps2in_kbd(&data, &t)) {
+      in_note(t);
       *sc = data;
       return 0;
     }
-  } else {
-    __asm__ volatile ("sti");
+    /* Pacote inteiro de uma vez se os 3 bytes ja chegaram. */
+    while (ps2in_aux(&data, &t)) {
+      in_note(t);
+      if (mouse_abs_mode) continue;          /* tablet USB manda; PS/2 e eco */
+      if (*pkt_idx > 0) {
+        packet[(*pkt_idx)++] = data;
+        if (*pkt_idx < 3) continue;
+        *pkt_idx = 0;
+        return 1;
+      }
+      if (data & 0x08) {                     /* bit 3: primeiro byte */
+        packet[0] = data;
+        *pkt_idx = 1;
+      }
+      /* sem o bit 3: fora de sincronia, descarta ate achar o inicio */
+    }
+    if (*pkt_idx > 0) return -1;             /* resto do pacote ainda vem */
   }
   if (mouse_abs_mode && tablet_take()) {
     packet[0] = tablet_btn;
@@ -4191,9 +4195,16 @@ static void lat_put(const char* k, uint32_t v) {
 #endif
 
 static int input_peek(void) {
-  if (inb(0x64) & 1) return 1;
+  if (ps2in_pending()) return 1;
   if (mouse_abs_mode && tablet_td && !(tablet_td->sts & (1u << 23))) return 1;
   return 0;
+}
+
+/* Byte tirado da fila: a latencia conta desde a IRQ que o trouxe. */
+static void in_note(uint32_t t) {
+  uint32_t p = in_pend_t;
+  if (t && (!p || (int32_t)(t - p) < 0)) in_pend_t = t;
+  lat_note((uint32_t)irq_ticks());
 }
 
 static void lat_note(uint32_t now) {
@@ -4875,7 +4886,7 @@ static void wm_exec(struct wm_win* wins, int* focus, int big, const char* path) 
 /* Atalho gravado em D:\... e o arquivo ficou no pendrive: procura o mesmo
  * caminho em U: e depois so o nome na raiz de U:. 1 achou (caminho em out). */
 static int desk_find(const char* path, char* out, int max) {
-  char alt[48];
+  char alt[96];
   const char* leaf;
   char L;
   int i, j;
@@ -4891,18 +4902,27 @@ static int desk_find(const char* path, char* out, int max) {
     wm_copy_str(out, max, path);
     return 1;
   }
-  if (L == 'U') return 0;
-  if (!drives_is_mounted('U') && drives_mount_usb() != 0) return 0;
-  wm_copy_str(alt, (int)sizeof(alt), path);
-  alt[0] = 'U';
-  if (file_size(alt) >= 0) {
-    wm_copy_str(out, max, alt);
-    return 1;
+  if (!drives_is_mounted('U') && drives_mount_usb() != 0 && L == 'U') return 0;
+  if (L != 'U') {
+    wm_copy_str(alt, (int)sizeof(alt), path);
+    alt[0] = 'U';
+    if (file_size(alt) >= 0) {
+      wm_copy_str(out, max, alt);
+      return 1;
+    }
   }
   leaf = path + 2;
   for (i = 2; path[i]; i++)
     if (path[i] == '\\' || path[i] == '/') leaf = path + i + 1;
-  if (!leaf[0] || leaf == path + 3) return 0;
+  if (!leaf[0]) return 0;
+  /* Pasta do sistema (PATHSODOS, padrao U:\SODOS): pendrive com tudo em
+   * U:\SODOS e arquivos pessoais na raiz. */
+  env_sodos_path(leaf, alt, (int)sizeof(alt));
+  if (file_size(alt) >= 0) {
+    wm_copy_str(out, max, alt);
+    return 1;
+  }
+  if (L == 'U' || leaf == path + 3) return 0;
   j = 0;
   alt[j++] = 'U';
   alt[j++] = ':';
@@ -6614,7 +6634,7 @@ static int win_wm_run(void) {
        * laco dava uma fatia inteira ao programa (Firefox) antes do proximo
        * byte. Com entrada chegando, so cede a cada 30 ms. */
       uint32_t now = (uint32_t)irq_ticks();
-      int pend = pkt_idx > 0 || (inb(0x64) & 1) || (now - in_ms) < 3;
+      int pend = pkt_idx > 0 || ps2in_pending() || (now - in_ms) < 3;
       if ((!pend || now - pump_ms >= 30) && task_pick() >= 0) {
         pump_ms = now;
         tasks_pump();
@@ -6670,7 +6690,7 @@ static int win_wm_run(void) {
     }
     /* Com entrada na fila, um quadro agora so mostraria uma posicao velha.
      * O limite garante um quadro mesmo com o mouse sem parar. */
-    if ((need_draw || dc.moved) && (inb(0x64) & 1) && ++draw_skip < 64) {
+    if ((need_draw || dc.moved) && ps2in_pending() && ++draw_skip < 64) {
       /* desenha depois de ler */
     } else if (dc.on) {
       draw_skip = 0;
@@ -8075,24 +8095,20 @@ gfx_restart:
   }
 
   {
-    int ps2_ok = ps2_mouse_init();
+    int ps2_ok;
+    ps2in_raw(1);      /* o ACK do F4 e nosso, nao da IRQ12 */
+    ps2_ok = ps2_mouse_init();
     ps2_enable_keyboard_port();
+    ps2in_raw(0);
     if (tablet_hw_init() != 0) (void)xhci_mouse_init(ps2_ok);
   }
-  {
-    int n = 0;
-    while ((inb(0x64) & 1) && n < 200) {
-      (void)inb(0x60);
-      n++;
-    }
-  }
+  ps2in_flush();       /* sobras de antes do WIN (eco do mouse, teclas velhas) */
   delay_loop();
 
   serial_puts("[visual] entrada no loop (ESC sai)\n");
 
-  /* O IRQ0 (timer) fica ligado: o kernel conta os ticks e o TOP mostra o uso.
-   * O teclado continua por polling (IRQ1 mascarado). */
-  pic_mask_irq(1);
+  /* IRQ0 (timer), IRQ1 (teclado) e IRQ12 (mouse) ligadas: teclado e mouse
+   * chegam pela fila de kernel/ps2in.c. */
 
   if (session == GFX_SESSION_WIN) {
     if (win_wm_run()) {
@@ -8252,7 +8268,6 @@ gfx_session_leave:
   gfx_session_on = 0;
   gpu_close();
   gfx_offscreen = 0;   /* com driver ele ficava 1 entre os quadros */
-  pic_mask_irq(1);     /* so o teclado: o IRQ0 do timer continua ligado */
 
   cursor_restore();
   gfx_mode_sel = -1;

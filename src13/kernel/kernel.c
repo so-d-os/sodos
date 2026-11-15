@@ -13,6 +13,7 @@
 #include "shell.h"
 #include "drives.h"
 #include "xhci.h"
+#include "ps2in.h"
  
 int strcmp(const char* a, const char* b); /* freestanding; definido mais abaixo */
 static int stricmp(const char* a, const char* b);
@@ -717,12 +718,11 @@ static int break_hotkey(unsigned char sc) {
 }
 
 void con_break_poll(void) {
-  unsigned char st;
+  uint8_t sc;
   if (!break_applies() || vt_bg()) return;
-  /* Para no primeiro byte do mouse: ele nao e nosso. */
-  while (((st = inb(0x64)) & 1) && !(st & 0x20)) {
-    unsigned char sc = inb(0x60);
-    kbd_watch(sc);
+  /* So a fila do teclado: os bytes do mouse ficam na fila deles.
+   * kbd_watch ja viu cada byte (na IRQ1 ou em ps2in_pump). */
+  while (ps2in_kbd(&sc, 0)) {
     if (break_hotkey(sc)) continue;
     if (((kb_head + 1) % KB_PEND) != kb_tail) {
       kb_pend[kb_head] = sc;
@@ -733,15 +733,13 @@ void con_break_poll(void) {
 }
 
 int shell_break(void) {
-  unsigned char st;
+  uint8_t sc;
   if (brk_hit) return 1;
   if (!brk_depth || mod_depth || brk_in) return 0;
   brk_in = 1;
   if (!vt_bg()) {
     /* Como con_break_poll: o resto fica para get_char (digitar adiante). */
-    while (((st = inb(0x64)) & 1) && !(st & 0x20)) {
-      unsigned char sc = inb(0x60);
-      kbd_watch(sc);
+    while (ps2in_kbd(&sc, 0)) {
       if (break_hotkey(sc)) continue;
       if (((kb_head + 1) % KB_PEND) != kb_tail) {
         kb_pend[kb_head] = sc;
@@ -783,19 +781,15 @@ static int run_builtin(int (*fn)(int, char**), int argc, char** argv) {
 
 /* Proximo scancode: primeiro os guardados, depois a porta. 0 se nao ha. */
 static int kb_read(unsigned char* sc) {
-  unsigned char st;
+  uint8_t b;
   if (kb_head != kb_tail) {
     *sc = kb_pend[kb_tail];
     kb_tail = (kb_tail + 1) % KB_PEND;
     return 1;
   }
-  st = inb(0x64);
-  if (!(st & 1))
+  if (!ps2in_kbd(&b, 0))
     return 0;
-  *sc = inb(0x60);
-  if (st & 0x20)
-    return 0;
-  kbd_watch(*sc);
+  *sc = b;
   return 1;
 }
 
@@ -1984,6 +1978,9 @@ void kmain(const struct BootInfo* bi) {
    * aqui e seguro. */
   pic_unmask(0);
   __asm__ volatile ("sti");
+  /* Teclado e mouse por IRQ1/IRQ12 numa fila (ps2in.c); a leitura por
+   * polling continua valendo se a IRQ nao vier. */
+  ps2in_init();
 
   vga_capture_bios_font();
   vga_force_text_mode();         /* a leitura da fonte mexe nos registros VGA */

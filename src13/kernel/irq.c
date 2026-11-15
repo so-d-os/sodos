@@ -3,6 +3,7 @@
 #include "pic.h"
 #include "reboot.h"
 #include "kthread.h"
+#include "ps2in.h"
 
 /* B1: contador do IRQ0. volatile: quem le nao pode cachear o valor. */
 static volatile uint64_t irq_tick_count;
@@ -21,12 +22,6 @@ void cpu_idle(int on) { bsp_idle_flag = on ? 1 : 0; }
 static void (*tick_hook)(uint64_t rip);
 void irq_set_tick_hook(void (*fn)(uint64_t rip)) { tick_hook = fn; }
 
-static inline unsigned char irq_inb(unsigned short port) {
-  unsigned char data;
-  __asm__ volatile ("inb %1, %0" : "=a"(data) : "Nd"(port));
-  return data;
-}
-
 void irq_handle(isr_frame_t* f) {
   uint32_t intno = f->int_no;
   if (intno >= 32 && intno <= 47) {
@@ -36,13 +31,9 @@ void irq_handle(isr_frame_t* f) {
       irq_tick_count++;
       if (bsp_idle_flag || kt_cpu_idle(0)) bsp_idle_ticks++;
       else bsp_busy_ticks++;
-    } else if (irq == 1) {
-      uint8_t st = irq_inb(0x64);
-      if (st & 1) {
-        uint8_t sc = irq_inb(0x60);
-        if (!(st & 0x20))
-          kbd_watch(sc);
-      }
+    } else if (irq == 1 || irq == 12) {
+      /* Teclado/mouse: so tira o byte do 8042 e poe na fila (ps2in.c). */
+      ps2in_isr();
     }
     pic_send_eoi(irq);
     /* Depois do EOI: o gancho pode trocar de tarefa e so voltar bem depois.

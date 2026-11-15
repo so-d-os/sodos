@@ -2,8 +2,9 @@
  * fat32.c - FAT32.DLL: leitura de FAT32 (contrato em fs/fsdrv.h).
  *
  * O kernel so carrega este DLL quando acha uma unidade FAT32 (pendrive em U:,
- * mount de uma particao 0x0B/0x0C). Somente leitura: pastas, arquivos e nomes
- * longos (VFAT, CP850 como o fs/fat.c).
+ * mount de uma particao 0x0B/0x0C). Le pastas, arquivos e nomes longos (VFAT,
+ * CP850 como o fs/fat.c). Escrita: so mkdir (FAT nas copias espelhadas,
+ * FSInfo, nome longo + apelido 8.3 com ~N).
  *
  * Memoria por volume: um cluster (pastas e pontas de arquivo), uma janela de
  * 16 KB da FAT e a posicao do ultimo arquivo lido (k_fread em sequencia nao
@@ -40,6 +41,11 @@ struct vol {
   uint32_t nclus;      /* clusters de dados: 2 .. nclus+1 */
   uint32_t root;
   uint32_t free_clus;  /* 0xFFFFFFFF = ainda nao contado */
+  uint32_t fat0_lba;   /* primeira FAT */
+  uint32_t nfats;
+  int mirror;          /* 1: grava em todas as FATs; 0: so na ativa */
+  uint32_t fsinfo_lba; /* 0 = sem FSInfo */
+  uint32_t next_free;  /* dica para alocar */
   uint8_t* cbuf;
   uint32_t cbuf_clus;  /* 0 = vazio */
   uint32_t* fatc;
@@ -366,6 +372,9 @@ static void* f_mount(const struct fsdrv_host* h, uint32_t disk, uint32_t lba) {
   active = (rd16(b + 40) & 0x80) ? (rd16(b + 40) & 0x0Fu) : 0;
   if (active >= nfats) active = 0;
   v->fat_lba = lba + res + active * fatsz;
+  v->fat0_lba = lba + res;
+  v->nfats = nfats;
+  v->mirror = (rd16(b + 40) & 0x80) ? 0 : 1;
   v->data_lba = lba + res + nfats * fatsz;
   v->nclus = (total - res - nfats * fatsz) / v->spc;
   /* a FAT tem que caber as entradas */
@@ -375,8 +384,12 @@ static void* f_mount(const struct fsdrv_host* h, uint32_t disk, uint32_t lba) {
   v->free_clus = 0xFFFFFFFFu;
   fsinfo = rd16(b + 48);
   if (fsinfo && fsinfo < res && h->read(disk, lba + fsinfo, 1, b) == 0 &&
-      rd32(b) == 0x41615252u && rd32(b + 484) == 0x61417272u && rd32(b + 488) <= v->nclus)
-    v->free_clus = rd32(b + 488);
+      rd32(b) == 0x41615252u && rd32(b + 484) == 0x61417272u) {
+    v->fsinfo_lba = lba + fsinfo;
+    if (rd32(b + 488) <= v->nclus) v->free_clus = rd32(b + 488);
+    v->next_free = rd32(b + 492);
+  }
+  if (!valid_clus(v, v->next_free)) v->next_free = 2;
   v->cbuf = (uint8_t*)h->alloc(v->csize);
   v->fatc = (uint32_t*)h->alloc(FATC_SECS * 512u);
   if (!v->cbuf || !v->fatc) goto fail;
@@ -552,8 +565,390 @@ static int f_space(void* p, uint32_t* total_kb, uint32_t* free_kb) {
   return 0;
 }
 
+
+/* ---------- escrita (mkdir) ---------- */
+static void wr16(uint8_t* p, uint16_t x) {
+  p[0] = (uint8_t)x;
+  p[1] = (uint8_t)(x >> 8);
+}
+static void wr32(uint8_t* p, uint32_t x) {
+  wr16(p, (uint16_t)x);
+  wr16(p + 2, (uint16_t)(x >> 16));
+}
+static void mzero(void* d, uint32_t n) {
+  uint8_t* a = (uint8_t*)d;
+  while (n--) *a++ = 0;
+}
+
+/* Entrada crua da FAT ativa (pela janela fatc). 0 ok. */
+static int fat_get(struct vol* v, uint32_t c, uint32_t* out) {
+  uint32_t sec = c / 128u;
+  if (!valid_clus(v, c) || sec >= v->fatsz) return -1;
+  if (!v->fatc_n || sec < v->fatc_first || sec >= v->fatc_first + v->fatc_n) {
+    uint32_t first = sec - sec % FATC_SECS, n = v->fatsz - first;
+    if (n > FATC_SECS) n = FATC_SECS;
+    v->fatc_n = 0;
+    if (v->h->read(v->disk, v->fat_lba + first, n, v->fatc) != 0) return -1;
+    v->fatc_first = first;
+    v->fatc_n = n;
+  }
+  *out = v->fatc[c - v->fatc_first * 128u] & 0x0FFFFFFFu;
+  return 0;
+}
+
+/* Grava val (28 bits, preserva os 4 de cima) em todas as FATs usadas. 0 ok. */
+static int fat_set(struct vol* v, uint32_t c, uint32_t val, uint8_t* sbuf) {
+  uint32_t sec = c / 128u, i, o = (c % 128u) * 4u;
+  if (!valid_clus(v, c)) return -1;
+  for (i = 0; i < v->nfats; i++) {
+    uint32_t lba = v->fat0_lba + i * v->fatsz + sec, old;
+    if (!v->mirror && lba - sec != v->fat_lba) continue;
+    if (v->h->read(v->disk, lba, 1, sbuf) != 0) return -1;
+    old = rd32(sbuf + o);
+    wr32(sbuf + o, (old & 0xF0000000u) | (val & 0x0FFFFFFFu));
+    if (v->h->write(v->disk, lba, 1, sbuf) != 0) return -1;
+  }
+  if (v->fatc_n && sec >= v->fatc_first && sec < v->fatc_first + v->fatc_n) {
+    uint32_t* e = &v->fatc[c - v->fatc_first * 128u];
+    *e = (*e & 0xF0000000u) | (val & 0x0FFFFFFFu);
+  }
+  return 0;
+}
+
+/* FSInfo com o contador e a dica atuais (falha aqui nao desfaz nada). */
+static void fsinfo_save(struct vol* v, uint8_t* sbuf) {
+  if (!v->fsinfo_lba || v->h->read(v->disk, v->fsinfo_lba, 1, sbuf) != 0) return;
+  if (rd32(sbuf) != 0x41615252u || rd32(sbuf + 484) != 0x61417272u) return;
+  wr32(sbuf + 488, v->free_clus);
+  wr32(sbuf + 492, v->next_free);
+  v->h->write(v->disk, v->fsinfo_lba, 1, sbuf);
+}
+
+/* Cluster novo, zerado no disco e marcado como fim de cadeia; prev != 0 e
+ * ligado a ele. 0 se nao ha espaco ou erro (*err = -2 cheio, -3 disco). */
+static uint32_t clus_alloc(struct vol* v, uint32_t prev, uint8_t* sbuf, int* err) {
+  uint32_t c = v->next_free, n, val;
+  if (!valid_clus(v, c)) c = 2;
+  for (n = 0; n < v->nclus; n++) {
+    if (fat_get(v, c, &val) != 0) {
+      *err = -3;
+      return 0;
+    }
+    if (val == 0) break;
+    if (++c >= v->nclus + 2) c = 2;
+  }
+  if (n == v->nclus) {
+    *err = -2;
+    return 0;
+  }
+  /* zera antes de ligar: uma pasta nunca aponta para lixo */
+  mzero(v->cbuf, v->csize);
+  v->cbuf_clus = 0;
+  if (v->h->write(v->disk, clus_lba(v, c), v->spc, v->cbuf) != 0) {
+    *err = -3;
+    return 0;
+  }
+  v->cbuf_clus = c;
+  if (fat_set(v, c, 0x0FFFFFFFu, sbuf) != 0 || (prev && fat_set(v, prev, c, sbuf) != 0)) {
+    *err = -3;
+    return 0;
+  }
+  if (v->free_clus != 0xFFFFFFFFu && v->free_clus) v->free_clus--;
+  v->next_free = c + 1 < v->nclus + 2 ? c + 1 : 2;
+  return c;
+}
+
+/* Grava 32 bytes na posicao (clus, off) de uma pasta e anda para a proxima. */
+static int slot_put(struct vol* v, uint32_t* clus, uint32_t* off, const uint8_t* e) {
+  if (load_clus(v, *clus) != 0) return -1;
+  mcopy(v->cbuf + *off, e, 32);
+  if (v->h->write(v->disk, clus_lba(v, *clus) + *off / 512u, 1, v->cbuf + (*off & ~511u)) != 0) {
+    v->cbuf_clus = 0;
+    return -1;
+  }
+  *off += 32;
+  if (*off >= v->csize) {
+    *off = 0;
+    *clus = fat_next(v, *clus);
+  }
+  return 0;
+}
+
+/* Caractere valido num nome 8.3 (ja em maiuscula). */
+static int sfn_ok(unsigned char c) {
+  if (c >= 0x80) return 1;
+  if (c >= 'A' && c <= 'Z') return 1;
+  if (c >= '0' && c <= '9') return 1;
+  return c == '$' || c == '%' || c == '\'' || c == '-' || c == '_' || c == '@' || c == '~' ||
+         c == '`' || c == '!' || c == '(' || c == ')' || c == '{' || c == '}' || c == '^' ||
+         c == '#' || c == '&';
+}
+
+static unsigned char oem_upper(unsigned char c) {
+  return (unsigned char)uni_to_oem(uni_fold(oem_to_uni(c)));
+}
+
+/* Nome aceito para criar: sem \ / : * ? " < > | nem controle, nao so pontos. */
+static int lfn_ok(const char* n) {
+  int i, dots = 1;
+  for (i = 0; n[i]; i++) {
+    unsigned char c = (unsigned char)n[i];
+    if (c < 0x20 || c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' ||
+        c == '<' || c == '>' || c == '|')
+      return 0;
+    if (c != '.') dots = 0;
+  }
+  return i > 0 && i < NAME_MAX && !dots && n[i - 1] != ' ' && n[i - 1] != '.';
+}
+
+/* Monta o 8.3 de name em n11. Devolve 0 se o nome e um 8.3 exato (com nt =
+ * bits de minuscula do NT, sem LFN), 1 se precisa de LFN e ~N (base/ext
+ * prontas em n11, sem o ~N), 2 se precisa de LFN mas n11 serve sem ~N
+ * (caixa misturada). */
+static int sfn_make(const char* name, uint8_t* n11, uint8_t* nt) {
+  int i, dot = -1, bl = 0, el = 0, lossy = 0, lo[2] = { 0, 0 }, up[2] = { 0, 0 };
+  int len = slen(name);
+  for (i = 0; i < 11; i++) n11[i] = ' ';
+  *nt = 0;
+  for (i = len - 1; i > 0; i--)
+    if (name[i] == '.') {
+      dot = i;
+      break;
+    }
+  for (i = 0; i < len; i++) {
+    unsigned char c = (unsigned char)name[i], u;
+    int part = dot >= 0 && i > dot;
+    if (i == dot) continue;
+    if (c == ' ' || (c == '.' && !part && i != dot)) {
+      lossy = 1;   /* espacos e pontos extras somem */
+      continue;
+    }
+    u = oem_upper(c);
+    if (u != c) lo[part] = 1;
+    else if (c >= 'A' && c <= 'Z') up[part] = 1;
+    if (!sfn_ok(u)) {
+      u = '_';
+      lossy = 1;
+    }
+    if (!part) {
+      if (bl < 8) n11[bl] = u;
+      else lossy = 1;
+      bl++;
+    } else {
+      if (el < 3) n11[8 + el] = u;
+      else lossy = 1;
+      el++;
+    }
+  }
+  if (bl == 0) {
+    n11[0] = '_';
+    lossy = 1;
+  }
+  if (n11[0] == 0xE5) n11[0] = 0x05;
+  if (lossy) return 1;
+  if ((lo[0] && up[0]) || (lo[1] && up[1])) return 2;
+  if (lo[0]) *nt |= 0x08;
+  if (lo[1]) *nt |= 0x10;
+  return 0;
+}
+
+struct sfn_ctx {
+  char want[13];
+};
+
+static int sfn_cb(void* ctx, const struct ent* e) {
+  return name_eq_fold(e->sname, ((struct sfn_ctx*)ctx)->want);
+}
+
+/* 1 se ja existe na pasta um 8.3 igual a n11; -1 erro. */
+static int sfn_used(struct vol* v, uint32_t dir, const uint8_t* n11, struct ent* tmp) {
+  struct sfn_ctx c;
+  uint8_t e[32];
+  mzero(e, 32);
+  mcopy(e, n11, 11);
+  short_name(e, c.want);
+  return dir_scan(v, dir, sfn_cb, &c, tmp);
+}
+
+/* Poe ~N na base do 8.3 (base ate 8-len("~N")). */
+static void sfn_tail(uint8_t* n11, const uint8_t* base, uint32_t num) {
+  char t[8];
+  int tl = 0, bl = 0, i;
+  uint32_t x = num;
+  char d[8];
+  int dn = 0;
+  while (x) {
+    d[dn++] = (char)('0' + x % 10u);
+    x /= 10u;
+  }
+  t[tl++] = '~';
+  while (dn) t[tl++] = d[--dn];
+  while (bl < 8 && base[bl] != ' ') bl++;
+  if (bl > 8 - tl) bl = 8 - tl;
+  for (i = 0; i < 8; i++) n11[i] = ' ';
+  for (i = 0; i < bl; i++) n11[i] = base[i];
+  for (i = 0; i < tl; i++) n11[bl + i] = (uint8_t)t[i];
+}
+
+static int f_mkdir(void* p, const char* path, uint16_t date, uint16_t time) {
+  struct vol* v = (struct vol*)p;
+  struct ent e;
+  struct find_ctx fc;
+  char par[PATH_MAX];
+  const char* leaf;
+  uint8_t n11[11], base[11], nt, sum, ent[32];
+  uint8_t* sbuf;
+  uint32_t dir, nl, need, clus, off, run_clus = 0, run_off = 0, run = 0, last = 0, newc, guard = 0, i;
+  int kind, len, err = -3, r, s = -1;
+  if (!v || !path) return -1;
+  len = slen(path);
+  while (len > 0 && (path[len - 1] == '\\' || path[len - 1] == '/')) len--;
+  if (len <= 0 || len >= PATH_MAX) return -1;
+  for (i = 0; i < (uint32_t)len; i++) {
+    par[i] = path[i];
+    if (path[i] == '\\' || path[i] == '/') s = (int)i;
+  }
+  par[len] = 0;
+  leaf = par + s + 1;
+  if (!lfn_ok(leaf)) return -1;
+  /* pai */
+  if (s >= 0) par[s] = 0;
+  if (lookup(v, s >= 0 ? par : "", &e) != 0 || !(e.attr & 0x10)) return -1;
+  dir = e.clus;
+  fc.want = leaf;
+  r = dir_scan(v, dir, find_cb, &fc, &e);
+  if (r < 0) return -3;
+  if (r == 1) return (e.attr & 0x10) ? 1 : -1;
+
+  /* nome: 8.3 exato ou LFN + apelido */
+  kind = sfn_make(leaf, n11, &nt);
+  if (kind == 2 && (r = sfn_used(v, dir, n11, &e)) != 0) kind = 1;
+  if (r < 0) return -3;
+  if (kind == 1) {
+    uint32_t num;
+    mcopy(base, n11, 11);
+    for (num = 1; num < 1000000u; num++) {
+      sfn_tail(n11, base, num);
+      r = sfn_used(v, dir, n11, &e);
+      if (r < 0) return -3;
+      if (r == 0) break;
+    }
+    if (num >= 1000000u) return -1;
+  }
+  nl = kind ? (uint32_t)(slen(leaf) + 12) / 13u : 0;
+  need = nl + 1;
+
+  sbuf = (uint8_t*)v->h->alloc(512);
+  if (!sbuf) return -3;
+
+  /* need entradas livres seguidas na pasta (estende se faltar) */
+  clus = dir;
+  while (valid_clus(v, clus)) {
+    if (++guard > v->nclus) goto out;
+    if (load_clus(v, clus) != 0) goto out;
+    for (off = 0; off < v->csize; off += 32) {
+      uint8_t b0 = v->cbuf[off];
+      if (b0 == 0x00 || b0 == 0xE5) {
+        if (!run) {
+          run_clus = clus;
+          run_off = off;
+        }
+        if (++run >= need) goto found;
+      } else {
+        run = 0;
+      }
+    }
+    last = clus;
+    clus = fat_next(v, clus);
+  }
+  while (run < need) {
+    if ((guard + 1) * (v->csize / 32u) > 65536u) {   /* pasta no limite */
+      err = -2;
+      goto out;
+    }
+    newc = clus_alloc(v, last, sbuf, &err);
+    if (!newc) goto out;
+    guard++;
+    if (!run) {
+      run_clus = newc;
+      run_off = 0;
+    }
+    run += v->csize / 32u;
+    last = newc;
+  }
+found:
+  /* a pasta nova: cluster zerado com . e .. */
+  newc = clus_alloc(v, 0, sbuf, &err);
+  if (!newc) goto out;
+  if (load_clus(v, newc) != 0) goto out;
+  mzero(ent, 32);
+  for (i = 0; i < 11; i++) ent[i] = ' ';
+  ent[11] = 0x10;
+  wr16(ent + 14, time);
+  wr16(ent + 16, date);
+  wr16(ent + 18, date);
+  wr16(ent + 22, time);
+  wr16(ent + 24, date);
+  ent[0] = '.';
+  wr16(ent + 20, (uint16_t)(newc >> 16));
+  wr16(ent + 26, (uint16_t)newc);
+  mcopy(v->cbuf, ent, 32);
+  ent[1] = '.';
+  i = dir == v->root ? 0 : dir;
+  wr16(ent + 20, (uint16_t)(i >> 16));
+  wr16(ent + 26, (uint16_t)i);
+  mcopy(v->cbuf + 32, ent, 32);
+  if (v->h->write(v->disk, clus_lba(v, newc), 1, v->cbuf) != 0) {
+    v->cbuf_clus = 0;
+    goto out;
+  }
+
+  /* LFN (do ultimo pedaco para o primeiro) e o 8.3 */
+  sum = sum11(n11);
+  clus = run_clus;
+  off = run_off;
+  for (r = (int)nl; r >= 1; r--) {
+    int k, base_i = (r - 1) * 13, ended = 0;
+    mzero(ent, 32);
+    ent[0] = (uint8_t)(r | (r == (int)nl ? 0x40 : 0));
+    ent[11] = 0x0F;
+    ent[13] = sum;
+    for (k = 0; k < 13; k++) {
+      uint16_t u;
+      int ci = base_i + k;
+      if (ended) u = 0xFFFF;
+      else if (ci < slen(leaf)) u = oem_to_uni((unsigned char)leaf[ci]);
+      else {
+        u = 0;
+        ended = 1;
+      }
+      wr16(ent + lfn_off[k], u);
+    }
+    if (!valid_clus(v, clus) || slot_put(v, &clus, &off, ent) != 0) goto out;
+  }
+  mzero(ent, 32);
+  mcopy(ent, n11, 11);
+  ent[11] = 0x10;
+  ent[12] = kind == 0 ? nt : 0;
+  wr16(ent + 14, time);
+  wr16(ent + 16, date);
+  wr16(ent + 18, date);
+  wr16(ent + 22, time);
+  wr16(ent + 24, date);
+  wr16(ent + 20, (uint16_t)(newc >> 16));
+  wr16(ent + 26, (uint16_t)newc);
+  if (!valid_clus(v, clus) || slot_put(v, &clus, &off, ent) != 0) goto out;
+  err = 0;
+out:
+  fsinfo_save(v, sbuf);
+  v->h->free(sbuf);
+  v->lvalid = 0;
+  return err;
+}
+
 static const struct fsdrv_ops ops = {
-  FSDRV_ABI, FAT32_NAME, f_probe, f_mount, f_umount, f_stat, f_read, f_items, f_long_name, f_space,
+  FSDRV_ABI_MKDIR, FAT32_NAME, f_probe, f_mount, f_umount, f_stat, f_read, f_items, f_long_name,
+  f_space, f_mkdir,
 };
 
 const struct fsdrv_ops* fs_driver(void) { return &ops; }

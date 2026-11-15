@@ -1,4 +1,5 @@
 #include "shell.h"
+#include "ps2in.h"
 
 int cmd_load(int argc, char** argv) {
   if (argc < 2) {
@@ -28,7 +29,11 @@ int cmd_load(int argc, char** argv) {
   puts_k("...\n");
   typedef int (*exec_main_fn)(void (*puts)(const char*));
   exec_main_fn entry = (exec_main_fn)exe->entry_point;
+  /* Estes programas antigos leem o 8042 direto: sem IRQ1/IRQ12 enquanto rodam. */
+  ps2in_raw(1);
   int result = entry(puts_k);
+  ps2in_raw(0);
+  ps2in_flush();
   puts_k("\nExecutable returned: ");
   char num_str[16];
   int n = result;

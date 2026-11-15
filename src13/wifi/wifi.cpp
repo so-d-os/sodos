@@ -5,10 +5,10 @@
  * 80x25, com os mesmos glifos trocados na fonte (0xC0-0xDC).
  *
  * Abas:
- *   Redes  - as redes do U:\NET\WIFI.CFG, na ordem do arquivo (a primeira no
+ *   Redes  - as redes do PATHSODOS\NET\WIFI.CFG, na ordem do arquivo (a primeira no
  *            ar vence). Da para escolher, editar, subir/descer, apagar, criar
  *            e gravar. "Conectar" roda net wifi start e mostra a saida.
- *   No ar  - o que a ultima varredura viu (beacons do U:\NET\WIFI.LOG), com o
+ *   No ar  - o que a ultima varredura viu (beacons do PATHSODOS\NET\WIFI.LOG), com o
  *            canal de cada BSSID. Serve para trazer a rede vista para o cfg.
  *   Ajuda  - as teclas e o que cada campo significa.
  *
@@ -346,8 +346,8 @@ static struct vista vistas[MAX_VISTAS];
 static int n_vistas;
 static int sel_vista;
 
-static char cfg_path[32] = "U:\\NET\\WIFI.CFG";
-static char log_path[32] = "U:\\NET\\WIFI.LOG";
+static char cfg_path[160] = "U:\\SODOS\\NET\\WIFI.CFG";
+static char log_path[160] = "U:\\SODOS\\NET\\WIFI.LOG";
 static char msg[80] = "escolha uma rede e tecle 2 para conectar";
 static int aba;
 static int log_scan;   /* o WIFI.LOG tem "[wifi] scan:": o kernel rodou o scan */
@@ -404,16 +404,33 @@ static void mac_texto(const char* s, char* out) {
 }
 
 /* ---------- leitura e gravacao ---------- */
-static char arquivo_usado[32];   /* o caminho que o le_arquivo achou */
+static char arquivo_usado[160];   /* o caminho que o le_arquivo achou */
 
-static int le_arquivo(const char* prim, const char* seg, char* buf, int max) {
-  FILE* f = fopen(prim, "rb");
+/* PATHSODOS\NET\nome (padrao U:\SODOS\NET), como o net wifi do kernel. */
+static void caminho_sodos(const char* nome, char* out, int max) {
+  char dir[128];
   int n;
-  if (f) {
-    copia(arquivo_usado, prim, (int)sizeof(arquivo_usado));
-  } else if (seg && seg[0]) {
-    f = fopen(seg, "rb");
-    if (f) copia(arquivo_usado, seg, (int)sizeof(arquivo_usado));
+  if (k_getenv("PATHSODOS", dir, (int)sizeof(dir)) <= 0) strcpy(dir, "U:\\SODOS");
+  n = (int)strlen(dir);
+  if (n > 0 && (dir[n - 1] == '\\' || dir[n - 1] == ':'))
+    snprintf(out, (size_t)max, "%sNET\\%s", dir, nome);
+  else
+    snprintf(out, (size_t)max, "%s\\NET\\%s", dir, nome);
+}
+
+/* Procura nome em PATHSODOS\NET, U:\NET e D:\NET. Sem achar, arquivo_usado
+ * fica no PATHSODOS (e onde um WIFI.CFG novo e gravado). */
+static int le_arquivo(const char* nome, char* buf, int max) {
+  char cand[3][160];
+  FILE* f = 0;
+  int i, n;
+  caminho_sodos(nome, cand[0], (int)sizeof(cand[0]));
+  snprintf(cand[1], sizeof(cand[1]), "U:\\NET\\%s", nome);
+  snprintf(cand[2], sizeof(cand[2]), "D:\\NET\\%s", nome);
+  copia(arquivo_usado, cand[0], (int)sizeof(arquivo_usado));
+  for (i = 0; i < 3 && !f; i++) {
+    f = fopen(cand[i], "rb");
+    if (f) copia(arquivo_usado, cand[i], (int)sizeof(arquivo_usado));
   }
   if (!f) return -1;
   n = (int)fread(buf, 1, (size_t)(max - 1), f);
@@ -426,13 +443,16 @@ static int le_arquivo(const char* prim, const char* seg, char* buf, int max) {
 /* Mesmas regras do wifi.c: [nome] ou um ssid= novo comecam outra rede. */
 static void carrega_cfg(void) {
   static char texto_cfg[4096];
-  int n = le_arquivo("U:\\NET\\WIFI.CFG", "D:\\NET\\WIFI.CFG", texto_cfg, (int)sizeof(texto_cfg));
+  int n = le_arquivo("WIFI.CFG", texto_cfg, (int)sizeof(texto_cfg));
   char* p;
   struct rede r;
   int tem = 0;
   n_redes = 0;
   if (n < 0) {
-    diz("nao achei U:\\NET\\WIFI.CFG (nem em D:)");
+    static char m[200];
+    copia(cfg_path, arquivo_usado, (int)sizeof(cfg_path));
+    snprintf(m, sizeof(m), "nao achei %s (nem U:\\NET, D:\\NET)", cfg_path);
+    diz(m);
     return;
   }
   copia(cfg_path, arquivo_usado, (int)sizeof(cfg_path));
@@ -444,6 +464,9 @@ static void carrega_cfg(void) {
     char* q;
     while (*p && *p != '\n') p++;
     if (*p == '\n') *p++ = 0;
+    /* fim de linha do Windows (CRLF): o \r nao e do ssid nem da senha */
+    for (q = linha_ini; *q; q++)
+      if (*q == '\r') *q = 0;
     q = linha_ini;
     while (*q == ' ' || *q == '\t') q++;
     if (*q == '#' || *q == ';' || !*q) continue;
@@ -551,7 +574,7 @@ static void add_vista(const char* bssid, const char* ssid, int canal, int ch, un
 
 static void carrega_log(void) {
   static char texto_log[32768];
-  int n = le_arquivo("U:\\NET\\WIFI.LOG", "D:\\NET\\WIFI.LOG", texto_log, (int)sizeof(texto_log));
+  int n = le_arquivo("WIFI.LOG", texto_log, (int)sizeof(texto_log));
   char* p;
   int canal = 0;
   n_vistas = 0;

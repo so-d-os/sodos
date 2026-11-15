@@ -1127,7 +1127,7 @@ static struct fat_dir_entry* dir_new_entry(struct dir_view* v, const char* name,
 /* Data e hora do relogio (RTC, como o relogio do WIN) no formato FAT:
  * modificacao e, com create, tambem a criacao (reserved[3..6]). Com o RTC
  * sem data fica 0, que o dir mostra em branco. */
-static void fat_stamp(struct fat_dir_entry* e, int create) {
+void fat_now(uint16_t* date, uint16_t* time) {
   int d = rtc_date();
   int t = rtc_time();
   uint16_t fd = 0, ft = 0;
@@ -1136,6 +1136,14 @@ static void fat_stamp(struct fat_dir_entry* e, int create) {
     if (t >= 0)
       ft = (uint16_t)(((t / 10000) << 11) | ((t / 100 % 100) << 5) | (t % 100 / 2));
   }
+  *date = fd;
+  *time = ft;
+}
+
+static void fat_stamp(struct fat_dir_entry* e, int create) {
+  int t = rtc_time();
+  uint16_t fd, ft;
+  fat_now(&fd, &ft);
   e->date = fd;
   e->time = ft;
   if (create) {

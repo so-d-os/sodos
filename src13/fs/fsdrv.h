@@ -19,7 +19,8 @@
 #pragma once
 #include <stdint.h>
 
-#define FSDRV_ABI 1
+#define FSDRV_ABI 1      /* fsdrv_host e as ops ate space */
+#define FSDRV_ABI_MKDIR 2 /* ops->abi 2: tem mkdir (DLL antigo com 1 continua valendo) */
 #define FSDRV_SYM "fs_driver"
 
 /* Igual a struct dir_item de drives.h (k_dirent dos programas). */
@@ -61,6 +62,10 @@ struct fsdrv_ops {
   int (*long_name)(void* vol, const char* path, char* out, int max);
   /* Espaco em KB. 0 ok. */
   int (*space)(void* vol, uint32_t* total_kb, uint32_t* free_kb);
+  /* So com abi >= FSDRV_ABI_MKDIR. Cria a pasta (date/time no formato FAT,
+   * 0 = sem data). 0 ok; 1 ja existe; -1 erro (pai nao existe, nome invalido,
+   * existe arquivo com o nome); -2 disco cheio; -3 erro de disco. */
+  int (*mkdir)(void* vol, const char* path, uint16_t date, uint16_t time);
 };
 
 typedef const struct fsdrv_ops* (*fsdrv_entry_fn)(void);
