@@ -829,18 +829,31 @@ iso-grub: kernel_multiboot.elf sodos.pak
 	grub-mkrescue -o so-grub.iso iso_root
 	@echo "ISO com GRUB criado: so-grub.iso"
 
-# Entrada "SODOS" do GRUB desta maquina Linux (tools/grub-entry.sh).
-# O "make" padrao so gera o os.img; este alvo recompila o kernel Multiboot2 e
-# troca o /boot/sodos/kernel.elf. Sem a entrada, cria a entrada e roda o update-grub.
+# Entradas "SODOS" do GRUB desta maquina Linux. O "make" padrao so gera o
+# os.img; este alvo recompila o kernel Multiboot2 e grava nas DUAS entradas:
+#   F6 "SODOS (experimental)": /boot/sodos/kernel.elf e sodos.pak (sudo;
+#      sem a entrada, tools/grub-entry.sh cria e roda o update-grub)
+#   F8 "SODOS (SSD)": BOOT/KERNEL.ELF e BOOT/SODOS.PAK na FAT32 SODOSHD
+#      (sem sudo, como o make send; se a particao nao montar, so avisa)
+# So o kernel: os arquivos do D: continuam com o make send.
 .PHONY: grub
 grub: kernel_multiboot.elf sodos.pak
 	@if [ -f /etc/grub.d/41_sodos ] && grep -q sodos.pak /etc/grub.d/41_sodos; then \
 	  sudo cp kernel_multiboot.elf /boot/sodos/kernel.elf && \
 	  sudo cp sodos.pak /boot/sodos/sodos.pak && \
-	  echo "GRUB: kernel.elf e sodos.pak atualizados em /boot/sodos. Reinicie e escolha SODOS (F6)."; \
+	  echo "GRUB F6: kernel.elf e sodos.pak atualizados em /boot/sodos."; \
 	else \
 	  sudo sh tools/grub-entry.sh install; \
 	fi
+	@( $(REAL_MOUNT); \
+	  mkdir -p $(REAL_MNT)/BOOT; \
+	  cp kernel_multiboot.elf $(REAL_MNT)/BOOT/KERNEL.ELF; \
+	  cp sodos.pak $(REAL_MNT)/BOOT/SODOS.PAK; \
+	  sync; umount $(REAL_MNT); \
+	  echo "GRUB F8: BOOT/KERNEL.ELF e BOOT/SODOS.PAK atualizados na SODOSHD." ) || \
+	{ findmnt -n $(REAL_MNT) >/dev/null 2>&1 && umount $(REAL_MNT); \
+	  echo "GRUB F8: SODOSHD nao atualizada (make real-setup feito?)"; }
+	@echo "Kernel: $$(sed -n 's/.*SODOS_VERSION "\(.*\)"/\1/p' kernel/version.h). Reinicie e escolha SODOS (F6 ou F8)."
 
 # SODOS instalado no SSD desta maquina: particao FAT32 SODOSHD (nvme0n1p6),
 # que o kernel monta como D: (kernel/nvme.c). Preparar uma vez com
