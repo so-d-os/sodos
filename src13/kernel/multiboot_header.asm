@@ -36,6 +36,22 @@ header_start:
     dd 0
     dd 32
 
+    ; Tags 7 e 9 (opcionais): num GRUB UEFI de 64 bits o GRUB NAO encerra os
+    ; boot services e salta para efi_entry (64 bits, paginacao do firmware).
+    ; O efistub.c le as placas/saidas GOP e faz o ExitBootServices; efi_entry
+    ; sai do long mode e cai em multiboot_entry como sempre. GRUB BIOS ignora
+    ; as duas e entra direto em multiboot_entry.
+    align 8
+    dw 7
+    dw 1
+    dd 8
+
+    align 8
+    dw 9
+    dw 1
+    dd 12
+    dd efi_entry
+
     align 8
     dw 0
     dw 0
@@ -58,6 +74,7 @@ MB2_MAGIC equ 0x36d76289
 BOOTINFO  equ 0x00005000
 MEMMAP    equ 0x00005200
 MBI_TMP   equ 0x00060000
+RSDP_COPY equ 0x00005F00   ; depois do mapa (0x5200 + 64*24 = 0x5800), antes de 0x6000
 MBI_MAX   equ 32768
 
 multiboot_entry:
@@ -84,6 +101,9 @@ multiboot_entry:
     xor eax, eax
     mov edi, BOOTINFO
     mov ecx, (128 + 64 * 24) / 4
+    rep stosd
+    mov edi, RSDP_COPY            ; sem a tag ACPI, nada de copia velha (reboot quente)
+    mov ecx, 9
     rep stosd
 
     mov dword [mb_count], 0
@@ -126,6 +146,29 @@ multiboot_entry:
     je .fb
     cmp eax, 3
     je .module
+    cmp eax, 14
+    je .rsdp
+    cmp eax, 15
+    je .rsdp
+    jmp .advance
+
+    ; ACPI: o GRUB traz uma copia do RSDP (14 = v1, 20 bytes; 15 = v2, 36).
+    ; No UEFI o RSDP nao esta na area de BIOS (0xE0000), onde o smp.c procura;
+    ; a copia vai para RSDP_COPY e o smp.c olha la primeiro. A 15 vem depois
+    ; da 14 e fica por cima.
+.rsdp:
+    mov ecx, [esi + 4]
+    sub ecx, 8
+    jbe .advance
+    cmp ecx, 36
+    jbe .rsdp_n
+    mov ecx, 36
+.rsdp_n:
+    push esi
+    lea esi, [esi + 8]
+    mov edi, RSDP_COPY
+    rep movsb
+    pop esi
     jmp .advance
 
     ; module2 do grub.cfg: o primeiro e o pacote de boot (SODOS.PAK).
@@ -238,3 +281,77 @@ multiboot_entry:
     mov eax, 0x4F4D4F4D
     mov [edi], eax
     jmp .hang
+
+; ---------------------------------------------------------------------------
+; efi_entry: GRUB UEFI x86_64 com a tag 7 (boot services vivos).
+;   RAX = MB2_MAGIC, RBX = MBI (abaixo de 4 GB), long mode com a paginacao
+;   de identidade do firmware, pilha do firmware.
+; Chama efistub_main(mbi) (C, ABI SysV), que faz o ExitBootServices. Depois
+; volta ao estado que o multiboot_entry espera: modo protegido 32 bits sem
+; paginacao, CS=0x08 e dados 0x10 de uma GDT plana.
+; ---------------------------------------------------------------------------
+extern efistub_main
+
+section .data
+align 8
+efi_mbi: dq 0
+align 8
+efi_gdt:
+    dq 0
+    dq 0x00CF9A000000FFFF         ; 0x08: codigo 32 bits, base 0, 4 GB
+    dq 0x00CF92000000FFFF         ; 0x10: dados 32 bits
+efi_gdt_ptr:
+    dw 23
+    dq efi_gdt
+
+section .text
+bits 64
+global efi_entry
+efi_entry:
+    cmp eax, MB2_MAGIC
+    jne .efi_bad
+    mov [rel efi_mbi], rbx
+    mov rdi, rbx
+    and rsp, -16
+    call efistub_main             ; boot services encerrados (ou nao: segue igual)
+
+    cli
+    ; PCIDE ligado impede desligar a paginacao (#GP): desliga antes.
+    mov rax, cr4
+    and rax, ~(1 << 17)
+    mov cr4, rax
+    lgdt [rel efi_gdt_ptr]
+    push 0x08
+    lea rax, [rel .pm32]
+    push rax
+    retfq
+
+.efi_bad:
+    cli
+    hlt
+    jmp .efi_bad
+
+bits 32
+.pm32:
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov esp, 0x9FC00
+    ; Paginacao desligada = fora do long mode (codigo em identidade, < 4 GB).
+    mov eax, cr0
+    and eax, 0x7FFFFFFF
+    mov cr0, eax
+    ; EFER.LME = 0. CR4 limpo (LA57, PGE, PCIDE do firmware): o kernel_entry
+    ; liga o que precisa.
+    mov ecx, 0xC0000080
+    rdmsr
+    and eax, ~(1 << 8)
+    wrmsr
+    xor eax, eax
+    mov cr4, eax
+    mov eax, MB2_MAGIC
+    mov ebx, [efi_mbi]
+    jmp multiboot_entry

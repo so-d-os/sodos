@@ -118,6 +118,10 @@ check-layout: boot.bin stage2.bin kernel.elf kernel.bin app.bin
 kernel/multiboot_header.o: kernel/multiboot_header.asm
 	$(AS) -f elf64 kernel/multiboot_header.asm -o kernel/multiboot_header.o
 
+# Diagnostico de video com os boot services vivos (so no kernel_multiboot.elf).
+kernel/efistub.o: kernel/efistub.c kernel/efistub.h
+	$(CC) $(CFLAGS) -c kernel/efistub.c -o kernel/efistub.o
+
 # Stubs de exceção (IDT/ISR)
 kernel/isr_stubs.o: kernel/isr_stubs.asm
 	$(AS) -f elf64 kernel/isr_stubs.asm -o kernel/isr_stubs.o
@@ -234,8 +238,8 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o net/r8125.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o kernel/version.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 # Mesmo kernel de kernel.elf, com o stub Multiboot2 na frente. O GRUB carrega este ELF.
-kernel_multiboot.elf: kernel.elf kernel/multiboot_header.o kernel/linker_multiboot.ld
-	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o net/r8125.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o kernel/version.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+kernel_multiboot.elf: kernel.elf kernel/multiboot_header.o kernel/efistub.o kernel/linker_multiboot.ld
+	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/efistub.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o net/r8125.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o kernel/version.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 
 kernel.bin: kernel.elf

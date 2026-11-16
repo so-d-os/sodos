@@ -1,10 +1,18 @@
 /* bootinfo.c - guarda e valida a estrutura entregue pelo carregador. */
 #include "bootinfo.h"
+#include "serial.h"
 
 static const struct BootInfo *g_bootinfo;
 
+/* So o kernel_multiboot.elf tem efistub.o; no kernel.elf o simbolo e 0. */
+extern void efistub_report(void (*puts_fn)(const char *)) __attribute__((weak));
+
 void bootinfo_set(const struct BootInfo *bi) {
   g_bootinfo = bi;
+  /* Primeira chamada do kmain depois de zerar o .bss: o que o stub EFI viu
+   * antes do ExitBootServices (placas, saidas GOP, modos, EDID) vai para a
+   * serial e, no PC real, para o \LOG\SERIAL.LOG. */
+  if (efistub_report) efistub_report(serial_puts);
 }
 
 const struct BootInfo *bootinfo_get(void) {

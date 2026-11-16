@@ -748,6 +748,9 @@ int mod_exec(const char* path, int argc, char** argv) {
     serial_puts(" av=");
     serial_hex32((uint32_t)(uintptr_t)av);
     serial_puts("\n");
+      /* PC sem serial: o log ate aqui vai para D:\LOG\SERIAL.LOG antes de o
+       * programa rodar (se ele derrubar a maquina, o log mostra quem foi). */
+      (void)serial_log_save();
       {
         /* Codigo do programa roda sem o BKL: threads dele (e de outros)
          * entram no kernel enquanto isso. Volta com a mesma profundidade,

@@ -10779,6 +10779,7 @@ static void gfx_session_run(int session) {
   int vt_to = -1;   /* tela pedida com Ctrl+Fn durante o modo grafico */
 
   serial_puts("[visual] enter\n");
+  (void)serial_log_save();   /* PC sem serial: D:\LOG\SERIAL.LOG ate aqui */
   if (!vga_bios_font_ok)
     vga_capture_bios_font();
   shift_on = 0;
@@ -10881,6 +10882,7 @@ gfx_restart:
     if (win_wm_run()) {
       bochs_disable_if_needed();
       serial_puts("[visual] troca de tela\n");
+      (void)serial_log_save();
       goto gfx_restart;
     }
     goto gfx_session_leave;

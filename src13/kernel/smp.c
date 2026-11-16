@@ -82,6 +82,10 @@ static uint64_t rd64(const uint8_t* p) { return (uint64_t)rd32(p) | ((uint64_t)r
 static const uint8_t* rsdp_find(void) {
   uintptr_t ebda = ((uintptr_t)(*(const uint16_t*)0x40E)) << 4;
   uintptr_t p;
+  /* Boot pelo GRUB (UEFI): copia do RSDP que veio na tag ACPI do Multiboot2
+   * (kernel/multiboot_header.asm). No UEFI o RSDP nao fica na area de BIOS. */
+  if (mem_eq((const uint8_t*)0x5F00, "RSD PTR ", 8) && sum_ok((const uint8_t*)0x5F00, 20))
+    return (const uint8_t*)0x5F00;
   if (ebda >= 0x80000 && ebda < 0xA0000) {
     for (p = ebda; p + 20 <= ebda + 1024; p += 16)
       if (mem_eq((const uint8_t*)p, "RSD PTR ", 8) && sum_ok((const uint8_t*)p, 20))
