@@ -652,6 +652,17 @@ void putc(char c) {
 
 void puts_k(const char* s) { while (*s) putc(*s++); }
 
+/* Grava o log da COM1 deste boot em D:\LOG\SERIAL.LOG (sobrescreve). O PC
+ * real nao tem serial: o diagnostico (USB, NVMe, rede) vem por aqui, e o
+ * Windows le o arquivo no E:. Chamado no fim do boot e pelo MOUSE e pelo USB. */
+int serial_log_save(void) {
+  uint32_t n;
+  const char* s = serial_log(&n);
+  if (!drives_is_mounted('D')) return -1;
+  (void)drives_mkdir("D:\\LOG");
+  return file_save("D:\\LOG\\SERIAL.LOG", s, (int)n);
+}
+
 /* Log para debug de fdisk (partition.c chama) */
 void fdisk_log(const char* s) { puts_k(s); }
 
@@ -2146,6 +2157,7 @@ void kmain(const struct BootInfo* bi) {
   serial_puts("[kernel] shell ready — mais linhas na serial apos o comando 'visual'\n");
 
   version_boot_log(); /* \LOG\BOOT.LOG: diz se o kernel mudou desde o boot anterior */
+  serial_log_save();  /* \LOG\SERIAL.LOG: o log da COM1, para o PC sem serial */
   vt_init();
   shell_loop();
 }

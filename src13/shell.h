@@ -15,6 +15,7 @@ extern int cmd_count;
 int register_builtin(const char* name, cmd_fn fn);
 
 void puts_k(const char* s);
+int serial_log_save(void);   /* COM1 deste boot -> D:\LOG\SERIAL.LOG */
 void putc(char c);
 /* Enquanto fn nao e nulo, putc e clear_screen mandam o texto para fn.
  * clear_screen manda '\\f'. */

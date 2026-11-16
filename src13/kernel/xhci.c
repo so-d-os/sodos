@@ -127,6 +127,13 @@ struct udev {
   int dci_kb;              /* teclado: interrupt IN no anel rout */
   int kb_len;
   volatile uint8_t* krep;  /* 64 bytes: relatorio do teclado */
+  uint8_t ifc[4][3];       /* classe/subclasse/protocolo das 4 primeiras interfaces (USB) */
+  int nifc;
+  /* Mouse em protocolo report: posicoes (em bits, depois do report ID) que o
+   * HID report descriptor deu. m_rep = 0: formato boot (3-4 bytes fixos). */
+  int m_rep, m_rid;
+  int m_fix, m_errs, m_seen; /* erro a tratar, erros seguidos, relatorios logados */
+  int m_boff, m_bn, m_xoff, m_xsz, m_yoff, m_ysz, m_woff, m_wsz;
   uint8_t* mem;            /* 3 paginas, nunca liberadas */
   struct ring ep0, rin, rout;
   volatile uint8_t* buf;   /* 256 bytes do EP0 */
@@ -142,9 +149,13 @@ static struct udev devs[UDEV_MAX];
 static int busy;
 static int ps2_hint = -1;  /* ultimo ps2_ok de xhci_mouse_init; -1 = nao sabido */
 
-static int ms = -1;        /* devs[] do mouse */
-static int ms_errs;
-static int ms_fix;         /* erro no interrupt IN: reset no proximo poll */
+/* Mouses: todos os que aparecerem valem. Um teclado gamer ou um receptor
+ * costuma ter uma interface "Mouse" (macros) que nunca manda nada; com um
+ * mouse so, ela tomava o lugar do mouse de verdade (PC real: X=0, Y=0). */
+#define MS_MAX 4
+static int msl[MS_MAX];    /* devs[] dos mouses */
+static int ms_n;
+static int ms_fix;         /* algum mouse com erro no interrupt IN (ver d->m_fix) */
 static int ms_q[MSQ][4];   /* dx, dy, dz, botoes */
 static int ms_qh, ms_qn;
 
@@ -468,7 +479,7 @@ static void ep_reset(struct udev* d, int dci, struct ring* r) {
                 ((uint32_t)dci << 16) | ((uint32_t)d->slot << 24), 0);
 }
 
-/* Requisicao de controle no EP0. Os dados ficam em d->buf (ate 256 bytes).
+/* Requisicao de controle no EP0. Os dados ficam em d->buf (ate 1024 bytes).
  * Um STALL (requisicao recusada) para o EP0; o reset deixa ele pronto de novo. */
 static int ctrl(struct udev* d, uint8_t rtype, uint8_t req, uint16_t val, uint16_t idx,
                 uint16_t len) {
@@ -611,8 +622,11 @@ static int dev_new(void) {
     ring_init(&d->ep0, (struct trb*)d->mem);
     ring_init(&d->rin, (struct trb*)(d->mem + 512));
     ring_init(&d->rout, (struct trb*)(d->mem + 1024));
-    d->buf = d->mem + 1536;   /* 256 bytes */
+    d->buf = d->mem + 2048;   /* 1024 bytes: descritores (mouse gamer passa de 256) */
     d->rep = d->mem + 1792;   /* 64 bytes */
+    d->nifc = 0;
+    d->m_rep = 0;
+    d->m_rid = 0;
     d->cbw = d->mem + 1856;   /* 32 bytes */
     d->krep = d->mem + 1920;  /* 64 bytes */
     d->dci_kb = 0;
@@ -640,11 +654,15 @@ static void dev_drop(int i) {
   if (d->kind == UD_FREE) return;
   for (j = 0; j < UDEV_MAX; j++)
     if (j != i && devs[j].kind != UD_FREE && devs[j].parent == i) dev_drop(j);
-  if (i == ms) {
-    xlog("[xhci] mouse desconectado\n");
-    ms = -1;
-    ms_qn = 0;
-  }
+  for (j = 0; j < ms_n; j++)
+    if (msl[j] == i) {
+      int k;
+      xlog("[xhci] mouse desconectado\n");
+      for (k = j; k + 1 < ms_n; k++) msl[k] = msl[k + 1];
+      ms_n--;
+      if (!ms_n) ms_qn = 0;
+      break;
+    }
   if (i == kb) {
     xlog("[xhci] teclado desconectado\n");
     kb_release_all();
@@ -887,10 +905,10 @@ static int hid_setup(int i, int m_if, int m_ep, int m_mps, int m_ival, int m_boo
   if (m_if >= 0) {
     d->iface = m_if;
     d->len = m_mps;
-    ms = i;
-    ms_errs = 0;
-    ms_fix = 0;
-    ms_qn = 0;
+    if (ms_n < MS_MAX) msl[ms_n++] = i;
+    d->m_errs = 0;
+    d->m_fix = 0;
+    d->m_seen = 0;
     ms_arm(d);
     xlog("[xhci] mouse USB pronto, porta ");
     xlog_hex((uint32_t)(d->port + 1));
@@ -956,15 +974,179 @@ static void kb_report(const uint32_t e[4]) {
   kb_arm(d);
 }
 
-static void ms_report(const uint32_t e[4]) {
-  struct udev* d = &devs[ms];
+/* HID report descriptor: acha a coleção de aplicacao Mouse (ou Pointer) e
+ * onde ficam botoes, X, Y e roda no relatorio de entrada. Muitos mouses (sem
+ * fio, gamer) nao tem protocolo boot e so mandam este formato. 1 = achou X e
+ * Y; as posicoes vao para d->m_*. */
+static int hid_mouse_layout(struct udev* d, const volatile uint8_t* p, int n) {
+  static uint16_t off[256];          /* bits ja usados em cada report ID */
+  uint32_t upage = 0, rsize = 0, rcount = 0, rid = 0;
+  uint32_t us[16], umin = 0, umax = 0;
+  int nus = 0, range = 0, depth = 0, mdepth = -1, i;
+  int found_x = 0, found_y = 0, found_b = 0, mrid = -1;
+  for (i = 0; i < 256; i++) off[i] = 0;
+  d->m_bn = d->m_xsz = d->m_ysz = d->m_wsz = 0;
+  i = 0;
+  while (i < n) {
+    uint8_t b = p[i];
+    int sz = b & 3, type = (b >> 2) & 3, tag = b >> 4, j;
+    uint32_t v = 0;
+    if (b == 0xFE) {                 /* item longo: pula */
+      if (i + 2 >= n) break;
+      i += 3 + p[i + 1];
+      continue;
+    }
+    if (sz == 3) sz = 4;
+    if (i + 1 + sz > n) break;
+    for (j = 0; j < sz; j++) v |= (uint32_t)p[i + 1 + j] << (8 * j);
+    i += 1 + sz;
+    if (type == 1) {                 /* global */
+      if (tag == 0) upage = v;
+      else if (tag == 7) rsize = v;
+      else if (tag == 8) rid = v & 0xFFu;
+      else if (tag == 9) rcount = v;
+    } else if (type == 2) {          /* local */
+      if (tag == 0 && nus < 16) us[nus++] = (sz == 4) ? v : (upage << 16) | (v & 0xFFFFu);
+      else if (tag == 1) { umin = (sz == 4) ? v : (upage << 16) | v; range = 1; }
+      else if (tag == 2) umax = (sz == 4) ? v : (upage << 16) | v;
+    } else if (type == 0) {          /* main */
+      if (tag == 10) {               /* Collection */
+        /* So Mouse (01/02): um Pointer solto costuma ser tablet (absoluto). */
+        if (v == 1 && mdepth < 0 && nus > 0 && us[nus - 1] == 0x00010002u)
+          mdepth = depth;
+        depth++;
+      } else if (tag == 12) {        /* End Collection */
+        if (depth > 0) depth--;
+        if (mdepth >= 0 && depth <= mdepth) {
+          if (found_x && found_y) break;   /* primeira coleção de mouse basta */
+          mdepth = -1;
+        }
+      } else if (tag == 8) {         /* Input */
+        uint32_t k;
+        if (mdepth >= 0 && !(v & 1) && (v & 2) && rsize && rsize <= 32) {
+          for (k = 0; k < rcount && k < 64u; k++) {
+            uint32_t u = nus ? us[k < (uint32_t)nus ? k : (uint32_t)nus - 1u]
+                             : range ? umin + k : 0;
+            uint32_t bit = off[rid] + k * rsize;
+            if (mrid >= 0 && (int)rid != mrid) break;
+            if ((u >> 16) == 9 && !found_b) {
+              found_b = 1;
+              d->m_boff = (int)bit;
+              d->m_bn = (int)(rcount > 8 ? 8 : rcount);
+              mrid = (int)rid;
+            } else if (u == 0x00010030u && !found_x && (v & 4)) {   /* X relativo */
+              found_x = 1; d->m_xoff = (int)bit; d->m_xsz = (int)rsize; mrid = (int)rid;
+            } else if (u == 0x00010031u && !found_y && (v & 4)) {   /* Y relativo */
+              found_y = 1; d->m_yoff = (int)bit; d->m_ysz = (int)rsize; mrid = (int)rid;
+            } else if (u == 0x00010038u && !d->m_wsz) {
+              d->m_woff = (int)bit; d->m_wsz = (int)rsize;
+            }
+          }
+        }
+        off[rid] = (uint16_t)(off[rid] + rsize * rcount);
+      }
+      nus = 0;
+      range = 0;
+      (void)umax;
+    }
+  }
+  if (!found_x || !found_y) return 0;
+  d->m_rid = mrid > 0 ? mrid : 0;
+  if (!found_b) d->m_bn = 0;
+  return 1;
+}
+
+static uint32_t rep_bits(const uint8_t* r, uint32_t nbytes, int bit, int size) {
+  uint32_t v = 0;
+  int k;
+  for (k = 0; k < size && k < 32; k++) {
+    uint32_t b = (uint32_t)(bit + k);
+    if ((b >> 3) < nbytes && (r[b >> 3] >> (b & 7)) & 1u) v |= 1u << k;
+  }
+  return v;
+}
+
+static int rep_sbits(const uint8_t* r, uint32_t nbytes, int bit, int size) {
+  uint32_t v;
+  if (size <= 0) return 0;
+  v = rep_bits(r, nbytes, bit, size);
+  if (size < 32 && (v & (1u << (size - 1)))) v |= ~0u << size;
+  return (int)v;
+}
+
+/* "[xhci] <s> 05 01 09 02 ...\n" (ate max bytes) na serial / SERIAL.LOG. */
+static void log_bytes(const char* s, const volatile uint8_t* p, uint32_t n, uint32_t max) {
+  static const char hx[] = "0123456789ABCDEF";
+  char b[4];
+  uint32_t i;
+  xlog(s);
+  for (i = 0; i < n && i < max; i++) {
+    b[0] = ' ';
+    b[1] = hx[p[i] >> 4];
+    b[2] = hx[p[i] & 15u];
+    b[3] = 0;
+    xlog(b);
+  }
+  if (n > max) xlog(" ...");
+  xlog("\n");
+}
+
+static void ms_report(int mi, const uint32_t e[4]) {
+  struct udev* d = &devs[mi];
   uint32_t cc = e[2] >> 24, n;
   if (cc != CC_OK && cc != CC_SHORT) {
+    if (d->m_seen < 8) {
+      d->m_seen++;
+      log_hex("[xhci] mouse: erro no interrupt IN, cc=", cc);
+    }
+    d->m_fix = 1;
     ms_fix = 1;
     return;
   }
   n = (uint32_t)d->len - (e[2] & 0xFFFFFFu);
-  ms_errs = 0;
+  d->m_errs = 0;
+  if (d->m_seen < 8) {  /* os primeiros relatorios de cada mouse, para o log */
+    d->m_seen++;
+    xlog("[xhci] mouse porta ");
+    xlog_hex((uint32_t)(d->port + 1));
+    log_bytes(" relatorio:", d->rep, n, 16);
+  }
+  if (d->m_rep) {
+    /* Protocolo report: so o report ID do mouse; os outros (teclas de
+     * midia, configuracao do mouse gamer) ficam de fora. */
+    uint8_t r[64];
+    uint32_t k, nb = n > 64u ? 64u : n;
+    const uint8_t* q0 = r;
+    for (k = 0; k < nb; k++) r[k] = d->rep[k];
+    if (d->m_rid) {
+      if (nb < 1 || r[0] != (uint8_t)d->m_rid) {
+        ms_arm(d);
+        return;
+      }
+      q0 = r + 1;
+      nb--;
+    }
+    {
+      int dx = rep_sbits(q0, nb, d->m_xoff, d->m_xsz);
+      int dy = rep_sbits(q0, nb, d->m_yoff, d->m_ysz);
+      int dz = rep_sbits(q0, nb, d->m_woff, d->m_wsz);
+      int b = (int)(rep_bits(q0, nb, d->m_boff, d->m_bn > 3 ? 3 : d->m_bn) & 7u);
+      int* q;
+      if (ms_qn < MSQ) {
+        q = ms_q[(ms_qh + ms_qn) % MSQ];
+        ms_qn++;
+        q[0] = q[1] = q[2] = 0;
+      } else {
+        q = ms_q[(ms_qh + MSQ - 1) % MSQ];
+      }
+      q[0] += dx;
+      q[1] += dy;
+      q[2] += dz;
+      q[3] = b;
+    }
+    ms_arm(d);
+    return;
+  }
   if (n >= 3) {
     int dx = (int8_t)d->rep[1], dy = (int8_t)d->rep[2];
     int dz = (n >= 4) ? (int8_t)d->rep[3] : 0, b = d->rep[0] & 7;
@@ -1197,6 +1379,9 @@ static int enumerate(struct xc* x, int port, uint32_t route, int speed, int pare
   int m_if = -1, m_ep = -1, m_mps = 0, m_ival = 0, m_boot = 0;
   int k_if = -1, k_ep = -1, k_mps = 0, k_ival = 0;
   int s_if = -1, s_in = -1, s_out = -1, s_mps = 0, s_burst = 0;
+  /* Interfaces HID sem protocolo boot de mouse/teclado: podem ser um mouse
+   * em protocolo report (le-se o report descriptor depois). */
+  int h_if[4], h_ep[4], h_mps[4], h_ival[4], h_proto[4], h_rlen[4], nh = 0, cur_rlen = 0;
   uint32_t mps0;
   volatile uint32_t* c;
   struct udev* d;
@@ -1267,7 +1452,7 @@ static int enumerate(struct xc* x, int port, uint32_t route, int speed, int pare
   if (ctrl(d, 0x80, 6, 0x0200, 0, 9) != 0) goto fail;
   total = (int)d->buf[2] | ((int)d->buf[3] << 8);
   if (total < 9) total = 9;
-  if (total > 256) total = 256;
+  if (total > 1024) total = 1024;
   if (ctrl(d, 0x80, 6, 0x0200, 0, (uint16_t)total) != 0) goto fail;
   cfg = d->buf[5];
 
@@ -1282,7 +1467,14 @@ static int enumerate(struct xc* x, int port, uint32_t route, int speed, int pare
       cur_sub = d->buf[k + 6];
       cur_proto = d->buf[k + 7];
       last_bulk = 0;
+      cur_rlen = 0;
       if (cur_cls == 9 && cur_alt == 0) hub = 1;
+      if (cur_alt == 0 && d->nifc < 4) {
+        d->ifc[d->nifc][0] = (uint8_t)cur_cls;
+        d->ifc[d->nifc][1] = (uint8_t)cur_sub;
+        d->ifc[d->nifc][2] = (uint8_t)cur_proto;
+        d->nifc++;
+      }
       xlog("[xhci] interface classe ");
       xlog_hex((uint32_t)((cur_cls << 16) | (cur_sub << 8) | cur_proto));
       xlog("\n");
@@ -1291,12 +1483,28 @@ static int enumerate(struct xc* x, int port, uint32_t route, int speed, int pare
       int attr = d->buf[k + 3] & 3;
       int mps = ((int)d->buf[k + 4] | ((int)d->buf[k + 5] << 8)) & 0x7FF;
       last_bulk = 0;
-      if (cur_cls == 3 && cur_proto == 2 && m_ep < 0 && (addr & 0x80) && attr == 3) {
+#ifdef XHCI_TEST_REPORT_MOUSE
+      /* Teste no QEMU (o usb-mouse dele e boot): forca o caminho do report descriptor. */
+      if (0) {
+#else
+      if (cur_cls == 3 && cur_sub == 1 && cur_proto == 2 && m_ep < 0 && (addr & 0x80) &&
+          attr == 3) {
+#endif
+        /* Mouse com protocolo boot (subclasse 1, protocolo 2). */
         m_if = cur_if;
-        m_boot = cur_sub == 1;
+        m_boot = 1;
         m_ep = addr & 0x0F;
         m_mps = mps;
         m_ival = d->buf[k + 6];
+      } else if (cur_cls == 3 && !(cur_sub == 1 && cur_proto == 1) && (addr & 0x80) && attr == 3 &&
+                 nh < 4) {
+        h_if[nh] = cur_if;
+        h_ep[nh] = addr & 0x0F;
+        h_mps[nh] = mps;
+        h_ival[nh] = d->buf[k + 6];
+        h_proto[nh] = cur_proto;
+        h_rlen[nh] = cur_rlen;
+        nh++;
       } else if (cur_cls == 3 && cur_sub == 1 && cur_proto == 1 && k_ep < 0 && (addr & 0x80) &&
                  attr == 3) {
         /* Teclado com protocolo boot (subclasse 1, protocolo 1). */
@@ -1317,8 +1525,57 @@ static int enumerate(struct xc* x, int port, uint32_t route, int speed, int pare
       }
     } else if (t == 0x30 && l >= 6 && last_bulk) {
       s_burst = d->buf[k + 2];  /* SuperSpeed: bMaxBurst do companheiro */
+    } else if (t == 0x21 && l >= 9 && d->buf[k + 6] == 0x22) {
+      cur_rlen = (int)d->buf[k + 7] | ((int)d->buf[k + 8] << 8);  /* report descriptor */
     }
     k += l;
+  }
+
+  /* Mouse sem protocolo boot: le o report descriptor de cada interface HID
+   * candidata (precisa da configuracao ativa) e usa a primeira que descreve
+   * um mouse. Sem descritor util, um protocolo 2 ainda vai no formato boot. */
+  if (m_ep < 0 && ms_n < MS_MAX && nh > 0) {
+    int h;
+    if (ctrl(d, 0x00, 9, (uint16_t)cfg, 0, 0) == 0) {
+      for (h = 0; h < nh && m_ep < 0; h++) {
+        int len = h_rlen[h];
+        if (len <= 0) continue;
+        if (len > 1024) len = 1024;
+        zero(d->buf, 1024u);
+        if (ctrl(d, 0x81, 6, 0x2200, (uint16_t)h_if[h], (uint16_t)len) != 0) {
+          log_hex("[xhci] report descriptor recusado, interface ", (uint32_t)h_if[h]);
+          continue;
+        }
+        log_hex("[xhci] report descriptor, interface ", (uint32_t)h_if[h]);
+        log_bytes("[xhci]  ", d->buf, (uint32_t)len, 128);
+        if (hid_mouse_layout(d, d->buf, len)) {
+          xlog("[xhci] mouse: id ");
+          xlog_hex((uint32_t)d->m_rid);
+          xlog(" botoes ");
+          xlog_hex((uint32_t)((d->m_boff << 8) | d->m_bn));
+          xlog(" x ");
+          xlog_hex((uint32_t)((d->m_xoff << 8) | d->m_xsz));
+          xlog(" y ");
+          xlog_hex((uint32_t)((d->m_yoff << 8) | d->m_ysz));
+          xlog("\n");
+          m_if = h_if[h];
+          m_ep = h_ep[h];
+          m_mps = h_mps[h];
+          m_ival = h_ival[h];
+          m_boot = 0;
+          d->m_rep = 1;
+          xlog("[xhci] mouse em protocolo report\n");
+        }
+      }
+    }
+    for (h = 0; h < nh && m_ep < 0; h++)
+      if (h_proto[h] == 2) {
+        m_if = h_if[h];
+        m_ep = h_ep[h];
+        m_mps = h_mps[h];
+        m_ival = h_ival[h];
+        m_boot = 0;
+      }
   }
 
   if (hub) {
@@ -1330,7 +1587,7 @@ static int enumerate(struct xc* x, int port, uint32_t route, int speed, int pare
     return i;
   }
   {
-    int use_m = m_ep >= 0 && m_mps >= 3 && ms < 0;
+    int use_m = m_ep >= 0 && m_mps >= 3 && ms_n < MS_MAX;
     int use_k = k_ep >= 0 && k_mps >= 3 && kb < 0;
     if (use_m || use_k) {
       if (hid_setup(i, use_m ? m_if : -1, m_ep, m_mps > 64 ? 64 : m_mps, m_ival, m_boot,
@@ -1392,12 +1649,19 @@ static void evt_other(struct xc* x, const uint32_t e[4]) {
     if (p >= 0 && p < 32) x->pchg |= 1u << p;
     return;
   }
-  if (type == EV_XFER && ms >= 0 && devs[ms].x == x && (int)(e[3] >> 24) == devs[ms].slot &&
-      (int)((e[3] >> 16) & 0x1Fu) == devs[ms].dci_in)
-    ms_report(e);
-  else if (type == EV_XFER && kb >= 0 && devs[kb].x == x && (int)(e[3] >> 24) == devs[kb].slot &&
-           (int)((e[3] >> 16) & 0x1Fu) == devs[kb].dci_kb)
-    kb_report(e);
+  if (type == EV_XFER) {
+    int k;
+    for (k = 0; k < ms_n; k++) {
+      struct udev* m = &devs[msl[k]];
+      if (m->x == x && (int)(e[3] >> 24) == m->slot && (int)((e[3] >> 16) & 0x1Fu) == m->dci_in) {
+        ms_report(msl[k], e);
+        return;
+      }
+    }
+    if (kb >= 0 && devs[kb].x == x && (int)(e[3] >> 24) == devs[kb].slot &&
+        (int)((e[3] >> 16) & 0x1Fu) == devs[kb].dci_kb)
+      kb_report(e);
+  }
 }
 
 /* Trata as portas raiz marcadas por evt_other (fora de qualquer espera). */
@@ -1491,11 +1755,11 @@ static int xc_up(int ps2_ok) {
 
 int xhci_mouse_init(int ps2_ok) {
   ps2_hint = ps2_ok;
-  if (ms >= 0) return 0;
+  if (ms_n) return 0;
   if (busy || !xc_up(ps2_ok)) return -1;
   scan_all();
-  if (ms < 0) xlog("[xhci] nenhum mouse USB\n");
-  return ms >= 0 ? 0 : -1;
+  if (!ms_n) xlog("[xhci] nenhum mouse USB\n");
+  return ms_n ? 0 : -1;
 }
 
 int xhci_mouse_poll(int* dx, int* dy, int* dz, int* btn) {
@@ -1506,22 +1770,30 @@ int xhci_mouse_poll(int* dx, int* dy, int* dz, int* btn) {
   for (i = 0; i < xc_n; i++)
     if (xcs[i].up)
       while (evt_take(&xcs[i], e)) evt_other(&xcs[i], e);
-  if (ms_fix && ms >= 0) {
+  if (ms_fix) {
     /* Endpoint parado (STALL ou erro de transacao): reset e volta ao anel. */
-    struct udev* d = &devs[ms];
+    int k;
     ms_fix = 0;
-    if (++ms_errs > 8) {
-      xlog("[xhci] mouse com erro, desligado\n");
-      d->kind = UD_OTHER;
-      ms = -1;
-    } else {
-      ep_reset(d, d->dci_in, &d->rin);
-      ms_arm(d);
+    for (k = 0; k < ms_n; k++) {
+      struct udev* d = &devs[msl[k]];
+      if (!d->m_fix) continue;
+      d->m_fix = 0;
+      if (++d->m_errs > 8) {
+        int j;
+        xlog("[xhci] mouse com erro, desligado\n");
+        if (d->kind == UD_MOUSE) d->kind = UD_OTHER;
+        for (j = k; j + 1 < ms_n; j++) msl[j] = msl[j + 1];
+        ms_n--;
+        k--;
+      } else {
+        ep_reset(d, d->dci_in, &d->rin);
+        ms_arm(d);
+      }
     }
   }
   /* Reserva para um evento de porta perdido: a cada 500 ms procura uma
    * conexao nova (CSC ainda ligado) enquanto nao ha mouse. */
-  if (ms < 0 && net_has_clock() && net_ms() - scan_ms >= 500u) {
+  if (!ms_n && net_has_clock() && net_ms() - scan_ms >= 500u) {
     scan_ms = net_ms();
     for (i = 0; i < xc_n; i++) {
       uint32_t p;
@@ -1762,6 +2034,7 @@ int xhci_describe(char* out, int max) {
         pos = put_s(out, pos, max, " portas");
       } else if (d->kind == UD_MOUSE) {
         pos = put_s(out, pos, max, j == kb ? "mouse + teclado" : "mouse");
+        if (d->m_rep) pos = put_s(out, pos, max, " (report)");
       } else if (d->kind == UD_KBD) {
         pos = put_s(out, pos, max, "teclado");
       } else if (d->kind == UD_DISK) {
@@ -1771,7 +2044,19 @@ int xhci_describe(char* out, int max) {
         pos = put_u(out, pos, max, dk_blocks / 2048u);
         pos = put_s(out, pos, max, " MB");
       } else {
-        pos = put_s(out, pos, max, "outro (sem driver)");
+        int q;
+        pos = put_s(out, pos, max, "outro (sem driver:");
+        /* classe/subclasse/protocolo de cada interface: 03/01/02 = mouse
+         * boot, 03/00/00 = HID report, 08 = disco, 09 = hub, E0 = Bluetooth */
+        for (q = 0; q < d->nifc; q++) {
+          pos = put_s(out, pos, max, " ");
+          pos = put_hex2(out, pos, max, d->ifc[q][0]);
+          pos = put_s(out, pos, max, "/");
+          pos = put_hex2(out, pos, max, d->ifc[q][1]);
+          pos = put_s(out, pos, max, "/");
+          pos = put_hex2(out, pos, max, d->ifc[q][2]);
+        }
+        pos = put_s(out, pos, max, ")");
       }
       pos = put_s(out, pos, max, "\n");
     }

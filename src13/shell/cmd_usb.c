@@ -20,5 +20,6 @@ int cmd_usb(int argc, char** argv) {
     puts_k(m);
   } else
     puts_k("Nenhum pendrive (porta do PC ou hub USB 2; FAT12/16/32).\n");
+  (void)serial_log_save();   /* lista e log do USB -> D:\LOG\SERIAL.LOG */
   return 0;
 }

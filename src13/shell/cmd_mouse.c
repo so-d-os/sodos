@@ -158,5 +158,6 @@ int cmd_mouse(int argc, char** argv) {
   }
 
   puts_k("\nMouse encerrado. (ESC)\n");
+  (void)serial_log_save();   /* relatorios do mouse -> D:\LOG\SERIAL.LOG */
   return 0;
 }

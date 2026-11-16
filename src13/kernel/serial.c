@@ -28,8 +28,24 @@ static int tx_ready(void) {
   return (int)(inb(COM1 + 5) & 0x20u);
 }
 
+/* Copia de tudo o que sai na COM1, para o \LOG\SERIAL.LOG: o PC real nao tem
+ * serial. Guarda os primeiros 192 KB do boot (o diagnostico esta no comeco). */
+#define SLOG_MAX (192u * 1024u)
+static char slog[SLOG_MAX];
+static volatile uint32_t slog_n;
+
+const char* serial_log(uint32_t* n) {
+  uint32_t v = slog_n;
+  if (n) *n = v > SLOG_MAX ? SLOG_MAX : v;
+  return slog;
+}
+
 void serial_putc(char c) {
   volatile int spin = 100000;
+  if (c != '\r') {
+    uint32_t i = __atomic_fetch_add(&slog_n, 1u, __ATOMIC_RELAXED);
+    if (i < SLOG_MAX) slog[i] = c;
+  }
   while (!tx_ready() && --spin > 0) { }
   outb(COM1, (uint8_t)c);
 }
