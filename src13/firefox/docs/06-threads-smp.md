@@ -90,6 +90,31 @@ no BKL (o mundo segura o BKL ~75% do tempo dentro do laço do WIN) e o
 `poll` da thread de soquete, que dorme em fatias de 4 ms e lê a placa a cada
 volta.
 
+### Digitação em app Flutter (C8X, campo CPF)
+
+Tempo da tecla até o dígito aparecer (screendump pelo QMP, que não custa nada
+ao guest; o `/win/printscreen` do httpd comprime PNG na CPU0 e infla a medida
+para 8–20 s):
+
+| | cooperativo | k_threads |
+|---|---|---|
+| janela 1600×820 | 1,0–1,8 s | ~0,9 s |
+| janela maximizada | — | 1,3–2,3 s |
+| busca do Google (HTML comum) | 0,1–1 s | — |
+
+A causa não é o caminho da tecla no port: **não há WebGL** (`Failed to create
+WebGL context`, `FEATURE_FAILURE_EGL_LOAD_3`), então o Flutter cai no CanvasKit
+em software e rasteriza cada quadro em wasm na thread principal. O custo cresce
+com a área da janela, e o caret piscando (um quadro a cada 500 ms) deixa a CPU0
+em ~93% em código JIT mesmo parado; as APs ficam ociosas. O JIT do SODOS está
+na velocidade do host (microbenchmark de loop: wasm 333 ms vs 300 ms no
+Firefox do Linux, JS 304 vs 298 ms), então o ganho de verdade é ter WebGL (GL
+em software, p.ex. Mesa llvmpipe, que rasteriza em threads nas APs).
+
+Com o DevTools aberto, clicar no app Flutter não tira o foco do teclado da
+busca do Inspector (o Flutter cancela o `pointerdown`); feche o DevTools antes
+de digitar.
+
 ## Limites conhecidos / próximos passos
 
 - `gettid()` devolve 1 para todas as threads, então o SpiderMonkey usa a base
