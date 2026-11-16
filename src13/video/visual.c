@@ -25,6 +25,7 @@
 #include "clip.h"
 #include "bootinfo.h"
 #include "fbcon.h"
+#include "efistub.h"
 #include "xhci.h"
 #include "vt.h"
 #include "env.h"
@@ -124,12 +125,16 @@ static void vga_restore_bios_font(void);
 #define BOCHS_LFB_PHYS           0xE0000000u
 
 /* 1920x1080x32 com pagina dupla cabe em 16 MB (QEMU -vga std e v86). */
-static const uint16_t gfx_mode_w[] = { 1920u, 1600u, 1280u, 1024u, 800u, 640u };
-static const uint16_t gfx_mode_h[] = { 1080u, 1200u, 1024u, 768u, 600u, 480u };
-static const char* const gfx_mode_name[] = {
+/* No UEFI a tabela vira a lista de modos da placa (efistub.c, gop_modes). */
+#define GFX_MODE_MAX 12
+static uint16_t gfx_mode_w[GFX_MODE_MAX] = { 1920u, 1600u, 1280u, 1024u, 800u, 640u };
+static uint16_t gfx_mode_h[GFX_MODE_MAX] = { 1080u, 1200u, 1024u, 768u, 600u, 480u };
+static char gfx_mode_txt[GFX_MODE_MAX][24];
+static const char* gfx_mode_name[GFX_MODE_MAX] = {
   "1920x1080", "1600x1200", "1280x1024", "1024x768", "800x600", "640x480"
 };
-#define GFX_MODE_N ((int)(sizeof(gfx_mode_w) / sizeof(gfx_mode_w[0])))
+static int gfx_mode_n = 6;
+#define GFX_MODE_N gfx_mode_n
 /* -1 = a maior que couber (padrao ao abrir o win). Outro valor e a escolha do menu. */
 static int gfx_mode_sel = -1;
 
@@ -554,9 +559,106 @@ static int bochs_try_mode(void) {
   return 0;
 }
 
-/* UEFI: o framebuffer que o GRUB pediu ao GOP.  Resolucao fixa. */
+/* So o kernel_multiboot.elf tem efistub.o; no kernel.elf o simbolo e 0. */
+extern const struct efistub_video* efistub_video(void) __attribute__((weak));
+
+/* Escolha feita no WIN que so vale no proximo boot (GOP). 0 = nenhuma;
+ * 0xFFFF = "Padrao" (tela=auto). */
+static uint16_t gop_pend_w, gop_pend_h;
+
+static void gop_mode_label(int i) {
+  char* t = gfx_mode_txt[i];
+  int n = 0;
+  uint32_t v[2];
+  int k;
+  v[0] = gfx_mode_w[i];
+  v[1] = gfx_mode_h[i];
+  for (k = 0; k < 2; k++) {
+    char d[6];
+    int m = 0;
+    uint32_t x = v[k];
+    do { d[m++] = (char)('0' + x % 10u); x /= 10u; } while (x && m < 5);
+    while (m) t[n++] = d[--m];
+    if (k == 0) t[n++] = 'x';
+  }
+  if (gop_pend_w == gfx_mode_w[i] && gop_pend_h == gfx_mode_h[i]) {
+    const char* s = " (reinicie)";
+    while (*s && n < 23) t[n++] = *s++;
+  }
+  t[n] = 0;
+  gfx_mode_name[i] = t;
+}
+
+/* UEFI: a lista de resolucoes e a dos modos da placa (GOP), maiores
+ * primeiro, sem repetir e sem os menores que 640x480. Trocar so vale no
+ * proximo boot: o firmware liga o modo antes do kernel (efistub.c). */
+static void gop_modes(void) {
+  const struct efistub_video* ev = efistub_video ? efistub_video() : 0;
+  uint32_t i;
+  int j, k;
+  if (!ev) return;
+  gfx_mode_n = 0;
+  for (i = 0; i < ev->n; i++) {
+    uint16_t w = ev->w[i], h = ev->h[i];
+    if (w < 640 || h < 480) continue;
+    for (j = 0; j < gfx_mode_n; j++)
+      if (gfx_mode_w[j] == w && gfx_mode_h[j] == h) break;
+    if (j < gfx_mode_n) continue;
+    /* insere ordenado por area (maior primeiro) */
+    for (j = 0; j < gfx_mode_n; j++)
+      if ((uint32_t)w * h > (uint32_t)gfx_mode_w[j] * gfx_mode_h[j]) break;
+    if (j >= GFX_MODE_MAX) continue;
+    if (gfx_mode_n == GFX_MODE_MAX) gfx_mode_n--;
+    for (k = gfx_mode_n; k > j; k--) {
+      gfx_mode_w[k] = gfx_mode_w[k - 1];
+      gfx_mode_h[k] = gfx_mode_h[k - 1];
+    }
+    gfx_mode_w[j] = w;
+    gfx_mode_h[j] = h;
+    gfx_mode_n++;
+  }
+  for (j = 0; j < gfx_mode_n; j++) gop_mode_label(j);
+}
+
+/* Grava D:\SODOS\TELA.CFG (tela=LxA ou tela=auto) para o proximo boot. */
+static int gop_mode_save(int sel) {
+  char t[32] = "tela=";
+  int n = 5;
+  int j;
+  if (sel < 0) {
+    const char* s = "auto\r\n";
+    while (*s) t[n++] = *s++;
+  } else {
+    const char* s = gfx_mode_txt[sel];
+    while (*s && *s != ' ') t[n++] = *s++;
+    t[n++] = '\r';
+    t[n++] = '\n';
+  }
+  t[n] = 0;
+  if (file_save("D:\\SODOS\\TELA.CFG", t, n) != 0) {
+    serial_puts("[visual] nao gravou D:\\SODOS\\TELA.CFG\n");
+    return 0;
+  }
+  if (sel < 0) {
+    gop_pend_w = gop_pend_h = 0xFFFFu;
+  } else {
+    gop_pend_w = gfx_mode_w[sel];
+    gop_pend_h = gfx_mode_h[sel];
+  }
+  /* escolher a que ja esta na tela desfaz a pendencia */
+  if (gop_pend_w == (uint16_t)gfx_w && gop_pend_h == (uint16_t)gfx_h) gop_pend_w = gop_pend_h = 0;
+  for (j = 0; j < gfx_mode_n; j++) gop_mode_label(j);
+  serial_puts("[visual] D:\\SODOS\\TELA.CFG: ");
+  serial_puts(t);
+  return 1;
+}
+
+/* UEFI: o framebuffer que o firmware ligou antes do kernel (efistub.c, com
+ * o \SODOS\TELA.CFG) ou o que o GRUB pediu ao GOP. Nao troca sem reiniciar. */
 static int gop_try_mode(void) {
   const struct BootInfo* bi = bootinfo_get();
+  const struct efistub_video* ev;
+  int j;
   if (vga_legacy() || !bi || !bi->fb_addr || bi->fb_bpp != 32) return 0;
   gfx_lfb = (volatile uint8_t*)(uintptr_t)bi->fb_addr;
   gfx_w = bi->fb_width;
@@ -565,6 +667,12 @@ static int gop_try_mode(void) {
   gfx_bochs = 1;
   gfx_gop = 1;
   gfx_mode_sel = -1;
+  gop_modes();
+  /* tela=LxA no TELA.CFG: a marca fica na resolucao, nao em "Padrao" */
+  ev = efistub_video ? efistub_video() : 0;
+  if (ev && ev->from_cfg)
+    for (j = 0; j < gfx_mode_n; j++)
+      if (gfx_mode_w[j] == gfx_w && gfx_mode_h[j] == gfx_h) gfx_mode_sel = j;
   serial_puts("[visual] GOP ");
   serial_u16((uint16_t)gfx_w);
   serial_puts("x");
@@ -589,6 +697,12 @@ static void bochs_disable_if_needed(void) {
 
 /* 1 se a escolha muda a tela. sel < 0 pede de novo a maior que couber. */
 static int gfx_mode_pick(int sel) {
+  if (gfx_gop) {
+    /* GOP: o modo so muda no proximo boot. Grava e fica na mesma tela. */
+    if (sel >= gfx_mode_n) return 0;
+    if (gop_mode_save(sel)) gfx_mode_sel = sel;
+    return 0;
+  }
   if (sel < 0) {
     if (gfx_mode_sel < 0) return 0;
     gfx_mode_sel = -1;
@@ -7232,7 +7346,7 @@ static void wm_open_display(struct wm_win* wins, int* focus, int big) {
     wins[i].used = 1;
     wins[i].kind = WM_KIND_DISP;
     wins[i].st = 0;
-    wins[i].w = 12 * FONT_W * scale + 48;
+    wins[i].w = (gfx_gop ? 21 : 12) * FONT_W * scale + 48;  /* GOP: "(reinicie)" */
     wins[i].h = title_h + 8 + DISP_N * ih + 8;
     wins[i].x = big ? gfx_sx(160) : 40;
     wins[i].y = big ? gfx_sy(80) : 16;
@@ -7376,7 +7490,7 @@ static void start_menu_geom(struct start_menu* m, int scr_w, int scr_h, int bar_
     m->sub_x = m->x - m->sub_w + 4;
   if (m->sub_y + m->sub_h > scr_h - bar_h)
     m->sub_y = scr_h - bar_h - m->sub_h;
-  m->mode_w = 10 * FONT_W * scale + 16;
+  m->mode_w = (gfx_gop ? 21 : 10) * FONT_W * scale + 16;  /* GOP: "(reinicie)" */
   m->mode_h = DISP_N * menu_item_h + 4;
   m->mode_x = m->sub_x + m->sub_w - 4;
   m->mode_y = m->sub_y;

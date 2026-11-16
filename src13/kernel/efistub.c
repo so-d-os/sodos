@@ -215,6 +215,160 @@ static const uint8_t* mbi_tag(const uint8_t* mbi, uint32_t type) {
   return 0;
 }
 
+/* ---------- mapa de memoria para o kernel ----------
+ * Com a tag 7 o GRUB NAO manda a tag 6 (mapa de memoria): o mapa ainda
+ * mudaria ate o ExitBootServices. Sem ela o BootInfo saia com e820=0, o
+ * mm.c caia no teste de RAM ate 1 GB e nao havia RAM acima de 4 GB (sem
+ * hmalloc: Z: de 64 MB e o Firefox abortava no primeiro mmap grande,
+ * "!MM len=..." + mozalloc_abort). Aqui o mapa do ExitBootServices vira uma
+ * tag 6 num MBI novo, como o GRUB faz sem a tag 7: Loader*, BootServices* e
+ * Conventional viram RAM livre; ACPI, NVS e o resto ficam reservados.
+ * O efi_entry (multiboot_header.asm) segue com efi_mbi, que aponta para ca. */
+
+extern uint64_t efi_mbi;          /* multiboot_header.asm: MBI do caminho 32 bits */
+
+#define MB_MAP_MAX 64             /* o multiboot_header.asm guarda ate 64 */
+#define EFI_RAW_MAX 768
+#define MBI_NEW_MAX 32768         /* MBI_MAX do multiboot_header.asm */
+
+struct mb_ent {
+  uint64_t base, len;
+  uint32_t type;
+};
+static struct mb_ent mm_ent[EFI_RAW_MAX];
+static uint8_t mbi_new[MBI_NEW_MAX] __attribute__((aligned(8)));
+
+/* Tipo EFI -> tipo Multiboot2 (1 RAM, 2 reservado, 3 ACPI, 4 NVS, 5 ruim). */
+static uint32_t efi_mb_type(uint32_t t) {
+  switch (t) {
+    case 1: case 2:   /* LoaderCode/Data: kernel, MBI e modulos do GRUB */
+    case 3: case 4:   /* BootServicesCode/Data: livres depois do Exit */
+    case 7:           /* ConventionalMemory */
+      return 1;
+    case 9: return 3;  /* ACPIReclaimMemory */
+    case 10: return 4; /* ACPIMemoryNVS */
+    case 8: return 5;  /* UnusableMemory */
+    default: return 2;
+  }
+}
+
+static void mbi_w32(uint8_t* p, uint32_t v) { *(volatile uint32_t*)p = v; }
+static void mbi_w64(uint8_t* p, uint64_t v) { *(volatile uint64_t*)p = v; }
+
+/* MBI do GRUB + tag 6 com o mapa (map_size bytes de descritores de dsz
+ * bytes em mmap_buf). Devolve o MBI original se nao der (ou se ja ha tag 6). */
+static const uint8_t* mbi_with_mmap(const uint8_t* mbi, UINTN map_size, UINTN dsz) {
+  uint32_t n = 0, m = 0, k = 0, i, j, pass;
+  uint32_t total = *(const uint32_t*)mbi;
+  uint32_t off = 8, out = 8, tag6;
+  uint64_t free_lo = 0, free_hi = 0;
+  UINTN p;
+
+  if (mbi_tag(mbi, 6)) return mbi;
+  if (dsz < 32 || map_size > sizeof(mmap_buf)) {
+    ls("[efi] mapa de memoria: descritor invalido\n");
+    return mbi;
+  }
+  for (p = 0; p + dsz <= map_size && n < EFI_RAW_MAX; p += dsz) {
+    const uint8_t* d = mmap_buf + p;
+    uint64_t pages = *(const uint64_t*)(d + 24);
+    if (!pages) continue;
+    mm_ent[n].base = *(const uint64_t*)(d + 8);
+    mm_ent[n].len = pages << 12;
+    mm_ent[n].type = efi_mb_type(*(const uint32_t*)d);
+    n++;
+  }
+  /* Por base (insercao: poucas centenas) e vizinhos do mesmo tipo juntos:
+   * o mm.c usa a maior regiao livre, e o firmware a corta em muitas. */
+  for (i = 1; i < n; i++) {
+    uint64_t b = mm_ent[i].base, l = mm_ent[i].len;
+    uint32_t t = mm_ent[i].type;
+    for (j = i; j > 0 && mm_ent[j - 1].base > b; j--) {
+      mm_ent[j].base = mm_ent[j - 1].base;
+      mm_ent[j].len = mm_ent[j - 1].len;
+      mm_ent[j].type = mm_ent[j - 1].type;
+    }
+    mm_ent[j].base = b;
+    mm_ent[j].len = l;
+    mm_ent[j].type = t;
+  }
+  for (i = 0; i < n; i++) {
+    if (m && mm_ent[m - 1].type == mm_ent[i].type &&
+        mm_ent[m - 1].base + mm_ent[m - 1].len == mm_ent[i].base) {
+      mm_ent[m - 1].len += mm_ent[i].len;
+      continue;
+    }
+    mm_ent[m].base = mm_ent[i].base;
+    mm_ent[m].len = mm_ent[i].len;
+    mm_ent[m].type = mm_ent[i].type;
+    m++;
+  }
+
+  /* Copia as tags do GRUB, menos a final (tipo 0). */
+  while (off + 8 <= total) {
+    uint32_t t = *(const uint32_t*)(mbi + off);
+    uint32_t sz = *(const uint32_t*)(mbi + off + 4);
+    uint32_t step = (sz + 7u) & ~7u;
+    if (t == 0 || sz < 8 || off + sz > total) break;
+    if (out + step + 16u + MB_MAP_MAX * 24u + 8u > MBI_NEW_MAX) {
+      ls("[efi] mapa de memoria: MBI do GRUB grande demais\n");
+      return mbi;
+    }
+    for (i = 0; i < sz; i++) ((volatile uint8_t*)mbi_new)[out + i] = mbi[off + i];
+    for (; i < step; i++) ((volatile uint8_t*)mbi_new)[out + i] = 0;
+    out += step;
+    off += step;
+  }
+
+  /* Tag 6: as regioes livres primeiro (se passar de 64, perde-se reservado). */
+  tag6 = out;
+  out += 16;
+  for (pass = 0; pass < 2; pass++) {
+    for (i = 0; i < m && k < MB_MAP_MAX; i++) {
+      if ((mm_ent[i].type == 1) != (pass == 0)) continue;
+      mbi_w64(mbi_new + out, mm_ent[i].base);
+      mbi_w64(mbi_new + out + 8, mm_ent[i].len);
+      mbi_w32(mbi_new + out + 16, mm_ent[i].type);
+      mbi_w32(mbi_new + out + 20, 0);
+      if (mm_ent[i].type == 1) {
+        uint64_t b = mm_ent[i].base, e = b + mm_ent[i].len;
+        if (b < 0x100000000ull)
+          free_lo += (e > 0x100000000ull ? 0x100000000ull : e) - b;
+        if (e > 0x100000000ull)
+          free_hi += e - (b > 0x100000000ull ? b : 0x100000000ull);
+      }
+      out += 24;
+      k++;
+    }
+  }
+  mbi_w32(mbi_new + tag6, 6);
+  mbi_w32(mbi_new + tag6 + 4, out - tag6);
+  mbi_w32(mbi_new + tag6 + 8, 24);  /* entry_size */
+  mbi_w32(mbi_new + tag6 + 12, 0);  /* entry_version */
+  mbi_w32(mbi_new + out, 0);        /* tag final */
+  mbi_w32(mbi_new + out + 4, 8);
+  out += 8;
+  mbi_w32(mbi_new, out);
+  mbi_w32(mbi_new + 4, 0);
+
+  ls("[efi] mapa de memoria: ");
+  ldec(n);
+  ls(" descritores -> ");
+  ldec(k);
+  ls(" regioes");
+  if (k < m) {
+    ls(" (de ");
+    ldec(m);
+    ls(", sem as reservadas que nao couberam)");
+  }
+  ls("; RAM livre ");
+  ldec(free_lo >> 20);
+  ls(" MB abaixo de 4 GB e ");
+  ldec(free_hi >> 20);
+  ls(" MB acima\n");
+  return mbi_new;
+}
+
 /* ---------- partes do relatorio ---------- */
 
 static EFI_BOOT_SERVICES* bs;
@@ -429,38 +583,153 @@ static void gop_list(EFI_HANDLE con_out, uint64_t grub_fb) {
   bs->free_pool(hs);
 }
 
-/* A tela que o kernel recebe. Com a tag 7 o GRUB nao garante que a tag de
- * framebuffer bata com o modo da placa (no QEMU ele programa a bochs direto,
- * a 24 bpp, sem a GOP saber). Pega a GOP do endereco da tag (senao a
- * primeira com caminho de dispositivo e framebuffer linear), poe nela o
- * tamanho que o GRUB escolheu a 32 bpp se a placa tiver esse modo, e
- * reescreve a tag com o que a GOP diz. Se ja bate, nao mexe em nada. */
-static void fb_fix(uint8_t* t_fb) {
+/* ---------- \SODOS\TELA.CFG (lido pelo firmware, antes do kernel) ---------- */
+
+typedef struct EFI_FILE {
+  uint64_t revision;
+  EFI_STATUS (EFIAPI* open)(struct EFI_FILE* f, struct EFI_FILE** out, const uint16_t* name,
+                            uint64_t mode, uint64_t attr);
+  EFI_STATUS (EFIAPI* close)(struct EFI_FILE* f);
+  void* del;
+  EFI_STATUS (EFIAPI* read)(struct EFI_FILE* f, UINTN* size, void* buf);
+} EFI_FILE;
+
+typedef struct {
+  uint64_t revision;
+  EFI_STATUS (EFIAPI* open_volume)(void* self, EFI_FILE** root);
+} EFI_SFS;
+
+static const EFI_GUID guid_sfs =
+  { 0x964e5b22, 0x6459, 0x11d2, { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b } };
+
+/* "tela=1920x1080" ou "tela=auto" (= a nativa do monitor). Le o primeiro
+ * \SODOS\TELA.CFG que achar entre os volumes que o firmware le (FAT: a
+ * particao SODOSHD, o D: do SODOS). Devolve 1 com *w/*h (0x0 = auto). */
+static int tela_cfg(uint32_t* w, uint32_t* h) {
+  static const uint16_t path[] = { '\\', 'S', 'O', 'D', 'O', 'S', '\\', 'T', 'E', 'L', 'A',
+                                   '.', 'C', 'F', 'G', 0 };
+  EFI_HANDLE* hs = 0;
+  UINTN n = 0, i;
+  char buf[256];
+  int found = 0;
+  if (EFI_ERR(bs->locate_handle_buffer(BY_PROTOCOL, &guid_sfs, 0, &n, &hs)) || !hs) return 0;
+  for (i = 0; i < n && !found; i++) {
+    EFI_SFS* sfs;
+    EFI_FILE *root = 0, *f = 0;
+    UINTN sz = sizeof(buf) - 1;
+    if (EFI_ERR(bs->handle_protocol(hs[i], &guid_sfs, (void**)&sfs)) || !sfs) continue;
+    if (EFI_ERR(sfs->open_volume(sfs, &root)) || !root) continue;
+    if (!EFI_ERR(root->open(root, &f, path, 1, 0)) && f) {
+      if (!EFI_ERR(f->read(f, &sz, buf)) && sz < sizeof(buf)) {
+        const char* p = buf;
+        buf[sz] = 0;
+        found = 1;
+        ls("[efi] TELA.CFG: ");
+        while (*p) {
+          if (p[0] == 't' && p[1] == 'e' && p[2] == 'l' && p[3] == 'a' && p[4] == '=') {
+            uint32_t a = 0, b = 0;
+            p += 5;
+            if (p[0] == 'a') {
+              *w = *h = 0;
+              ls("auto");
+              found = 2;
+            } else {
+              while (*p >= '0' && *p <= '9') a = a * 10u + (uint32_t)(*p++ - '0');
+              if (*p == 'x' || *p == 'X') p++;
+              while (*p >= '0' && *p <= '9') b = b * 10u + (uint32_t)(*p++ - '0');
+              if (a >= 320 && b >= 200 && a <= 16384 && b <= 16384) {
+                *w = a;
+                *h = b;
+                ldec(a);
+                lc('x');
+                ldec(b);
+                found = 2;
+              }
+            }
+            break;
+          }
+          while (*p && *p != '\n') p++;
+          if (*p) p++;
+        }
+        if (found != 2) ls("sem linha tela= valida");
+        lc('\n');
+      }
+      f->close(f);
+    }
+    root->close(root);
+  }
+  bs->free_pool(hs);
+  return found == 2;
+}
+
+/* ---------- modos para o kernel (WIN: lista de resolucoes) ---------- */
+
+static struct efistub_video ev __attribute__((section(".data")));
+
+const struct efistub_video* efistub_video(void) {
+  return ev.n ? &ev : 0;
+}
+
+/* Resolucao nativa do monitor pelo EDID (ativo, senao o descoberto). */
+static int edid_native(EFI_HANDLE h, uint32_t* w, uint32_t* hh) {
+  const EFI_GUID* g[2] = { &guid_edid_act, &guid_edid_disc };
+  int i;
+  for (i = 0; i < 2; i++) {
+    EDID_PROTO* e;
+    const uint8_t* d;
+    if (EFI_ERR(bs->handle_protocol(h, g[i], (void**)&e)) || !e || e->size < 128 || !e->edid)
+      continue;
+    d = e->edid;
+    if (!(d[54] | d[55])) continue;
+    *w = (uint32_t)(d[56] | (d[58] & 0xF0u) << 4);
+    *hh = (uint32_t)(d[59] | (d[61] & 0xF0u) << 4);
+    if (*w && *hh) return 1;
+  }
+  return 0;
+}
+
+/* A tela que o kernel recebe.
+ * Pega a GOP do endereco da tag do GRUB (senao a primeira com caminho de
+ * dispositivo e framebuffer linear) e escolhe o modo:
+ *   1. tela=LxA do \SODOS\TELA.CFG, se a placa tiver esse modo;
+ *   2. senao (ou tela=auto) a resolucao nativa do monitor (EDID);
+ *   3. senao o que o GRUB escolheu.
+ * Liga o modo (SetMode) se for outro e reescreve a tag de framebuffer com o
+ * que a GOP diz (com a tag 7 o GRUB nao garante que ela bata com a placa:
+ * no QEMU ele programa a bochs direto, a 24 bpp, sem a GOP saber). */
+static void video_setup(uint8_t* t_fb) {
   EFI_HANDLE* hs = 0;
   UINTN n = 0, i;
   GOP* pick = 0;
+  EFI_HANDLE pick_h = 0;
   GOP_MODE* m;
-  uint32_t want_w, want_h, k, set = 0xFFFFFFFFu;
+  uint32_t want_w = 0, want_h = 0, cfg_w = 0, cfg_h = 0, nat_w = 0, nat_h = 0, k;
+  uint32_t set = 0xFFFFFFFFu, old;
   uint64_t tag_addr;
+  int cfg;
   if (!t_fb || *(const uint32_t*)(t_fb + 4) < 38) {
     ls("[efi] sem tag de framebuffer completa: a tela fica como esta\n");
     return;
   }
   tag_addr = *(const uint64_t*)(t_fb + 8);
-  want_w = *(const uint32_t*)(t_fb + 20);
-  want_h = *(const uint32_t*)(t_fb + 24);
   if (EFI_ERR(bs->locate_handle_buffer(BY_PROTOCOL, &guid_gop, 0, &n, &hs)) || !hs) return;
   for (i = 0; i < n && !pick; i++) {
     GOP* g;
     if (EFI_ERR(bs->handle_protocol(hs[i], &guid_gop, (void**)&g)) || !g || !g->mode) continue;
-    if (g->mode->fb_base == tag_addr && g->mode->info && g->mode->info->pixel_format < 2) pick = g;
+    if (g->mode->fb_base == tag_addr && g->mode->info && g->mode->info->pixel_format < 2) {
+      pick = g;
+      pick_h = hs[i];
+    }
   }
   for (i = 0; i < n && !pick; i++) {
     GOP* g;
     void* dp;
     if (EFI_ERR(bs->handle_protocol(hs[i], &guid_gop, (void**)&g)) || !g || !g->mode) continue;
     if (EFI_ERR(bs->handle_protocol(hs[i], &guid_dpath, &dp))) continue;
-    if (g->mode->fb_base && g->mode->info && g->mode->info->pixel_format < 2) pick = g;
+    if (g->mode->fb_base && g->mode->info && g->mode->info->pixel_format < 2) {
+      pick = g;
+      pick_h = hs[i];
+    }
   }
   bs->free_pool(hs);
   if (!pick) {
@@ -468,33 +737,78 @@ static void fb_fix(uint8_t* t_fb) {
     return;
   }
   m = pick->mode;
-  if (m->info->w == want_w && m->info->h == want_h && m->fb_base == tag_addr && t_fb[28] == 32 &&
-      *(const uint32_t*)(t_fb + 16) == m->info->pixels_per_line * 4u) {
-    ls("[efi] tag do GRUB confere com a GOP\n");
-    return;
+  old = m->mode;
+
+  /* Modos de 32 bpp com framebuffer, para o WIN listar. */
+  ev.n = 0;
+  for (k = 0; k < m->max_mode && ev.n < EFISTUB_MAX_MODES; k++) {
+    GOP_INFO* inf = 0;
+    UINTN sz = 0;
+    if (EFI_ERR(pick->query_mode(pick, k, &sz, &inf)) || !inf) continue;
+    if (inf->pixel_format < 2) {
+      ev.w[ev.n] = (uint16_t)inf->w;
+      ev.h[ev.n] = (uint16_t)inf->h;
+      ev.n++;
+    }
+    bs->free_pool(inf);
   }
-  for (k = 0; k < m->max_mode; k++) {
+
+  cfg = tela_cfg(&cfg_w, &cfg_h);
+  if (edid_native(pick_h, &nat_w, &nat_h)) {
+    ev.native_w = (uint16_t)nat_w;
+    ev.native_h = (uint16_t)nat_h;
+  }
+  ev.from_cfg = (uint8_t)(cfg && cfg_w);
+  if (cfg && cfg_w) {
+    want_w = cfg_w;
+    want_h = cfg_h;
+  } else if (nat_w) {
+    want_w = nat_w;
+    want_h = nat_h;
+  } else {
+    want_w = *(const uint32_t*)(t_fb + 20);
+    want_h = *(const uint32_t*)(t_fb + 24);
+  }
+  for (k = 0; k < m->max_mode && set == 0xFFFFFFFFu; k++) {
     GOP_INFO* inf = 0;
     UINTN sz = 0;
     if (EFI_ERR(pick->query_mode(pick, k, &sz, &inf)) || !inf) continue;
     if (inf->w == want_w && inf->h == want_h && inf->pixel_format < 2) set = k;
     bs->free_pool(inf);
-    if (set != 0xFFFFFFFFu) break;
   }
-  if (set != 0xFFFFFFFFu) {
+  ls("[efi] tela pedida ");
+  ldec(want_w);
+  lc('x');
+  ldec(want_h);
+  ls(cfg && cfg_w ? " (TELA.CFG)" : nat_w ? " (nativa, EDID)" : " (a do GRUB)");
+  if (set == 0xFFFFFFFFu) ls(": a placa nao tem esse modo, fica a atual");
+  lc('\n');
+  if (set != 0xFFFFFFFFu && (set != m->mode || t_fb[28] != 32)) {
     EFI_STATUS s = pick->set_mode(pick, set);
     ls("[efi] SetMode ");
     ldec(set);
-    ls(" (");
-    ldec(want_w);
-    lc('x');
-    ldec(want_h);
-    ls("): ");
+    ls(": ");
     lst(s);
     lc('\n');
+    if (EFI_ERR(s)) {
+      s = pick->set_mode(pick, old);
+      ls("[efi] volta ao modo ");
+      ldec(old);
+      ls(": ");
+      lst(s);
+      lc('\n');
+    }
   }
   m = pick->mode;
   if (!m->info || m->info->pixel_format >= 2 || !m->fb_base) return;
+  ev.cur_w = (uint16_t)m->info->w;
+  ev.cur_h = (uint16_t)m->info->h;
+  if (m->fb_base == tag_addr && t_fb[28] == 32 && *(const uint32_t*)(t_fb + 20) == m->info->w &&
+      *(const uint32_t*)(t_fb + 24) == m->info->h &&
+      *(const uint32_t*)(t_fb + 16) == m->info->pixels_per_line * 4u) {
+    ls("[efi] tag do GRUB confere com a GOP\n");
+    return;
+  }
   *(uint64_t*)(t_fb + 8) = m->fb_base;
   *(uint32_t*)(t_fb + 16) = m->info->pixels_per_line * 4u;
   *(uint32_t*)(t_fb + 20) = m->info->w;
@@ -532,6 +846,7 @@ int efistub_main(const uint8_t* mbi) {
   uint64_t grub_fb = 0;
   UINTN before, after;
   EFI_STATUS s = 1;
+  UINTN map_size = 0, map_dsz = 0;
   int tries;
 
   efi_log_n = 0;
@@ -573,7 +888,7 @@ int efistub_main(const uint8_t* mbi) {
   ldec(after);
   ls(" depois\n");
   gop_list(st->con_out_handle, grub_fb);
-  fb_fix((uint8_t*)t_fb);
+  video_setup((uint8_t*)t_fb);
 
   /* A chave muda se o mapa mudar entre as duas chamadas: tenta de novo. */
   for (tries = 0; tries < 8; tries++) {
@@ -582,7 +897,11 @@ int efistub_main(const uint8_t* mbi) {
     s = bs->get_memory_map(&size, mmap_buf, &key, &dsz, &dver);
     if (EFI_ERR(s)) continue;
     s = st->boot->exit_boot_services(image, key);
-    if (!EFI_ERR(s)) break;
+    if (!EFI_ERR(s)) {
+      map_size = size;
+      map_dsz = dsz;
+      break;
+    }
   }
   ls("[efi] ExitBootServices: ");
   lst(s);
@@ -592,6 +911,8 @@ int efistub_main(const uint8_t* mbi) {
     lc(')');
   }
   lc('\n');
+  /* O mapa que valeu para o Exit e o definitivo: vai ao kernel na tag 6. */
+  if (!EFI_ERR(s)) efi_mbi = (uint64_t)(uintptr_t)mbi_with_mmap(mbi, map_size, map_dsz);
   return EFI_ERR(s) ? -2 : 0;
 }
 

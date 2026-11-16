@@ -294,6 +294,7 @@ extern efistub_main
 
 section .data
 align 8
+global efi_mbi                    ; o efistub.c troca pelo MBI com a tag 6 (mapa)
 efi_mbi: dq 0
 align 8
 efi_gdt:
