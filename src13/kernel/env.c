@@ -9,6 +9,7 @@
  */
 #include <stdint.h>
 #include "env.h"
+#include "mm.h"
 #include "shell.h"
 #include "linkext.h"
 #include "vt.h"
@@ -80,6 +81,13 @@ int env_set(const char* name, const char* val) {
   if (gen != g && (name_is(name, "LINKEXT") || name_is(name, "PATHSODOS")))
     linkext_env_changed();
   if (gen != g && name_is(name, "DISKSYNC")) vt_service_check();
+  if (gen != g && name_is(name, "HIMEM")) {
+    /* % da RAM total que programas de 64 bits podem pegar acima de 4 GB. */
+    uint32_t pct = 0;
+    int k;
+    for (k = 0; val && val[k] >= '0' && val[k] <= '9' && k < 3; k++) pct = pct * 10u + (uint32_t)(val[k] - '0');
+    if (val && val[0] >= '0' && val[0] <= '9') hm_set_user_pct(pct);
+  }
   return rc;
 }
 

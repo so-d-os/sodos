@@ -393,6 +393,12 @@ void kx_puts(const char* s) { k_puts(s); }
 static void* k_malloc(uint32_t n) { return umalloc(n); }
 static void* k_malloc_aligned(uint32_t n, uint32_t align) { return umalloc_aligned(n, align); }
 static void k_free(void* p) { ufree(p); }
+/* RAM acima de 4 GB (so programas de 64 bits enxergam). Teto: SET HIMEM. */
+static void* k_hmalloc(uint64_t n, uint64_t align) { return hm_user_alloc(n, align, um_owner()); }
+static void k_hfree(void* p) { hm_user_free(p); }
+static void k_hminfo(uint64_t* quota, uint64_t* used, uint64_t* total_ram) {
+  hm_user_info(quota, used, total_ram);
+}
 static void* k_realloc(void* p, uint32_t n) { return urealloc(p, n); }
 static uint32_t k_msize(void* p) { return usize(p); }
 
@@ -1079,6 +1085,9 @@ static const struct kexp table[] = {
   EXP(k_exe_drive),
   EXP(k_malloc),
   EXP(k_malloc_aligned),
+  EXP(k_hmalloc),
+  EXP(k_hfree),
+  EXP(k_hminfo),
   EXP(k_fault_entry),
   EXP(k_free),
   EXP(k_realloc),

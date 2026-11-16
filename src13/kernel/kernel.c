@@ -51,6 +51,11 @@ int format_fat16(uint32_t drive, uint32_t lba_start, uint32_t total_sectors, con
 #include "smp.h"
 #include "env.h"
 #include "bootpak.h"
+/* version.c */
+const char* sodos_version(void);
+void version_boot_log(void);
+void version_print(int full);
+int cmd_ver(int argc, char** argv);
 
 const struct executable_entry* find_executable(const char* name) {
   for (int i = 0; i < executable_count; i++) {
@@ -2045,7 +2050,8 @@ void kmain(const struct BootInfo* bi) {
   vga_capture_bios_font();
   vga_force_text_mode();         /* a leitura da fonte mexe nos registros VGA */
   clear_screen();
-  puts_k("SO DOS 1.0\n");
+  puts_k(sodos_version());
+  puts_k("\n");
   puts_k("64-bit kernel. Type HELP or WIN.\n\n");
   net_init();
   irq0_probe("");
@@ -2099,6 +2105,7 @@ void kmain(const struct BootInfo* bi) {
   register_builtin("smp", cmd_smp);
   register_builtin("shutdown", cmd_shutdown);
   register_builtin("set", cmd_set);
+  register_builtin("ver", cmd_ver);
 
   drives_init();
   drives_automount();
@@ -2119,6 +2126,7 @@ void kmain(const struct BootInfo* bi) {
   /* Unico trafego serial depois do boot ate ao visual: shell nao usa COM1 (só VGA). */
   serial_puts("[kernel] shell ready — mais linhas na serial apos o comando 'visual'\n");
 
+  version_boot_log(); /* \LOG\BOOT.LOG: diz se o kernel mudou desde o boot anterior */
   vt_init();
   shell_loop();
 }
@@ -2126,6 +2134,8 @@ void kmain(const struct BootInfo* bi) {
 /* O prompt. Cada tela (vt.c) roda o seu. */
 void shell_loop(void) {
   char line[256];
+
+  version_print(0); /* versao (e se mudou) antes do primeiro prompt */
 
   for (;;) {
     {

@@ -91,3 +91,8 @@ pref("browser.backup.scheduled.enabled", false);
 pref("browser.backup.archive.enabled", false);
 // Audio: so ha o backend nulo do SODOS (cubeb_sodos.c), sem som por enquanto.
 pref("media.cubeb.backend", "sodos");
+// Memoria do wasm: sem "huge memory" o SpiderMonkey reserva so o maximo da
+// memoria (ate 4 GB + guarda) em vez de ~6 GB por instancia. O SODOS nao tem
+// paginas sob demanda: toda reserva vira RAM de verdade (acima de 4 GB, do
+// k_hmalloc, teto SET HIMEM).
+pref("javascript.options.wasm_disable_huge_memory", true);

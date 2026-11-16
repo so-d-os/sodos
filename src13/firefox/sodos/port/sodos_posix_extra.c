@@ -161,6 +161,45 @@ int fstatfs(int fd, struct statfs* buf)
   return 0;
 }
 
+#include "../../../c_compiler/lib/unixdrv.h"
+
+/* statfs: espaco da unidade do caminho ("/Z/...", "Z:\..." ou relativo).
+ * Era ENOSYS, e o Gecko pergunta o espaco livre (nsIFile.diskSpaceAvailable)
+ * ao abrir todo banco do IndexedDB (SetGrowthIncrement) e ao calcular o limite
+ * do armazenamento temporario dos sites: com o erro, IndexedDB e localStorage
+ * falhavam em todas as paginas (UnknownError). */
+int statfs(const char* path, struct statfs* buf)
+{
+  unsigned total_kb = 0, free_kb = 0;
+  int L = 0;
+  if (!path || !buf) {
+    errno = EFAULT;
+    return -1;
+  }
+  if (path[0] == '/' && path[1] && (path[2] == '/' || path[2] == 0))
+    L = unix_drive(path[1]);
+  else if (path[0] && path[1] == ':')
+    L = path[0];
+  else
+    L = k_drive();
+  if (L >= 'a' && L <= 'z') L -= 32;
+  if (L < 'A' || L > 'Z' || k_dfree(L, &total_kb, &free_kb) < 0) {
+    errno = ENOENT;
+    return -1;
+  }
+  memset(buf, 0, sizeof *buf);
+  buf->f_type = MSDOS_SUPER_MAGIC;
+  buf->f_bsize = 1024;
+  buf->f_frsize = 1024;
+  buf->f_blocks = (long)total_kb;
+  buf->f_bfree = (long)free_kb;
+  buf->f_bavail = (long)free_kb;
+  buf->f_files = 65536;
+  buf->f_ffree = 65536;
+  buf->f_namelen = 255;
+  return 0;
+}
+
 int posix_fadvise(int fd, off_t off, off_t len, int advice)
 {
   (void)fd; (void)off; (void)len; (void)advice;
