@@ -40,6 +40,16 @@ void hm_stats(uint64_t* total, uint64_t* used, uint64_t* free_bytes, uint64_t* l
 uint32_t hm_regions(void);
 uint64_t hm_region_start(uint32_t i);
 uint64_t hm_region_end(uint32_t i);
+/* RAM acima de 4 GB para programas de 64 bits (k_hmalloc): teto em % da RAM
+ * total (padrao 40, SET HIMEM=pct), blocos com dono soltos no fim do programa. */
+void* hm_user_alloc(uint64_t nbytes, uint64_t align, uint32_t owner);
+void hm_user_free(void* ptr);
+void hm_free_owner(uint32_t owner);
+void hm_set_user_pct(uint32_t pct);
+/* MTRR: a BSP corrige no boot (TOM2 WB na AMD); cada AP repete. */
+void mm_mtrr_ap(void);
+void mm_mtrr_info(uint64_t* wb, uint64_t* uc, uint64_t* other, int* fixed);
+void hm_user_info(uint64_t* quota, uint64_t* used, uint64_t* total_ram);
 
 /* Percorre todos os blocos para o TOP. area: 0 = heap do kernel, 1 = arena
  * alta, 2 = acima de 4 GB. owner so vale para a arena alta. */

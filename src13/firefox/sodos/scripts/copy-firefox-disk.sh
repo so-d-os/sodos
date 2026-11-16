@@ -9,7 +9,7 @@ DISK=$(realpath "$1")  # o script muda de diretorio
 S=$(cd "$(dirname "$0")/../.." && pwd)
 O=${FIREFOX_OBJ:-$HOME/ffsrc/obj-browser64}
 BIN=$O/dist/bin
-EXE=$BIN/FIREFOX.EXE
+EXE=${FIREFOX_EXE:-$BIN/FIREFOX.EXE}  # FIREFOX_EXE: outro link (ex.: o de um worktree)
 
 if [ ! -f "$EXE" ]; then
   echo "Firefox: $EXE nao existe; rode sodos/scripts/link-firefox64.sh. Pulando."
@@ -18,6 +18,8 @@ fi
 
 need=$(( $(stat -L -c %s "$EXE") + 64 * 1024 * 1024 ))
 have=$(stat -L -c %s "$DISK")
+# Pasta = FAT32 montada (make send, tools/dirfs): o espaco e o da particao.
+[ -d "$DISK" ] && have=$(( $(df -k --output=avail "$DISK" | tail -1) * 1024 + $(stat -L -c %s "$EXE") ))
 if [ "$have" -lt "$need" ]; then
   echo "Firefox: $DISK ($((have / 1048576)) MB) nao comporta o FIREFOX.EXE; rode make grow-disk. Pulando."
   exit 0

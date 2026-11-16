@@ -7,6 +7,7 @@
  * sobe) volta para 1 CPU sem derrubar o sistema.
  */
 #include <stdint.h>
+#include "mm.h"
 #include "smp.h"
 #include "serial.h"
 #include "net.h"
@@ -280,6 +281,7 @@ static void ap_cpu_setup(void) {
   if (cr4 & (1u << 18))
     __asm__ volatile ("xsetbv" :: "c"(0), "a"(bsp_xcr0_lo), "d"(bsp_xcr0_hi));
   __asm__ volatile ("fninit");
+  mm_mtrr_ap();   /* mesmo tipo de cache da BSP na RAM acima de 4 GB */
 }
 
 /* Corpo dos APs: nunca volta (o trampolim chamou sem return address). */

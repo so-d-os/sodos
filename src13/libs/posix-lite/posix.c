@@ -980,7 +980,12 @@ __export DIR* opendir(const char* path) {
   memset(d, 0, sizeof(*d));
   n = k_dirlist(full, d->list, LIST_MAX);
   if (n < 0) {
-    errno = ENOTDIR;
+    /* ENOTDIR so quando existe e e arquivo. Pasta que nao existe e ENOENT:
+     * o Firefox (nsLocalFile -> NS_ERROR_FILE_NOT_FOUND) aceita isso, mas
+     * ENOTDIR vira NS_ERROR_FILE_DESTINATION_NOT_DIR e derruba o
+     * QuotaManager (storage/to-be-removed ainda nao existe num perfil novo),
+     * e com ele IndexedDB e localStorage de todos os sites. */
+    errno = k_fsize(full) >= 0 ? ENOTDIR : ENOENT;
     return 0;
   }
   d->used = 1;

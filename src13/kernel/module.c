@@ -617,6 +617,7 @@ static void exec_release(uint32_t pid, int id) {
   unload(id);
   elf_release_pid(pid);
   ufree_owner(pid);
+  hm_free_owner(pid);
   isr_fault_release(pid);
 }
 

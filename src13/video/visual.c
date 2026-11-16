@@ -31,7 +31,9 @@
 #include "gpu.h"
 #include "wfont.h"
 #include "linkext.h"
+#include "smp.h"
 #include "c_compiler/sox.h"
+const char* sodos_version(void); /* kernel/version.c */
 
 static inline void outl(uint16_t port, uint32_t v) {
   __asm__ volatile ("outl %0, %1" : : "a"(v), "Nd"(port));
@@ -2544,7 +2546,7 @@ static void draw_win_desktop(uint32_t col_desk, uint32_t col_win, uint32_t col_t
   draw_string_scaled(win_x + 4, title_ty, "Gerenciador", col_white, col_title, scale);
   fill_rect(win_x + win_w - (title_h - 2), win_y + 2, title_h - 4, title_h - 4, col_btn);
   draw_string_scaled(win_x + win_w - (title_h - 2) + 2, title_ty, "x", col_black, col_btn, scale);
-  draw_string_scaled(win_x + 8, win_y + title_h + 6, "SO DOS 1.0", col_black, col_win, scale);
+  draw_string_scaled(win_x + 8, win_y + title_h + 6, sodos_version(), col_black, col_win, scale);
 
   fill_rect(0, h - bar_h, w, bar_h, col_bar);
   fill_rect(2, h - bar_h + 2, big ? 96 : 48, bar_h - 4, col_btn);
@@ -4131,6 +4133,43 @@ static void rs_apply(int mx, int my, int min_w, int min_h, int max_x, int max_y,
   *h = y1 - y0;
 }
 
+/* Gerenciador: versao do kernel (build, data, commit) e as CPUs. */
+static void mgr_draw_info(struct wm_win* w, int title_h, int scale, uint32_t fg, uint32_t bg) {
+  int ch = (vga_bios_font_ok ? FONT_H : 8) * scale;
+  int y = w->y + title_h + 8;
+  int n = smp_cpu_count(), on = 0, busy = 0, i;
+  char b[64];
+  int k = 0;
+  struct k_cpu_stat st;
+  for (i = 0; i < n; i++)
+    if (smp_cpu_stat(i, &st) == 0 && st.online) {
+      on++;
+      if (st.state) busy++;
+    }
+  draw_string_scaled(w->x + 8, y, sodos_version(), fg, bg, scale);
+  y += ch + 2;
+  {
+    const char* p = "CPUs online: ";
+    while (*p) b[k++] = *p++;
+    b[k++] = (char)('0' + on / 10 % 10);
+    if (b[k - 1] == '0') k--;
+    b[k++] = (char)('0' + on % 10);
+    b[k++] = '/';
+    if (n >= 10) b[k++] = (char)('0' + n / 10 % 10);
+    b[k++] = (char)('0' + n % 10);
+    p = "  ativas agora: ";
+    while (*p) b[k++] = *p++;
+    if (busy >= 10) b[k++] = (char)('0' + busy / 10 % 10);
+    b[k++] = (char)('0' + busy % 10);
+    b[k] = 0;
+  }
+  draw_string_scaled(w->x + 8, y, b, fg, bg, scale);
+  y += ch + 2;
+  draw_string_scaled(w->x + 8, y, "Arraste a barra. Canto = tamanho.", fg, bg, scale);
+  y += ch + 2;
+  draw_string_scaled(w->x + 8, y, "X fecha. Iniciar: Bloco de notas.", fg, bg, scale);
+}
+
 static void wm_draw_inner(struct wm_win* w, int focus, int title_h, int scale,
                           uint32_t col_win, uint32_t col_title, uint32_t col_white,
                           uint32_t col_black, uint32_t col_btn, uint32_t col_inactive) {
@@ -4194,9 +4233,7 @@ static void wm_draw_inner(struct wm_win* w, int focus, int title_h, int scale,
   } else if (w->kind == WM_KIND_FONT) {
     font_draw(w, title_h, scale, col_win, col_title, col_white, col_black);
   } else {
-    draw_string_scaled(w->x + 8, w->y + title_h + 8, "SO DOS 1.0", col_black, col_win, scale);
-    draw_string_scaled(w->x + 8, w->y + title_h + 8 + ch + 2, "Arraste a barra. Canto = tamanho.", col_black, col_win, scale);
-    draw_string_scaled(w->x + 8, w->y + title_h + 8 + 2 * (ch + 2), "X fecha. Iniciar: Bloco de notas.", col_black, col_win, scale);
+    mgr_draw_info(w, title_h, scale, col_black, col_win);
   }
 }
 

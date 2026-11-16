@@ -828,7 +828,7 @@ ENOSYS_STUB(shmget, int a, size_t b, int c)
 ENOSYS_STUB(shmdt, const void* a)
 ENOSYS_STUB(shmctl, int a, int b, void* c)
 ENOSYS_STUB(ftok, const char* a, int b)
-ENOSYS_STUB(statfs, const char* a, void* b)
+/* statfs: sodos_posix_extra.c */
 ENOSYS_STUB(sysinfo, void* a)
 ENOSYS_SSIZE(sendfile, int a, int b, long* c, size_t d)
 

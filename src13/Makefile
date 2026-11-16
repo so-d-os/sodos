@@ -142,7 +142,9 @@ DISKS_CMD_O = $(DISKS_CMD_C:.c=.o)
 
 CMD_O = $(SHELL_CMD_O) $(DISKS_CMD_O)
 
-kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c video/gpu.c video/wfont.c video/prtscr.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/ps2in.c kernel/smp.c kernel/reboot.c kernel/xhci.c kernel/nvme.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c fs/fsdrv.c kernel/env.c kernel/linkext.c kernel/bootpak.c kernel/mm.c net/net.c net/httpd.c net/png.c net/wpa.c net/rtw89.c net/wifi.c kernel/module.c kernel/elf.c kernel/sched.c kernel/kthread.c kernel/kexports.c kernel/keymap.c kernel/clip.c kernel/vt.c $(SHELL_CMD_C) $(DISKS_CMD_C) kernel/ap_blob.o shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
+kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c video/gpu.c video/wfont.c video/prtscr.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/ps2in.c kernel/smp.c kernel/reboot.c kernel/xhci.c kernel/nvme.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c fs/fsdrv.c kernel/env.c kernel/linkext.c kernel/bootpak.c kernel/mm.c net/net.c net/httpd.c net/png.c net/wpa.c net/rtw89.c net/wifi.c kernel/module.c kernel/elf.c kernel/sched.c kernel/kthread.c kernel/kexports.c kernel/keymap.c kernel/clip.c kernel/vt.c kernel/version.c $(SHELL_CMD_C) $(DISKS_CMD_C) kernel/ap_blob.o shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
+	@[ -f kernel/version.h ] || sh tools/mkversion.sh
+	$(CC) $(CFLAGS) -c kernel/version.c -o kernel/version.o
 	$(CC) $(CFLAGS) -c kernel/kernel.c -o kernel/kernel.o
 	$(CC) $(CFLAGS) -c kernel/bootinfo.c -o kernel/bootinfo.o
 	$(CC) $(CFLAGS) -c kernel/mm.c -o kernel/mm.o
@@ -228,11 +230,11 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(AS) -f elf64 kernel/irq_stubs.asm -o kernel/irq_stubs.o
 	$(AS) -f elf64 kernel/modrun.asm -o kernel/modrun.o
 	$(AS) -f elf64 kernel/kernel_entry.asm -o kernel/kernel_entry.o
-	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o kernel/version.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 # Mesmo kernel de kernel.elf, com o stub Multiboot2 na frente. O GRUB carrega este ELF.
 kernel_multiboot.elf: kernel.elf kernel/multiboot_header.o kernel/linker_multiboot.ld
-	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o kernel/version.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 
 kernel.bin: kernel.elf
@@ -538,7 +540,7 @@ DISK_FILES = c_compiler/out/*.EXE c_compiler/out/*.DLL c_compiler/out/*.OBJ \
 	libs/posix-lite/posix.c
 # browser/main.c vai como BROWSER.C para nao colidir com o MAIN.C do cc
 # Headers sys/*.h vao para ::/SYS/ (FAT 8.3; no SO o include path e flat).
-disk-files: disk.img
+disk-files: $(DISK)
 	@if pgrep -f "[q]emu-system.*file=$(DISK)" >/dev/null; then \
 	  echo "Feche o QEMU antes: o SO regrava a FAT e apaga o que o mcopy gravou."; exit 1; fi
 	$(MAKE) -C c_compiler all
@@ -674,8 +676,8 @@ disk-files: disk.img
 	@# QEMU (qemu/): QEMU.EXE, firmware, guests de teste e .BAT em D:\UTILS\QEMU
 	@sh qemu/scripts/copy-qemu-disk.sh $(DISK)
 	@mdir -i $(DISK)@@512 -w ::/
-	@sh tools/usb-docs.sh
-	@sh tools/usb-wifi.sh
+	@[ -d "$(DISK)" ] || sh tools/usb-docs.sh
+	@[ -d "$(DISK)" ] || sh tools/usb-wifi.sh
 
 # Apaga o perfil do Firefox no disco (D:\USER\DEFAULT\.MOZILLA) e reinstala as
 # prefs do port. Util quando o perfil acumulado de execucoes interrompidas
@@ -843,45 +845,48 @@ grub: kernel_multiboot.elf sodos.pak
 # SODOS instalado no SSD desta maquina: particao FAT32 SODOSHD (nvme0n1p6),
 # que o kernel monta como D: (kernel/nvme.c). Preparar uma vez com
 #   make real-setup        (sudo: linha user,noauto no fstab + GRUB F8)
-# Depois, sem sudo:
-#   make real              kernel + SODOS.PAK em \BOOT da particao
-#   make send              o mesmo + tudo do D: (disk-files no $(DISK))
-# O make monta em $(REAL_MNT), copia e desmonta (o FAT fica limpo para o boot).
-# "make send" nao apaga nada no SSD: o que o SODOS gravou la fica.
+# Depois, sem sudo, nesta ordem:
+#   make version           sobe o numero de build (tools/mkversion.sh)
+#   make real              compila o kernel, SODOS.PAK e os programas do D:
+#   make send              monta a FAT32 em $(REAL_MNT) e copia direto nela:
+#                          BOOT/KERNEL.ELF, BOOT/SODOS.PAK e os arquivos do D:
+#                          (o mesmo disk-files do disk.img, com tools/dirfs no
+#                          PATH: mcopy/mmd/mdir escrevem na pasta e pulam o que
+#                          nao mudou). Desmonta no fim (o FAT fica limpo p/ o boot).
+# "make send" nao apaga nada no SSD (o que o SODOS gravou la fica) e nao passa
+# pelo disk.img.
 REAL_UUID ?= 72F8-35A2
 REAL_MNT ?= /mnt/sodoshd
-REAL_STAGE ?= real-stage
 REAL_MOUNT = set -e; \
 	if ! findmnt -n $(REAL_MNT) >/dev/null 2>&1; then \
 	  mount $(REAL_MNT) 2>/dev/null || { echo "Nao montou $(REAL_MNT). Rode uma vez: make real-setup"; exit 1; }; \
 	fi; \
 	u=$$(findmnt -n -o UUID $(REAL_MNT)); \
 	if [ "$$u" != "$(REAL_UUID)" ]; then echo "$(REAL_MNT) e $$u, nao $(REAL_UUID)"; exit 1; fi
-REAL_BOOT = mkdir -p $(REAL_MNT)/BOOT; \
-	cp kernel_multiboot.elf $(REAL_MNT)/BOOT/KERNEL.ELF; \
-	cp sodos.pak $(REAL_MNT)/BOOT/SODOS.PAK; \
-	echo "Gravando no SSD (sync)..."; sync; umount $(REAL_MNT)
 
-.PHONY: real send real-setup real-remove
+.PHONY: version real send real-setup real-remove
 real-setup:
 	sudo sh tools/real-setup.sh install
 
 real-remove:
 	sudo sh tools/real-setup.sh remove
 
-real: kernel_multiboot.elf sodos.pak
-	@$(REAL_MOUNT); $(REAL_BOOT); \
-	echo "SSD: BOOT/KERNEL.ELF e BOOT/SODOS.PAK atualizados. Reinicie e escolha SODOS (SSD) com F8."
+version:
+	@sh tools/mkversion.sh
 
-send: kernel_multiboot.elf sodos.pak disk-files
-	@echo "Extraindo $(DISK) para $(REAL_STAGE)/ ..."
-	@mkdir -p $(REAL_STAGE)
-	@mcopy -s -n -m -i $(DISK)@@512 '::/*' $(REAL_STAGE)/
+real: kernel_multiboot.elf sodos.pak
+	$(MAKE) -C c_compiler all
+	@echo "real: $$(sed -n 's/.*SODOS_VERSION "\(.*\)"/\1/p' kernel/version.h) compilado; agora make send."
+
+send: kernel_multiboot.elf sodos.pak
 	@$(REAL_MOUNT); \
 	echo "Copiando para $(REAL_MNT) (so o que mudou)..."; \
-	rsync -rt --modify-window=2 --info=stats1 $(REAL_STAGE)/ $(REAL_MNT)/; \
-	$(REAL_BOOT); \
-	echo "SSD atualizado: arquivos do D: + kernel. Reinicie e escolha SODOS (SSD) com F8."
+	PATH="$(CURDIR)/tools/dirfs:$$PATH" $(MAKE) --no-print-directory disk-files DISK=$(REAL_MNT) || { umount $(REAL_MNT); exit 1; }; \
+	mkdir -p $(REAL_MNT)/BOOT; \
+	cp kernel_multiboot.elf $(REAL_MNT)/BOOT/KERNEL.ELF; \
+	cp sodos.pak $(REAL_MNT)/BOOT/SODOS.PAK; \
+	echo "Gravando no SSD (sync)..."; sync; umount $(REAL_MNT); \
+	echo "SSD: $$(sed -n 's/.*SODOS_VERSION "\(.*\)"/\1/p' kernel/version.h) + arquivos do D:. Reinicie e escolha SODOS (SSD) com F8."
 
 # Firefox (firefox/): camada de plataforma e NSPR do port (SODOS.DLL,
 # FBOOT.EXE e PRTEST.EXE). Precisa de gcc com -mx32 e do c_compiler.

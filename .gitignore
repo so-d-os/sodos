@@ -17,3 +17,7 @@ src13/content/*.mp4
 
 # Arquivo de lixo de uma sessao antiga (nome U+F03A, 815 bytes)
 
+
+# Versao do kernel gerada no build (tools/mkversion.sh). O contador
+# src13/kernel/BUILDNO fica no git: o numero da build e o mesmo em todo checkout.
+src13/kernel/version.h

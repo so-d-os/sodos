@@ -158,6 +158,7 @@ static uint32_t kernel_reserved_end(const struct BootInfo* bi) {
 #define HM_MAX_ARENAS 8u
 #define HM_PAGE       0x200000ULL
 #define HM_GB         0x40000000ULL
+#define HM_USER_PCT_DEFAULT 40u
 
 struct hm_hdr {
   uint64_t size;
@@ -173,6 +174,15 @@ struct harena {
 static uint64_t hm_pd[HM_MAX_GB - HM_FIRST_GB][512] __attribute__((aligned(4096)));
 static struct harena hm_arenas[HM_MAX_ARENAS];
 static uint32_t hm_count;
+
+/* Onde a proxima busca comeca em cada arena (next-fit). Com o Firefox pondo
+ * os chunks do GC aqui sao milhares de blocos; recomecar do inicio a cada
+ * pedido custaria uma passada pela arena inteira. */
+static struct hm_hdr* hm_rover[HM_MAX_ARENAS];
+/* Bytes acima de 4 GB entregues a programas (k_hmalloc) e o teto deles. */
+static uint64_t hm_user_used;
+static uint64_t hm_user_quota;
+static uint32_t hm_user_pct = HM_USER_PCT_DEFAULT;
 
 static void hm_add_arena(uint64_t s, uint64_t e) {
   uint32_t i;
@@ -210,6 +220,213 @@ static int hm_map(uint64_t* pdpt, uint64_t s, uint64_t e) {
   return 1;
 }
 
+
+/* ---- Tipo de cache da RAM acima de 4 GB ----
+ * O PAT do kernel e WB, mas o tipo efetivo e o "pior" entre PAT e MTRR. Em
+ * VM e sempre WB; num notebook o firmware pode deixar parte (ou tudo) acima
+ * de 4 GB sem cobertura WB. Memoria UC/WT para o heap do Firefox (codigo JIT,
+ * GC, wasm) deixa tudo dezenas de vezes mais lento: CPU0 a 100% e teclado e
+ * mouse sem resposta. Aqui calculamos o tipo efetivo por pagina de 2 MB,
+ * corrigimos pelo TOM2 da AMD quando o problema e o tipo padrao, e o que
+ * continuar nao-WB fica fora das arenas. */
+#define MT_UC 0u
+#define MT_WC 1u
+#define MT_WT 4u
+#define MT_WP 5u
+#define MT_WB 6u
+
+static inline uint64_t mm_rdmsr(uint32_t msr) {
+  uint32_t lo, hi;
+  __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+  return ((uint64_t)hi << 32) | lo;
+}
+static inline void mm_wrmsr(uint32_t msr, uint64_t v) {
+  __asm__ volatile("wrmsr" : : "c"(msr), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
+}
+static inline void mm_cpuid(uint32_t leaf, uint32_t* a, uint32_t* b, uint32_t* c, uint32_t* d) {
+  __asm__ volatile("cpuid" : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d) : "a"(leaf), "c"(0));
+}
+
+static int mt_ok;            /* CPU tem MTRR */
+static int mt_amd;           /* AMD: SYSCFG/TOM2 */
+static uint64_t mt_physmask; /* bits de endereco fisico */
+static uint32_t mt_vcnt;
+static uint64_t mt_def;
+static uint64_t mt_base[32], mt_mask[32];
+static uint64_t mt_syscfg, mt_tom2;
+/* Aplicado na BSP; os APs repetem em ap_cpu_setup (mm_mtrr_ap). */
+static int mt_fix_tom2;
+static uint64_t mt_fix_tom2_val;
+static uint64_t mt_bytes[8];  /* bytes de RAM alta por tipo, antes da correcao */
+
+static void mt_read(void) {
+  uint32_t a, b, c, d, i;
+  mt_ok = 0;
+  mm_cpuid(0, &a, &b, &c, &d);
+  mt_amd = (b == 0x68747541u); /* "Auth"enticAMD */
+  mm_cpuid(1, &a, &b, &c, &d);
+  if (!(d & (1u << 12))) return;
+  /* Em VM o tipo efetivo e o do host (WB) e o KVM pode dar #GP nas MSRs da
+   * AMD (SYSCFG/TOM2) - aqui ainda nao ha IDT: seria reset. */
+  if (c & (1u << 31)) return;
+  mm_cpuid(0x80000000u, &a, &b, &c, &d);
+  if (a >= 0x80000008u) {
+    mm_cpuid(0x80000008u, &a, &b, &c, &d);
+    mt_physmask = ((a & 0xFFu) >= 64u) ? ~0ULL : ((1ULL << (a & 0xFFu)) - 1u);
+  } else {
+    mt_physmask = (1ULL << 36) - 1u;
+  }
+  mt_vcnt = (uint32_t)(mm_rdmsr(0xFE) & 0xFFu);
+  if (mt_vcnt > 32u) mt_vcnt = 32u;
+  mt_def = mm_rdmsr(0x2FF);
+  for (i = 0; i < mt_vcnt; ++i) {
+    mt_base[i] = mm_rdmsr(0x200u + 2u * i);
+    mt_mask[i] = mm_rdmsr(0x201u + 2u * i);
+  }
+  if (mt_amd) {
+    mt_syscfg = mm_rdmsr(0xC0010010u);
+    mt_tom2 = (mt_syscfg & (1ULL << 21)) ? (mm_rdmsr(0xC001001Du) & 0x0000FFFFFF800000ULL) : 0;
+  }
+  mt_ok = 1;
+}
+
+/* Tipo efetivo do MTRR para o endereco a (>= 1 MB). */
+static uint32_t mt_type(uint64_t a) {
+  uint32_t i, t = 0xFFu;
+  if (!mt_ok) return MT_WB;
+  if (!(mt_def & (1u << 11))) return MT_UC; /* MTRRs desligados = UC */
+  for (i = 0; i < mt_vcnt; ++i) {
+    uint64_t m = mt_mask[i];
+    uint32_t ty;
+    if (!(m & (1u << 11))) continue;
+    m &= mt_physmask & ~0xFFFULL;
+    if ((a & m) != (mt_base[i] & m)) continue;
+    ty = (uint32_t)(mt_base[i] & 0xFFu);
+    if (t == 0xFFu) t = ty;
+    else if (ty == MT_UC || t == MT_UC) t = MT_UC;
+    else if ((ty == MT_WT && t == MT_WB) || (ty == MT_WB && t == MT_WT)) t = MT_WT;
+    else if (ty != t) t = MT_UC; /* combinacao indefinida: trata como UC */
+  }
+  if (t != 0xFFu) return t;
+  if (mt_amd && (mt_syscfg & (1ULL << 21)) && (mt_syscfg & (1ULL << 22)) && a >= 0x100000000ULL &&
+      a < mt_tom2)
+    return MT_WB;
+  return (uint32_t)(mt_def & 0xFFu);
+}
+
+/* Pior tipo dentro de [a, a + HM_PAGE): confere inicio, fim e as bordas de
+ * cada MTRR variavel (paginas de 2 MB; MTRRs tem granularidade de 4 KB). */
+static uint32_t mt_type_2m(uint64_t a) {
+  uint32_t t = mt_type(a), u = mt_type(a + HM_PAGE - 0x1000u);
+  if (t != u) return MT_UC;
+  return t;
+}
+
+/* Desliga o cache, troca, invalida (sequencia do manual para MTRR). */
+static void mt_apply_tom2(uint64_t tom2) {
+  uint64_t cr0, f;
+  __asm__ volatile("pushfq; popq %0; cli" : "=r"(f) : : "memory");
+  __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+  __asm__ volatile("mov %0, %%cr0" : : "r"((cr0 | (1ULL << 30)) & ~(1ULL << 29)) : "memory");
+  __asm__ volatile("wbinvd" ::: "memory");
+  mm_wrmsr(0xC001001Du, tom2);
+  mm_wrmsr(0xC0010010u, mm_rdmsr(0xC0010010u) | (1ULL << 21) | (1ULL << 22));
+  __asm__ volatile("wbinvd" ::: "memory");
+  __asm__ volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
+  if (f & 0x200) __asm__ volatile("sti" ::: "memory");
+}
+
+void mm_mtrr_ap(void) {
+  if (mt_fix_tom2) mt_apply_tom2(mt_fix_tom2_val);
+}
+
+static void mt_count(uint64_t s, uint64_t e, uint64_t* by) {
+  uint64_t a;
+  for (a = s; a < e; a += HM_PAGE) by[mt_type_2m(a) & 7u] += HM_PAGE;
+}
+
+/* Chamado por hm_init antes de criar as arenas: le os MTRRs, registra na
+ * serial quanto da RAM alta e WB/UC e, se o problema for o tipo padrao (AMD),
+ * liga o TOM2 com WB. O que ainda nao for WB fica fora (hm_add_arena_wb). */
+static void mt_prepare(const uint64_t* rs, const uint64_t* re, uint32_t n) {
+  uint32_t i;
+  uint64_t top = 0, by[8];
+  int bad_default = 0, any_bad = 0;
+  for (i = 0; i < 8; ++i) mt_bytes[i] = by[i] = 0;
+  mt_read();
+  if (!mt_ok) return;
+  for (i = 0; i < n; ++i) {
+    uint64_t a;
+    if (re[i] > top) top = re[i];
+    for (a = rs[i]; a < re[i]; a += HM_PAGE) {
+      uint32_t t = mt_type_2m(a);
+      mt_bytes[t & 7u] += HM_PAGE;
+      if (t != MT_WB) {
+        uint32_t k, hit = 0;
+        any_bad = 1;
+        for (k = 0; k < mt_vcnt; ++k) {
+          uint64_t m = mt_mask[k];
+          if (!(m & (1u << 11))) continue;
+          m &= mt_physmask & ~0xFFFULL;
+          if ((a & m) == (mt_base[k] & m)) hit = 1;
+        }
+        if (!hit) bad_default = 1; /* vem do tipo padrao, nao de um MTRR */
+      }
+    }
+  }
+  serial_puts("[mm] MTRR def=");
+  serial_hex32((uint32_t)mt_def);
+  serial_puts(" vcnt=");
+  serial_hex32(mt_vcnt);
+  if (mt_amd) {
+    serial_puts(" SYSCFG=");
+    serial_hex32((uint32_t)mt_syscfg);
+    serial_puts(" TOM2=");
+    serial_hex32((uint32_t)(mt_tom2 >> 20));
+    serial_puts("MB");
+  }
+  serial_puts("\n[mm] RAM alta WB=");
+  serial_hex32((uint32_t)(mt_bytes[MT_WB] >> 20));
+  serial_puts("MB UC=");
+  serial_hex32((uint32_t)(mt_bytes[MT_UC] >> 20));
+  serial_puts("MB outros=");
+  serial_hex32((uint32_t)((mt_bytes[MT_WC] + mt_bytes[MT_WT] + mt_bytes[MT_WP]) >> 20));
+  serial_puts("MB\n");
+  if (!any_bad) return;
+  if (bad_default && mt_amd && top) {
+    /* TOM2 cobre [4 GB, TOM2) com WB por padrao (granularidade 8 MB). */
+    uint64_t t2 = (top + 0x7FFFFFULL) & ~0x7FFFFFULL;
+    if (t2 < mt_tom2) t2 = mt_tom2;
+    mt_fix_tom2_val = t2;
+    mt_fix_tom2 = 1;
+    mt_apply_tom2(t2);
+    mt_read();
+    for (i = 0; i < n; ++i) mt_count(rs[i], re[i], by);
+    serial_puts("[mm] TOM2 -> WB: agora WB=");
+    serial_hex32((uint32_t)(by[MT_WB] >> 20));
+    serial_puts("MB\n");
+  }
+}
+
+void mm_mtrr_info(uint64_t* wb, uint64_t* uc, uint64_t* other, int* fixed) {
+  if (wb) *wb = mt_bytes[MT_WB];
+  if (uc) *uc = mt_bytes[MT_UC];
+  if (other) *other = mt_bytes[MT_WC] + mt_bytes[MT_WT] + mt_bytes[MT_WP];
+  if (fixed) *fixed = mt_fix_tom2;
+}
+
+static void hm_add_arena_wb(uint64_t s, uint64_t e) {
+  /* So as partes WB viram arena (o que sobrar fora de WB nao e usado). */
+  uint64_t a = s, run = s;
+  for (; a < e; a += HM_PAGE) {
+    if (mt_type_2m(a) != MT_WB) {
+      if (a > run) hm_add_arena(run, a);
+      run = a + HM_PAGE;
+    }
+  }
+  if (e > run) hm_add_arena(run, e);
+}
+
 static void hm_init(const struct BootInfo* bi) {
   const struct BootMemEntry* map;
   uint64_t cr3;
@@ -226,20 +443,28 @@ static void hm_init(const struct BootInfo* bi) {
   if (!(pml4[0] & 1u)) return;
   pdpt = (uint64_t*)(uintptr_t)(pml4[0] & 0x000FFFFFFFFFF000ULL);
 
-  for (i = 0; i < bi->mem_count; ++i) {
-    uint64_t b = map[i].base;
-    uint64_t e = b + map[i].length;
-    if (map[i].type != BOOTINFO_MEM_USABLE || map[i].length == 0) continue;
-    if (e < b) continue;
-    if (b < 0x100000000ULL) b = 0x100000000ULL;
-    if (e > (uint64_t)HM_MAX_GB * HM_GB) e = (uint64_t)HM_MAX_GB * HM_GB;
-    b = (b + HM_PAGE - 1u) & ~(HM_PAGE - 1u);
-    e &= ~(HM_PAGE - 1u);
-    if (e <= b) continue;
-    if (!hm_map(pdpt, b, e)) continue;
-    hm_add_arena(b, e);
+  {
+    uint64_t rs[16], re[16];
+    uint32_t n = 0;
+    for (i = 0; i < bi->mem_count && n < 16; ++i) {
+      uint64_t b = map[i].base;
+      uint64_t e = b + map[i].length;
+      if (map[i].type != BOOTINFO_MEM_USABLE || map[i].length == 0) continue;
+      if (e < b) continue;
+      if (b < 0x100000000ULL) b = 0x100000000ULL;
+      if (e > (uint64_t)HM_MAX_GB * HM_GB) e = (uint64_t)HM_MAX_GB * HM_GB;
+      b = (b + HM_PAGE - 1u) & ~(HM_PAGE - 1u);
+      e &= ~(HM_PAGE - 1u);
+      if (e <= b) continue;
+      if (!hm_map(pdpt, b, e)) continue;
+      rs[n] = b;
+      re[n] = e;
+      n++;
+    }
+    __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+    mt_prepare(rs, re, n);
+    for (i = 0; i < n; ++i) hm_add_arena_wb(rs[i], re[i]);
   }
-  __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
 
   for (i = 0; i < hm_count; ++i) {
     struct hm_hdr* h = (struct hm_hdr*)(uintptr_t)hm_arenas[i].start;
@@ -248,6 +473,7 @@ static void hm_init(const struct BootInfo* bi) {
     h->owner = 0;
     total += h->size;
   }
+  for (i = 0; i < HM_MAX_ARENAS; ++i) hm_rover[i] = 0;
   serial_puts("[mm] RAM acima de 4 GB: ");
   serial_hex32((uint32_t)(total >> 20));
   serial_puts(" MB em ");
@@ -263,60 +489,183 @@ static int hm_ok(const struct harena* a, const struct hm_hdr* h) {
   return 1;
 }
 
-static void hm_merge(const struct harena* a, struct hm_hdr* h) {
+static void hm_merge(uint32_t ai, struct hm_hdr* h) {
+  const struct harena* a = &hm_arenas[ai];
   for (;;) {
     struct hm_hdr* nxt = (struct hm_hdr*)((uint8_t*)h + h->size);
     if ((uint64_t)(uintptr_t)nxt >= a->end || !hm_ok(a, nxt) || !nxt->free) return;
+    if (hm_rover[ai] == nxt) hm_rover[ai] = h;
     h->size += nxt->size;
   }
 }
 
 int hm_ready(void) { return hm_count != 0; }
 
-void* hmalloc(uint64_t nbytes) {
+/* Tenta o bloco livre h: payload alinhado a align. A sobra da frente (se
+ * houver) vira um bloco livre proprio; a de tras tambem. */
+static void* hm_take(uint32_t ai, struct hm_hdr* h, uint64_t nbytes, uint64_t align,
+                     uint32_t owner) {
+  uint64_t base = (uint64_t)(uintptr_t)h;
+  uint64_t pay = base + sizeof(struct hm_hdr);
   uint64_t need;
+  uint64_t lead;
+  pay = (pay + align - 1u) & ~(align - 1u);
+  lead = pay - sizeof(struct hm_hdr) - base;
+  /* Folga pequena demais para um bloco livre: empurra para o proximo
+   * alinhamento. */
+  while (lead != 0 && lead < sizeof(struct hm_hdr) + MM_ALIGN) {
+    pay += align;
+    lead += align;
+  }
+  need = (nbytes + sizeof(struct hm_hdr) + (MM_ALIGN - 1u)) & ~(uint64_t)(MM_ALIGN - 1u);
+  if (need < nbytes || lead + need < lead || h->size < lead + need) return 0;
+  if (lead) {
+    struct hm_hdr* nh = (struct hm_hdr*)(uintptr_t)(base + lead);
+    nh->size = h->size - lead;
+    nh->free = 1;
+    nh->owner = 0;
+    h->size = lead; /* continua livre */
+    h = nh;
+  }
+  {
+    uint64_t rest = h->size - need;
+    if (rest >= sizeof(struct hm_hdr) + MM_ALIGN) {
+      struct hm_hdr* nxt = (struct hm_hdr*)((uint8_t*)h + need);
+      nxt->size = rest;
+      nxt->free = 1;
+      nxt->owner = 0;
+      h->size = need;
+      hm_rover[ai] = nxt;
+    } else {
+      hm_rover[ai] = h;
+    }
+  }
+  h->free = 0;
+  h->owner = owner;
+  return (uint8_t*)h + sizeof(struct hm_hdr);
+}
+
+static void* hm_alloc(uint64_t nbytes, uint64_t align, uint32_t owner) {
   uint32_t i;
   if (nbytes == 0) return 0;
-  need = (nbytes + sizeof(struct hm_hdr) + (MM_ALIGN - 1u)) & ~(uint64_t)(MM_ALIGN - 1u);
-  if (need < nbytes) return 0;
+  if (align < MM_ALIGN) align = MM_ALIGN;
+  if (align & (align - 1u)) return 0;
   for (i = 0; i < hm_count; ++i) {
     const struct harena* a = &hm_arenas[i];
-    struct hm_hdr* h = (struct hm_hdr*)(uintptr_t)a->start;
-    while (hm_ok(a, h)) {
-      if (h->free) hm_merge(a, h);
-      if (h->free && h->size >= need) {
-        uint64_t rest = h->size - need;
-        if (rest >= sizeof(struct hm_hdr) + MM_ALIGN) {
-          struct hm_hdr* nxt = (struct hm_hdr*)((uint8_t*)h + need);
-          nxt->size = rest;
-          nxt->free = 1;
-          nxt->owner = 0;
-          h->size = need;
-        }
-        h->free = 0;
-        h->owner = 0;
-        return (uint8_t*)h + sizeof(struct hm_hdr);
-      }
-      h = (struct hm_hdr*)((uint8_t*)h + h->size);
+    struct hm_hdr* first = (struct hm_hdr*)(uintptr_t)a->start;
+    struct hm_hdr* r = hm_rover[i];
+    struct hm_hdr* h;
+    void* p;
+    if (!r || !hm_ok(a, r)) r = first;
+    /* Do rover ate o fim, depois do inicio ate o rover. */
+    for (h = r; hm_ok(a, h); h = (struct hm_hdr*)((uint8_t*)h + h->size)) {
+      if (!h->free) continue;
+      hm_merge(i, h);
+      if ((p = hm_take(i, h, nbytes, align, owner)) != 0) return p;
+    }
+    if (r == first) continue;
+    for (h = first; hm_ok(a, h) && h != r; h = (struct hm_hdr*)((uint8_t*)h + h->size)) {
+      if (!h->free) continue;
+      hm_merge(i, h);
+      if ((p = hm_take(i, h, nbytes, align, owner)) != 0) return p;
     }
   }
   return 0;
 }
 
-void hfree(void* ptr) {
+void* hmalloc(uint64_t nbytes) { return hm_alloc(nbytes, MM_ALIGN, 0); }
+
+/* Devolve o tamanho do bloco solto (0 se ptr nao e um bloco usado daqui). */
+static uint64_t hm_release(void* ptr) {
   uint32_t i;
   uint64_t p;
-  if (!ptr) return;
+  if (!ptr) return 0;
   p = (uint64_t)(uintptr_t)ptr - sizeof(struct hm_hdr);
   for (i = 0; i < hm_count; ++i) {
     const struct harena* a = &hm_arenas[i];
     struct hm_hdr* h = (struct hm_hdr*)(uintptr_t)p;
+    uint64_t sz;
     if (p < a->start || p >= a->end) continue;
-    if (!hm_ok(a, h) || h->free) return;
+    if (!hm_ok(a, h) || h->free) return 0;
+    sz = h->size;
     h->free = 1;
-    hm_merge(a, h);
-    return;
+    h->owner = 0;
+    hm_merge(i, h);
+    return sz;
   }
+  return 0;
+}
+
+void hfree(void* ptr) { (void)hm_release(ptr); }
+
+/* ---- RAM acima de 4 GB para programas (64 bits: Firefox) ----
+ * Teto = hm_user_pct% de toda a RAM do PC (abaixo + acima de 4 GB), limitado
+ * ao que existe acima de 4 GB. O kernel quase nao usa essa RAM (so o Z:), entao
+ * o teto fica de fato disponivel para o programa. SET HIMEM=<pct> muda. */
+static uint64_t hm_total_ram(void) {
+  uint64_t t = 0;
+  uint32_t i;
+  for (i = 0; i < hm_count; ++i) t += hm_arenas[i].end - hm_arenas[i].start;
+  if (high.ready) t += high.end - high.start;
+  return t;
+}
+
+static void hm_quota_update(void) {
+  uint64_t q = 0;
+  uint32_t i;
+  uint64_t hi = 0;
+  for (i = 0; i < hm_count; ++i) hi += hm_arenas[i].end - hm_arenas[i].start;
+  if (hm_user_pct) q = hm_total_ram() / 100u * hm_user_pct;
+  if (q > hi) q = hi;
+  hm_user_quota = q;
+}
+
+void hm_set_user_pct(uint32_t pct) {
+  if (pct > 95u) pct = 95u;
+  hm_user_pct = pct;
+  hm_quota_update();
+}
+
+void* hm_user_alloc(uint64_t nbytes, uint64_t align, uint32_t owner) {
+  void* p;
+  uint64_t need = (nbytes + sizeof(struct hm_hdr) + (MM_ALIGN - 1u)) & ~(uint64_t)(MM_ALIGN - 1u);
+  if (!hm_count || need < nbytes) return 0;
+  if (hm_user_used + need > hm_user_quota) return 0;
+  p = hm_alloc(nbytes, align, owner ? owner : 1u);
+  if (p) hm_user_used += ((struct hm_hdr*)((uint8_t*)p - sizeof(struct hm_hdr)))->size;
+  return p;
+}
+
+void hm_user_free(void* ptr) {
+  uint64_t sz = hm_release(ptr);
+  if (sz <= hm_user_used) hm_user_used -= sz;
+  else hm_user_used = 0;
+}
+
+/* Fim do programa: solta o que ele pegou acima de 4 GB. */
+void hm_free_owner(uint32_t owner) {
+  uint32_t i;
+  if (owner == 0) return;
+  for (i = 0; i < hm_count; ++i) {
+    const struct harena* a = &hm_arenas[i];
+    struct hm_hdr* h = (struct hm_hdr*)(uintptr_t)a->start;
+    while (hm_ok(a, h)) {
+      if (!h->free && h->owner == owner) {
+        if (h->size <= hm_user_used) hm_user_used -= h->size;
+        else hm_user_used = 0;
+        h->free = 1;
+        h->owner = 0;
+        hm_merge(i, h);
+      }
+      h = (struct hm_hdr*)((uint8_t*)h + h->size);
+    }
+  }
+}
+
+void hm_user_info(uint64_t* quota, uint64_t* used, uint64_t* total_ram) {
+  if (quota) *quota = hm_user_quota;
+  if (used) *used = hm_user_used;
+  if (total_ram) *total_ram = hm_total_ram();
 }
 
 void hm_stats(uint64_t* total, uint64_t* used, uint64_t* free_bytes, uint64_t* largest) {
@@ -387,6 +736,7 @@ void mm_init(void) {
     if (kend >= MM_HEAP_END && range_usable(bi, MM_HEAP_START, MM_HEAP_END))
       arena_init(&low, MM_HEAP_START, MM_HEAP_END);
     hm_init(bi);
+    hm_quota_update();
   } else {
     uint32_t top = probe_ram_end(start);
     if (top >= start + UM_MIN_SIZE)
