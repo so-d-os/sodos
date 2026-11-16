@@ -142,7 +142,7 @@ DISKS_CMD_O = $(DISKS_CMD_C:.c=.o)
 
 CMD_O = $(SHELL_CMD_O) $(DISKS_CMD_O)
 
-kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c video/gpu.c video/wfont.c video/prtscr.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/ps2in.c kernel/smp.c kernel/reboot.c kernel/xhci.c kernel/nvme.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c fs/fsdrv.c kernel/env.c kernel/linkext.c kernel/bootpak.c kernel/mm.c net/net.c net/httpd.c net/png.c net/wpa.c net/rtw89.c net/wifi.c kernel/module.c kernel/elf.c kernel/sched.c kernel/kthread.c kernel/kexports.c kernel/keymap.c kernel/clip.c kernel/vt.c kernel/version.c $(SHELL_CMD_C) $(DISKS_CMD_C) kernel/ap_blob.o shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
+kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c video/gpu.c video/wfont.c video/prtscr.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/ps2in.c kernel/smp.c kernel/reboot.c kernel/xhci.c kernel/nvme.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c fs/fsdrv.c kernel/env.c kernel/linkext.c kernel/bootpak.c kernel/mm.c net/net.c net/httpd.c net/png.c net/wpa.c net/rtw89.c net/wifi.c net/r8125.c kernel/module.c kernel/elf.c kernel/sched.c kernel/kthread.c kernel/kexports.c kernel/keymap.c kernel/clip.c kernel/vt.c kernel/version.c $(SHELL_CMD_C) $(DISKS_CMD_C) kernel/ap_blob.o shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
 	@[ -f kernel/version.h ] || sh tools/mkversion.sh
 	$(CC) $(CFLAGS) -c kernel/version.c -o kernel/version.o
 	$(CC) $(CFLAGS) -c kernel/kernel.c -o kernel/kernel.o
@@ -159,6 +159,7 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(CC) $(CFLAGS) -c net/wpa.c -o net/wpa.o
 	$(CC) $(CFLAGS) -c net/rtw89.c -o net/rtw89.o
 	$(CC) $(CFLAGS) -c net/wifi.c -o net/wifi.o
+	$(CC) $(CFLAGS) -c net/r8125.c -o net/r8125.o
 	$(CC) $(CFLAGS) -c kernel/module.c -o kernel/module.o
 	$(CC) $(CFLAGS) -c kernel/elf.c -o kernel/elf.o
 	$(CC) $(CFLAGS) -c kernel/kexports.c -o kernel/kexports.o
@@ -230,11 +231,11 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(AS) -f elf64 kernel/irq_stubs.asm -o kernel/irq_stubs.o
 	$(AS) -f elf64 kernel/modrun.asm -o kernel/modrun.o
 	$(AS) -f elf64 kernel/kernel_entry.asm -o kernel/kernel_entry.o
-	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o kernel/version.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o net/r8125.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o kernel/version.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 # Mesmo kernel de kernel.elf, com o stub Multiboot2 na frente. O GRUB carrega este ELF.
 kernel_multiboot.elf: kernel.elf kernel/multiboot_header.o kernel/linker_multiboot.ld
-	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o kernel/version.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o net/r8125.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o kernel/version.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 
 kernel.bin: kernel.elf
@@ -877,7 +878,7 @@ REAL_MOUNT = set -e; \
 	u=$$(findmnt -n -o UUID $(REAL_MNT)); \
 	if [ "$$u" != "$(REAL_UUID)" ]; then echo "$(REAL_MNT) e $$u, nao $(REAL_UUID)"; exit 1; fi
 
-.PHONY: version real send real-setup real-remove
+.PHONY: version real send sendpc real-setup real-remove
 real-setup:
 	sudo sh tools/real-setup.sh install
 
@@ -900,6 +901,109 @@ send: kernel_multiboot.elf sodos.pak
 	cp sodos.pak $(REAL_MNT)/BOOT/SODOS.PAK; \
 	echo "Gravando no SSD (sync)..."; sync; umount $(REAL_MNT); \
 	echo "SSD: $$(sed -n 's/.*SODOS_VERSION "\(.*\)"/\1/p' kernel/version.h) + arquivos do D:. Reinicie e escolha SODOS (SSD) com F8."
+
+# make sendpc: o mesmo "make send", rodando no WSL do Windows, para a particao
+# FAT32 SODOSHD que o Windows enxerga com letra (ex.: a criada encolhendo o C:
+# no WD SN850X). Acha a letra pelo rotulo (powershell.exe Get-Volume), usa o
+# /mnt/<letra> do WSL (monta com drvfs + sudo se o WSL subiu antes da particao
+# existir) e copia BOOT/KERNEL.ELF, BOOT/SODOS.PAK e os arquivos do D: (so o
+# que mudou, via tools/dirfs). Nao apaga nada na particao. Num checkout do
+# Windows os links de tools/dirfs viram texto, entao o alvo cria os links
+# mcopy/mdir/mmd numa pasta temporaria e testa o mdir antes do disk-files.
+#   make sendpc SENDPC_DRIVE=S          letra fixa, sem procurar pelo rotulo
+#   make sendpc SENDPC_LABEL=SODOSHD2   outro rotulo
+#   make sendpc SENDPC_DIR=/mnt/x       pasta ja montada (Linux, testes)
+SENDPC_LABEL ?= SODOSHD
+SENDPC_DRIVE ?=
+SENDPC_DIR ?=
+
+.PHONY: sendpc
+sendpc: kernel_multiboot.elf sodos.pak
+	@set -e; \
+	mnt="$(SENDPC_DIR)"; where="$$mnt"; \
+	if [ -z "$$mnt" ]; then \
+	  d="$(SENDPC_DRIVE)"; \
+	  if [ -z "$$d" ]; then \
+	    command -v $(POWERSHELL) >/dev/null 2>&1 || { echo "sendpc: sem $(POWERSHELL) (rode no WSL) ou passe SENDPC_DRIVE=<letra>."; exit 1; }; \
+	    d=$$($(POWERSHELL) -NoProfile -Command "Get-Volume | Where-Object { \$$_.FileSystemLabel -eq '$(SENDPC_LABEL)' -and \$$_.FileSystem -eq 'FAT32' -and \$$_.DriveLetter } | ForEach-Object { \$$_.DriveLetter }" | tr -d '\r\n '); \
+	    if [ -z "$$d" ]; then echo "sendpc: nenhum volume FAT32 com rotulo $(SENDPC_LABEL) e letra no Windows."; exit 1; fi; \
+	    if [ $${#d} -gt 1 ]; then echo "sendpc: mais de um volume FAT32 $(SENDPC_LABEL) ($$d); escolha com SENDPC_DRIVE=<letra>."; exit 1; fi; \
+	  fi; \
+	  d=$$(printf '%s' "$$d" | tr -d ':' | tr 'A-Z' 'a-z'); \
+	  case "$$d" in [a-z]) ;; *) echo "sendpc: letra invalida: $(SENDPC_DRIVE)"; exit 1 ;; esac; \
+	  D=$$(printf '%s' "$$d" | tr 'a-z' 'A-Z'); \
+	  if [ "$$D" = C ]; then echo "sendpc: C: e o Windows, recusado."; exit 1; fi; \
+	  mnt=/mnt/$$d; where="$$D: ($$mnt)"; \
+	  if ! findmnt -n "$$mnt" >/dev/null 2>&1; then \
+	    echo "sendpc: $$D: nao esta montado no WSL; montando em $$mnt (sudo)."; \
+	    sudo mkdir -p "$$mnt"; \
+	    sudo mount -t drvfs "$$D:" "$$mnt" -o uid=$$(id -u),gid=$$(id -g); \
+	  fi; \
+	fi; \
+	[ -d "$$mnt" ] || { echo "sendpc: $$mnt nao existe."; exit 1; }; \
+	bin=$$(mktemp -d); trap 'rm -rf "$$bin"' EXIT; \
+	for p in mcopy mdir mmd; do ln -s "$(CURDIR)/tools/dirfs/mtools.py" "$$bin/$$p"; done; \
+	PATH="$$bin:$$PATH" mdir -i "$$mnt@@512" ::/ >/dev/null 2>&1 || \
+	  { echo "sendpc: tools/dirfs nao le $$mnt; parado antes do disk-files (que formataria)."; exit 1; }; \
+	echo "Copiando para $$where (so o que mudou)..."; \
+	PATH="$$bin:$$PATH" $(MAKE) --no-print-directory disk-files DISK=$$mnt; \
+	mkdir -p "$$mnt/BOOT"; \
+	cp kernel_multiboot.elf "$$mnt/BOOT/KERNEL.ELF"; \
+	cp sodos.pak "$$mnt/BOOT/SODOS.PAK"; \
+	[ -f "$$mnt/BOOT/GRUBENV" ] || { printf '# GRUB Environment Block\n'; head -c 999 /dev/zero | tr '\0' '#'; } > "$$mnt/BOOT/GRUBENV"; \
+	sync; \
+	if [ -n "$$D" ]; then $(POWERSHELL) -NoProfile -Command "Write-VolumeCache -DriveLetter $$D" >/dev/null 2>&1 || true; fi; \
+	echo "SODOSHD em $$where: $$(sed -n 's/.*SODOS_VERSION "\(.*\)"/\1/p' kernel/version.h) + BOOT/ + arquivos do D:."
+
+# SODOS no menu do Windows Boot Manager (PC com Windows, sem o GRUB do Linux).
+# O bootmgr so carrega .efi: sodos-grubx64.efi e um GRUB autonomo com o
+# tools/winboot/grub.cfg embutido, que acha o FAT32 SODOSHD e carrega
+# BOOT/KERNEL.ELF + BOOT/SODOS.PAK. Depois do boot o kernel acha a mesma
+# particao pelo rotulo (kernel/nvme.c) e ela vira o D:.
+#   make winboot-efi       gera sodos-grubx64.efi (sem sudo: baixa o GRUB do apt
+#                          para ~/.cache/sodos-grub se nao estiver instalado)
+#   make winboot-install   uma vez: abre o UAC e roda tools/winboot/winboot.ps1
+#                          install (backup do BCD, \EFI\SODOS na ESP, entrada
+#                          "SODOS" no fim da ordem de boot do FIRMWARE, nao
+#                          no menu azul do Windows, que da 0xc000007b com GRUB).
+#                          Secure Boot desligado.
+#   make sendpc            a cada build: kernel + arquivos para o SODOSHD (E:)
+#   make winboot           = winboot-efi + sendpc
+#   make winboot-next      reinicia no SODOS so uma vez (ou tecla de boot da placa)
+#   make winboot-update    recopia o .efi na ESP (so se o grub.cfg mudar)
+#   make winboot-status / make winboot-remove
+WINBOOT_PS1_WIN := $(shell wslpath -w "$(CURDIR)/tools/winboot/winboot.ps1" 2>/dev/null || cygpath -w "$(CURDIR)/tools/winboot/winboot.ps1" 2>/dev/null)
+WINBOOT_EFI_WIN := $(shell wslpath -w "$(CURDIR)/sodos-grubx64.efi" 2>/dev/null || cygpath -w "$(CURDIR)/sodos-grubx64.efi" 2>/dev/null)
+WINBOOT_ADMIN = $(POWERSHELL) -NoProfile -Command "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-NoExit','-File','\"$(WINBOOT_PS1_WIN)\"','$(1)','-Efi','\"$(WINBOOT_EFI_WIN)\"'"
+
+.PHONY: winboot winboot-efi winboot-install winboot-update winboot-next winboot-remove winboot-status
+sodos-grubx64.efi: tools/winboot/grub.cfg tools/winboot/mkefi.sh
+	sh tools/winboot/mkefi.sh $@
+
+winboot-efi: sodos-grubx64.efi
+
+winboot: sodos-grubx64.efi sendpc
+	@echo "winboot: E: atualizado. Para entrar: make winboot-next (ou tecla de boot da placa). Sem a entrada SODOS: make winboot-install"
+
+winboot-install: sodos-grubx64.efi
+	@echo "winboot: confirme o UAC; a janela do PowerShell mostra o resultado."
+	@$(call WINBOOT_ADMIN,install)
+
+winboot-update: sodos-grubx64.efi
+	@$(call WINBOOT_ADMIN,update)
+
+# Reinicia direto no SODOS, so desta vez (bootsequence do firmware).
+# (a virgula fica numa variavel: no $(call) ela separaria os argumentos)
+WINBOOT_NEXT_ARGS := next','-Restart
+winboot-next:
+	@echo "winboot: confirme o UAC; a maquina reinicia no SODOS em 3 s."
+	@$(call WINBOOT_ADMIN,$(WINBOOT_NEXT_ARGS))
+
+winboot-remove:
+	@$(call WINBOOT_ADMIN,remove)
+
+winboot-status:
+	@$(POWERSHELL) -NoProfile -ExecutionPolicy Bypass -File "$(WINBOOT_PS1_WIN)" status -Efi "$(WINBOOT_EFI_WIN)"
 
 # Firefox (firefox/): camada de plataforma e NSPR do port (SODOS.DLL,
 # FBOOT.EXE e PRTEST.EXE). Precisa de gcc com -mx32 e do c_compiler.

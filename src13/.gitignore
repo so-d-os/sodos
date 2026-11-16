@@ -68,3 +68,6 @@ disk-antigo.img
 sodos.pak
 tools/mkpak
 real-stage/
+
+# GRUB EFI do menu do Windows (make winboot-efi)
+sodos-grubx64.efi

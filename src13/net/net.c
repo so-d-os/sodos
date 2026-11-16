@@ -13,6 +13,7 @@
 #include "vt.h"
 #include "irq.h"
 #include "env.h"
+#include "r8125.h"
 
 #define SLIRP_IP   0x0A00020Fu
 #define SLIRP_MASK 0xFFFFFF00u
@@ -138,6 +139,9 @@ static uint32_t our_gw = SLIRP_GW;
 static uint32_t our_dns = SLIRP_DNS;
 /* Placa que nao e a NE2000 (o WiFi). Entrega e recebe quadros Ethernet. */
 static const struct net_link* nlink;
+/* Placa de cabo que nao e a NE2000 (RTL8125 no PC real): net_attach(0)
+ * volta para ela em vez de ficar sem rede. */
+static const struct net_link* base_link;
 static int ne_ok;
 static uint8_t ne_mac[6];
 static int polling;
@@ -942,6 +946,7 @@ void net_get_addr(uint32_t* ip, uint32_t* mask, uint32_t* gw, uint32_t* dns) {
 
 void net_attach(const struct net_link* l) {
   int i;
+  if (!l) l = base_link;
   if (l && !nlink)
     for (i = 0; i < 6; i++) ne_mac[i] = our_mac[i];
   if (!l && nlink)
@@ -955,6 +960,21 @@ void net_attach(const struct net_link* l) {
   arp_valid = 0;
   hosts_loaded = 0;
   tcp_state = ST_CLOSED;
+}
+
+static void gate_set(uint32_t magic, uint32_t c, uint32_t s, uint32_t r, uint32_t cl);
+static int api_connect(const char* host, int port);
+static int api_send(const void* data, int len);
+static int api_recv(void* data, int cap);
+static void api_close(void);
+static uint32_t fn_bits(void* fp);
+
+void net_attach_base(const struct net_link* l) {
+  base_link = l;
+  net_attach(l);
+  if (l)
+    gate_set(NET_MAGIC, fn_bits((void*)api_connect), fn_bits((void*)api_send),
+             fn_bits((void*)api_recv), fn_bits((void*)api_close));
 }
 
 const char* net_link_name(void) {
@@ -2738,8 +2758,8 @@ void net_init(void) {
       if (i != 5) serial_putc(':');
     }
     serial_puts("\n");
-  } else {
-    puts_k("Rede: sem placa NE2000\n");
+  } else if (r8125_start() != 0) {
+    puts_k("Rede: sem placa (nem NE2000 nem RTL8125)\n");
     serial_puts("[net] sem placa\n");
   }
 }

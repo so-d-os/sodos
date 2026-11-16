@@ -118,13 +118,38 @@ kernel_entry:
     ; qualquer lugar (0xD0000000 numa AMD, BAR alto acima de 4 GB...).
     ; Mapeia 64 MB a partir de fb_addr, write-combining (PAT 1 = WC abaixo).
     ; GB 0..3 usam os diretorios 0x3000/pd_gb12/pd_gb12+0x1000/0x6000; acima, 0x7000.
+    ; Acima de 512 GB (fora do PML4[0]): PML4[n] -> pdpt_fb -> pd_fb. Ex.: a
+    ; RX 570 com "Above 4G Decoding" (ReBAR) da placa ASUS B650 poe a VRAM em
+    ; 0xFC10000000 (~1 TB); sem este mapa o fbcon_init escrevia na tela antes
+    ; do idt_init, o #PF virava triple fault e o PC reiniciava.
     mov eax, [ebp + 56]
     mov edx, [ebp + 60]
     mov ecx, eax
     or ecx, edx
     jz .fbi_done
-    cmp edx, 0x80                 ; >= 512 GB: fora do PDPT unico
-    jae .fbi_done
+    cmp edx, 0x80                 ; >= 512 GB: fora do PML4[0]
+    jb .fbi_low
+    cmp edx, 0x10000              ; >= 256 TB: fora dos 48 bits; sem tela
+    jb .fbi_high
+    mov dword [ebp + 56], 0       ; fb_addr = 0: o fbcon nao toca (melhor que
+    mov dword [ebp + 60], 0       ; um triple fault)
+    jmp .fbi_done
+.fbi_high:
+    mov ecx, edx
+    shr ecx, 7                    ; indice no PML4 (addr >> 39), 1..511
+    mov dword [0x1000 + ecx*8], pdpt_fb + 3
+    mov dword [0x1004 + ecx*8], 0
+    mov ecx, eax
+    shr ecx, 30
+    mov esi, edx
+    and esi, 0x7F
+    shl esi, 2
+    or ecx, esi                   ; (addr >> 30) & 511: indice no pdpt_fb
+    mov dword [pdpt_fb + ecx*8], pd_fb + 3
+    mov dword [pdpt_fb + ecx*8 + 4], 0
+    mov edi, pd_fb
+    jmp .fbi_map
+.fbi_low:
     mov ecx, eax
     shr ecx, 30
     mov esi, edx
@@ -303,3 +328,11 @@ section .data
 align 4096
 pd_gb12:
     times 1024 dq 0
+
+; PDPT e diretorio do framebuffer acima de 512 GB (ver .fbi_high). Tambem no
+; .data pelo mesmo motivo.
+align 4096
+pdpt_fb:
+    times 512 dq 0
+pd_fb:
+    times 512 dq 0

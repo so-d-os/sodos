@@ -20,9 +20,6 @@ static volatile uint8_t* fb;
 static uint32_t fb_pitch;
 static uint32_t fb_w;
 static uint32_t fb_h;
-static int scale;
-static uint32_t org_x;
-static uint32_t org_y;
 static int cur_pos = -1;
 static int cur_drawn = -1;
 static uint32_t pal[16];
@@ -50,8 +47,15 @@ static void fb_clear(void) {
   }
 }
 
+/* As 80x25 celulas ocupam a tela toda, como o modo texto VGA num monitor LCD:
+ * a celula c vai de c*largura/80 ate (c+1)*largura/80 (idem nas linhas) e a
+ * fonte 8x16 e esticada por vizinho mais proximo. Em 1920x1080 cada celula
+ * tem 24x43 pixels. (Antes: escala inteira centralizada, 1280x800 no meio de
+ * um monitor Full HD.) */
+static uint32_t cell_x(int c) { return (uint32_t)((uint64_t)(uint32_t)c * fb_w / COLS); }
+static uint32_t cell_y(int r) { return (uint32_t)((uint64_t)(uint32_t)r * fb_h / ROWS); }
+
 int fbcon_init(const struct BootInfo* bi) {
-  uint32_t sx, sy;
   int i;
   if (!bi || bi->firmware != BOOTINFO_FIRMWARE_UEFI) return 0;
   if (!bi->fb_addr || bi->fb_bpp != 32 || bi->fb_width < COLS * CELL_W ||
@@ -63,12 +67,6 @@ int fbcon_init(const struct BootInfo* bi) {
   fb_pitch = bi->fb_pitch;
   fb_w = bi->fb_width;
   fb_h = bi->fb_height;
-  sx = bi->fb_width / (COLS * CELL_W);
-  sy = bi->fb_height / (ROWS * CELL_H);
-  scale = (int)(sx < sy ? sx : sy);
-  if (scale > 4) scale = 4;
-  org_x = (bi->fb_width - (uint32_t)(COLS * CELL_W * scale)) / 2u;
-  org_y = (bi->fb_height - (uint32_t)(ROWS * CELL_H * scale)) / 2u;
   for (i = 0; i < 16; i++) {
     uint32_t r = cga_rgb[i][0], g = cga_rgb[i][1], b = cga_rgb[i][2];
     /* FORMAT_BGR: bytes B,G,R na memoria (vermelho no bit 16), como o Bochs. */
@@ -85,29 +83,55 @@ int fbcon_init(const struct BootInfo* bi) {
   serial_puts("[fbcon] texto 80x25 no framebuffer 0x");
   serial_hex32((uint32_t)(bi->fb_addr >> 32));
   serial_hex32((uint32_t)bi->fb_addr);
-  serial_puts(" escala ");
-  serial_hex32((uint32_t)scale);
-  serial_puts("\n");
+  serial_puts(", tela cheia\n");
   return 1;
+}
+
+/* "Video: 1920x1080, 32 bpp, texto 80x25 em tela cheia\n" para o boot. */
+void fbcon_mode_str(char* out, int max) {
+  static const char tail[] = ", 32 bpp, texto 80x25 em tela cheia\n";
+  char num[2][12];
+  uint32_t v[2];
+  int n = 0, k, i;
+  const char* p;
+  if (!out || max < 2) return;
+  out[0] = 0;
+  if (!active) return;
+  v[0] = fb_w;
+  v[1] = fb_h;
+  for (k = 0; k < 2; k++) {
+    char t[12];
+    int m = 0;
+    uint32_t x = v[k];
+    do { t[m++] = (char)('0' + x % 10u); x /= 10u; } while (x && m < 11);
+    for (i = 0; i < m; i++) num[k][i] = t[m - 1 - i];
+    num[k][m] = 0;
+  }
+  for (p = "Video: "; *p && n < max - 1; p++) out[n++] = *p;
+  for (p = num[0]; *p && n < max - 1; p++) out[n++] = *p;
+  if (n < max - 1) out[n++] = 'x';
+  for (p = num[1]; *p && n < max - 1; p++) out[n++] = *p;
+  for (p = tail; *p && n < max - 1; p++) out[n++] = *p;
+  out[n] = 0;
 }
 
 static void draw_cell(int idx, uint16_t cell, int with_cursor) {
   const uint8_t* g = vga_font_glyph((int)(cell & 0xFFu));
   uint32_t fg = pal[(cell >> 8) & 0x0Fu];
   uint32_t bg = pal[(cell >> 12) & 0x0Fu];
-  uint32_t x0 = org_x + (uint32_t)(idx % COLS) * CELL_W * (uint32_t)scale;
-  uint32_t y0 = org_y + (uint32_t)(idx / COLS) * CELL_H * (uint32_t)scale;
-  int r, sy, b, sx;
-  for (r = 0; r < CELL_H; r++) {
+  int col = idx % COLS, lin = idx / COLS;
+  uint32_t x0 = cell_x(col), x1 = cell_x(col + 1);
+  uint32_t y0 = cell_y(lin), y1 = cell_y(lin + 1);
+  uint32_t cw = x1 - x0, ch = y1 - y0, py, px;
+  uint8_t colbit[128]; /* coluna da fonte -> mascara, por pixel da celula (ate 10240 px) */
+  if (!cw || !ch || cw > 128u) return;
+  for (px = 0; px < cw; px++) colbit[px] = (uint8_t)(0x80u >> (px * CELL_W / cw));
+  for (py = 0; py < ch; py++) {
+    uint32_t r = py * CELL_H / ch;
     uint8_t bits = g[r];
+    volatile uint32_t* row = (volatile uint32_t*)(fb + (uint64_t)(y0 + py) * fb_pitch) + x0;
     if (with_cursor && r >= CELL_H - 2) bits = 0xFF;
-    for (sy = 0; sy < scale; sy++) {
-      volatile uint32_t* row = (volatile uint32_t*)(fb + (uint64_t)(y0 + (uint32_t)(r * scale + sy)) * fb_pitch) + x0;
-      for (b = 0; b < CELL_W; b++) {
-        uint32_t c = (bits & (0x80u >> b)) ? fg : bg;
-        for (sx = 0; sx < scale; sx++) *row++ = c;
-      }
-    }
+    for (px = 0; px < cw; px++) row[px] = (bits & colbit[px]) ? fg : bg;
   }
 }
 

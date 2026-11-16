@@ -18,6 +18,13 @@ int xhci_mouse_init(int ps2_ok);
  * dz como no HID (positivo = roda para cima), btn: bit 0 esq, 1 dir, 2 meio. */
 int xhci_mouse_poll(int* dx, int* dy, int* dz, int* btn);
 
+/* Teclado USB (protocolo boot) como scancodes set 1 na fila do PS/2.
+ * xhci_kbd_init: liga os controladores e procura o teclado (boot UEFI).
+ * xhci_kbd_pump: chamado por ps2in_pump; recolhe teclas e repete a segurada. */
+int xhci_kbd_init(void);
+int xhci_kbd_ready(void);
+void xhci_kbd_pump(void);
+
 /* Liga os controladores (se ainda nao estiverem) e procura um pendrive.
  * 0 com o disco pronto; chamar de novo com ele ligado nao refaz nada. */
 int xhci_disk_init(void);

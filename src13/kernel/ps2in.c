@@ -10,6 +10,7 @@
 #include "reboot.h"
 #include "serial.h"
 #include "irq.h"
+#include "xhci.h"
 
 #define PQ 256   /* potencia de 2 */
 
@@ -108,8 +109,24 @@ void ps2in_isr(void) {
   lk_drop();
 }
 
+/* Byte de teclado que nao veio do 8042 (teclado USB, xhci.c): mesma fila e o
+ * mesmo kbd_watch (Ctrl+Alt+Del etc.) que um byte da IRQ1. */
+void ps2in_inject(uint8_t b) {
+  uint64_t f = irq_save();
+  uint32_t now;
+  lk_take();
+  now = (uint32_t)irq_ticks();
+  if (!now) now = 1;
+  kbd_watch(b);
+  q_push(&kq, b, now);
+  lk_drop();
+  irq_restore(f);
+}
+
 void ps2in_pump(void) {
   uint64_t f;
+  /* Teclado USB primeiro, fora do cli: ele pode esperar comandos do xHCI. */
+  xhci_kbd_pump();
   if (ps2_raw_depth) return;
   f = irq_save();
   lk_take();

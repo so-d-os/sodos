@@ -274,6 +274,59 @@ O caminho BIOS (`boot.asm` + `stage2.asm` + `os.img`) continua sendo o boot
 principal no QEMU. Magic Multiboot2 ausente escreve `M` na serial e na VGA e
 para.
 
+### 10.1 Num PC só com Windows (firmware UEFI)
+
+O Windows Boot Manager não carrega um kernel Multiboot2. Ele também não carrega
+um `.efi` qualquer: no menu azul do Windows, ele abre o arquivo como aplicativo
+de boot do Windows, e o GRUB falha com `0xc000007b` (formato de imagem
+inválido). Por isso a entrada fica no menu de boot do **firmware**. A ponte é
+um GRUB autônomo:
+
+```
+Firmware UEFI ─ Boot#### "SODOS" ─> \EFI\SODOS\grubx64.efi (na ESP)
+  └─ grub.cfg embutido: search --label SODOSHD
+       └─ multiboot2 \BOOT\KERNEL.ELF + module2 \BOOT\SODOS.PAK (no E:)
+            └─ kernel: kernel/nvme.c acha o mesmo SODOSHD pelo rótulo -> D:
+```
+
+- A partição do SODOS é um FAT32 com rótulo `SODOSHD` em SSD **NVMe**: o E:
+  desta máquina, criado encolhendo o C: no WD SN850X. O kernel só procura
+  o `SODOSHD` em NVMe e testa todos os controladores, então os outros SSDs
+  não atrapalham.
+- `make winboot-efi` gera `sodos-grubx64.efi` (`tools/winboot/mkefi.sh` com o
+  `tools/winboot/grub.cfg`). Sem `grub-mkstandalone` instalado, o script baixa
+  `grub-common` e `grub-efi-amd64-bin` do apt para `~/.cache/sodos-grub`, sem
+  sudo.
+- `make winboot-install` (uma vez, abre o UAC) roda
+  `tools/winboot/winboot.ps1 install`. Ele exporta o BCD para
+  `C:\bcd-backup-sodos-<data>`, copia o .efi para `\EFI\SODOS\grubx64.efi` na
+  ESP e cria a entrada com `bcdedit /copy {bootmgr}` e `/set path`. Depois a
+  põe no fim da ordem do firmware com `bcdedit /set {fwbootmgr} displayorder
+  /addlast`, que grava um `Boot####` na NVRAM. O Windows continua sendo o boot
+  padrão, e a entrada não aparece no menu azul.
+- O `/copy {bootmgr}` herda a marca `LOAD_OPTION_HIDDEN` (atributo `0x9`) da
+  cópia oculta que o Windows guarda de si mesmo. Com ela, a placa ASUS não
+  mostra a entrada no F8 e ignora até o `BootNext`. O `install` e o `next`
+  regravam o `Boot####` do SODOS com o atributo `0x1`
+  (`SetFirmwareEnvironmentVariableEx`). Se o Windows voltar a ocultar a
+  entrada, `winboot.ps1 fwfix` resolve, e `status` mostra o atributo.
+- Para entrar no SODOS, use `make winboot-next` (abre o UAC). Ele faz
+  `bcdedit /set {fwbootmgr} bootsequence`, que vale só para o próximo boot, e
+  reinicia. Outra opção é a tecla do menu de boot da placa (F8, F11 ou F12),
+  escolhendo "SODOS". Depois o PC volta a ligar no Windows.
+- A cada build, `make sendpc` (no WSL) copia o kernel, o `SODOS.PAK` e os
+  arquivos do D: para o E:. Isso não precisa de Administrador.
+- O Secure Boot precisa estar **desligado**, porque o GRUB não é assinado.
+- Para ver o estado, use `make winboot-status`. Para desfazer, use
+  `make winboot-remove`, ou volte o backup com
+  `bcdedit /import C:\bcd-backup-sodos-<data>`.
+- Se a partição ou o kernel não forem achados, o GRUB cai na segunda entrada:
+  avisa, espera 15 s e volta ao firmware.
+
+Testado no QEMU com OVMF: um disco NVMe com a ESP e um FAT32 `SODOSHD` de
+32 GiB, com clusters de 32 KB como o formato do Windows. O boot chega ao shell
+com o D: montado.
+
 ## 11. UEFI (etapa futura, não implementada)
 
 O contrato permite um `sodos.efi` sem duplicar o kernel C:

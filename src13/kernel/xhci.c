@@ -1,5 +1,10 @@
-/* xhci.c - Controlador USB 3 (xHCI): hubs USB 2, mouse USB (protocolo boot)
- * e pendrive (mass storage bulk-only, comandos SCSI).
+/* xhci.c - Controlador USB 3 (xHCI): hubs USB 2, mouse e teclado USB
+ * (protocolo boot) e pendrive (mass storage bulk-only, comandos SCSI).
+ *
+ * Teclado: no boot UEFI o firmware para de emular PS/2 quando o SODOS toma os
+ * controladores, entao o teclado USB vira scancodes set 1 na mesma fila do
+ * PS/2 (ps2in_inject). Shell, keymap e WIN nao mudam. Repeticao por software
+ * (500 ms, depois 30/s), como o 8042 faria.
  *
  * Tudo por polling, como o resto do kernel (sem IRQ):
  *   1. acha os xHCI no PCI (classe 0C0330, qualquer barramento);
@@ -20,9 +25,10 @@
 #include "mm.h"
 #include "net.h"
 #include "serial.h"
+#include "ps2in.h"
 
-#define XC_MAX   4
-#define UDEV_MAX 8
+#define XC_MAX   8   /* AM5: CPU, chipset e controladores extras */
+#define UDEV_MAX 16
 #define RING_N   32
 #define EVT_N    64
 
@@ -65,6 +71,7 @@
 #define UD_HUB   3
 #define UD_MOUSE 4
 #define UD_DISK  5
+#define UD_KBD   6   /* so teclado; teclado + mouse no mesmo receptor fica UD_MOUSE */
 
 #define DK_RA 32u   /* setores lidos de uma vez (16 KB) */
 #define MSQ   8     /* relatorios do mouse guardados entre dois polls */
@@ -117,6 +124,9 @@ struct udev {
   int dci_in, dci_out;     /* mouse: so dci_in */
   int ep_in, ep_out;       /* enderecos USB dos endpoints bulk (CLEAR_FEATURE) */
   int len;                 /* mouse: bytes do relatorio */
+  int dci_kb;              /* teclado: interrupt IN no anel rout */
+  int kb_len;
+  volatile uint8_t* krep;  /* 64 bytes: relatorio do teclado */
   uint8_t* mem;            /* 3 paginas, nunca liberadas */
   struct ring ep0, rin, rout;
   volatile uint8_t* buf;   /* 256 bytes do EP0 */
@@ -137,6 +147,15 @@ static int ms_errs;
 static int ms_fix;         /* erro no interrupt IN: reset no proximo poll */
 static int ms_q[MSQ][4];   /* dx, dy, dz, botoes */
 static int ms_qh, ms_qn;
+
+static int kb = -1;        /* devs[] do teclado */
+static int kb_on;          /* xhci_kbd_init rodou: o pump trabalha */
+static int kb_errs;
+static int kb_fix;
+static uint8_t kb_prev[8]; /* ultimo relatorio boot: modificadores, 0, 6 teclas */
+static uint8_t kb_rk;      /* tecla que repete (uso HID), 0 = nenhuma */
+static uint32_t kb_rt;
+static int kb_rn;
 
 static int dk = -1;        /* devs[] do pendrive */
 static int dk_fails;
@@ -288,6 +307,65 @@ static void log_hex(const char* s, uint32_t v) {
   xlog(s);
   xlog_hex(v);
   xlog("\n");
+}
+
+/* ---------- teclado: uso HID -> scancode set 1 ---------- */
+
+/* Bit 8 = prefixo E0. 0 = sem tecla. ABNT2: 0x87 (/?) = 73, 0x85 (. do
+ * teclado numerico) = 7E, 0x64 (\| ao lado do Z) = 56. */
+static const uint16_t hid_set1[0x8A] = {
+  [0x04] = 0x1E, [0x05] = 0x30, [0x06] = 0x2E, [0x07] = 0x20, [0x08] = 0x12,
+  [0x09] = 0x21, [0x0A] = 0x22, [0x0B] = 0x23, [0x0C] = 0x17, [0x0D] = 0x24,
+  [0x0E] = 0x25, [0x0F] = 0x26, [0x10] = 0x32, [0x11] = 0x31, [0x12] = 0x18,
+  [0x13] = 0x19, [0x14] = 0x10, [0x15] = 0x13, [0x16] = 0x1F, [0x17] = 0x14,
+  [0x18] = 0x16, [0x19] = 0x2F, [0x1A] = 0x11, [0x1B] = 0x2D, [0x1C] = 0x15,
+  [0x1D] = 0x2C,
+  [0x1E] = 0x02, [0x1F] = 0x03, [0x20] = 0x04, [0x21] = 0x05, [0x22] = 0x06,
+  [0x23] = 0x07, [0x24] = 0x08, [0x25] = 0x09, [0x26] = 0x0A, [0x27] = 0x0B,
+  [0x28] = 0x1C, [0x29] = 0x01, [0x2A] = 0x0E, [0x2B] = 0x0F, [0x2C] = 0x39,
+  [0x2D] = 0x0C, [0x2E] = 0x0D, [0x2F] = 0x1A, [0x30] = 0x1B, [0x31] = 0x2B,
+  [0x32] = 0x2B, [0x33] = 0x27, [0x34] = 0x28, [0x35] = 0x29, [0x36] = 0x33,
+  [0x37] = 0x34, [0x38] = 0x35, [0x39] = 0x3A,
+  [0x3A] = 0x3B, [0x3B] = 0x3C, [0x3C] = 0x3D, [0x3D] = 0x3E, [0x3E] = 0x3F,
+  [0x3F] = 0x40, [0x40] = 0x41, [0x41] = 0x42, [0x42] = 0x43, [0x43] = 0x44,
+  [0x44] = 0x57, [0x45] = 0x58,
+  [0x47] = 0x46,
+  [0x49] = 0x152, [0x4A] = 0x147, [0x4B] = 0x149, [0x4C] = 0x153, [0x4D] = 0x14F,
+  [0x4E] = 0x151, [0x4F] = 0x14D, [0x50] = 0x14B, [0x51] = 0x150, [0x52] = 0x148,
+  [0x53] = 0x45, [0x54] = 0x135, [0x55] = 0x37, [0x56] = 0x4A, [0x57] = 0x4E,
+  [0x58] = 0x11C, [0x59] = 0x4F, [0x5A] = 0x50, [0x5B] = 0x51, [0x5C] = 0x4B,
+  [0x5D] = 0x4C, [0x5E] = 0x4D, [0x5F] = 0x47, [0x60] = 0x48, [0x61] = 0x49,
+  [0x62] = 0x52, [0x63] = 0x53, [0x64] = 0x56, [0x65] = 0x15D,
+  [0x85] = 0x7E, [0x87] = 0x73, [0x89] = 0x7D,
+};
+
+/* Bits do byte de modificadores: LCtrl LShift LAlt LGui RCtrl RShift RAlt RGui. */
+static const uint16_t hid_mod_set1[8] = { 0x1D, 0x2A, 0x38, 0x15B, 0x11D, 0x36, 0x138, 0x15C };
+
+static void kb_code(uint16_t c, int make) {
+  if (!c) return;
+  if (c & 0x100) ps2in_inject(0xE0);
+  ps2in_inject((uint8_t)((c & 0x7Fu) | (make ? 0u : 0x80u)));
+}
+
+static void kb_emit(uint8_t u, int make) {
+  if (u == 0x46) {  /* Print Screen: E0 2A E0 37 / E0 B7 E0 AA */
+    if (make) { kb_code(0x12A, 1); kb_code(0x137, 1); }
+    else { kb_code(0x137, 0); kb_code(0x12A, 0); }
+    return;
+  }
+  if (u < sizeof(hid_set1) / sizeof(hid_set1[0])) kb_code(hid_set1[u], make);
+}
+
+/* Teclado saiu ou parou: solta o que estava apertado (Shift preso etc.). */
+static void kb_release_all(void) {
+  int i;
+  for (i = 0; i < 8; i++)
+    if (kb_prev[0] & (1u << i)) kb_code(hid_mod_set1[i], 0);
+  for (i = 2; i < 8; i++)
+    if (kb_prev[i] > 3) kb_emit(kb_prev[i], 0);
+  for (i = 0; i < 8; i++) kb_prev[i] = 0;
+  kb_rk = 0;
 }
 
 /* ---------- aneis ---------- */
@@ -536,6 +614,8 @@ static int dev_new(void) {
     d->buf = d->mem + 1536;   /* 256 bytes */
     d->rep = d->mem + 1792;   /* 64 bytes */
     d->cbw = d->mem + 1856;   /* 32 bytes */
+    d->krep = d->mem + 1920;  /* 64 bytes */
+    d->dci_kb = 0;
     d->ictx = d->mem + 4096;  /* 33 contextos */
     d->octx = d->mem + 8192;  /* 32 contextos */
     d->kind = UD_NEW;
@@ -564,6 +644,11 @@ static void dev_drop(int i) {
     xlog("[xhci] mouse desconectado\n");
     ms = -1;
     ms_qn = 0;
+  }
+  if (i == kb) {
+    xlog("[xhci] teclado desconectado\n");
+    kb_release_all();
+    kb = -1;
   }
   if (i == dk) {
     xlog("[xhci] pendrive desconectado\n");
@@ -750,35 +835,125 @@ static void ms_arm(struct udev* d) {
   d->x->db[d->slot] = (uint32_t)d->dci_in;
 }
 
-static int mouse_setup(int i, int iface, int ep, int mps, int ival, int boot, int cfg) {
+static void kb_arm(struct udev* d) {
+  ring_put(&d->rout, (uint32_t)pa(d->krep), (uint32_t)(pa(d->krep) >> 32), (uint32_t)d->kb_len,
+           (TRB_NORMAL << 10) | (1u << 5) | (1u << 2));  /* IOC | ISP */
+  d->x->db[d->slot] = (uint32_t)d->dci_kb;
+}
+
+/* Mouse (m_if >= 0) e/ou teclado (k_if >= 0) no mesmo dispositivo: um
+ * receptor sem fio traz os dois. Um Configure Endpoint para os dois IN. */
+static int hid_setup(int i, int m_if, int m_ep, int m_mps, int m_ival, int m_boot,
+                     int k_if, int k_ep, int k_mps, int k_ival, int cfg) {
   struct udev* d = &devs[i];
-  int rc;
-  d->dci_in = ep * 2 + 1;
-  (void)cfg_begin(d, 1u << d->dci_in, d->dci_in);
-  ep_ctx(d, d->dci_in, 7, mps, 0, ep_interval(d->speed, ival), &d->rin,
-         (uint32_t)mps | ((uint32_t)mps << 16));                      /* Interrupt IN */
+  uint32_t add = 0;
+  int top = 0, rc;
+  if (m_if >= 0) {
+    d->dci_in = m_ep * 2 + 1;
+    add |= 1u << d->dci_in;
+    top = d->dci_in;
+  }
+  if (k_if >= 0) {
+    d->dci_kb = k_ep * 2 + 1;
+    add |= 1u << d->dci_kb;
+    if (d->dci_kb > top) top = d->dci_kb;
+  }
+  (void)cfg_begin(d, add, top);
+  if (m_if >= 0)
+    ep_ctx(d, d->dci_in, 7, m_mps, 0, ep_interval(d->speed, m_ival), &d->rin,
+           (uint32_t)m_mps | ((uint32_t)m_mps << 16));                /* Interrupt IN */
+  if (k_if >= 0)
+    ep_ctx(d, d->dci_kb, 7, k_mps, 0, ep_interval(d->speed, k_ival), &d->rout,
+           (uint32_t)k_mps | ((uint32_t)k_mps << 16));
   rc = cfg_run(d);
   if (rc != 0) {
     log_hex("[xhci] Configure Endpoint falhou, cc=", (uint32_t)-rc);
     return -1;
   }
   if (ctrl(d, 0x00, 9, (uint16_t)cfg, 0, 0) != 0) return -1;          /* SET_CONFIGURATION */
-  /* Protocolo boot: botoes, X e Y em 3 bytes fixos (o byte 3, se vier, e a roda).
-   * O SET_IDLE vai por ultimo: alguns mouses respondem STALL. */
-  if (boot) (void)ctrl(d, 0x21, 0x0B, 0, (uint16_t)iface, 0);
-  (void)ctrl(d, 0x21, 0x0A, 0, (uint16_t)iface, 0);
-  d->iface = iface;
-  d->len = mps;
-  d->kind = UD_MOUSE;
-  ms = i;
-  ms_errs = 0;
-  ms_fix = 0;
-  ms_qn = 0;
-  ms_arm(d);
-  xlog("[xhci] mouse USB pronto, porta ");
-  xlog_hex((uint32_t)(d->port + 1));
-  xlog(boot ? " (boot)\n" : " (report)\n");
+  /* Protocolo boot: mouse com botoes, X e Y em 3 bytes fixos (o byte 3, se
+   * vier, e a roda); teclado com modificadores e 6 teclas em 8 bytes. O
+   * SET_IDLE vai por ultimo: alguns dispositivos respondem STALL. Teclado com
+   * idle 0: so manda relatorio quando algo muda (a repeticao e nossa). */
+  if (m_if >= 0) {
+    if (m_boot) (void)ctrl(d, 0x21, 0x0B, 0, (uint16_t)m_if, 0);
+    (void)ctrl(d, 0x21, 0x0A, 0, (uint16_t)m_if, 0);
+  }
+  if (k_if >= 0) {
+    (void)ctrl(d, 0x21, 0x0B, 0, (uint16_t)k_if, 0);
+    (void)ctrl(d, 0x21, 0x0A, 0, (uint16_t)k_if, 0);
+  }
+  d->kind = (m_if >= 0) ? UD_MOUSE : UD_KBD;
+  if (m_if >= 0) {
+    d->iface = m_if;
+    d->len = m_mps;
+    ms = i;
+    ms_errs = 0;
+    ms_fix = 0;
+    ms_qn = 0;
+    ms_arm(d);
+    xlog("[xhci] mouse USB pronto, porta ");
+    xlog_hex((uint32_t)(d->port + 1));
+    xlog(m_boot ? " (boot)\n" : " (report)\n");
+  }
+  if (k_if >= 0) {
+    int j;
+    d->kb_len = k_mps > 64 ? 64 : k_mps;
+    kb = i;
+    kb_errs = 0;
+    kb_fix = 0;
+    kb_rk = 0;
+    for (j = 0; j < 8; j++) kb_prev[j] = 0;
+    kb_arm(d);
+    xlog("[xhci] teclado USB pronto, porta ");
+    xlog_hex((uint32_t)(d->port + 1));
+    xlog("\n");
+  }
   return 0;
+}
+
+static int kb_has(const uint8_t* r, uint8_t u) {
+  int i;
+  for (i = 2; i < 8; i++)
+    if (r[i] == u) return 1;
+  return 0;
+}
+
+/* Relatorio boot do teclado: compara com o anterior e gera make/break. */
+static void kb_report(const uint32_t e[4]) {
+  struct udev* d = &devs[kb];
+  uint32_t cc = e[2] >> 24, n;
+  uint8_t cur[8];
+  int i;
+  if (cc != CC_OK && cc != CC_SHORT) {
+    kb_fix = 1;
+    return;
+  }
+  n = (uint32_t)d->kb_len - (e[2] & 0xFFFFFFu);
+  kb_errs = 0;
+  for (i = 0; i < 8; i++) cur[i] = (uint32_t)i < n ? d->krep[i] : 0;
+  /* ErrorRollOver (teclas demais): as 6 posicoes vem 0x01; ignora. */
+  if (n >= 3 && cur[2] != 1) {
+    for (i = 0; i < 8; i++)
+      if ((cur[0] ^ kb_prev[0]) & (1u << i)) kb_code(hid_mod_set1[i], (cur[0] >> i) & 1);
+    for (i = 2; i < 8; i++)
+      if (kb_prev[i] > 3 && !kb_has(cur, kb_prev[i])) {
+        kb_emit(kb_prev[i], 0);
+        if (kb_prev[i] == kb_rk) kb_rk = 0;
+      }
+    for (i = 2; i < 8; i++)
+      if (cur[i] > 3 && !kb_has(kb_prev, cur[i])) {
+        kb_emit(cur[i], 1);
+        /* Caps, Num e Scroll Lock nao repetem. */
+        if (cur[i] != 0x39 && cur[i] != 0x53 && cur[i] != 0x47) {
+          kb_rk = cur[i];
+          kb_rt = net_ms();
+          kb_rn = 0;
+        }
+      }
+    for (i = 0; i < 8; i++) kb_prev[i] = cur[i];
+  }
+  kb_arm(d);
 }
 
 static void ms_report(const uint32_t e[4]) {
@@ -1020,6 +1195,7 @@ static int enumerate(struct xc* x, int port, uint32_t route, int speed, int pare
   int i, slot = 0, rc, total, k, cfg, hub = 0;
   int cur_cls = -1, cur_sub = 0, cur_proto = -1, cur_alt = 0, cur_if = -1, last_bulk = 0;
   int m_if = -1, m_ep = -1, m_mps = 0, m_ival = 0, m_boot = 0;
+  int k_if = -1, k_ep = -1, k_mps = 0, k_ival = 0;
   int s_if = -1, s_in = -1, s_out = -1, s_mps = 0, s_burst = 0;
   uint32_t mps0;
   volatile uint32_t* c;
@@ -1121,6 +1297,13 @@ static int enumerate(struct xc* x, int port, uint32_t route, int speed, int pare
         m_ep = addr & 0x0F;
         m_mps = mps;
         m_ival = d->buf[k + 6];
+      } else if (cur_cls == 3 && cur_sub == 1 && cur_proto == 1 && k_ep < 0 && (addr & 0x80) &&
+                 attr == 3) {
+        /* Teclado com protocolo boot (subclasse 1, protocolo 1). */
+        k_if = cur_if;
+        k_ep = addr & 0x0F;
+        k_mps = mps;
+        k_ival = d->buf[k + 6];
       } else if (cur_cls == 8 && cur_proto == 0x50 && attr == 2 && (s_if < 0 || s_if == cur_if)) {
         s_if = cur_if;
         if ((addr & 0x80) && s_in < 0) {
@@ -1146,11 +1329,17 @@ static int enumerate(struct xc* x, int port, uint32_t route, int speed, int pare
     if (disk_setup(i, s_if, s_in, s_out, s_mps, s_burst, cfg) != 0) goto fail;
     return i;
   }
-  if (m_ep >= 0 && m_mps >= 3 && ms < 0) {
-    if (mouse_setup(i, m_if, m_ep, m_mps > 64 ? 64 : m_mps, m_ival, m_boot, cfg) != 0) goto fail;
-    return i;
+  {
+    int use_m = m_ep >= 0 && m_mps >= 3 && ms < 0;
+    int use_k = k_ep >= 0 && k_mps >= 3 && kb < 0;
+    if (use_m || use_k) {
+      if (hid_setup(i, use_m ? m_if : -1, m_ep, m_mps > 64 ? 64 : m_mps, m_ival, m_boot,
+                    use_k ? k_if : -1, k_ep, k_mps, k_ival, cfg) != 0)
+        goto fail;
+      return i;
+    }
   }
-  if (m_ep < 0 && s_in < 0) xlog("[xhci] porta sem hub, mouse ou disco\n");
+  if (m_ep < 0 && k_ep < 0 && s_in < 0) xlog("[xhci] porta sem hub, mouse, teclado ou disco\n");
 other:
   d->kind = UD_OTHER;
   return i;
@@ -1206,6 +1395,9 @@ static void evt_other(struct xc* x, const uint32_t e[4]) {
   if (type == EV_XFER && ms >= 0 && devs[ms].x == x && (int)(e[3] >> 24) == devs[ms].slot &&
       (int)((e[3] >> 16) & 0x1Fu) == devs[ms].dci_in)
     ms_report(e);
+  else if (type == EV_XFER && kb >= 0 && devs[kb].x == x && (int)(e[3] >> 24) == devs[kb].slot &&
+           (int)((e[3] >> 16) & 0x1Fu) == devs[kb].dci_kb)
+    kb_report(e);
 }
 
 /* Trata as portas raiz marcadas por evt_other (fora de qualquer espera). */
@@ -1349,6 +1541,79 @@ int xhci_mouse_poll(int* dx, int* dy, int* dz, int* btn) {
   ms_qh = (ms_qh + 1) % MSQ;
   ms_qn--;
   return 1;
+}
+
+static int irqs_on(void) {
+  uint64_t f;
+  __asm__ volatile ("pushfq; popq %0" : "=r"(f));
+  return (f & 0x200u) != 0;
+}
+
+/* Boot UEFI: liga os controladores (o firmware deixa de emular PS/2 quando
+ * eles sao nossos) e procura o teclado. 0 = teclado pronto. */
+int xhci_kbd_init(void) {
+  kb_on = 1;
+  if (kb >= 0) return 0;
+  if (busy || !xc_up(0)) return -1;
+  scan_all();
+  if (kb < 0) xlog("[xhci] nenhum teclado USB\n");
+  return kb >= 0 ? 0 : -1;
+}
+
+int xhci_kbd_ready(void) {
+  return kb >= 0;
+}
+
+/* Chamado por ps2in_pump (todo leitor de teclado passa por la): recolhe os
+ * relatorios, repete a tecla segurada e, com interrupcoes ligadas, trata
+ * teclado ligado depois do boot. Uma CPU por vez; nada se o driver ja esta
+ * no meio de outra coisa (busy). */
+void xhci_kbd_pump(void) {
+  static volatile int lk;
+  static uint32_t scan_ms;
+  uint32_t e[4];
+  int i, on;
+  if (!kb_on || busy || !xc_n) return;
+  if (__atomic_exchange_n(&lk, 1, __ATOMIC_ACQUIRE)) return;
+  on = irqs_on();
+  for (i = 0; i < xc_n; i++)
+    if (xcs[i].up)
+      while (evt_take(&xcs[i], e)) evt_other(&xcs[i], e);
+  /* O ep_reset espera o comando pelo relogio (IRQ0): so com IF ligado. */
+  if (kb_fix && kb >= 0 && on) {
+    struct udev* d = &devs[kb];
+    kb_fix = 0;
+    if (++kb_errs > 8) {
+      xlog("[xhci] teclado com erro, desligado\n");
+      kb_release_all();
+      kb = -1;
+    } else {
+      ep_reset(d, d->dci_kb, &d->rout);
+      kb_arm(d);
+    }
+  }
+  if (kb_rk && net_has_clock()) {
+    uint32_t now = net_ms();
+    if (now - kb_rt >= (kb_rn ? 33u : 500u)) {
+      kb_emit(kb_rk, 1);
+      kb_rt = now;
+      kb_rn = 1;
+    }
+  }
+  /* Teclado ligado depois (ou evento de porta perdido): a cada 500 ms. */
+  if (on && kb < 0 && net_has_clock() && net_ms() - scan_ms >= 500u) {
+    scan_ms = net_ms();
+    for (i = 0; i < xc_n; i++) {
+      uint32_t p;
+      if (!xcs[i].up) continue;
+      for (p = 0; p < xcs[i].ports && p < 32; p++) {
+        uint32_t sc = r32(xcs[i].op, 0x400 + p * 0x10);
+        if ((sc & PORT_CCS) && (sc & PORT_CSC)) xcs[i].pchg |= 1u << p;
+      }
+    }
+  }
+  if (on) port_work();
+  __atomic_store_n(&lk, 0, __ATOMIC_RELEASE);
 }
 
 int xhci_disk_init(void) {
@@ -1496,7 +1761,9 @@ int xhci_describe(char* out, int max) {
         pos = put_u(out, pos, max, (uint32_t)d->nports);
         pos = put_s(out, pos, max, " portas");
       } else if (d->kind == UD_MOUSE) {
-        pos = put_s(out, pos, max, "mouse");
+        pos = put_s(out, pos, max, j == kb ? "mouse + teclado" : "mouse");
+      } else if (d->kind == UD_KBD) {
+        pos = put_s(out, pos, max, "teclado");
       } else if (d->kind == UD_DISK) {
         pos = put_s(out, pos, max, "pendrive ");
         pos = put_s(out, pos, max, dk_name);

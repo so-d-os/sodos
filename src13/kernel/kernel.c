@@ -2052,9 +2052,28 @@ void kmain(const struct BootInfo* bi) {
   clear_screen();
   puts_k(sodos_version());
   puts_k("\n");
-  puts_k("64-bit kernel. Type HELP or WIN.\n\n");
+  puts_k("64-bit kernel. Type HELP or WIN.\n");
+  {
+    char vid[80];
+    fbcon_mode_str(vid, (int)sizeof(vid));
+    puts_k(vid);
+    serial_puts("[kernel] ");
+    serial_puts(vid);
+  }
+  puts_k("\n");
   net_init();
   irq0_probe("");
+  /* Boot UEFI (GRUB): o teclado de PC de mesa e USB, e o firmware para de
+   * emular PS/2 quando o SODOS assume os controladores. Liga o xHCI ja aqui
+   * (depois do net_init: precisa do relogio) e mostra o que achou. */
+  if (bi->firmware == BOOTINFO_FIRMWARE_UEFI) {
+    static char usb_txt[1024];
+    int kb_ok = xhci_kbd_init() == 0;
+    (void)xhci_describe(usb_txt, (int)sizeof(usb_txt));
+    puts_k(usb_txt);
+    puts_k(kb_ok ? "Teclado USB pronto.\n"
+                 : "Teclado USB nao encontrado (so o PS/2, se houver).\n");
+  }
   smp_init();
   irq0_probe(" pos-smp");
   httpd_start(8797);

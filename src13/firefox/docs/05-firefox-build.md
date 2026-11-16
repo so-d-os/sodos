@@ -890,6 +890,30 @@ de 38% para 3,6% da CPU; codigo do Firefox de 1% para 26%. Proximo item visivel
 no perfil: `sodos__tls_switch` (~10%), um `wrmsr` do FS base a cada troca de
 thread do port, que tambem sai da VM.
 
+**Trocas de thread (futex e TLS).** Quase todas as trocas vinham de
+`__so_futex` (`c_compiler/lib/misc.c`): o `FUTEX_WAIT` cedia a vez em laco
+ate o valor mudar e o `FUTEX_WAKE` nao fazia nada, entao as threads do Rust
+(Glean, WebRender, rayon) giravam pelo escalonador, cada volta com troca de
+TLS e leitura do relogio. Agora `sodos_futex_wait`/`sodos_futex_wake`
+(`sodos/port/sodos_thread.c`) poem a thread na fila de sono e o wake a acorda
+na hora (fatia de 50 ms so como rede para quem mudar o valor sem wake); a libc
+os chama por simbolo fraco. Medido: `sodos__tls_switch` de 10,8% para 0%, o
+futex de ~40% das amostras para <1%, e o browser ocioso deixa a CPU para o
+WIN. A troca do FS base tambem passou a usar `wrfsbase` quando o kernel liga o
+CR4.FSGSBASE (`kernel_entry.asm`, se o CPUID 7 tiver) e o QEMU roda com
+`-cpu host` (o `qemu64` nao tem a instrucao). No WSL2 (KVM aninhado, AMD) o
+`wrfsbase` saiu tao caro quanto o `wrmsr`; o ganho veio do futex.
+
+**Atencao: perfil antigo e o hash da instalacao.** O commit `06ad82a`
+corrigiu o `%l` do `printf` no LP64 (lia so 32 bits). O Firefox nomeia a
+instalacao com um hash de 64 bits em `%lX`: perfis criados antes guardam
+`[942EE580]` em `installs.ini` e `[Install942EE580]` em `profiles.ini`, e um
+FIREFOX.EXE ligado com o `printf` corrigido procura `77B1F61A942EE580`, cria
+um perfil novo e abre um dialogo modal que o WIN nao desenha (janela branca,
+"compositor de outro widget 0 0" e "RenderCompositorSWGL failed mapping
+default framebuffer" na serial). Conserto: `make firefox-profile-reset`, ou
+renomear as duas secoes para o hash novo.
+
 ### Mouse e teclado lentos com o Firefox aberto
 
 Medido no QEMU/KVM com `-smp 4`: **so o desktop, sem Firefox, ja usa ~92% de um

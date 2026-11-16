@@ -88,10 +88,23 @@ static void* amem(uint32_t n) {
   return a;
 }
 
-static void log_hex(const char* s, uint32_t v) {
+/* Log na COM1 e na tela: o PC real nao tem serial, e e no boot que o D:
+ * pode falhar (assim o motivo aparece sem cabo). */
+extern void puts_k(const char* s);
+static void nlog(const char* s) {
   serial_puts(s);
-  serial_hex32(v);
-  serial_puts("\n");
+  puts_k(s);
+}
+
+static void log_hex(const char* s, uint32_t v) {
+  static const char hx[] = "0123456789ABCDEF";
+  char b[10];
+  int i;
+  for (i = 0; i < 8; i++) b[i] = hx[(v >> (28 - 4 * i)) & 0xFu];
+  b[8] = '\n';
+  b[9] = 0;
+  nlog(s);
+  nlog(b);
 }
 
 /* Espera sem relogio (quem chama esta com cli): ~voltas de pause. */
@@ -203,7 +216,7 @@ static int ctrl_up(int bus, int dev, int fun) {
   nv.bar = (volatile uint8_t*)(uintptr_t)base;
   cap = r64(R_CAP);
   if ((cap >> 48) & 0xFu) {
-    serial_puts("[nvme] controlador nao aceita paginas de 4 KB\n");
+    nlog("[nvme] controlador nao aceita paginas de 4 KB\n");
     return -1;
   }
   nv.dstrd = 4u << ((cap >> 32) & 0xFu);
@@ -212,7 +225,7 @@ static int ctrl_up(int bus, int dev, int fun) {
     w32(R_CC, r32(R_CC) & ~1u);
   }
   if (wait_rdy(0, 500u * (uint32_t)(((cap >> 24) & 0xFFu) + 1u)) != 0) {
-    serial_puts("[nvme] controlador nao parou\n");
+    nlog("[nvme] controlador nao parou\n");
     return -1;
   }
   nv.asq = (uint8_t*)amem(4096u);
@@ -280,6 +293,42 @@ static int is_label(const uint8_t* b) {
   return ok32 || ok16;
 }
 
+/* O Windows grava o rotulo so na entrada de volume do diretorio raiz; no
+ * setor de boot (BS_VolLab) fica "NO NAME" (o E: deste PC e assim). O GRUB e
+ * o Windows leem o do raiz, entao aqui tambem. FAT32 com setor de 512 bytes:
+ * le ate 8 setores do primeiro cluster do raiz. nv.buf tem o setor de boot. */
+static int root_label(uint64_t first) {
+  static const char want[] = "SODOSHD    ";
+  uint8_t bs[512];
+  uint32_t spc, rsvd, nf, fsz, rc, s, k, n;
+  uint64_t lba;
+  copy(bs, nv.buf, 512u);
+  if (bs[510] != 0x55 || bs[511] != 0xAA) return 0;
+  if (bs[11] != 0 || bs[12] != 2) return 0;
+  if (bs[82] != 'F' || bs[83] != 'A' || bs[84] != 'T' || bs[85] != '3' || bs[86] != '2') return 0;
+  spc = bs[13];
+  rsvd = (uint32_t)bs[14] | ((uint32_t)bs[15] << 8);
+  nf = bs[16];
+  fsz = *(const uint32_t*)(bs + 36);
+  rc = *(const uint32_t*)(bs + 44);
+  if (!spc || !nf || !fsz || rc < 2) return 0;
+  lba = first + rsvd + (uint64_t)nf * fsz + (uint64_t)(rc - 2u) * spc;
+  n = spc > 8u ? 8u : spc;
+  for (s = 0; s < n; s++) {
+    if (raw_io(0, lba + s, 1) != 0) return 0;
+    for (k = 0; k < 512u; k += 32u) {
+      const uint8_t* e = nv.buf + k;
+      int i, ok = 1;
+      if (e[0] == 0) return 0;                       /* fim do diretorio */
+      if (e[0] == 0xE5 || e[11] == 0x0F || !(e[11] & 0x08)) continue;
+      for (i = 0; i < 11; i++)
+        if (e[i] != (uint8_t)want[i]) ok = 0;
+      return ok;                                     /* uma so entrada de rotulo */
+    }
+  }
+  return 0;
+}
+
 /* Procura na GPT a particao basic data com FAT rotulado SODOSHD. */
 static int find_part(void) {
   static const uint8_t basic[16] = {0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44,
@@ -289,7 +338,7 @@ static int find_part(void) {
   if (raw_io(0, 1, 1) != 0) return -1;
   if (nv.buf[0] != 'E' || nv.buf[1] != 'F' || nv.buf[2] != 'I' || nv.buf[3] != ' ' ||
       nv.buf[4] != 'P' || nv.buf[5] != 'A' || nv.buf[6] != 'R' || nv.buf[7] != 'T') {
-    serial_puts("[nvme] SSD sem GPT\n");
+    nlog("[nvme] SSD sem GPT\n");
     return -1;
   }
   ent_lba = *(uint64_t*)(nv.buf + 72);
@@ -310,13 +359,13 @@ static int find_part(void) {
       if (!same || last < first || last >= nv.ns_secs) continue;
       if (last - first + 1u > 0xFFFFFFFFull) continue;
       if (raw_io(0, first, 1) != 0) return -1;
-      if (!is_label(nv.buf)) continue;
+      if (!is_label(nv.buf) && !root_label(first)) continue;
       nv.part_lba = first;
       nv.part_secs = (uint32_t)(last - first + 1u);
       return 0;
     }
   }
-  serial_puts("[nvme] nenhuma particao FAT com rotulo SODOSHD\n");
+  nlog("[nvme] nenhuma particao FAT com rotulo SODOSHD\n");
   return -1;
 }
 
@@ -335,16 +384,20 @@ int nvme_init(void) {
         if (fun == 0 && (pci_rd(bus, dev, 0, 0x0C) & 0x00800000u)) nf = 8;
         if ((pci_rd(bus, dev, fun, 0x08) >> 8) != 0x010802u) continue;
         log_hex("[nvme] controlador ", (uint32_t)((bus << 8) | (dev << 3) | fun));
-        if (ctrl_up(bus, dev, fun) != 0 || find_part() != 0) continue;
-        serial_puts("[nvme] ");
-        serial_puts(nv.name);
+        if (ctrl_up(bus, dev, fun) != 0) continue;
+        nlog("[nvme] ");
+        nlog(nv.name);
+        nlog("\n");
+        if (find_part() != 0) continue;
+        nlog("[nvme] ");
+        nlog(nv.name);
         log_hex(": particao SODOSHD no setor ", (uint32_t)nv.part_lba);
         nv.state = 1;
         return 0;
       }
     }
   }
-  serial_puts("[nvme] nada encontrado\n");
+  nlog("[nvme] nada encontrado\n");
   return -1;
 }
 

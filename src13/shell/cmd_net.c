@@ -2,10 +2,12 @@
 #include "net.h"
 #include "wifi.h"
 #include "wpa.h"
+#include "r8125.h"
 
 static int usage(void) {
   puts_k("Uso: net [status]          placa e endereco atuais\n");
   puts_k("     net dhcp              pede endereco por DHCP\n");
+  puts_k("     net eth               Ethernet RTL8125: link, velocidade, contadores\n");
   puts_k("     net wifi start [cfg]  conecta usando " WIFI_CFG_PATH "\n");
   puts_k("     net wifi scan [canal] procura redes no ar (auto = 5 GHz todo)\n");
   puts_k("     net wifi stop | status | test | watch [s]\n");
@@ -84,7 +86,12 @@ static int do_wifi(int argc, char** argv) {
 
 int cmd_net(int argc, char** argv) {
   if (argc < 2 || name_eq(argv[1], "status")) {
+    if (r8125_present()) r8125_status();
     wifi_status();
+    return 0;
+  }
+  if (name_eq(argv[1], "eth")) {
+    r8125_status();
     return 0;
   }
   if (name_eq(argv[1], "dhcp") && argc > 2 && name_eq(argv[2], "renew")) {

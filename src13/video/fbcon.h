@@ -20,6 +20,8 @@ int vga_legacy(void);
 /* Liga o fbcon se o firmware for UEFI e houver framebuffer de 32 bpp. */
 int fbcon_init(const struct BootInfo* bi);
 int fbcon_active(void);
+/* Linha "Video: LxA, ..." para o boot; vazia sem fbcon. */
+void fbcon_mode_str(char* out, int max);
 /* Desenha as celulas alteradas e o cursor (pos = linha * 80 + coluna). */
 void fbcon_sync(void);
 void fbcon_cursor(int pos);

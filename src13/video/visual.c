@@ -1696,8 +1696,17 @@ static void delay_loop(void) {
   for (i = 0; i < 500000; i++) { }
 }
 
-static void ps2_wait_write(void) {
-  while ((inb(0x64) & 2)) { }
+/* 1 se o 8042 aceita um byte; 0 se ficou ocupado (~100 ms) ou nao existe.
+ * Sem limite, um PC sem 8042 (0x64 = 0xFF) ou com o buffer travado prendia o
+ * WIN aqui para sempre, antes de desenhar a tela. */
+static int ps2_wait_write(void) {
+  uint32_t t0 = net_ms(), spins = 0;
+  for (;;) {
+    uint8_t st = inb(0x64);
+    if (st == 0xFF) return 0;
+    if (!(st & 2)) return 1;
+    if (net_has_clock() ? (net_ms() - t0) >= 100u : ++spins > 2000000u) return 0;
+  }
 }
 
 /* 1 se um mouse PS/2 (de verdade ou emulado pelo firmware) respondeu 0xFA ao F4.
@@ -1705,30 +1714,34 @@ static void ps2_wait_write(void) {
 static int ps2_mouse_init(void) {
   uint32_t t0, spins = 0;
   int ack = 0;
-  ps2_wait_write();
+  if (inb(0x64) == 0xFF) return 0;   /* sem controlador */
+  if (!ps2_wait_write()) return 0;
   outb(0x64, 0xA8);
   for (volatile int i = 0; i < 10000; i++) { }
-  ps2_wait_write();
+  if (!ps2_wait_write()) return 0;
   outb(0x64, 0xD4);
-  ps2_wait_write();
+  if (!ps2_wait_write()) return 0;
   outb(0x60, 0xF4);
   t0 = net_ms();
   for (;;) {
     uint8_t st = inb(0x64);
+    /* O limite vale tambem com dado pendente: 0xFF ou um buffer que nunca
+     * esvazia nao podem segurar o laco. */
+    if (net_has_clock() ? (net_ms() - t0) >= 50u : ++spins > 2000000u) break;
+    if (st == 0xFF) break;
     if (st & 1) {
       uint8_t b = inb(0x60);
       if ((st & 0x20) && b == 0xFA) ack = 1;
       continue;
     }
     if (ack) break;
-    if (net_has_clock() ? (net_ms() - t0) >= 50u : ++spins > 2000000u) break;
   }
   return ack;
 }
 
 /* Alguns controladores deixam a porta 1 (teclado) desativada apos comandos ao auxiliar. */
 static void ps2_enable_keyboard_port(void) {
-  ps2_wait_write();
+  if (!ps2_wait_write()) return;
   outb(0x64, 0xAE);
 }
 

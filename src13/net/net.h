@@ -73,6 +73,9 @@ struct net_link {
   void (*tick)(void);
 };
 void net_attach(const struct net_link* l);
+/* Placa de cabo no lugar da NE2000 (RTL8125): fica sendo a placa padrao,
+ * para onde net_attach(0) volta quando o WiFi desliga. */
+void net_attach_base(const struct net_link* l);
 /* "NE2000", o nome da placa ligada por net_attach, ou NULL sem placa. */
 const char* net_link_name(void);
 /* Pede endereco por DHCP. 0 = ok; -1 sem placa; -2 ninguem respondeu. */

@@ -15,6 +15,7 @@
 void ps2in_init(void);              /* liga IRQ1/IRQ12 no 8042 e no PIC */
 void ps2in_isr(void);               /* chamada pela IRQ1 e pela IRQ12 */
 void ps2in_pump(void);              /* esvazia o controlador nas filas */
+void ps2in_inject(uint8_t b);       /* byte de teclado vindo do USB (xhci.c) */
 
 /* 1 com o byte em *b (e o tick em que chegou em *t, se t != 0); 0 se vazia. */
 int ps2in_kbd(uint8_t* b, uint32_t* t);
