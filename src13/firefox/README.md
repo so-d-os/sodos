@@ -27,6 +27,12 @@ O código do Firefox em si não é copiado para o repositório; `setup.sh` baixa
 > CPUs o app C8X (Flutter/wasm) carrega em ~13 s em vez de ~26 s. Ver
 > [docs/06-threads-smp.md](docs/06-threads-smp.md).
 
+> **Estado em 2026-11-16:** **WebGL 2** em GL de software: Mesa 25 (EGL
+> surfaceless + llvmpipe com LLVM 18) ligado dentro do FIREFOX.EXE. O C8X
+> (Flutter) deixa o CanvasKit em software na thread principal; a tecla no campo
+> CPF cai de ~0,9 s para ~0,26 s (maximizado: 1,3–2,3 s → ~0,44 s). Ver
+> [docs/07-webgl.md](docs/07-webgl.md).
+
 ## O que já funciona
 
 **M0 — `SODOS.DLL` + `FBOOT.EXE`** (17 testes, 18 com rede): threads

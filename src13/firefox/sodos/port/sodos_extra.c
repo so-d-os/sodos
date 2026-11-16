@@ -121,12 +121,19 @@ extern void* NSC_GetInterface(void*, void*, void*, unsigned long) __attribute__(
 extern void* FC_GetInterface(void*, void*, void*, unsigned long) __attribute__((weak));
 extern void* NSC_ModuleDBFunc(unsigned long, char*, void*) __attribute__((weak));
 extern const void* FREEBL_GetVector(void) __attribute__((weak));
+/* Mesa (EGL + GLES em software, sodos/scripts/build-mesa.sh): o GLLibraryEGL
+ * do Firefox abre libEGL.so e libGLESv2.so e procura cada funcao por nome;
+ * o eglGetProcAddress do Mesa acha as funcoes EGL e GL. */
+#define DL_MESA ((void*)4)
+extern void* sodos_mesa_eglGetProcAddress(const char*) __attribute__((weak));
 
 void* dlopen(const char* f, int m) {
   (void)m;
   if (!f) return DL_SELF;
   if (strstr(f, "softokn3") && NSC_GetFunctionList) return DL_SOFTOKN;
   if (strstr(f, "freebl") && FREEBL_GetVector) return DL_FREEBL;
+  if ((strstr(f, "libEGL") || strstr(f, "libGLESv2")) && sodos_mesa_eglGetProcAddress)
+    return DL_MESA;
   return 0;
 }
 
@@ -143,6 +150,7 @@ void* dlsym(void* h, const char* n) {
     if (!strcmp(n, "NSC_ModuleDBFunc")) return (void*)NSC_ModuleDBFunc;
     return 0;
   }
+  if (h == DL_MESA) return sodos_mesa_eglGetProcAddress(n);
   if (h == DL_FREEBL) {
     if (!strcmp(n, "FREEBL_GetVector")) return (void*)FREEBL_GetVector;
     return 0;

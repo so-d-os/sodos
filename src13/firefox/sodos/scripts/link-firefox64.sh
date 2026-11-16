@@ -59,7 +59,13 @@ open(p, "w").write("\n".join(out) + "\n")
 print("objetos:", len(out))
 EOF
 
+# Mesa (WebGL em GL de software): sodos/scripts/build-mesa.sh. Sem ele o
+# dlopen("libEGL.so") falha como antes e o WebGL fica desligado.
+MESA=${MESA_OBJ:-$HOME/ffsrc/mesa-build/mesa_sodos.o}
+[ -f "$MESA" ] || MESA=
+[ -n "$MESA" ] && echo "mesa: $MESA"
+
 export PATH="$S/toolchain/bin:$PATH"
 x86_64-sodos-g++64 -o "${FIREFOX_OUT:-$O/dist/bin/FIREFOX.EXE}" "@$T/objs.list" \
-  "$O/x86_64-sodos/release/libgkrust.a" "$O/build/pure_virtual/libpure_virtual.a"
+  $MESA "$O/x86_64-sodos/release/libgkrust.a" "$O/build/pure_virtual/libpure_virtual.a"
 ls -la "${FIREFOX_OUT:-$O/dist/bin/FIREFOX.EXE}"

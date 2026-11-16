@@ -91,3 +91,7 @@ pref("browser.backup.scheduled.enabled", false);
 pref("browser.backup.archive.enabled", false);
 // Audio: so ha o backend nulo do SODOS (cubeb_sodos.c), sem som por enquanto.
 pref("media.cubeb.backend", "sodos");
+// WebGL em GL de software (Mesa ligado no FIREFOX.EXE, docs/07-webgl.md). Sem
+// GPU o gfxInfo marcaria FORBID_HARDWARE e o caminho EGL so tenta o display
+// de software do GTK; force-enabled usa o display EGL padrao (surfaceless).
+pref("webgl.force-enabled", true);

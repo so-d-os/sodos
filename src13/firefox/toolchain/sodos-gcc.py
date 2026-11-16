@@ -78,6 +78,12 @@ def print_info(arg):
     if arg in ("-dumpmachine", "-print-target-triple"):
         print("x86_64-pc-sodos")
         return 0
+    if arg in ("-print-search-dirs", "--print-search-dirs"):
+        # O meson pergunta isso ao procurar bibliotecas estaticas (LLVM do Mesa).
+        print("install: %s/" % os.path.join(ROOT, "build"))
+        print("programs: =/usr/bin")
+        print("libraries: =%s" % os.path.join(ROOT, "build"))
+        return 0
     if arg.startswith("-print-file-name="):
         print(arg.split("=", 1)[1])
         return 0
@@ -387,6 +393,9 @@ def main():
     # O meson pergunta "-m64 --version": flags -m de ABI antes da consulta
     # nao mudam a resposta.
     info = [a for a in args if a not in ("-m64", "-mx32", "-m32")]
+    for a in ("-print-search-dirs", "--print-search-dirs"):
+        if a in info:
+            info = [a]
     if info:
         r = print_info(info[0])
         if r is not None:
