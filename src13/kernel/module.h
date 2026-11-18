@@ -115,6 +115,7 @@ struct mod_cpu {
   uint32_t depth;
   char drive;
   uint64_t fs;   /* FS base (TLS do programa): cada tarefa tem o seu */
+  uint64_t teb;  /* TEB do Windows (WINE.DLL) da tarefa; 0 = nenhum */
   int bkl;       /* profundidade do BKL do mundo nesta tarefa (kthread.c) */
 };
 

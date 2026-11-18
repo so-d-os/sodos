@@ -41,6 +41,8 @@ struct nv {
   uint32_t part_secs;
   char name[41];
   int state;                   /* 0 nunca tentou, 1 pronto, <0 falhou */
+  int raw;                     /* 1 = namespace 1 legivel cru (nvme_raw_read) */
+  uint32_t first_bdf;          /* 0x10000 | bdf do primeiro controlador que ligou */
 };
 
 static struct nv nv;
@@ -375,6 +377,7 @@ int nvme_init(void) {
   if (nv.state < 0) return nv.state;
   nv.state = -1;
   if (!mm_ready()) return -1;
+  nv.raw = 0;
   for (bus = 0; bus < 256; bus++) {
     for (dev = 0; dev < 32; dev++) {
       int nf = 1;
@@ -388,17 +391,50 @@ int nvme_init(void) {
         nlog("[nvme] ");
         nlog(nv.name);
         nlog("\n");
+        if (!nv.first_bdf) nv.first_bdf = 0x10000u | (uint32_t)((bus << 8) | (dev << 3) | fun);
         if (find_part() != 0) continue;
         nlog("[nvme] ");
         nlog(nv.name);
         log_hex(": particao SODOSHD no setor ", (uint32_t)nv.part_lba);
         nv.state = 1;
+        nv.raw = 1;
         return 0;
       }
     }
   }
+  /* Sem SODOSHD: o primeiro SSD ainda serve para leitura crua (WSL). */
+  if (nv.first_bdf) {
+    uint32_t b = nv.first_bdf & 0xFFFFu;
+    if (ctrl_up((int)(b >> 8), (int)((b >> 3) & 31u), (int)(b & 7u)) == 0) {
+      nv.raw = 1;
+      nlog("[nvme] sem SODOSHD; SSD so para leitura crua\n");
+    }
+  }
   nlog("[nvme] nada encontrado\n");
   return -1;
+}
+
+/* ---- leitura crua do namespace 1 inteiro (so leitura, nunca grava) ----
+ * Para o WSL.EXE ler o NTFS do Windows. Inicializa o driver se preciso. */
+int nvme_raw_read(uint64_t lba, uint32_t count, void* buf) {
+  uint8_t* p = (uint8_t*)buf;
+  if (!nv.raw && nv.state == 0) nvme_init();
+  if (!nv.raw || !p || count == 0) return -2;
+  if (lba >= nv.ns_secs || count > nv.ns_secs - lba) return -1;
+  while (count) {
+    uint32_t k = count > nv.max_sec ? nv.max_sec : count;
+    if (raw_io(0, lba, k) != 0) return -3;
+    copy(p, nv.buf, k * 512u);
+    p += k * 512u;
+    lba += k;
+    count -= k;
+  }
+  return 0;
+}
+
+uint64_t nvme_raw_sectors(void) {
+  if (!nv.raw && nv.state == 0) nvme_init();
+  return nv.raw ? nv.ns_secs : 0;
 }
 
 uint32_t nvme_sectors(void) { return nv.state == 1 ? nv.part_secs : 0; }

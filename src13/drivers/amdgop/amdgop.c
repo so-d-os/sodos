@@ -21,8 +21,14 @@
 #include "gpu.h"
 
 /* AMDSMC.DLL (-DAMD_SMC): o AMDCUR.DLL mais a etapa C2 da RX 570 (carrega o
- * firmware do SMU). AMDGOP_SIM: teste no host (drivers/amdgop/smcsim.c), os
+ * firmware do SMU). AMDSDMA.DLL (-DAMD_SDMA): o AMDSMC mais a etapa E (liga
+ * o motor de copia SDMA0 e o testa). AMDGOP_SIM: teste no host (drivers/amdgop/smcsim.c), os
  * registradores da Polaris passam por sim_r/sim_w em vez do BAR5. */
+#ifdef AMD_SDMA
+#ifndef AMD_SMC
+#define AMD_SMC
+#endif
+#endif
 #ifdef AMD_SMC
 #ifndef AMD_CURSOR
 #define AMD_CURSOR
@@ -460,6 +466,588 @@ static int polaris_smc_carrega(void) {
 }
 #endif
 
+#ifdef AMD_SDMA
+/* ---------------------------------------------------------------------------
+ * Etapa E da RX 570: o motor de copia SDMA0 (sdma_v3_0 do Linux 6.12).
+ *
+ * 1. microcodigo: na Polaris o amdgpu carrega pelo SMU (AMDGPU_FW_LOAD_SMU,
+ *    smu7_request_smu_load_fw): o ucode do polaris10_sdma.bin vai para a
+ *    VRAM, uma tabela SMU_DRAMData_TOC aponta para ele, e as mensagens
+ *    SMU_DRAM_ADDR, DRV_DRAM_ADDR e LoadUcodes pedem a carga; o SMU marca o
+ *    bit em SoftRegisters.UcodeLoadStatus. So a SDMA0 (mascara 0x2).
+ * 2. anel de 4 KB na VRAM, sem doorbell nem polling de wptr (o wptr vai pelo
+ *    registrador), rptr escrito pela SDMA na VRAM; VMID 0 com a VM desligada
+ *    (etapa A): os enderecos sao os do MC (0xF4_xxxx_xxxx = VRAM).
+ * 3. testes: escrita de uma palavra, preenchimento (CONST_FILL) e copia
+ *    (COPY linear) de 4 MB, cada um com FENCE; confere pela CPU e mede.
+ *
+ * Tudo fica em VRAM livre entre 32 e 44 MB (a tela GOP ocupa os primeiros
+ * 8 MB e o cursor fica em 16 MB); o kernel mapeia 64 MB do framebuffer.
+ * Escritas da CPU na VRAM passam pelo HDP: sfence + HDP flush antes de a
+ * placa ler, e HDP_DEBUG0 (invalida) antes de a CPU ler o que a placa
+ * escreveu.
+ * ------------------------------------------------------------------------- */
+#define SD_FW_NOME "P10SDMA.BIN"
+#define SD_TOC 0x02000000u
+#define SD_UCODE 0x02001000u
+#define SD_UCODE_MAX 0x10000u
+#define SD_SMUBUF 0x02100000u        /* 200 paginas para o SMU (smu_buffer) */
+#define SD_RING 0x02200000u
+#define SD_RING_DW 1024u              /* 4 KB: RB_SIZE = log2(1024) = 10 */
+#define SD_WB 0x02201000u             /* rptr escrito pela SDMA */
+#define SD_TESTE 0x02201080u          /* palavra do teste de escrita */
+#define SD_FENCE 0x022010C0u
+#define SD_A 0x02400000u
+#define SD_B 0x02800000u
+#define SD_TAM 0x00400000u            /* 4 MB por teste */
+#define SD_FIM 0x02C00000u
+
+/* registradores (oss_3_0_d.h, bif_5_0_d.h) */
+#define SD0_UCODE_ADDR 0x3400u
+#define SD0_CLK_CTRL 0x3403u
+#define SD0_CNTL 0x3404u
+#define SD0_CHICKEN_BITS 0x3405u
+#define SD0_TILING_CONFIG 0x3406u
+#define SD0_SEM_WAIT_FAIL_TIMER_CNTL 0x3409u
+#define SD0_STATUS_REG 0x340Du
+#define SD0_F32_CNTL 0x3412u
+#define SD0_GFX_RB_CNTL 0x3480u
+#define SD0_GFX_RB_BASE 0x3481u
+#define SD0_GFX_RB_BASE_HI 0x3482u
+#define SD0_GFX_RB_RPTR 0x3483u
+#define SD0_GFX_RB_WPTR 0x3484u
+#define SD0_GFX_RB_WPTR_POLL_CNTL 0x3485u
+#define SD0_GFX_RB_WPTR_POLL_ADDR_HI 0x3486u
+#define SD0_GFX_RB_WPTR_POLL_ADDR_LO 0x3487u
+#define SD0_GFX_RB_RPTR_ADDR_HI 0x3488u
+#define SD0_GFX_RB_RPTR_ADDR_LO 0x3489u
+#define SD0_GFX_IB_CNTL 0x348Au
+#define SD0_GFX_IB_RPTR 0x348Bu
+#define SD0_GFX_IB_OFFSET 0x348Cu
+#define SD0_GFX_DOORBELL 0x3492u
+#define SD0_GFX_VIRTUAL_ADDR 0x34A7u
+#define SD0_GFX_APE1_CNTL 0x34A8u
+#define SD_HDP_FLUSH_CNTL 0x1520u     /* HDP_MEM_COHERENCY_FLUSH_CNTL */
+#define SD_HDP_DEBUG0 0x0BCCu
+#define SD_SRBM_STATUS2 0x0393u
+/* campos */
+#define SD_F32_HALT 1u
+#define SD_CNTL_ATC_L1 0x2u
+#define SD_CNTL_AUTO_CTXSW 0x40000u
+#define SD_RB_ENABLE 1u
+#define SD_RB_SIZE_MASK 0x3Eu
+#define SD_RB_RPTR_WB 0x1000u
+#define SD_IB_ENABLE 1u
+#define SD_DOORBELL_EN 0x10000000u
+/* pacotes (tonga_sdma_pkt_open.h) */
+#define SD_OP_NOP 0u
+#define SD_OP_COPY 1u
+#define SD_OP_WRITE 2u
+#define SD_OP_FENCE 5u
+#define SD_OP_CONST_FILL 11u
+#define SD_FILL_MAX 0x200000u          /* CONST_FILL: o Linux usa ate 0x3FFFE0 bytes */
+/* CONSTANT_FILL_HEADER.fillsize (bits 31:30). Com 0 (como o Linux manda) a
+ * RX 570 repete so o byte baixo: 0x5AA5C33C virou 3C3C3C3C (2026-11-18).
+ * 2 = palavra de 32 bits. */
+#define SD_FILL_DW (2u << 30)
+#define SD_COPY_MAX 0x100000u          /* COPY linear: o Linux usa ate 0x1FFFFF bytes */
+/* SMU */
+#define SD_MSG_DRV_DRAM_HI 0x250u
+#define SD_MSG_DRV_DRAM_LO 0x251u
+#define SD_MSG_SMU_DRAM_HI 0x252u
+#define SD_MSG_SMU_DRAM_LO 0x253u
+#define SD_MSG_LOAD_UCODES 0x254u
+#define SD_UCODE_ID_SDMA0 1u
+#define SD_UCODE_SDMA0_MASK 0x2u
+#define SD_SOFTREGS_PTR 0x20030u      /* SMU74_Firmware_Header.SoftRegisters */
+#define SD_UCODE_LOAD_STATUS 108u     /* offsetof(SMU74_SoftRegisters, UcodeLoadStatus) */
+
+static uint64_t sd_mc;                /* endereco MC do inicio da VRAM (fb_lo) */
+static volatile uint8_t* sd_cpu;      /* o mesmo para a CPU (m.fb, fb - BAR0 = 0) */
+static uint32_t sd_wptr;              /* em palavras */
+static uint32_t sd_seq;
+static int sd_ligada;
+
+static volatile uint32_t* sd_p(uint32_t off) { return (volatile uint32_t*)(sd_cpu + off); }
+
+static void sd_hdp_flush(void) {
+  __asm__ volatile ("sfence" ::: "memory");
+  pl_w(SD_HDP_FLUSH_CNTL, 1);
+  (void)pl_r(SD_HDP_FLUSH_CNTL);
+}
+
+static uint32_t sd_le(uint32_t off) {
+  pl_w(SD_HDP_DEBUG0, 1);   /* invalida o cache de leitura do HDP */
+  return *sd_p(off);
+}
+
+static void sd_put(uint32_t v) {
+  *sd_p(SD_RING + (sd_wptr % SD_RING_DW) * 4u) = v;
+  sd_wptr++;
+}
+
+/* entrega o que foi escrito no anel e espera o fence (ou o rptr) */
+static int sd_executa(uint32_t ms) {
+  uint32_t t0, voltas = 0, seq = ++sd_seq;
+  sd_put(SD_OP_FENCE);
+  sd_put((uint32_t)(sd_mc + SD_FENCE));
+  sd_put((uint32_t)((sd_mc + SD_FENCE) >> 32));
+  sd_put(seq);
+  sd_hdp_flush();
+  pl_w(SD0_GFX_RB_WPTR, (sd_wptr % SD_RING_DW) << 2);
+  t0 = k->ms();
+  for (;;) {
+    if (sd_le(SD_FENCE) == seq) return 0;
+    if (k->ms() - t0 > ms || ++voltas > 50000000u) {
+      log_kv("[amdsdma] sem fence: esperado ", seq);
+      log_kv(" fence ", sd_le(SD_FENCE));
+      log_kv(" rptr ", pl_r(SD0_GFX_RB_RPTR));
+      log_kv(" wptr ", pl_r(SD0_GFX_RB_WPTR));
+      log_kv(" status ", pl_r(SD0_STATUS_REG));
+      log_kv(" f32 ", pl_r(SD0_F32_CNTL));
+      log_kv(" srbm2 ", pl_r(SD_SRBM_STATUS2));
+      k->log("\n");
+      return -1;
+    }
+  }
+}
+
+/* le \SODOS\FW\P10SDMA.BIN e (grava = 1) poe o ucode na VRAM; devolve o
+ * tamanho do ucode ou 0 */
+static uint32_t sd_ucode_le(uint32_t* versao, int grava) {
+  uint8_t* fw;
+  int tam, n;
+  uint32_t hsize, vmaj, ucode, off, i;
+  if (k->ext != GPU_KAPI_EXT || !k->fw_size || !k->fw_read) return 0;
+  tam = k->fw_size(SD_FW_NOME);
+  if (tam < 0x34 + 4 || tam > 0x20000) {
+    log_kv("[amdsdma] sem \\SODOS\\FW\\" SD_FW_NOME " valido, tamanho ", (uint32_t)tam);
+    k->log("\n");
+    return 0;
+  }
+  fw = (uint8_t*)k->alloc((uint32_t)tam, 64);
+  if (!fw) return 0;
+  n = k->fw_read(SD_FW_NOME, fw, (uint32_t)tam);
+  /* sdma_firmware_header_v1_0 = common_firmware_header + 4 palavras */
+  hsize = le32(fw);
+  vmaj = le32(fw + 8) & 0xFFFFu;
+  *versao = le32(fw + 16);
+  ucode = le32(fw + 20);
+  off = le32(fw + 24);
+  log_kv("[amdsdma] " SD_FW_NOME " bytes ", (uint32_t)n);
+  log_kv(" v", vmaj);
+  log_kv(" ucode_versao ", *versao);
+  log_kv(" ucode ", ucode);
+  log_kv(" em ", off);
+  k->log("\n");
+  if (n != tam || hsize != (uint32_t)tam || vmaj != 1u || ucode == 0 || (ucode & 3u) ||
+      off < 0x34u || off + ucode > (uint32_t)tam || ucode > SD_UCODE_MAX) {
+    k->log("[amdsdma] cabecalho invalido\n");
+    k->free(fw);
+    return 0;
+  }
+  if (grava)
+    for (i = 0; i < ucode; i += 4) *sd_p(SD_UCODE + i) = le32(fw + off + i);
+  k->free(fw);
+  return ucode;
+}
+
+static int sd_msg(uint32_t msg, uint32_t arg, const char* nome) {
+  int r = pl_smc_msg(msg, arg);
+  if (r != 1) {
+    k->log("[amdsdma] SMU recusou ");
+    k->log(nome);
+    log_kv(": resp ", (uint32_t)r);
+    k->log("\n");
+    return -1;
+  }
+  return 0;
+}
+
+/* 1. microcodigo da SDMA0 pelo SMU */
+static int sd_carrega_ucode(void) {
+  uint32_t soft, st, versao = 0, tam, idx, t0, voltas = 0;
+  uint64_t a;
+  volatile uint32_t* toc = sd_p(SD_TOC);
+  int i;
+  idx = pl_r(PL_SMC_IND_INDEX_11);
+  soft = pl_smc_r(SD_SOFTREGS_PTR);
+  /* SMU74_SoftRegisters tem 120 bytes; no polaris10_k_smc.bin fica em 0x3FA24 */
+  if (soft < 0x20000u || soft + 0x80u > 0x40000u || (soft & 3u)) {
+    log_kv("[amdsdma] SoftRegisters fora da RAM do SMC: ", soft);
+    k->log("\n");
+    pl_w(PL_SMC_IND_INDEX_11, idx);
+    return -1;
+  }
+  st = pl_smc_r(soft + SD_UCODE_LOAD_STATUS);
+  pl_w(PL_SMC_IND_INDEX_11, idx);
+  tam = sd_ucode_le(&versao, 1);
+  if (!tam) return -1;
+  /* SMU_DRAMData_TOC: versao 1, uma entrada (SMU_Entry, 28 bytes) */
+  for (i = 0; i < 1024; i++) toc[i] = 0;
+  a = sd_mc + SD_UCODE;
+  toc[0] = 1;                                           /* structure_version */
+  toc[1] = 1;                                           /* num_entries */
+  toc[2] = SD_UCODE_ID_SDMA0 | (versao & 0xFFFFu) << 16; /* id, version */
+  toc[3] = (uint32_t)(a >> 32);                         /* image_addr_high */
+  toc[4] = (uint32_t)a;                                 /* image_addr_low */
+  toc[5] = 0;                                           /* meta_data_addr_high */
+  toc[6] = 0;                                           /* meta_data_addr_low */
+  toc[7] = tam;                                         /* data_size_byte */
+  toc[8] = 0;                                           /* flags, num_register_entries */
+  sd_hdp_flush();
+  idx = pl_r(PL_SMC_IND_INDEX_11);
+  pl_smc_w(soft + SD_UCODE_LOAD_STATUS, 0);
+  pl_w(PL_SMC_IND_INDEX_11, idx);
+  log_kv("[amdsdma] soft_regs ", soft);
+  log_kv(" status antes ", st);
+  log_kv(" toc ", (uint32_t)((sd_mc + SD_TOC) >> 32));
+  log_kv(":", (uint32_t)(sd_mc + SD_TOC));
+  k->log("\n");
+  /* como smu7_request_smu_load_fw: as respostas so vao para o log; quem diz
+   * se carregou e o UcodeLoadStatus */
+  (void)sd_msg(SD_MSG_SMU_DRAM_HI, (uint32_t)((sd_mc + SD_SMUBUF) >> 32), "SMU_DRAM_ADDR_HI");
+  (void)sd_msg(SD_MSG_SMU_DRAM_LO, (uint32_t)(sd_mc + SD_SMUBUF), "SMU_DRAM_ADDR_LO");
+  (void)sd_msg(SD_MSG_DRV_DRAM_HI, (uint32_t)((sd_mc + SD_TOC) >> 32), "DRV_DRAM_ADDR_HI");
+  (void)sd_msg(SD_MSG_DRV_DRAM_LO, (uint32_t)(sd_mc + SD_TOC), "DRV_DRAM_ADDR_LO");
+  (void)sd_msg(SD_MSG_LOAD_UCODES, SD_UCODE_SDMA0_MASK, "LoadUcodes");
+  t0 = k->ms();
+  for (;;) {
+    idx = pl_r(PL_SMC_IND_INDEX_11);
+    st = pl_smc_r(soft + SD_UCODE_LOAD_STATUS);
+    pl_w(PL_SMC_IND_INDEX_11, idx);
+    if ((st & SD_UCODE_SDMA0_MASK) == SD_UCODE_SDMA0_MASK) break;
+    if (k->ms() - t0 > 2000u || ++voltas > 20000000u) {
+      log_kv("[amdsdma] SMU nao carregou a SDMA0: UcodeLoadStatus ", st);
+      k->log("\n");
+      return -3;
+    }
+  }
+  log_kv("[amdsdma] ucode da SDMA0 carregado pelo SMU: versao ", versao);
+  log_kv(" bytes ", tam);
+  log_kv(" status ", st);
+  k->log("\n");
+  return 0;
+}
+
+static void sd_para(void) {
+  pl_w(SD0_GFX_RB_CNTL, pl_r(SD0_GFX_RB_CNTL) & ~SD_RB_ENABLE);
+  pl_w(SD0_GFX_IB_CNTL, pl_r(SD0_GFX_IB_CNTL) & ~SD_IB_ENABLE);
+  pl_w(SD0_F32_CNTL, pl_r(SD0_F32_CNTL) | SD_F32_HALT);
+}
+
+/* 2. anel (sdma_v3_0_start / gfx_resume, so a SDMA0 e a VMID 0) */
+static int sd_liga(void) {
+  uint32_t v;
+  uint64_t ring = sd_mc + SD_RING, wb = sd_mc + SD_WB;
+  int i;
+  /* golden_settings_polaris10_a11 da SDMA0 */
+  pl_w(SD0_CHICKEN_BITS, (pl_r(SD0_CHICKEN_BITS) & ~0xFC910007u) | 0x00810007u);
+  pl_w(SD0_CLK_CTRL, pl_r(SD0_CLK_CTRL) & ~0xFF000FFFu);
+  pl_w(SD0_GFX_IB_CNTL, (pl_r(SD0_GFX_IB_CNTL) & ~0x800F0111u) | 0x00000100u);
+  /* parada antes de programar */
+  pl_w(SD0_CNTL, (pl_r(SD0_CNTL) & ~SD_CNTL_AUTO_CTXSW) | SD_CNTL_ATC_L1);
+  sd_para();
+  for (i = 0; i < (int)SD_RING_DW; i++) *sd_p(SD_RING + (uint32_t)i * 4u) = 0;
+  *sd_p(SD_WB) = 0;
+  *sd_p(SD_FENCE) = 0;
+  sd_hdp_flush();
+  pl_w(SD0_GFX_VIRTUAL_ADDR, 0);
+  pl_w(SD0_GFX_APE1_CNTL, 0);
+  pl_w(SD0_TILING_CONFIG, pl_r(PL_GB_ADDR_CONFIG) & 0x70u);
+  pl_w(SD0_SEM_WAIT_FAIL_TIMER_CNTL, 0);
+  v = (pl_r(SD0_GFX_RB_CNTL) & ~(SD_RB_SIZE_MASK | SD_RB_ENABLE)) | 10u << 1;
+  pl_w(SD0_GFX_RB_CNTL, v);
+  sd_wptr = 0;
+  pl_w(SD0_GFX_RB_RPTR, 0);
+  pl_w(SD0_GFX_RB_WPTR, 0);
+  pl_w(SD0_GFX_IB_RPTR, 0);
+  pl_w(SD0_GFX_IB_OFFSET, 0);
+  pl_w(SD0_GFX_RB_RPTR_ADDR_HI, (uint32_t)(wb >> 32));
+  pl_w(SD0_GFX_RB_RPTR_ADDR_LO, (uint32_t)wb & 0xFFFFFFFCu);
+  v |= SD_RB_RPTR_WB;
+  pl_w(SD0_GFX_RB_BASE, (uint32_t)(ring >> 8));
+  pl_w(SD0_GFX_RB_BASE_HI, (uint32_t)(ring >> 40));
+  pl_w(SD0_GFX_DOORBELL, pl_r(SD0_GFX_DOORBELL) & ~SD_DOORBELL_EN);
+  pl_w(SD0_GFX_RB_WPTR_POLL_ADDR_LO, (uint32_t)(wb + 0x40u));
+  pl_w(SD0_GFX_RB_WPTR_POLL_ADDR_HI, (uint32_t)((wb + 0x40u) >> 32));
+  pl_w(SD0_GFX_RB_WPTR_POLL_CNTL, pl_r(SD0_GFX_RB_WPTR_POLL_CNTL) & ~1u);
+  pl_w(SD0_GFX_RB_CNTL, v | SD_RB_ENABLE);
+  pl_w(SD0_GFX_IB_CNTL, pl_r(SD0_GFX_IB_CNTL) | SD_IB_ENABLE);
+  /* solta o F32 e liga a troca de contexto */
+  pl_w(SD0_F32_CNTL, pl_r(SD0_F32_CNTL) & ~SD_F32_HALT);
+  pl_w(SD0_CNTL, pl_r(SD0_CNTL) | SD_CNTL_AUTO_CTXSW | SD_CNTL_ATC_L1);
+  sd_ligada = 1;
+  log_kv("[amdsdma] anel ", (uint32_t)(ring >> 32));
+  log_kv(":", (uint32_t)ring);
+  log_kv(" rb_cntl ", pl_r(SD0_GFX_RB_CNTL));
+  log_kv(" f32 ", pl_r(SD0_F32_CNTL));
+  log_kv(" status ", pl_r(SD0_STATUS_REG));
+  k->log("\n");
+  return 0;
+}
+
+/* 3. testes */
+static int sd_testes(void) {
+  uint32_t i, ruins = 0;
+  uint64_t t;
+  /* escrita de uma palavra (sdma_v3_0_ring_test_ring) */
+  *sd_p(SD_TESTE) = 0xCAFEDEADu;
+  sd_put(SD_OP_WRITE);
+  sd_put((uint32_t)(sd_mc + SD_TESTE));
+  sd_put((uint32_t)((sd_mc + SD_TESTE) >> 32));
+  sd_put(1);
+  sd_put(0xDEADBEEFu);
+  if (sd_executa(1000) != 0) return -1;
+  if (sd_le(SD_TESTE) != 0xDEADBEEFu) {
+    log_kv("[amdsdma] teste de escrita: lido ", sd_le(SD_TESTE));
+    k->log("\n");
+    return -2;
+  }
+  k->log("[amdsdma] escrita pela SDMA ok\n");
+  /* preenchimento de 4 MB */
+  /* como sdma_v3_0_emit_fill_buffer, mas com fillsize 2 (32 bits); contagem
+   * em bytes */
+  t = tsc();
+  for (i = 0; i < SD_TAM; i += SD_FILL_MAX) {
+    sd_put(SD_OP_CONST_FILL | SD_FILL_DW);
+    sd_put((uint32_t)(sd_mc + SD_A + i));
+    sd_put((uint32_t)((sd_mc + SD_A + i) >> 32));
+    sd_put(0x5AA5C33Cu);
+    sd_put(SD_FILL_MAX);
+  }
+  if (sd_executa(2000) != 0) return -3;
+  t = tsc() - t;
+  for (i = 0; i < SD_TAM; i += 4096u)
+    if (sd_le(SD_A + i) != 0x5AA5C33Cu || sd_le(SD_A + i + 4092u) != 0x5AA5C33Cu) ruins++;
+  log_kv("[amdsdma] preenchimento de 4 MB: ciclos ", (uint32_t)t);
+  log_kv(" paginas erradas ", ruins);
+  log_kv(" (primeira palavra ", sd_le(SD_A));
+  k->log(")");
+  k->log("\n");
+  if (ruins) return -4;
+  /* copia de 4 MB (A com um padrao por palavra -> B) */
+  for (i = 0; i < SD_TAM; i += 4096u) *sd_p(SD_A + i) = i ^ 0x13572468u;
+  sd_hdp_flush();
+  t = tsc();
+  for (i = 0; i < SD_TAM; i += SD_COPY_MAX) {   /* sdma_v3_0_emit_copy_buffer */
+    sd_put(SD_OP_COPY);                            /* sub_op 0 = linear */
+    sd_put(SD_COPY_MAX);
+    sd_put(0);
+    sd_put((uint32_t)(sd_mc + SD_A + i));
+    sd_put((uint32_t)((sd_mc + SD_A + i) >> 32));
+    sd_put((uint32_t)(sd_mc + SD_B + i));
+    sd_put((uint32_t)((sd_mc + SD_B + i) >> 32));
+  }
+  if (sd_executa(2000) != 0) return -5;
+  t = tsc() - t;
+  ruins = 0;
+  for (i = 0; i < SD_TAM; i += 4096u)
+    if (sd_le(SD_B + i) != (i ^ 0x13572468u) || sd_le(SD_B + i + 4092u) != 0x5AA5C33Cu) ruins++;
+  log_kv("[amdsdma] copia de 4 MB: ciclos ", (uint32_t)t);
+  log_kv(" paginas erradas ", ruins);
+  k->log("\n");
+  if (ruins) return -6;
+  /* para comparar: a CPU preenche 4 MB pela abertura (write-combining) */
+  t = tsc();
+  for (i = 0; i < SD_TAM; i += 4) *sd_p(SD_B + i) = 0;
+  __asm__ volatile ("sfence" ::: "memory");
+  t = tsc() - t;
+  log_kv("[amdsdma] (CPU preenchendo os mesmos 4 MB: ciclos ", (uint32_t)t);
+  k->log(")\n");
+  return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Etapa D (primeira parte): a SDMA lendo a RAM do PC, sem GART.
+ *
+ * O MC da RX 570 esta como o GOP deixou: VM_CONTEXT0 desligado e
+ * MC_VM_MX_L1_TLB_CNTL.SYSTEM_ACCESS_MODE = 0 ("PA only", etapa A). Nesse
+ * modo um endereco fora da VRAM (MC_VM_FB_LOCATION) deveria ir direto para a
+ * RAM, com o endereco fisico. O back buffer do kernel fica em 0x100000
+ * (fisico = virtual) e o k->alloc tambem devolve fisico = virtual.
+ *
+ * Antes de usar, testa: copia linear RAM -> VRAM e copia de um retangulo
+ * (COPY sub-janela, como o cik_sdma do Mesa: elementsize log2(4), pitch e
+ * tamanho - 1) conferidos pela CPU. So LE a RAM: nada aqui escreve na RAM
+ * pela placa. Passou: o present usa a SDMA (uma sub-janela por area, um
+ * fence no fim); qualquer erro volta para a CPU e desliga o caminho.
+ * ------------------------------------------------------------------------- */
+#define SD_SUBWIN (SD_OP_COPY | 4u << 8 | 2u << 29)   /* COPY_LINEAR_SUB_WIND, 4 bytes */
+#define SD_RAM_TAM 0x10000u                          /* 64 KB: 256 x 64 pixels */
+#define SD_RAM_LARG 256u
+
+static int sd_present_ok;
+static uint32_t sd_falhas_present;
+
+/* sub-janela de w x h pixels de 32 bits (Mesa cik_sdma_copy, GFX8) */
+static void sd_subjanela(uint64_t src, uint32_t sx, uint32_t sy, uint32_t spitch, uint32_t salt,
+                         uint64_t dst, uint32_t dx, uint32_t dy, uint32_t dpitch, uint32_t dalt,
+                         uint32_t w, uint32_t h) {
+  sd_put(SD_SUBWIN);
+  sd_put((uint32_t)src);
+  sd_put((uint32_t)(src >> 32));
+  sd_put(sx | sy << 16);
+  sd_put((spitch - 1u) << 16);
+  sd_put(spitch * salt - 1u);
+  sd_put((uint32_t)dst);
+  sd_put((uint32_t)(dst >> 32));
+  sd_put(dx | dy << 16);
+  sd_put((dpitch - 1u) << 16);
+  sd_put(dpitch * dalt - 1u);
+  sd_put((w - 1u) | (h - 1u) << 16);
+  sd_put(0);
+}
+
+static int sd_teste_ram(void) {
+  uint32_t* buf = (uint32_t*)k->alloc(SD_RAM_TAM, 4096);
+  uint64_t fis = (uint64_t)(uintptr_t)buf, t;
+  uint32_t i, x, y, ruins = 0, fora = 0;
+  const uint32_t rx = 16, ry = 8, rw = 64, rh = 32, dx = 100, dy = 10, dp = 1920;
+  if (!buf) return -1;
+  if (fis >= fb_lo && fis <= fb_hi) {
+    k->log("[amdsdma] buffer de teste cai na faixa da VRAM do MC: sem teste da RAM\n");
+    k->free(buf);
+    return -1;
+  }
+  for (i = 0; i < SD_RAM_TAM / 4u; i++) buf[i] = 0xA5000000u ^ i * 2654435761u;
+  __asm__ volatile ("mfence" ::: "memory");
+  /* 1. linear: 64 KB da RAM para a area B */
+  t = tsc();
+  sd_put(SD_OP_COPY);
+  sd_put(SD_RAM_TAM);
+  sd_put(0);
+  sd_put((uint32_t)fis);
+  sd_put((uint32_t)(fis >> 32));
+  sd_put((uint32_t)(sd_mc + SD_B));
+  sd_put((uint32_t)((sd_mc + SD_B) >> 32));
+  if (sd_executa(1000) != 0) {
+    k->free(buf);
+    return -2;
+  }
+  t = tsc() - t;
+  for (i = 0; i < SD_RAM_TAM / 4u; i += 61u)
+    if (sd_le(SD_B + i * 4u) != buf[i]) ruins++;
+  log_kv("[amdsdma] RAM -> VRAM linear 64 KB: ciclos ", (uint32_t)t);
+  log_kv(" erradas ", ruins);
+  log_kv(" (palavra 0: ", sd_le(SD_B));
+  log_kv(" esperado ", buf[0]);
+  k->log(")\n");
+  if (ruins) {
+    k->free(buf);
+    return -3;
+  }
+  /* 2. sub-janela: (16,8) 64x32 de uma imagem 256x64 -> (100,10) de uma
+   * imagem 1920 de largura, sobre um fundo zerado pela SDMA */
+  sd_put(SD_OP_CONST_FILL | SD_FILL_DW);
+  sd_put((uint32_t)(sd_mc + SD_B));
+  sd_put((uint32_t)((sd_mc + SD_B) >> 32));
+  sd_put(0);
+  sd_put(SD_FILL_MAX);
+  sd_subjanela(fis, rx, ry, SD_RAM_LARG, SD_RAM_TAM / 4u / SD_RAM_LARG, sd_mc + SD_B, dx, dy, dp, 64,
+               rw, rh);
+  if (sd_executa(1000) != 0) {
+    k->free(buf);
+    return -4;
+  }
+  for (y = 0; y < rh; y++)
+    for (x = 0; x < rw; x += 7u)
+      if (sd_le(SD_B + ((dy + y) * dp + dx + x) * 4u) != buf[(ry + y) * SD_RAM_LARG + rx + x]) ruins++;
+  /* em volta do retangulo continua zero */
+  if (sd_le(SD_B + ((dy - 1u) * dp + dx) * 4u) || sd_le(SD_B + (dy * dp + dx - 1u) * 4u) ||
+      sd_le(SD_B + (dy * dp + dx + rw) * 4u) || sd_le(SD_B + ((dy + rh) * dp + dx) * 4u))
+    fora++;
+  log_kv("[amdsdma] RAM -> VRAM sub-janela 64x32: erradas ", ruins);
+  log_kv(" fora do retangulo ", fora);
+  log_kv(" (pixel 0: ", sd_le(SD_B + (dy * dp + dx) * 4u));
+  log_kv(" esperado ", buf[ry * SD_RAM_LARG + rx]);
+  k->log(")\n");
+  k->free(buf);
+  if (ruins || fora) return -5;
+  return 0;
+}
+
+/* present pela SDMA; 0 = feito, <0 = a CPU faz este quadro */
+static int sd_present(const struct gpu_rect* r, int n) {
+  uint64_t src = (uint64_t)(uintptr_t)m.back, dst = surf_gpu;
+  uint32_t sp = m.pitch / 4u, dp = m.fb_pitch / 4u;
+  int i, feitos = 0;
+  uint64_t px = 0;
+  if (!sd_ligada || (m.pitch & 3u) || (m.fb_pitch & 3u) || sp > 16384u || dp > 16384u) return -1;
+  if (!r || n <= 0 || n > 40) {
+    sd_subjanela(src, 0, 0, sp, m.h, dst, 0, 0, dp, m.h, m.w, m.h);
+    px = (uint64_t)m.w * m.h;
+    feitos = 1;
+  } else {
+    for (i = 0; i < n; i++) {
+      int32_t x = r[i].x, y = r[i].y, w = r[i].w, h = r[i].h;
+      if (x < 0) {
+        w += x;
+        x = 0;
+      }
+      if (y < 0) {
+        h += y;
+        y = 0;
+      }
+      if (x + w > (int32_t)m.w) w = (int32_t)m.w - x;
+      if (y + h > (int32_t)m.h) h = (int32_t)m.h - y;
+      if (w <= 0 || h <= 0) continue;
+      sd_subjanela(src, (uint32_t)x, (uint32_t)y, sp, m.h, dst, (uint32_t)x, (uint32_t)y, dp, m.h,
+                   (uint32_t)w, (uint32_t)h);
+      px += (uint64_t)w * (uint32_t)h;
+      feitos++;
+    }
+  }
+  if (!feitos) return 0;
+  if (sd_executa(200) != 0) {
+    sd_falhas_present++;
+    sd_present_ok = 0;
+    sd_para();
+    sd_ligada = 0;
+    k->log("[amdsdma] present pela SDMA falhou: SDMA parada, a CPU volta a copiar\n");
+    return -1;
+  }
+  pixels += px;
+  return 0;
+}
+
+static int sd_res = 1;
+static uint32_t sd_quadros;   /* quadros que a SDMA copiou */
+
+static int polaris_sdma(void) {
+  int r;
+  sd_mc = fb_lo;
+  sd_cpu = m.fb;
+  if (surf_gpu != fb_lo || sd_mc + SD_FIM - 1u > fb_hi) {
+    k->log("[amdsdma] tela nao comeca na VRAM do MC: SDMA nao liga\n");
+    return -1;
+  }
+  sd_para();   /* parada enquanto o SMU troca o microcodigo */
+  r = sd_carrega_ucode();
+  if (r) return r;
+  r = sd_liga();
+  if (r) return r;
+  r = sd_testes();
+  if (r) {
+    log_kv("[amdsdma] testes falharam: ", (uint32_t)(-r));
+    k->log(" (SDMA parada)\n");
+    sd_para();
+    sd_ligada = 0;
+    return -10 + r;
+  }
+  k->log("[amdsdma] SDMA0 FUNCIONANDO\n");
+  r = sd_teste_ram();
+  if (r == 0) {
+    sd_present_ok = 1;
+    k->log("[amdsdma] a SDMA le a RAM (modo PA, sem GART): o present passa a ser pela placa\n");
+  } else {
+    log_kv("[amdsdma] SDMA nao leu a RAM direito: ", (uint32_t)(-r));
+    k->log(" (present continua pela CPU)\n");
+  }
+  return 0;
+}
+#endif
+
 /* So leitura: memoria, motores e a parte de exibicao que o GOP deixou. */
 static void polaris_diag(void) {
   uint32_t bar0 = k->pci_read32(m.pci_bus, m.pci_dev, m.pci_fun, 0x10);
@@ -576,6 +1164,9 @@ static int a_init(const struct gpu_kapi* kapi, const struct gpu_mode* mode) {
   /* uma vez por carga do DLL; se ja roda (outra sessao do WIN), so confere */
   if (m.pci_id == AMD_POLARIS10 && mmio) {
     smc_res = polaris_smc_carrega();
+#ifdef AMD_SDMA
+    if (smc_res == 0) sd_res = polaris_sdma();
+#endif
   } else {
     /* outra placa (QEMU): so confere o arquivo, para testar a leitura */
     uint32_t o, u, v;
@@ -584,6 +1175,9 @@ static int a_init(const struct gpu_kapi* kapi, const struct gpu_mode* mode) {
       k->log("[amdsmc] firmware conferido; placa nao e a RX 570: nada carregado\n");
       k->free(fw);
     }
+#ifdef AMD_SDMA
+    if (sd_ucode_le(&v, 0)) k->log("[amdsdma] ucode conferido; placa nao e a RX 570: SDMA nao liga\n");
+#endif
   }
 #endif
   return 0;
@@ -616,6 +1210,14 @@ static int a_selftest(void) {
 static int a_present(const struct gpu_rect* r, int n) {
   uint64_t t0 = tsc();
   int i;
+#ifdef AMD_SDMA
+  if (sd_present_ok && sd_present(r, n) == 0) {
+    ciclos += tsc() - t0;
+    quadros++;
+    sd_quadros++;
+    return 0;
+  }
+#endif
   if (!r || n <= 0) {
     copia(0, 0, m.w, m.h);
     pixels += (uint64_t)m.w * m.h;
@@ -867,6 +1469,18 @@ static int a_resume(const struct gpu_mode* mode) {
 
 static void a_fini(void) {
   if (!k) return;
+#ifdef AMD_SDMA
+  if (sd_ligada) {
+    sd_para();
+    sd_ligada = 0;
+    k->log("[amdsdma] SDMA0 parada (fim)\n");
+  }
+  log_kv("[amdsdma] quadros pela SDMA ", sd_quadros);
+  log_kv(" falhas ", sd_falhas_present);
+  k->log("\n");
+  sd_quadros = 0;
+  sd_present_ok = 0;
+#endif
 #ifdef AMD_CURSOR
   cur_desliga();
   if (cur_salvo) {
@@ -889,7 +1503,10 @@ static void a_fini(void) {
 
 static const struct gpu_drv drv = {
   GPU_ABI,
-#if defined(AMD_SMC)
+#if defined(AMD_SDMA)
+  "amdsdma (Radeon, GOP, cursor, SMU, SDMA)",
+  GPU_CAP_PRESENT | GPU_CAP_DAMAGE | GPU_CAP_CURSOR,
+#elif defined(AMD_SMC)
   "amdsmc (Radeon, GOP, cursor, SMU)",
   GPU_CAP_PRESENT | GPU_CAP_DAMAGE | GPU_CAP_CURSOR,
 #elif defined(AMD_CURSOR)

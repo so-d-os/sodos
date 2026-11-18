@@ -835,6 +835,183 @@ E a segunda entrada no WIN, no mesmo boot (`GPU.LOG`):
 - a tela e o cursor da placa seguiram normais; nessa sessao 96 quadros,
   1.169.736 ciclos por quadro (4,4 vezes menos que a copia inteira).
 
+### Etapa E: motor de copia SDMA0 (`AMDSDMA.DLL`, 2026-11-18)
+
+**Ordem trocada com a D.** Para ligar a SDMA nao e preciso GART: o anel, o
+rptr, o fence, a tabela do SMU e o microcodigo ficam todos na **VRAM**, que a
+CPU escreve pela abertura do BAR0 e a placa le pelo endereco do MC
+(`0xF4_xxxx_xxxx`, VMID 0, VM desligada). A GART (etapa D) so e preciso
+quando a SDMA tiver de ler a RAM do PC (o back buffer do kernel), para o
+`present` pela placa.
+
+O `AMDSDMA.DLL` e o `amdgop.c` com `-DAMD_SDMA` (que inclui `AMD_SMC` e
+`AMD_CURSOR`). Depois de o firmware do SMU estar rodando (etapa C2):
+
+1. **microcodigo pelo SMU**, como `smu7_request_smu_load_fw` (o Linux 6.12
+   nao tem mais carga direta para a Polaris): le `\SODOS\FW\P10SDMA.BIN`
+   (`amdgpu/polaris10_sdma.bin`), poe o ucode na VRAM (32 MB + 4 KB), monta
+   uma `SMU_DRAMData_TOC` com uma `SMU_Entry` (id 1 = SDMA0, versao, endereco
+   MC, tamanho), manda `SMU_DRAM_ADDR_HI/LO` (`0x252/0x253`, 800 KB de VRAM
+   para o SMU), `DRV_DRAM_ADDR_HI/LO` (`0x250/0x251`, a TOC) e
+   `LoadUcodes` (`0x254`) com a mascara `0x2`, e espera o bit em
+   `SMU74_SoftRegisters.UcodeLoadStatus` (ponteiro em `0x20030` do cabecalho
+   do firmware do SMU; no `polaris10_k_smc.bin` os SoftRegisters ficam em
+   `0x3FA24`, o campo em `+108`);
+2. **anel** (`sdma_v3_0_gfx_resume`, so a SDMA0): golden settings da
+   Polaris 10, F32 em HALT, anel de 4 KB (`RB_SIZE` 10), rptr com writeback,
+   sem doorbell e sem polling de wptr (o wptr vai pelo registrador,
+   `GFX_RB_WPTR` em bytes), `RB_ENABLE`, `IB_ENABLE`, F32 solto,
+   `AUTO_CTXSW`;
+3. **testes**, cada um terminado por um `FENCE` na VRAM que a CPU espera
+   (com `sfence` + `HDP_MEM_COHERENCY_FLUSH_CNTL` antes de a placa ler e
+   `HDP_DEBUG0` antes de a CPU ler): escrita de uma palavra
+   (`sdma_v3_0_ring_test_ring`), `CONST_FILL` de 4 MB (2 pacotes de 2 MB),
+   `COPY` linear de 4 MB (4 pacotes de 1 MB, limite do Linux `0x1FFFFF`),
+   conferidos pela CPU uma pagina por vez; e, para comparar, a CPU
+   preenchendo os mesmos 4 MB.
+
+Mapa da VRAM usado (todo dentro dos 64 MB que o kernel mapeia; a tela GOP
+ocupa os primeiros 8 MB e o cursor fica em 16 MB):
+
+| Deslocamento | O que |
+|---|---|
+| `0x02000000` | TOC do SMU |
+| `0x02001000` | ucode da SDMA0 |
+| `0x02100000` | 800 KB do SMU (`SMU_DRAM_ADDR`) |
+| `0x02200000` | anel (4 KB) |
+| `0x02201000` | rptr; `+0x80` teste de escrita; `+0xC0` fence |
+| `0x02400000`, `0x02800000` | areas A e B dos testes (4 MB cada) |
+
+Falhas so vao para o log e deixam a SDMA em HALT; a tela e o cursor nao
+dependem dela. Codigos (`sd_res`): `-1` nao tentou (tela fora da VRAM do MC,
+SoftRegisters invalido, sem arquivo), `-3` o SMU nao carregou
+(`UcodeLoadStatus`), `-11` sem fence no teste de escrita, `-12` palavra
+errada, `-13`/`-14` preenchimento, `-15`/`-16` copia. No fim do WIN
+(`fini`) a SDMA volta ao HALT.
+
+**Testes sem a placa (2026-11-18):**
+
+- `make test-amdsmc` agora roda tambem o `smcsim.c` com `-DAMD_SDMA`: o
+  SMU simulado responde `0xFE` sem firmware, guarda os enderecos das
+  mensagens, le a TOC da VRAM simulada e confere o ucode contra o arquivo; a
+  SDMA simulada executa o anel (WRITE, FENCE, CONST_FILL, COPY, NOP) a cada
+  escrita do wptr e escreve o rptr. Cenarios novos, 0 falhas: tudo ligado
+  (TOC e SMU_DRAM nos enderecos certos, `UcodeLoadStatus`, `RB_BASE` e
+  tamanho, F32 solto, rptr = wptr, os tres testes certos, `fini` em HALT),
+  SMU que nao carrega (`-3`, anel desligado), SDMA que nao anda (`-11`
+  dentro do limite, deixada em HALT) e sem `P10SDMA.BIN` (`-1`). A
+  simulacao com o firmware real achou um erro: o limite que eu tinha posto
+  para os SoftRegisters (`<= 0x3F000`) recusaria o `0x3FA24` de verdade;
+- QEMU, Bochs apontada para o `AMDSDMA.DLL`: o kernel leu os dois firmwares,
+  "placa nao e a RX 570: SDMA nao liga", driver ativo, desktop normal.
+
+O que a simulacao nao cobre: se o SMU aceita uma TOC so com a SDMA0 (o
+Linux pede os sete microcodigos de uma vez), os tempos reais e o formato do
+`CONST_FILL` (o Linux manda so o OP no cabecalho; se o padrao de 32 bits
+nao vier certo, o log mostra a primeira palavra lida). O `D:\SODOS.CFG` do
+desktop passa a `driver=AMDSDMA.DLL` (o anterior em `D:\SODOS.BK3`); para
+voltar, `driver=AMDSMC.DLL`.
+
+**Primeiro boot com o `AMDSDMA.DLL` (2026-11-18): a SDMA0 anda na RX
+570.** Do `\LOG\SERIAL.LOG`:
+
+```
+[amdsmc] firmware do SMU RODANDO: versao 00171100 pc 00020550 flags 00000001 resp_test 00000001
+[amdsdma] P10SDMA.BIN bytes 00003194 v00000001 ucode_versao 0000003A ucode 00003094 em 00000100
+[amdsdma] soft_regs 0003FA24 status antes 00000000 toc 000000F4:02000000
+[amdsdma] ucode da SDMA0 carregado pelo SMU: versao 0000003A bytes 00003094 status 00000002
+[amdsdma] anel 000000F4:02200000 rb_cntl 00001015 f32 00000000 status 46DEE557
+[amdsdma] escrita pela SDMA ok
+[amdsdma] preenchimento de 4 MB: ciclos 002A02BD paginas erradas 00000400 (primeira palavra 3C3C3C3C)
+[amdsdma] testes falharam: 00000004 (SDMA parada)
+```
+
+- o SMU aceitou a TOC so com a SDMA0 e carregou o microcodigo
+  (`UcodeLoadStatus` = 2): a duvida principal da etapa ficou respondida;
+- o anel ligou (`RB_SIZE` 10, rptr com writeback, F32 solto) e a SDMA
+  **executou** a escrita e os fences: o motor de copia funciona;
+- o preenchimento rodou nos 4 MB (todas as 1.024 paginas escritas, em
+  2.753.213 ciclos), mas com `3C3C3C3C`: o `CONST_FILL` so com o OP no
+  cabecalho (como o Linux manda) tem `fillsize` 0, e a RX 570 repete o
+  **byte** baixo do dado. O Linux nao percebe porque so usa o fill para
+  zerar. Corrigido: o cabecalho leva `fillsize` 2 (palavra de 32 bits), e o
+  `smcsim.c` passou a imitar a placa (`fillsize` 0 = byte), entao este erro
+  agora quebra a simulacao;
+- a copia nao rodou nesse boot (os testes param no primeiro erro).
+
+So o `AMDSDMA.DLL` mudou (copiado direto para `E:\SODOS\DRV`, sem kernel
+novo). Falta o boot que confirme preenchimento e copia.
+
+**Segundo boot, `fillsize` 2 (2026-11-18): SDMA0 funcionando na RX 570.**
+
+```
+[amdsdma] escrita pela SDMA ok
+[amdsdma] preenchimento de 4 MB: ciclos 0029E4D0 paginas erradas 00000000 (primeira palavra 5AA5C33C)
+[amdsdma] copia de 4 MB: ciclos 002A2137 paginas erradas 00000000
+[amdsdma] (CPU preenchendo os mesmos 4 MB: ciclos 00270380)
+[amdsdma] SDMA0 FUNCIONANDO
+...
+[amdsdma] SDMA0 parada (fim)
+```
+
+- escrita, preenchimento de 4 MB (padrao de 32 bits certo) e copia de 4 MB
+  VRAM -> VRAM conferidos pagina por pagina, sem erro; a SDMA parou no Esc;
+- tempos medidos de ponta a ponta (do pacote ao fence visto pela CPU):
+  preenchimento 2.745.552 ciclos, copia 2.761.015, a CPU preenchendo pela
+  abertura 2.556.800. A placa ainda nao e mais rapida que a CPU nisso: os
+  dois tempos da SDMA sao quase iguais, sinal de que o custo nao e a
+  memoria (a copia le e escreve o dobro). Suspeitos: o clock da SDMA/memoria
+  (o firmware do SMU roda sem DPM, provavelmente no nivel mais baixo) e a
+  espera pela CPU (cada volta invalida o HDP e le a VRAM pelo PCIe). A
+  vantagem que ja existe: enquanto a SDMA trabalha a CPU fica livre;
+- quadros dessa sessao: 2.334, 4.111.419 ciclos por quadro (80% da tela,
+  com o Firefox aberto).
+
+### Etapa D, primeira parte: a SDMA le a RAM e copia a tela (`AMDSDMA.DLL`, 2026-11-18)
+
+**Sem GART, de proposito.** O MC esta como o GOP deixou (etapa A):
+`VM_CONTEXT0` desligado e `MC_VM_MX_L1_TLB_CNTL.SYSTEM_ACCESS_MODE` = 0
+("PA only"). Nesse modo um endereco fora de `MC_VM_FB_LOCATION` deveria ir
+direto para a RAM pelo endereco fisico. O back buffer do kernel fica em
+`0x100000` (`GFX_BACK_PHYS`, fisico = virtual, abaixo de 4 GB) e o `k->alloc`
+tambem devolve fisico = virtual. Se a placa ler a RAM assim, o `present` pela
+placa nao precisa de tabela de paginas; a GART (a segunda parte da D) so
+volta a ser preciso se esse modo nao funcionar ou para memoria acima do que o
+modo alcanca.
+
+Depois de a SDMA0 passar nos testes da etapa E, o `sd_teste_ram()`:
+
+1. enche 64 KB de RAM (`k->alloc`) com um padrao e copia para a VRAM (COPY
+   linear, endereco = fisico da RAM); a CPU confere;
+2. zera a area B pela SDMA e copia um retangulo 64x32 de uma imagem
+   256x64 na RAM para (100,10) de uma imagem de 1920 de largura na VRAM com
+   **COPY sub-janela** (`sub_op` 4, `elementsize` 2 = 4 bytes, pitch e
+   tamanhos - 1, como o `cik_sdma` do Mesa para GFX8); a CPU confere o
+   retangulo e que em volta dele continua zero.
+
+**So leitura da RAM:** nenhum pacote manda a placa escrever na RAM.
+
+Se passar, o `present` vira a placa (`sd_present`): uma sub-janela por area
+alterada (back buffer na RAM -> framebuffer na VRAM, pitch de cada lado), um
+fence no fim e espera de ate 200 ms; acima de 40 areas, um quadro inteiro.
+Qualquer falha (fence que nao vem) para a SDMA, desliga o caminho e a CPU
+copia o quadro, como antes. Se o teste da RAM falhar, a SDMA continua ligada
+mas o `present` segue pela CPU. No fim, o log diz quantos quadros a SDMA
+copiou (`[amdsdma] quadros pela SDMA ... falhas ...`).
+
+**Testes sem a placa (2026-11-18):** o `smcsim.c` (com `AMD_SDMA`) trata o
+endereco fora da VRAM como ponteiro do host (modo PA) e executa a sub-janela.
+Cenarios novos, 0 falhas: teste da RAM passa e liga o present; duas areas
+(uma passando da borda, recortada) copiadas da RAM para a tela e nada fora
+delas; quadro inteiro; a SDMA para no meio da sessao e a CPU copia o quadro
+(caminho desligado, SDMA em HALT); placa que le lixo da RAM (o present fica
+na CPU, a SDMA continua ligada). QEMU (Bochs com `AMDSDMA.DLL`): desktop
+normal.
+
+O que so a placa responde: se o modo PA realmente leva a SDMA a RAM (com o
+endereco fisico e coerente com a cache da CPU) e se a sub-janela tem o
+formato certo na Polaris. O teste para antes de usar; nada escreve na RAM.
+
 ### Etapas da RX 570
 
 | # | Etapa | Estado |
@@ -843,8 +1020,8 @@ E a segunda entrada no WIN, no mesmo boot (`GPU.LOG`):
 | B | Cursor pelo DCE 11.2 (`CUR_CONTROL`, `CUR_SURFACE_ADDRESS`, `CUR_SIZE`, `CUR_POSITION`, `CUR_UPDATE` com lock), imagem 64x64 na VRAM: `AMDCUR.DLL` passa a ter caminho Polaris | feito, rodou na placa (128x128); falta Ctrl+F1/F7 |
 | C | Estado do SMC: leitura indireta (`SMC_IND_INDEX_11`/`DATA_11`) de `SMC_SYSCON_CLOCK_CNTL_0` e `SMC_PC_C`, para saber se o firmware do SMU esta rodando | feito: SMC so na ROM, firmware a carregar, modo protegido |
 | C2 | Carregar o `polaris10_k_smc.bin` (assinado) na RAM do SMC em modo protegido, como `polaris10_start_smu_in_protection_mode` + `smu7_upload_smu_firmware_image`, e esperar `SMU_DONE`/`SMU_PASS` | feito: firmware do SMU rodando na placa (2026-11-18) |
-| D | GMC 8: GART (tabela de paginas da GPU para a RAM do sistema), VM contexto 0 | em aberto |
-| E | SDMA 3.0: microcodigo `polaris10_sdma*.bin`, anel em RAM, copia e preenchimento pela placa: o `GPU_CAP_FILL`/`BLIT` (etapa 5 geral) | em aberto |
+| D | A SDMA lendo a RAM do PC para o `present` pela placa: primeiro pelo modo PA (sem GART), testado antes de usar (`AMDSDMA.DLL`); GART (GMC 8, VM contexto 0) so se o modo PA nao servir | modo PA feito, testado em simulacao e QEMU; falta rodar na placa |
+| E | SDMA 3.0: microcodigo `polaris10_sdma.bin` pelo SMU, anel e fence na VRAM, escrita, preenchimento e copia pela placa (`AMDSDMA.DLL`) | feito: SDMA0 funcionando na placa (escrita, preenchimento e copia de 4 MB, 2026-11-18) |
 | F | GFX 8: microcodigos PFP/ME/CE/MEC/RLC, anel GFX, IH (interrupcoes), fences | em aberto |
 | G | Interface estilo DRM no kernel (BOs, mapear no processo, submeter, esperar) e Mesa radeonsi/RADV com um winsys do SODOS | em aberto |
 
@@ -869,6 +1046,7 @@ gpudrv=GPUTEST.DLL forca este driver de D:\SODOS\DRV, com ou sem placa na tabela
 | `1002:15E7` AMD Barcelo (pelo `SODOS.CFG`) | `AMDGOP.DLL` | funciona no notebook (1920x1200, GOP): 8,1x menos ciclos por quadro |
 | `1002:67DF` Radeon RX 570 (pelo `SODOS.CFG`) | `AMDGOP.DLL` | funciona no desktop (1920x1080, GOP acima de 4 GB); diagnostico Polaris (etapa A) rodou: tela no CRTC 0, motores parados |
 | `1002:67DF` Radeon RX 570 (pelo `SODOS.CFG`) | `AMDSMC.DLL` | funciona no desktop: tela, cursor da placa e firmware do SMU carregado (etapa C2) |
+| `1002:67DF` Radeon RX 570 (pelo `SODOS.CFG`) | `AMDSDMA.DLL` | funciona no desktop: tela, cursor da placa, firmware do SMU e SDMA0 (escrita, preenchimento e copia na VRAM) |
 | nenhuma (so `gpudrv=`) | `GPUTEST.DLL` | teste: copia o back buffer para o LFB pela CPU, reserva 64 KB para aparecer no TOP |
 | nenhuma (so `gpudrv=`) | `GPUFAIL.DLL` | o mesmo, mas `present` falha no 20o quadro |
 

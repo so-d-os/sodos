@@ -72,6 +72,9 @@ int kt_thread_self(void);
 int kt_thread_affinity(int tid, uint32_t mask);
 void kt_thread_yield(void);
 int kt_thread_tls(uint64_t fs);
+/* TEB do Windows (gs:0x10..0x67) da tarefa corrente; 0 = nenhum. */
+void kt_win_teb_set(uint64_t teb);
+uint64_t kt_win_teb_get(void);
 /* Fim do programa pid: mata e libera as threads dele (mundo, com BKL). */
 void kt_release_pid(uint32_t pid);
 /* sched_yield de dentro de uma thread: solta o BKL e cede a CPU. */

@@ -15,5 +15,14 @@ polaris10_k_smc.bin
 No disco do SODOS fica em \SODOS\FW\P10KSMC.BIN (nome 8.3), copiado pelo
 "make disk-files"/"make sendpc".
 
+polaris10_sdma.bin
+  Microcodigo do motor de copia SDMA da Polaris 10 (sdma_firmware_header
+  v1.1, ucode_version 0x3A, ucode de 0x3094 bytes em 0x100). O AMDSDMA.DLL
+  poe o ucode na VRAM e pede ao SMU que o carregue na SDMA0 (etapa E).
+  Origem: linux-firmware, amdgpu/polaris10_sdma.bin (igual nos dois
+  servidores acima). Baixado em 2026-11-18, 12.692 bytes
+  sha256 e27b3ec976f87e32883b9190e653b20d27f9e77da8dd2d77eeb10c35ee9f1e61
+  No disco: \SODOS\FW\P10SDMA.BIN.
+
 Licenca: LICENSE.amdgpu (redistribuivel em forma binaria, sem modificar),
 a mesma do linux-firmware (LICENSES/LICENSE.amdgpu).

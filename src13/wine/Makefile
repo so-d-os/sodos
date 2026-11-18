@@ -1,0 +1,60 @@
+# wine/Makefile - WINE.DLL (loader PE do SODOS) e EXEs de teste do Windows.
+# Rodar no WSL:  make -C wine
+#
+#   build/WINE.DLL        DLL SOX2; tambem copiado para c_compiler/out/DRV
+#                         (o disk-files do Makefile principal leva a D:\SODOS\DRV)
+#   build/tests/*.EXE     EXEs PE32+ feitos com o zig (x86_64-windows-gnu)
+
+CC_DIR = ../c_compiler
+B = build
+LINK64 = $(CC_DIR)/build/link64
+KIMP = $(CC_DIR)/out/KERNEL.IMP
+ZIG ?= $(HOME)/zig/zig
+
+LIBC64_SRC = string ctype stdlib stdio printf scanf fpconv math time misc wchar sigfault64 setjmp64
+LIBC64_OBJ = $(patsubst %,$(CC_DIR)/build/x64_%.o,$(LIBC64_SRC))
+
+# Como a LIBC64: codigo de programa (SSE liberado), modelo large para o link64.
+CFLAGS = -m64 -O2 -fno-strict-aliasing -fno-tree-loop-distribute-patterns -ffreestanding \
+  -fno-pic -fno-pie -fno-stack-protector -mno-red-zone -mcmodel=large -mstackrealign \
+  -fno-asynchronous-unwind-tables -nostdinc -isystem $(CC_DIR)/include -Wall -Wno-unused-function
+
+SRC = main pe k32 crt util
+OBJ = $(patsubst %,$(B)/%.o,$(SRC))
+
+TESTS = HELLOW MSGBOXW
+TEST_EXE = $(patsubst %,$(B)/tests/%.EXE,$(TESTS))
+
+all: $(B)/WINE.DLL tests
+
+$(B) $(B)/tests:
+	mkdir -p $@
+
+$(B)/%.o: dll/%.c dll/wine_int.h ../kernel/wine.h | $(B)
+	gcc $(CFLAGS) -c $< -o $@
+
+$(KIMP): ../kernel/kexports.c
+	$(MAKE) -C $(CC_DIR) out/KERNEL.IMP
+
+$(LIBC64_OBJ) $(LINK64):
+	$(MAKE) -C $(CC_DIR) $(patsubst $(CC_DIR)/%,%,$@)
+
+$(B)/WINE.DLL: $(OBJ) $(LIBC64_OBJ) $(LINK64) $(KIMP)
+	$(LINK64) /dll /export:wine_driver /out:$@ $(OBJ) $(LIBC64_OBJ) $(KIMP)
+	mkdir -p $(CC_DIR)/out/DRV
+	cp $@ $(CC_DIR)/out/DRV/WINE.DLL
+
+tests: $(TEST_EXE)
+
+$(B)/tests/HELLOW.EXE: tests/hello.c | $(B)/tests
+	$(ZIG) cc -target x86_64-windows-gnu -O2 $< -o $@
+	rm -f $(B)/tests/HELLOW.pdb
+
+$(B)/tests/MSGBOXW.EXE: tests/msgbox.c | $(B)/tests
+	$(ZIG) cc -target x86_64-windows-gnu -O2 $< -o $@ -luser32
+	rm -f $(B)/tests/MSGBOXW.pdb
+
+clean:
+	rm -rf $(B)
+
+.PHONY: all tests clean

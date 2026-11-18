@@ -12,6 +12,7 @@
 #include "module_priv.h"
 #include "isr.h"
 #include "env.h"
+#include "wine.h"
 
 void* kexport_find(const char* name);
 int mod_call_entry(void* fn, int argc, char** argv, void* stack_top);
@@ -68,6 +69,7 @@ void mod_thread_leave(const struct mod_tsave* s) {
 void mod_cpu_save(struct mod_cpu* s) {
   s->bkl = kt_bkl_depth();
   s->fs = mod_fs_read();
+  s->teb = kt_win_teb_get();
   s->ctx = cur_ctx;
   s->pid = cur_pid;
   s->owner = um_owner();
@@ -84,6 +86,7 @@ void mod_cpu_load(const struct mod_cpu* s) {
   kt_bkl_set_depth(s->bkl);
   /* Dois programas com TLS (Firefox, LLAMA) nao podem dividir o FS. */
   if (s->fs != mod_fs_read()) mod_fs_write(s->fs);
+  if (s->teb != kt_win_teb_get()) kt_win_teb_set(s->teb);
 }
 
 int mod_rip_preemptible(uint64_t rip) {
@@ -287,8 +290,10 @@ static void release(int id) {
 }
 
 static void unload(int id) {
-  struct module* m = &mods[id];
+  struct module* m;
   int i;
+  if (id < 0 || id >= MOD_MAX) return;   /* EXE do Windows: sem modulo SOX */
+  m = &mods[id];
   if (m->is_dll && m->entry != SOX_NO_ENTRY)
     ((dllmain_fn)(m->base + m->entry))(SOX_DLL_DETACH);
   for (i = 0; i < m->ndeps; i++) release(m->deps[i]);
@@ -619,6 +624,7 @@ static void exec_release(uint32_t pid, int id) {
   ufree_owner(pid);
   hm_free_owner(pid);
   isr_fault_release(pid);
+  if (id < 0) wine_exec_done();   /* EXE do Windows: pode soltar o WINE.DLL */
 }
 
 int mod_kill(uint32_t pid) {
@@ -647,6 +653,10 @@ int mod_exec(const char* path, int argc, char** argv) {
   uint32_t prev_owner;
   uint32_t prev_pid;
   char prev_drive;
+  int pe;
+  int is64 = 0;
+  void* entry = 0;
+  const char* pname = "?";
   if (mod_depth >= MOD_DEPTH_MAX) {
     set_err("programas aninhados demais", 0);
     return MOD_ERR_DEPTH;
@@ -663,14 +673,36 @@ int mod_exec(const char* path, int argc, char** argv) {
   cur_pid = pid;
   um_set_owner(pid);
   exe_drive = has_drive(path) ? up(path[0]) : drives_current();
-  id = load(path, 0);
-  if (id < 0) {
+  /* EXE do Windows (MZ/PE): roda pelo WINE.DLL, so com SET WINE=1. */
+  pe = wine_is_pe(path);
+  if (pe) {
+    id = -1;
+    entry = wine_entry();
+    if (!entry) {
+      um_set_owner(prev_owner);
+      cur_pid = prev_pid;
+      exe_drive = prev_drive;
+      return MOD_ERR_FORMAT;
+    }
+    is64 = 1;
+    ssz = WINE_STACK;
+    pname = "WINE";
+  } else {
+    id = load(path, 0);
+  }
+  if (!pe && id < 0) {
     um_set_owner(prev_owner);
     cur_pid = prev_pid;
     exe_drive = prev_drive;
     return MOD_ERR_IMPORT;
   }
-  if (mods[id].entry == SOX_NO_ENTRY) {
+  if (!pe) {
+    entry = mods[id].base + mods[id].entry;
+    is64 = mods[id].is64;
+    ssz = mods[id].stack_size ? mods[id].stack_size : MOD_STACK_DEFAULT;
+    pname = mods[id].name;
+  }
+  if (!pe && mods[id].entry == SOX_NO_ENTRY) {
     set_err("EXE sem _start: ", mods[id].name);
     unload(id);
     um_set_owner(prev_owner);
@@ -678,10 +710,10 @@ int mod_exec(const char* path, int argc, char** argv) {
     exe_drive = prev_drive;
     return MOD_ERR_FORMAT;
   }
-  ssz = mods[id].stack_size ? mods[id].stack_size : MOD_STACK_DEFAULT;
   stack = (uint8_t*)umalloc_owned(ssz, pid);
   if (!stack) {
     set_err("sem memoria para a pilha", 0);
+    if (pe) wine_exec_done();
     unload(id);
     um_set_owner(prev_owner);
     cur_pid = prev_pid;
@@ -714,9 +746,10 @@ int mod_exec(const char* path, int argc, char** argv) {
       self_av[nargc] = 0;
       argv = self_av;
     }
-    av = pack_user_argv(&nargc, argv, stack, ssz, mods[id].is64);
+    av = pack_user_argv(&nargc, argv, stack, ssz, is64);
     if (!av) {
       set_err("argumentos nao cabem na pilha", 0);
+      if (pe) wine_exec_done();
       unload(id);
       um_set_owner(prev_owner);
       cur_pid = prev_pid;
@@ -728,19 +761,16 @@ int mod_exec(const char* path, int argc, char** argv) {
     live_add(pid, prev_pid, id);
     {
       uint64_t prev_fs = mod_fs_read();
+      uint64_t prev_teb = kt_win_teb_get();
       uint64_t canary = 0x9e3779b97f4a7c15ull;
       int ti;
       for (ti = 0; ti < (int)sizeof(mod_tls_block); ti++) mod_tls_block[ti] = 0;
       for (ti = 0; ti < 8; ti++) mod_tls_block[0x28 + ti] = (uint8_t)(canary >> (ti * 8));
       mod_fs_write((uint64_t)(uintptr_t)mod_tls_block);
       serial_puts("[mod] exec ");
-    serial_puts(mods[id].name);
-    serial_puts(" base=");
-    serial_hex32((uint32_t)(uintptr_t)mods[id].base);
+    serial_puts(pname);
     serial_puts(" entry=");
-    serial_hex32((uint32_t)mods[id].entry);
-    serial_puts(" size=");
-    serial_hex32((uint32_t)mods[id].size);
+    serial_hex32((uint32_t)(uintptr_t)entry);
     serial_puts(" stack=");
     serial_hex32((uint32_t)(uintptr_t)stack);
     serial_puts(" ssz=");
@@ -756,12 +786,13 @@ int mod_exec(const char* path, int argc, char** argv) {
          * entram no kernel enquanto isso. Volta com a mesma profundidade,
          * inclusive quando o mod_exit pula direto para ca. */
         int bkl = kt_bkl_suspend();
-        rc = mod_call_entry(mods[id].base + mods[id].entry, nargc, av, av);
+        rc = mod_call_entry(entry, nargc, av, av);
         kt_bkl_resume(bkl);
       }
       mod_fs_write(prev_fs);
+      if (kt_win_teb_get() != prev_teb) kt_win_teb_set(prev_teb);
       serial_puts("[mod] saiu ");
-      serial_puts(mods[id].name);
+      serial_puts(pname);
       serial_puts(" rc=");
       serial_hex32((uint32_t)rc);
       serial_puts("\n");

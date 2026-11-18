@@ -12,6 +12,7 @@
 #include "mm.h"
 #include "shell.h"
 #include "linkext.h"
+#include "wine.h"
 #include "vt.h"
 
 #define ENV_N 32
@@ -80,6 +81,9 @@ int env_set(const char* name, const char* val) {
   int rc = env_set_raw(name, val);
   if (gen != g && (name_is(name, "LINKEXT") || name_is(name, "PATHSODOS")))
     linkext_env_changed();
+  /* WINE=0 tira o WINE.DLL da memoria (wine.c); WINE=1 so carrega no
+   * primeiro EXE do Windows. */
+  if (gen != g && name_is(name, "WINE")) wine_env_changed();
   if (gen != g && name_is(name, "DISKSYNC")) vt_service_check();
   if (gen != g && name_is(name, "HIMEM")) {
     /* % da RAM total que programas de 64 bits podem pegar acima de 4 GB. */

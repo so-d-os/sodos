@@ -21,6 +21,8 @@
 #include "smp.h"
 #include "kthread.h"
 #include "linkext.h"
+#include "nvme.h"
+#include "reboot.h"
 
 void mod_exit(int code);
 void shell_read_line(char* buf, int max);
@@ -326,6 +328,13 @@ static void k_font_reset(void) {
 /* Fundo claro na tela de texto: dura ate o programa que pediu terminar. */
 static uint32_t blink_pid;
 
+/* Teclado cru (terminal do WSL): ate o programa que pediu terminar. */
+static uint32_t kbdraw_pid;
+static void k_kbd_raw(int on) {
+  kbd_raw_set(on);
+  kbdraw_pid = on ? mod_current_pid() : 0;
+}
+
 static int k_blink(int on) {
   /* A janela sempre mostra o fundo claro: nada a trocar. */
   if (tscr_on()) return 0;
@@ -420,6 +429,14 @@ static void k_hfree(void* p) { hm_user_free(p); }
 static void k_hminfo(uint64_t* quota, uint64_t* used, uint64_t* total_ram) {
   hm_user_info(quota, used, total_ram);
 }
+/* SSD NVMe cru (so leitura): o WSL.EXE le o NTFS do Windows por aqui. */
+static int k_nvme_raw_read(uint64_t lba, uint32_t count, void* buf) {
+  return nvme_raw_read(lba, count, buf);
+}
+static uint64_t k_nvme_raw_sectors(void) { return nvme_raw_sectors(); }
+/* TEB do Windows da thread corrente (WINE.DLL): gs:0x10..0x67 vira copia de
+ * TEB+0x10..0x67. Chamar de novo depois de mudar esses campos. */
+static void k_win_teb(void* teb) { kt_win_teb_set((uint64_t)(uintptr_t)teb); }
 static void* k_realloc(void* p, uint32_t n) { return urealloc(p, n); }
 static uint32_t k_msize(void* p) { return usize(p); }
 
@@ -667,6 +684,10 @@ void kexp_release_pid(uint32_t pid) {
   if (font_pid == pid) {
     if (!vt_bg()) vga_font_reset();
     font_pid = 0;
+  }
+  if (kbdraw_pid == pid) {
+    kbd_raw_set(0);
+    kbdraw_pid = 0;
   }
   if (blink_pid == pid) {
     if (!vt_bg()) vga_text_blink(1);
@@ -1181,6 +1202,10 @@ static const struct kexp table[] = {
   EXP(k_hmalloc),
   EXP(k_hfree),
   EXP(k_hminfo),
+  EXP(k_nvme_raw_read),
+  EXP(k_nvme_raw_sectors),
+  EXP(k_kbd_raw),
+  EXP_NOLOCK(k_win_teb),
   EXP(k_fault_entry),
   EXP(k_free),
   EXP(k_realloc),

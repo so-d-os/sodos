@@ -306,6 +306,12 @@ $(B)/drv_amdsmc.o: ../drivers/amdgop/amdgop.c ../video/gpu.h | $(B)
 $(DRV)/AMDSMC.DLL: $(B)/drv_amdsmc.o $(LINK64) | $(DRV)
 	$(LINK64) /dll /export:gpu_driver /out:$@ $(B)/drv_amdsmc.o
 
+# AMDSDMA.DLL: AMDSMC + motor de copia SDMA0 da RX 570 (docs/GPU.md, etapa E).
+$(B)/drv_amdsdma.o: ../drivers/amdgop/amdgop.c ../video/gpu.h | $(B)
+	$(DRVCC) -DAMD_SDMA -c $< -o $@
+$(DRV)/AMDSDMA.DLL: $(B)/drv_amdsdma.o $(LINK64) | $(DRV)
+	$(LINK64) /dll /export:gpu_driver /out:$@ $(B)/drv_amdsdma.o
+
 # FAT32.DLL (fs/fsdrv.h): leitura de FAT32, carregado so quando o kernel
 # acha uma unidade FAT32 (pendrive em U:, mount).
 $(B)/drv_fat32.o: ../drivers/fat32/fat32.c ../fs/fsdrv.h | $(B)
@@ -320,7 +326,7 @@ $(B)/drv_linkext.o: ../drivers/linkext/linkext.c ../kernel/linkext.h | $(B)
 $(DRV)/LINKEXT.DLL: $(B)/drv_linkext.o $(LINK64) | $(DRV)
 	$(LINK64) /dll /export:linkext_driver /out:$@ $(B)/drv_linkext.o
 
-drivers: $(DRV)/LINKEXT.DLL $(DRV)/FAT32.DLL $(DRV)/GPUTEST.DLL $(DRV)/GPUFAIL.DLL $(DRV)/VIRTGPU.DLL $(DRV)/AMDGOP.DLL $(DRV)/AMDCUR.DLL $(DRV)/AMDSMC.DLL
+drivers: $(DRV)/LINKEXT.DLL $(DRV)/FAT32.DLL $(DRV)/GPUTEST.DLL $(DRV)/GPUFAIL.DLL $(DRV)/VIRTGPU.DLL $(DRV)/AMDGOP.DLL $(DRV)/AMDCUR.DLL $(DRV)/AMDSMC.DLL $(DRV)/AMDSDMA.DLL
 
 # LIBCX64 estatica: mesma libc, compilada -m64, ligada no HELLO64C.
 LIBC64_SRC = string ctype stdlib stdio printf scanf fpconv math time misc sigfault64 wchar setjmp64 ctors64

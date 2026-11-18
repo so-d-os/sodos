@@ -903,7 +903,18 @@ static int get_key(int wait) {
   if (keymap_kp_nav(sc)) return ext_keys[sc];
   if (sc >= 0x3B && sc <= 0x44) return KEY_F(sc - 0x3A);
   if (sc == 0x57 || sc == 0x58) return KEY_F(sc - 0x57 + 11);
-  return keymap_char(sc);
+  {
+    int c = keymap_char(sc);
+    /* Teclado cru (terminal do WSL): Ctrl+letra = 1..26, Ctrl+[ \ ] = 27..29 */
+    if (c && c < 0x80 && kbd_raw() && kbd_ctrl_down()) {
+      int l = c | 0x20;
+      if (l >= 'a' && l <= 'z') return l & 0x1F;
+      if (c == '[') return 0x1B;
+      if (c == '\\') return 0x1C;
+      if (c == ']') return 0x1D;
+    }
+    return c;
+  }
 }
 
 static int get_char(void) {

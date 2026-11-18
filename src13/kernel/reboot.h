@@ -21,3 +21,8 @@ void kbd_break_arm(int on);
 int kbd_ctrl_down(void);
 /* 1 enquanto um dos Alt esta apertado. */
 int kbd_alt_down(void);
+
+/* Teclado cru (k_kbd_raw, terminal do WSL): Ctrl+C nao para o programa e
+ * Ctrl+letra chega como 1..26. Volta a 0 quando o programa termina. */
+void kbd_raw_set(int on);
+int kbd_raw(void);

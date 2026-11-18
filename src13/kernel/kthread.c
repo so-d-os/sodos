@@ -74,13 +74,22 @@ struct task {
   void* arg;
   uint32_t slice_ms;
   struct mod_tsave msave;
+  uint64_t teb;             /* TEB do Windows (WINE.DLL); 0 = nao e thread Windows */
 };
 
 /* self e curr nos offsets 0 e 8: lidos com um mov %gs:N (atomico frente a
- * preempcao, como o "current" do Linux). */
+ * preempcao, como o "current" do Linux).
+ *
+ * teb_win cobre os offsets 0x10..0x67: codigo do Windows x64 le o TEB por
+ * gs:0x30 (Self), gs:0x58 (TLS) e gs:0x60 (PEB). O kernel nao usa essa faixa;
+ * a cada troca para uma thread Windows (task.teb != 0) ela recebe uma copia
+ * de TEB+0x10..0x67 (ver teb_load e k_win_teb). */
+#define TEB_WIN_LO 0x10u
+#define TEB_WIN_N 11
 struct cpu {
   struct cpu* self;
   struct task* volatile curr;
+  uint64_t teb_win[TEB_WIN_N];
   int index;
   volatile int online;
   struct spin lock;
@@ -153,6 +162,13 @@ static inline struct task* cur(void) {
 
 /* Excecao fatal em outra CPU: esta para (a que trata a falha continua). */
 static inline int stop_here(void) { return stopping && this_cpu()->index != stop_cpu; }
+
+/* Copia TEB+0x10..0x67 para a janela do gs desta CPU. */
+static inline void teb_load(struct cpu* c, uint64_t teb) {
+  const uint64_t* src = (const uint64_t*)(uintptr_t)(teb + TEB_WIN_LO);
+  int i;
+  for (i = 0; i < TEB_WIN_N; i++) c->teb_win[i] = src[i];
+}
 
 static uint64_t fs_read(void) {
   uint32_t lo, hi;
@@ -336,6 +352,7 @@ static void kt_schedule(void) {
   finish_switch(c);
   fpu_restore(prev);
   if (fs_read() != prev->fs) fs_write(prev->fs);
+  if (prev->teb) teb_load(c, prev->teb);
   irq_restore(fl);
 }
 
@@ -908,6 +925,7 @@ int kt_thread_create(int (*fn)(void*), void* arg, uint32_t stack_size, uint32_t 
   if (!t->stack) return E_NOMEM;
   fpu_init_area(t->xs);
   t->fs = fs_read();
+  t->teb = 0;
   t->drive = mod_exe_drive();
   t->kind = K_THREAD;
   t->fn = fn;
@@ -1005,6 +1023,18 @@ int kt_thread_tls(uint64_t fs) {
   fs_write(fs);
   return 0;
 }
+
+/* TEB do Windows da tarefa corrente (WINE.DLL). 0 desliga. Chamar de novo
+ * depois de mudar os campos 0x10..0x67 do TEB (a janela e uma copia). */
+void kt_win_teb_set(uint64_t teb) {
+  uint64_t fl = irq_save();
+  struct task* t = cur();
+  t->teb = teb;
+  if (teb) teb_load(this_cpu(), teb);
+  irq_restore(fl);
+}
+
+uint64_t kt_win_teb_get(void) { return cur()->teb; }
 
 void kt_thread_fault_exit(void) {
   struct task* t = cur();

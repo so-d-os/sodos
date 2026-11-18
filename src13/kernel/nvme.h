@@ -26,3 +26,10 @@ const char* nvme_name(void);
  * Fora da particao devolve -1 sem tocar no SSD. */
 int nvme_read(uint32_t lba, uint32_t count, void* buf);
 int nvme_write(uint32_t lba, uint32_t count, const void* buf);
+
+/* Leitura crua do namespace 1 inteiro (lba absoluto no SSD), so leitura.
+ * Funciona mesmo sem particao SODOSHD (usa o primeiro SSD). E o que o
+ * WSL.EXE usa para achar o NTFS do Windows. 0 ok; <0 erro. */
+int nvme_raw_read(uint64_t lba, uint32_t count, void* buf);
+/* Setores do namespace 1; 0 sem SSD. */
+uint64_t nvme_raw_sectors(void);
