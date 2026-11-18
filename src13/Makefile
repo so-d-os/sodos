@@ -433,11 +433,16 @@ run: os.img disk.img disk2.img
 # Etapas C2 e E da RX 570 (docs/GPU.md) sem a placa: o amdgop.c com AMD_SMC
 # e com AMD_SDMA contra um SMC/SMU/SDMA simulado no host
 # (drivers/amdgop/smcsim.c). 0 falhas = ok.
+# RX570_ROM: o VBIOS tirado da placa (drivers/amdgop/vbios-extrai.py); sem ele
+# o cenario 17 (tabelas reais do AtomBIOS) e pulado.
+RX570_ROM ?= /mnt/e/LOG/RX570.ROM
 test-amdsmc:
 	gcc -O2 -Wall -Wextra -Wno-unused-function -Ivideo drivers/amdgop/smcsim.c -o /tmp/sodos-smcsim
 	/tmp/sodos-smcsim firmware/amdgpu/polaris10_k_smc.bin
 	gcc -O2 -Wall -Wextra -Wno-unused-function -DAMD_SDMA -Ivideo drivers/amdgop/smcsim.c -o /tmp/sodos-sdmasim
 	/tmp/sodos-sdmasim firmware/amdgpu/polaris10_k_smc.bin firmware/amdgpu/polaris10_sdma.bin
+	gcc -O2 -Wall -Wno-unused-function -Wno-unused-variable -Wno-type-limits -DAMD_TELA2 -Ivideo drivers/amdgop/smcsim.c -o /tmp/sodos-dualsim
+	/tmp/sodos-dualsim firmware/amdgpu/polaris10_k_smc.bin firmware/amdgpu/polaris10_sdma.bin $(wildcard $(RX570_ROM))
 
 # Placa virtio-gpu (docs/GPU.md): o WIN usa D:\SODOS\DRV\VIRTGPU.DLL.
 # Sem o DLL, a mesma placa responde como Bochs VBE e tudo segue pela CPU.

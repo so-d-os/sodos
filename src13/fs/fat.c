@@ -134,10 +134,26 @@ static void fat_breathe_run(uint32_t nsec);
  * deixou pastas com nomes e datas de lixo no Z: com o Firefox (threads de
  * cache/SQLite gravando o perfil) e um COPY/DIR no CMD ao mesmo tempo.
  * Ramdisk: e so copia de memoria, nao precisa ceder. */
+/* Ceder custa uma volta inteira do desktop (dezenas a centenas de ms com a
+ * tela composta em software): contando so setores, gravar um arquivo pequeno
+ * cedia 16 vezes e levava segundos. Alem da contagem, so cede se ja passaram
+ * FAT_BREATH_MS desde a ultima vez: o desktop continua lendo teclado e rato
+ * nesse ritmo e o disco fica com o resto do tempo. */
+#define FAT_BREATH_MS 12u
+uint64_t irq_ticks(void);
+static uint32_t fat_breath_at;
+static int fat_breath_due(void) {
+  uint32_t now = (uint32_t)irq_ticks();
+  if (now - fat_breath_at < FAT_BREATH_MS) return 0;
+  fat_breath_at = now;
+  return 1;
+}
+
 static void fat_breathe(void) {
   if (current_drive == DISK_RAM) return;
   if (++fat_breath_n < 4) return;
   fat_breath_n = 0;
+  if (!fat_breath_due()) return;
   sched_yield();
 }
 
@@ -148,6 +164,7 @@ static void fat_breathe_run(uint32_t nsec) {
   fat_breath_n += (int)nsec;
   if (fat_breath_n < 512) return;
   fat_breath_n = 0;
+  if (!fat_breath_due()) return;
   sched_yield();
 }
 

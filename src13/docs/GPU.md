@@ -1012,6 +1012,345 @@ O que so a placa responde: se o modo PA realmente leva a SDMA a RAM (com o
 endereco fisico e coerente com a cache da CPU) e se a sub-janela tem o
 formato certo na Polaris. O teste para antes de usar; nada escreve na RAM.
 
+**Primeiro boot com o present pela SDMA (2026-11-18): a placa copiou a
+tela, mas a parte de cima saiu errada.**
+
+```
+[amdsdma] RAM -> VRAM linear 64 KB: ciclos 00018A8B erradas 00000000 (palavra 0: A5000000 esperado A5000000)
+[amdsdma] RAM -> VRAM sub-janela 64x32: erradas 00000000 fora do retangulo 00000000 (pixel 0: 3A452310 esperado 3A452310)
+[amdsdma] a SDMA le a RAM (modo PA, sem GART): o present passa a ser pela placa
+...
+[amdsdma] quadros pela SDMA 000000F3 falhas 00000000
+[amdgop] fim: quadros 000000F3 ciclos/quadro 002F5A20 pixels/quadro 000DFE32
+```
+
+- o modo PA funciona: a SDMA leu a RAM (linear e sub-janela conferidas) e
+  copiou 243 quadros sem nenhum fence perdido, com 3.103.264 ciclos por
+  quadro e 917.042 pixels por quadro: ~3,4 ciclos por pixel, contra ~2,5 da
+  CPU (5,2 milhoes de ciclos pela tela inteira de 2.073.600 pixels). A
+  comparacao com os 4.111.419 de outra sessao, feita no primeiro momento,
+  era injusta (quadros maiores la): por pixel, a SDMA sozinha perde;
+- mas na tela a parte de cima comecou **preta** e, mexendo, ganhou **riscos
+  horizontais curtos** (foto do usuario); a janela de baixo (Command) saiu
+  certa;
+- causa: o GOP deixa a **abertura AGP** do MC ligada (`MC_VM_AGP_BOT` =
+  `TOP` = `BASE` = 0 na etapa A: enderecos fisicos 0 a 4 MB). O back buffer
+  comeca em 1 MB, entao as primeiras ~400 linhas da tela eram lidas por esse
+  caminho, que nao ve o que esta na cache da CPU (os riscos tem o tamanho de
+  uma linha de cache). O teste nao pegou porque o buffer dele (`k->alloc`)
+  fica acima de 4 MB;
+- correcao: antes de usar a RAM, o `sd_agp_desliga()` desliga a abertura
+  como o Linux (`amdgpu_gmc_set_agp_default`: `BOT` = `0x3FFFF` > `TOP` = 0;
+  o BOT e escrito primeiro) e o `fini` devolve o valor do GOP; e o teste da
+  RAM ganhou um terceiro passo, `sd_teste_back()`, no **proprio back
+  buffer**: a CPU escreve um padrao nos primeiros 64 KB (que ficam na
+  cache), a SDMA copia na hora, a CPU confere e o conteudo antigo volta;
+- o `smcsim.c` passou a imitar a placa: com a abertura ligada, ler o back
+  buffer devolve zeros. Com a correcao, 0 falhas; tirando a linha que
+  desliga a abertura (copia temporaria), o teste do back buffer recusa o
+  present pela placa (6 falhas nos cenarios), ou seja, o erro do boot agora
+  aparece na simulacao.
+
+**Terceiro boot (abertura AGP desligada, 2026-11-18): tudo conferido.**
+
+```
+[amdsdma] abertura AGP ligada: bot 00000000 top 00000000 base 00000000 (fisico 00000000 a 00000003 MB): desligada, como no Linux
+[amdsdma] back buffer (fisico 00100000) -> VRAM 64 KB: erradas 00000000 (palavra 0: 3C000000 esperado 3C000000)
+[amdsdma] a SDMA le a RAM (modo PA, sem GART): o present passa a ser pela placa
+...
+[amdsdma] quadros pela SDMA 00000485 falhas 00000000
+[amdgop] fim: quadros 00000485 ciclos/quadro 00521B62 pixels/quadro 001890AE
+```
+
+1.157 quadros pela SDMA sem falha, 5.380.962 ciclos e 1.609.902 pixels por
+quadro: **3,34 ciclos por pixel**, de novo pior que os ~2,5 da CPU. Provavel
+causa: o firmware do SMU roda sem DPM (`FEATURE_STATUS` 0), entao os clocks
+da SDMA e da memoria devem estar no nivel mais baixo; e a CPU ficava parada
+esperando cada copia.
+
+### Present dividido entre a SDMA e a CPU (`AMDSDMA.DLL`, 2026-11-18)
+
+Ligar o DPM (as tabelas de energia do VBIOS inteiras) e um projeto grande.
+O que ja da para ganhar sem ele: as duas copiam **ao mesmo tempo**. O
+`sd_present` corta cada area na horizontal; a SDMA recebe as linhas de baixo
+(uma sub-janela por area, um fence no fim) e, enquanto ela trabalha, a CPU
+copia as de cima pela abertura. Depois espera o fence. Pela conta (~0,30
+pixel por ciclo da SDMA + ~0,40 da CPU) sai ~1,4 ciclo por pixel, ~40%
+melhor que a CPU sozinha.
+
+- A fatia da SDMA (`sd_parte`, em 1/1024) comeca em 440 (0,30 / 0,70) e se
+  ajusta a cada quadro: se o fence ja tinha chegado quando a CPU acabou
+  (folga), +16; se a espera passou de 1/8 do tempo da CPU (atraso), -16;
+  fica entre 64 e 960.
+- Quadros com menos de 65.536 pixels ficam so com a CPU: o fence e o HDP
+  custam mais que a copia ali.
+- Falha (fence que nao vem em 200 ms): SDMA parada, caminho desligado, e a
+  CPU refaz o quadro inteiro.
+- No fim, o log diz a fatia final, os pixels de cada lado e as folgas e os
+  atrasos: `[amdsdma] quadros pela SDMA ... fatia da SDMA /1024 ... pixels
+  SDMA ... CPU ... folgas ... atrasos ...`.
+
+Testes (2026-11-18): `make test-amdsmc` com cenarios novos, 0 falhas: o
+quadro e dividido (pixels dos dois lados) e sai certo; area pequena so pela
+CPU; a SDMA parando no meio faz a CPU refazer o quadro inteiro. QEMU (Bochs
+com `AMDSDMA.DLL`): normal. Na simulacao a SDMA trabalha na hora, entao o
+paralelismo e o ajuste da fatia so a placa mede.
+
+**Primeiro boot com o present dividido (2026-11-18): 1,56 vez mais rapido
+que a CPU sozinha.**
+
+```
+[amdsdma] quadros pela SDMA 000012FB falhas 00000000 fatia da SDMA /1024 000001D8 pixels SDMA CA077FAD CPU DFFE73E2 folgas 0000000D atrasos 0000000B
+[amdgop] fim: quadros 000012FB ciclos/quadro 0024223F pixels/quadro 00167202 (quadro inteiro: ciclos 004F622D pixels 001FA400)
+```
+
+| Caminho | Ciclos por pixel |
+|---|---|
+| CPU sozinha (copia da tela inteira) | 2,51 |
+| SDMA sozinha (sessoes anteriores) | ~3,35 |
+| **SDMA + CPU ao mesmo tempo** | **1,61** |
+
+- 4.859 quadros, todos pelo caminho dividido, sem nenhuma falha; 2.368.063
+  ciclos e 1.470.978 pixels por quadro;
+- a fatia da SDMA terminou em 472/1024 (46%), perto da conta inicial (43%):
+  so 13 folgas e 11 atrasos, entao ela ficou estavel;
+- a conta previa ~1,4; deu 1,61. A diferenca e o custo fixo de cada quadro
+  (montar os pacotes, o HDP flush, o fence) e alguma disputa no PCIe (a
+  escrita da CPU e as respostas das leituras da SDMA descem pelo mesmo
+  link);
+- os contadores de pixels de cada lado estouraram 32 bits (7,1 G pixels na
+  sessao); o log agora mostra milhares de pixels (`kpixels SDMA ... CPU`).
+
+O proximo ganho de verdade vem do DPM (clocks da SDMA e da memoria acima do
+minimo), que tambem deixaria a fatia da SDMA crescer.
+
+### Ajustes do present dividido (2026-11-18)
+
+- **Fatia pela velocidade medida.** A CPU copia a parte dela em blocos de
+  64 linhas e, entre um bloco e outro, olha o fence; assim cada quadro mede
+  quanto a SDMA levou (do envio ao fence) e quanto a CPU levou. A fatia
+  ideal sai das duas velocidades: `pxs * Tcpu / (pxs * Tcpu + pxcpu * Tsdma)`
+  (em 1/1024), media 3:1 com a anterior e entre 64 e 960. Antes eram passos
+  fixos de 16; `folgas` agora conta os quadros em que a SDMA acabou antes da
+  CPU e `atrasos` os em que a CPU esperou.
+- **Copia pela CPU em 8 bytes** (`rep movsq`, mais o pixel impar no fim com
+  `rep movsl`): metade das escritas pela abertura write-combining. Vale para
+  todos os DLLs da AMD (`copia()` e a mesma).
+- Testes: `make test-amdsmc` sem falhas, com um cenario novo de largura
+  impar (o ultimo pixel e o vizinho fora da area); QEMU (Bochs, caminho da
+  CPU) com a tela certa. Publicados so os DLLs (`AMDGOP`, `AMDCUR`, `AMDSMC`
+  e `AMDSDMA`), sem kernel novo.
+
+**Fora destes ajustes: o DPM.** Os clocks da SDMA e da memoria so sobem com
+o DPM do SMU, que no Linux e o `smu7_hwmgr` + `polaris10_smumgr`: ler as
+tabelas de energia do VBIOS (ATOM PowerPlay) e mandar ao SMU as tabelas de
+tensao, clock, ventoinha e temperatura antes de ligar os niveis. Erro ali
+nao e tela errada: e tensao ou refrigeracao erradas na placa. Fica como etapa
+propria, feita com alguem acompanhando o PC (temperatura e ventoinha), nao
+so com simulacao.
+
+### Etapa M: dois monitores, parte 1 (`AMDSMC`/`AMDSDMA.DLL`, 2026-11-18)
+
+O PC tem dois monitores na RX 570. O GPU.LOG mostra que o GOP so liga o
+CRTC 0: o CRTC 1 tem a mesma imagem 1920x1080 configurada (`surf
+F4:00000000`, pitch 1920), mas `CRTC_CONTROL` 0x80400310, com o
+`CRTC_MASTER_EN` em 0. Acender a segunda saida e programar o PLL do pixel,
+o codificador DIG e o transmissor (UNIPHY: DP com treino do link, ou
+HDMI/DVI) e o CRTC 1. O Linux faz isso rodando as tabelas do AtomBIOS da
+propria placa (`amdgpu_atombios_crtc.c`, `amdgpu_atombios_encoders.c`),
+porque os valores dependem da placa (qual UNIPHY vai a qual conector,
+espalhamento, tensao do PHY). Fazer isso as cegas pode travar a maquina,
+e os logs se perdem.
+
+Por isso a parte 1 so le, e copia o VBIOS para o log
+(`drivers/amdgop/vbios.c`):
+
+- VBIOS pela interface de ROM do SMC, como `vi_read_bios_from_rom`:
+  `ixROM_INDEX` (0xC0600010) = 0 e leituras seguidas de `ixROM_DATA`
+  (0xC0600014). So aceita a imagem com 0xAA55, " 761295520" em 0x30 e
+  "ATOM" no cabecalho;
+- tabela de objetos do AtomBIOS (`Object_Header`): cada conector (tipo,
+  linha I2C do DDC, GPIO do HPD) e cada caminho conector -> codificadores;
+- o nivel do pino de HPD de cada conector (`GPIO_Pin_LUT` -> `DC_GPIO_HPD_Y`,
+  0x488F), ou seja, quais portas tem monitor (`MONITOR` no log);
+- a temporizacao dos CRTCs 0 e 1 (`CRTC_H_TOTAL` 0x1B80 e seguintes);
+- a copia do VBIOS (ate 64 KB) no log: `[vbios] OOOOO <64 bytes>`, linhas
+  so de FF ou de 00 resumidas, e o FNV-1a no fim.
+  `drivers/amdgop/vbios-extrai.py SERIAL.LOG vbios.rom` remonta e confere.
+
+A copia tem cerca de 140 KB: cabe no `SERIAL.LOG` (192 KB), mas enche o
+GPU.LOG (8 KB), e as linhas do `fim` do driver (quadros, fatia da SDMA)
+ficam so no SERIAL.LOG. O SERIAL.LOG e gravado ao entrar no WIN e ao rodar
+um programa ou o comando `USB`: depois de sair do WIN com Esc, rodar `USB`
+grava o log com o `fim` do driver.
+
+Simulacao (`make test-amdsmc`, cenario 16): ROM falsa com um conector DP e
+um HDMI, HPD de um e dos dois, ROM que nao responde, copia remontada pelo
+extrator igual a ROM.
+
+**Primeiro log da parte 1 (2026-11-18).** VBIOS lido pelo par 0xC0600010/14:
+59.904 bytes, fnv1a A98AC119 (remontado pelo extrator, confere). A placa tem
+quatro saidas:
+
+| Conector | Id | Codificador | Pino HPD (`DC_GPIO_HPD_Y`) | Monitor |
+|---|---|---|---|---|
+| 0 DisplayPort 1 | 0x3113 | UNIPHY2 link A (0x2121) | bit 28 = 0 | nao |
+| 1 DisplayPort 2 | 0x3213 | UNIPHY2 link B (0x2221) | bit 24 = 0 | nao |
+| 2 DisplayPort 3 | 0x3313 | UNIPHY1 link A (0x2120) | bit 0 = 1 | sim |
+| 3 HDMI | 0x310C | UNIPHY1 link B (0x2220) | bit 26 = 1 | sim |
+
+- O HPD e ativo em 1. O `ucPlugged_PinState` desta placa e 0 em todos os
+  conectores e nao serve: a primeira versao marcou `MONITOR` nos dois DP
+  vazios. Corrigido (vale o nivel 1).
+- CRTC 0: 2080 x 1100 no total (1920x1080 com blanking reduzido, ~137 MHz).
+  CRTC 1: temporizacao toda em 0, ou seja, o GOP nunca o programou; a
+  segunda tela fica sem sinal ate o driver acende-la.
+- Tabelas do AtomBIOS que o Linux usa para isso, todas presentes:
+  `SetPixelClock` (v1.7), `DIGxEncoderControl` (v1.5),
+  `UNIPHYTransmitterControl` (v1.6), `SetCRTC_UsingDTDTiming`,
+  `EnableCRTC`, `BlankCRTC`, `SelectCRTC_Source`, `EnableGraphSurfaces`,
+  `ProcessAuxChannelTransaction`, `DPEncoderService` e
+  `ProcessI2cChannelTransaction` (EDID).
+- A copia no log enchia o SERIAL.LOG (192 KB): agora so com
+  `-DAMD_VBIOS_COPIA`; sem ela o log da so o tamanho e o fnv1a.
+
+Parte 2, depois do log: interpretador do AtomBIOS (o `atom.c` do Linux, MIT)
+testado no PC de desenvolvimento com a ROM desta placa; EDID do segundo
+monitor pelo DDC; e entao acender o CRTC 1 com a mesma imagem (espelho).
+A tela estendida (area de trabalho maior) precisa do kernel (`visual.c`
+com duas telas), que fica para quando o kernel puder ser publicado sem
+misturar o trabalho do WINE.
+
+### Etapa M, parte 2: a segunda tela em espelho (`AMDDUAL.DLL`, 2026-11-18)
+
+`AMDDUAL.DLL` = `AMDSDMA.DLL` + `-DAMD_TELA2`. O `SODOS.CFG` passa a usar
+`driver=AMDDUAL.DLL`; para voltar, `driver=AMDSDMA.DLL`.
+
+- **Interpretador do AtomBIOS** (`drivers/amdgop/atom.c`): o `atom.c` do
+  Linux v6.6 (MIT, aviso de copyright mantido), copiado por um script que so
+  troca o que e do kernel. As leituras da ROM tem limite (fora da imagem a
+  tabela aborta), um laco preso no mesmo salto aborta em 2 s (no Linux,
+  20 s), cada chamada tem um teto de 2 milhoes de instrucoes e de 3 s, o WS
+  vem de uma pilha propria e o PS e um buffer de 2048 palavras (o Linux nao
+  limita o indice).
+- **Sequencia** (`drivers/amdgop/tela2.c`), a mesma ordem do modeset do
+  `dce_v11_0` (crtc_prepare, encoder_prepare, crtc_mode_set, crtc_commit,
+  encoder_commit):
+  1. Acha a tela principal: o DIG ligado (`DIG_BE_EN_CNTL`) com a entrada
+     no CRTC 0 (`DIG_FE_CNTL`).
+  2. Escolhe a segunda: outro conector com monitor no HPD.
+  3. `EnableDispPowerGating`, `UpdateCRTC_DoubleBufferRegisters` (trava),
+     `EnableCRTC` (desliga), `SelectCRTC_Source` v1.3 (CRTC 1 -> DIGn).
+  4. `SetPixelClock` v1.7 (148,5 MHz no PLL do PHY: COMBOPHY_PLL0..5, como
+     o `dce_v11_0_pick_pll` da Polaris), `SetCRTC_UsingDTDTiming`
+     (1920x1080 da CEA-861, que todo monitor HDMI/DVI aceita).
+  5. A mesma superficie do CRTC 0 no CRTC 1, com o viewport, o buffer de
+     linha, o DMIF e as marcas d'agua copiadas do CRTC 0;
+     `SetCRTC_OverScan`, `EnableScaler`.
+  6. `EnableCRTC` (liga), `BlankCRTC` (mostra), LUT identidade, destrava.
+  7. `DIGxEncoderControl` v1.5 (STREAM_SETUP, SETUP_PANEL_MODE),
+     `UNIPHYTransmitterControl` v1.6 (INIT e ENABLE) em modo DVI, ou seja,
+     TMDS sem infoframes nem audio.
+  8. O cursor da placa passa a ir nos dois CRTCs.
+- Se uma tabela abortar, o driver desliga o transmissor e o CRTC 1. O `fini`
+  tambem desliga a segunda tela.
+- Se a segunda tela for DisplayPort, o driver so registra no log: ainda
+  falta o treino do link (`atombios_dp.c`: AUX, padroes 1/2/3, tensao e
+  pre-enfase).
+- O driver so mexe no CRTC 1, no DIG, no PHY e no PLL da segunda saida.
+
+**Simulacao com o VBIOS real** (`make test-amdsmc`, cenario 17, com
+`RX570_ROM`, por padrao `/mnt/e/LOG/RX570.ROM`):
+
+- O simulador recebe a ROM desta placa. A tela principal fica no DIG2
+  (DP 3, UNIPHY1 link A) e a segunda tela no HDMI (DIG3, PHY D).
+- Todas as tabelas rodam ate o fim, sem abortar.
+- O simulador imita tres respostas do PHY, lidas no codigo do VBIOS com
+  um desmontador:
+  - `CMD_BUS_GLOBAL_FOR_TX_LANEn`: o VBIOS pede pelo bit 12 e espera o
+    bit 13;
+  - `PLL_WRAP_CNTRL`: liga pelo bit 14 e espera o PLL travar no bit 13;
+  - `CMD_BUS_TX_CONTROL_LANEn`: espera a pista pronta no bit 8.
+- Conferido: o CRTC 1 sai com a superficie do CRTC 0, o cursor vai nas
+  duas telas e o `fini` desliga a segunda tela.
+- Em todo o modeset, as escritas da sequencia vao so para o CRTC 1, o
+  pipe 1, o DIG3, o PHY D (0x9AA1 a 0x9B3F, `UNIPHYD_*`, `SYMCLKD`) e o
+  PLL dele. Do bloco do CRTC 0 so muda o `DPG_WATERMARK_MASK_CONTROL`,
+  que a copia das marcas d'agua troca e devolve.
+- O DIG3 termina com a entrada no CRTC 1, a saida em modo DVI e o HPD5.
+
+Na placa, o log diz qual DIG e a tela principal. Se for o HDMI, a segunda
+tela e o DP 3 e fica para o treino do link.
+
+**Primeiro boot com o `AMDDUAL.DLL` (2026-11-18): a segunda tela acendeu em
+espelho.**
+
+```
+[amdtela2] DIG 00000002 fe 01000000 be 00020400 be_en 00000101 <- tela principal (CRTC 0)
+[amdtela2] TSC por ms 00479211 segunda tela: conector 00000003 dig 00000003 phy 00000003
+[amdtela2] UNIPHYTransmitterControl v6 ENABLE v00000106 ok, instrucoes 0000011D
+[amdtela2] CRTC 1: ctl 80410311 quadros 00000003 -> 00000004 DIG fe 01000001 be 40020800 be_en 00000101
+[amdtela2] segunda tela LIGADA em espelho (CRTC 1)
+```
+
+- A tela principal era mesmo o DIG2: DP 3, modo DP (`be` 0x00020400).
+- A segunda tela e o HDMI: DIG3, PHY D, modo DVI e HPD5.
+- As 15 tabelas rodaram sem abortar, com o mesmo caminho da simulacao.
+- O CRTC 1 varre a imagem: `CRTC_CONTROL` igual ao do CRTC 0 e o contador
+  de quadros andando. O DIG3 recebe o CRTC 1 com o clock ligado.
+- TSC calibrado: 4.690.449 ciclos por ms (4,69 GHz).
+
+### Etapa M, parte 3: tela estendida e o `TELAS.EXE` (2026-11-18)
+
+- **Escolha:** `telas=estendida` ou `telas=espelho` (o padrao) na secao
+  `[video]` do `SODOS.CFG`. Fica nesse arquivo, e nao no `VIDEO.CFG`,
+  porque o `VIDEOCFG.EXE` reescreve o `VIDEO.CFG` inteiro. Vale ao entrar
+  no WIN.
+- **`TELAS.EXE`** (`utils/telas_cfg.c`): janela com "Duplicado" e
+  "Estendido" e um desenho das duas telas. Grava so a linha `telas=` e
+  deixa o resto do arquivo como esta.
+- **Contrato do driver** (`video/gpu.h`): o bit `GPU_CAP_TELAS` e o campo
+  `telas` no fim do `struct gpu_drv`. Um DLL antigo nao tem o bit, entao o
+  kernel nao le o campo. O `GPU_ABI` continua 1. As operacoes sao:
+  - `CONSULTA`: quantas telas ha, a area larga e onde ela fica;
+  - `ESTENDE`: mostra a imagem larga e adota o modo largo;
+  - `UMA`: volta ao fb do GOP.
+- **Driver** (`tela2.c`):
+  - A imagem larga fica na VRAM a partir do endereco do GOP: 3840x1080
+    com pitch de 3840 pixels, 16,6 MB, abaixo do cursor em 16 MB.
+  - O CRTC 0 mostra a metade esquerda e o CRTC 1 a direita
+    (`VIEWPORT_START` em x 1920).
+  - O cursor usa coordenadas da imagem, entao a mesma posicao nos dois
+    CRTCs funciona.
+  - O `suspend` (Ctrl+F1..F12) e o `fini` voltam o pitch do GOP, para a
+    tela de texto.
+- **Kernel** (`visual.c`):
+  - Depois de ligar ou religar o driver, `gfx_tela_estende` pede a
+    imagem larga e passa a desenhar num quadro de 3840x1080 no heap alto
+    (a faixa de 1 MB so tem ~9 MB).
+  - `gfx_tela_uma` volta a uma tela ao suspender, ao sair do WIN, se o
+    driver cair e sempre que o quadro e remontado.
+  - A `gfx_back_move` do WINE nao devolve o quadro largo a faixa baixa.
+  - Maximizar e restaurar usam o monitor onde esta o centro da janela.
+- **Testes:**
+  - Simulador, cenario 17: consulta, estende, quadro largo inteiro e uma
+    area so na segunda tela copiados (SDMA + CPU), suspend/resume e
+    UMA/fini voltando o pitch, tudo OK.
+  - QEMU (Bochs, `AMDDUAL.DLL`, `telas=estendida`): o WIN sobe numa tela
+    so, porque la nao ha segunda tela, e o `TELAS.EXE` abre lendo
+    `estendida`.
+  - Publicado com `make sendpc`, que levou junto o WINE em andamento.
+
+**Primeiro boot com a tela estendida (2026-11-18): funcionou.** Quatro
+sessoes do WIN, todas com `tela ESTENDIDA: 3840x1080, segunda tela em x
+1920`. A volta a uma tela no fim de cada uma tambem funcionou. Nenhuma
+falha da SDMA. Ciclos por pixel no present: 1,61, 1,64 e 1,64, iguais aos
+de uma tela. A SDMA terminou antes da CPU em quase todos os quadros (2.944
+de 2.950 na primeira sessao) e a fatia dela ficou em 0,42 a 0,45: a conta
+da fatia mede a SDMA so entre um bloco e outro da CPU e a subestima (a
+corrigir). A troca da tela em memoria pelo WINE nao aconteceu neste teste:
+os EXEs abertos eram relocaveis.
+
 ### Etapas da RX 570
 
 | # | Etapa | Estado |
@@ -1020,9 +1359,10 @@ formato certo na Polaris. O teste para antes de usar; nada escreve na RAM.
 | B | Cursor pelo DCE 11.2 (`CUR_CONTROL`, `CUR_SURFACE_ADDRESS`, `CUR_SIZE`, `CUR_POSITION`, `CUR_UPDATE` com lock), imagem 64x64 na VRAM: `AMDCUR.DLL` passa a ter caminho Polaris | feito, rodou na placa (128x128); falta Ctrl+F1/F7 |
 | C | Estado do SMC: leitura indireta (`SMC_IND_INDEX_11`/`DATA_11`) de `SMC_SYSCON_CLOCK_CNTL_0` e `SMC_PC_C`, para saber se o firmware do SMU esta rodando | feito: SMC so na ROM, firmware a carregar, modo protegido |
 | C2 | Carregar o `polaris10_k_smc.bin` (assinado) na RAM do SMC em modo protegido, como `polaris10_start_smu_in_protection_mode` + `smu7_upload_smu_firmware_image`, e esperar `SMU_DONE`/`SMU_PASS` | feito: firmware do SMU rodando na placa (2026-11-18) |
-| D | A SDMA lendo a RAM do PC para o `present` pela placa: primeiro pelo modo PA (sem GART), testado antes de usar (`AMDSDMA.DLL`); GART (GMC 8, VM contexto 0) so se o modo PA nao servir | modo PA feito, testado em simulacao e QEMU; falta rodar na placa |
+| D | A SDMA lendo a RAM do PC para o `present` pela placa: primeiro pelo modo PA (sem GART), testado antes de usar (`AMDSDMA.DLL`); GART (GMC 8, VM contexto 0) so se o modo PA nao servir | feito: present pela placa em modo PA (abertura AGP desligada), dividido com a CPU: 1,61 ciclo por pixel contra 2,51 da CPU (2026-11-18). GART so se precisar |
 | E | SDMA 3.0: microcodigo `polaris10_sdma.bin` pelo SMU, anel e fence na VRAM, escrita, preenchimento e copia pela placa (`AMDSDMA.DLL`) | feito: SDMA0 funcionando na placa (escrita, preenchimento e copia de 4 MB, 2026-11-18) |
 | F | GFX 8: microcodigos PFP/ME/CE/MEC/RLC, anel GFX, IH (interrupcoes), fences | em aberto |
+| M | Dois monitores: VBIOS, conectores e HPD (parte 1); interpretador do AtomBIOS e o CRTC 1 em espelho (parte 2); tela estendida no kernel (parte 3) | parte 1 rodou na placa (VBIOS, 4 saidas, monitores no DP 3 e no HDMI); parte 2 (`AMDDUAL.DLL`): segunda tela em espelho no HDMI funcionando na placa (2026-11-18); DisplayPort como segunda tela e a tela estendida em aberto |
 | G | Interface estilo DRM no kernel (BOs, mapear no processo, submeter, esperar) e Mesa radeonsi/RADV com um winsys do SODOS | em aberto |
 
 As etapas D a G escrevem na placa e podem travar a maquina: cada uma entra
@@ -1046,7 +1386,8 @@ gpudrv=GPUTEST.DLL forca este driver de D:\SODOS\DRV, com ou sem placa na tabela
 | `1002:15E7` AMD Barcelo (pelo `SODOS.CFG`) | `AMDGOP.DLL` | funciona no notebook (1920x1200, GOP): 8,1x menos ciclos por quadro |
 | `1002:67DF` Radeon RX 570 (pelo `SODOS.CFG`) | `AMDGOP.DLL` | funciona no desktop (1920x1080, GOP acima de 4 GB); diagnostico Polaris (etapa A) rodou: tela no CRTC 0, motores parados |
 | `1002:67DF` Radeon RX 570 (pelo `SODOS.CFG`) | `AMDSMC.DLL` | funciona no desktop: tela, cursor da placa e firmware do SMU carregado (etapa C2) |
-| `1002:67DF` Radeon RX 570 (pelo `SODOS.CFG`) | `AMDSDMA.DLL` | funciona no desktop: tela, cursor da placa, firmware do SMU e SDMA0 (escrita, preenchimento e copia na VRAM) |
+| `1002:67DF` Radeon RX 570 (pelo `SODOS.CFG`) | `AMDSDMA.DLL` | funciona no desktop: tela, cursor da placa, firmware do SMU e present pela SDMA dividido com a CPU (1,56x mais rapido) |
+| `1002:67DF` Radeon RX 570 (pelo `SODOS.CFG`) | `AMDDUAL.DLL` | funciona no desktop: o `AMDSDMA` mais a segunda tela em espelho no HDMI (CRTC 1 pelo AtomBIOS) |
 | nenhuma (so `gpudrv=`) | `GPUTEST.DLL` | teste: copia o back buffer para o LFB pela CPU, reserva 64 KB para aparecer no TOP |
 | nenhuma (so `gpudrv=`) | `GPUFAIL.DLL` | o mesmo, mas `present` falha no 20o quadro |
 

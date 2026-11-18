@@ -258,7 +258,7 @@ Several FAT drives can be mounted at once (`D:`, `E:`, `U:`...). The kernel keep
 ### File system
 
 - FAT12 and FAT16 for reading; writing, `md` and `rd` on FAT16.
-- **FAT32** through `FAT32.DLL` (`src13/drivers/fat32`), loaded only when a FAT32 drive shows up. It is searched in `%FAT32DLL%`, `Z:\SODOS\DRV` (shipped in `SODOS.PAK`), `D:` and `U:`. Reads, creates folders (`md`), writes whole files (`copy`, `k_fsave`) and deletes (`del`); no `rd` or rename yet.
+- **FAT32** through `FAT32.DLL` (`src13/drivers/fat32`), loaded only when a FAT32 drive shows up. It is searched in `%FAT32DLL%`, `Z:\SODOS\DRV` (shipped in `SODOS.PAK`), `D:` and `U:`. Reads, creates folders (`md`), writes whole files (`copy`, `k_fsave`), deletes (`del`) and renames/moves without copying (`k_frename`, libc `rename()`); no `rd` yet.
 - **Long names (VFAT LFN)** on FAT16 and FAT32: `dir` shows the full name; programs get up to 31 characters, or the 8.3 alias (`NAME~1.EXT`). No exFAT.
 - Subdirectories up to 8 components of 12 characters, with `.` and `..`.
 - Primary MBR partitions (4 entries); no extended, logical or GPT partitions.
@@ -1115,7 +1115,7 @@ dlls      loaded modules, base, size and references
 ## Known limitations
 
 - **No memory protection**: everything runs in ring 0, in a single address space. Only window programs are preempted; an infinite loop in a text program, or inside the kernel, hangs the machine. The kernel runs on one CPU at a time (BKL).
-- **Partial FAT32** (no `rd` or rename), no exFAT, extended partitions or GPT; switching between FAT16 drives reloads the FAT from the disk.
+- **Partial FAT32** (no `rd`), no exFAT, extended partitions or GPT; switching between FAT16 drives reloads the FAT from the disk.
 - The old TCP client (`k_tcp_*`) is one connection at a time; `k_sock_*` sockets go up to 64. No IPv6, SACK or generic UDP sockets.
 - **No audio** (Firefox uses a null output), no floppy, no DMA.
 - **USB is only the mouse and the pendrive**: one HID boot mouse and one bulk-only mass storage device on an xHCI controller, in the PC's ports or behind USB 2 hubs; no USB 3 hubs, no USB keyboard, no I2C touchpad.

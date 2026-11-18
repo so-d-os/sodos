@@ -18,6 +18,11 @@ cleanup() {
   [ -z "$KEEP" ] && rm -rf "$T"
 }
 trap cleanup EXIT
+# outro QEMU (de outro teste) na mesma porta responderia no lugar deste
+if curl -s -m 2 "http://127.0.0.1:$PORT/win" >/dev/null 2>&1; then
+  echo "qemu-test: a porta $PORT ja esta em uso (outro QEMU?); use PORT=..." >&2
+  exit 1
+fi
 cp --sparse=always "$S/disk.img" "$T/disk.img"
 printf 'api start\r\n' > "$T/AUTOEXEC.BAT"
 mcopy -o -i "$T/disk.img@@512" "$T/AUTOEXEC.BAT" ::/AUTOEXEC.BAT

@@ -624,6 +624,7 @@ static void exec_release(uint32_t pid, int id) {
   ufree_owner(pid);
   hm_free_owner(pid);
   isr_fault_release(pid);
+  wine_low_release_pid(pid);      /* imagem de base fixa (sem pedidos: so um if) */
   if (id < 0) wine_exec_done();   /* EXE do Windows: pode soltar o WINE.DLL */
 }
 

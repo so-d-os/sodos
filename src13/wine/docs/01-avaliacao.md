@@ -59,8 +59,15 @@ O Wine (desde a 5.x) tem duas metades:
 
 | Marco | Entrega | Teste | Estado |
 |---|---|---|---|
-| W0 | Gate `SET WINE`, loader PE32+, TEB/PEB, TLS, kernel32/ucrt mínimos | `HELLOW.EXE`, `MSGBOXW.EXE` (zig) no QEMU | **feito em 2026-11-18** |
-| W1 | Arquivos (`CreateFile`...), `CreateThread` (k_threads + TEB), eventos/esperas, SEH por `k_fault_entry` + `.pdata` (`RtlVirtualUnwind`), `VirtualAlloc` grande por `k_hmalloc` | `lua.exe`, `7z.exe` de console | |
-| W2 | DLLs PE do Wine (`ucrtbase`, `msvcrt`, `kernelbase`) compiladas com MinGW, carregadas de `PATHSODOS\WINE\SYSTEM32` no lugar das embutidas | mesmos EXEs com a CRT do Wine | |
-| W3 | `user32`/`gdi32` do Wine + `win32u` próprio desenhando no WIN | `MessageBox` em janela, Notepad do Wine | |
-| W4 | Kernel: páginas por processo, bases fixas, `#PF`→SEH | EXEs sem `.reloc`, 32 bits (WoW64), instaladores | |
+| W0 | Gate `SET WINE`, loader PE32+, TEB/PEB, TLS, kernel32/ucrt minimos | `HELLOW.EXE`, `MSGBOXW.EXE` (zig) no QEMU | feito em 2026-11-18 |
+| W1 | GS = TEB real, `KUSER_SHARED_DATA`, memoria virtual (reserva/commit), threads, eventos/timers/IOCP, arquivos, excecoes vetorizadas, processos filhos | runtime do Go 1.25 (instalador do Claude), `WRT.EXE` | feito em 2026-11-18 |
+| W1b | Winsock TCP sobreposto, registro em memoria, crypt32 (cadeias, assinante), COM/WinRT minimo, PackageManager + ZIP | download HTTPS de 299 MB e instalacao de MSIX pelo instalador do Claude | feito em 2026-11-18 (ver 02-claude-setup.md) |
+| W3a | user32/gdi32 proprios: uma janela, mensagens, timers, GDI em superficie | splash do instalador do Claude no WIN | feito em 2026-11-18 |
+| W2 | DLLs PE do Wine (`ucrtbase`, `msvcrt`, `kernelbase`) no lugar das embutidas | | |
+| W3b | Controles, varias janelas, texto do GDI em bitmap, dialogos (`MessageBox` de verdade), ListView/Toolbar/StatusBar/Rebar, menus guardados | instalador grafico do WinRAR + `WinRAR.exe` (ver 04-winrar.md) | feito em 2026-11-18 (falta desenhar menus e icones) |
+| W1c | SEH por tabela (`RtlVirtualUnwind`, `__C_specific_handler`), `throw` do C++ | EXEs MSVC/MinGW com excecoes | |
+| W4 | Kernel: paginas por processo, bases fixas | EXEs sem `.reloc`, 32 bits (WoW64), instaladores Squirrel/NSIS | |
+| W5 | O que um app Electron/Chromium pede (GPU, sandbox, IPC, COM) | Claude Desktop instalado | |
+
+Pendencias de seguranca: verificador de X.509 (raizes + RSA/ECDSA) e
+Authenticode, para aposentar o `WINE_NOVERIFY`.

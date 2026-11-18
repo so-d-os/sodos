@@ -1038,6 +1038,44 @@ void* umalloc_aligned(uint32_t nbytes, uint32_t align) {
   return 0;
 }
 
+/* Bloco num endereco escolhido (addr multiplo de 16), se a faixa estiver
+ * livre. Para a pagina KUSER_SHARED_DATA dos programas Windows (wine.c). */
+void* umalloc_at(uint32_t addr, uint32_t nbytes, uint32_t owner) {
+  struct arena* a = &high;
+  const uint32_t hs = (uint32_t)sizeof(struct mm_hdr);
+  uint32_t need;
+  int b;
+  if (!a->ready || nbytes == 0 || (addr & (MM_ALIGN - 1u))) return 0;
+  if (addr - hs < a->start || addr >= a->end) return 0;
+  need = blk_need(nbytes);
+  if (!need) return 0;
+  if (!find_fit(a, MM_MIN_BLK)) return 0;  /* valida as listas */
+  for (b = 0; b < MM_NBIN; b++) {
+    uint32_t x;
+    for (x = a->bin[b]; x; x = fb(x)->next) {
+      struct mm_hdr* h = blk_at(x);
+      uint32_t start = x, end = start + h->size;
+      struct mm_hdr* n;
+      if (addr - hs < start || addr - hs + need > end) continue;
+      /* a folga da frente precisa caber como bloco livre valido */
+      if (addr - hs != start && addr - hs - start < MM_MIN_BLK) return 0;
+      fl_remove(a, h);
+      n = blk_at(addr - hs);
+      if ((uint32_t)n != start) {
+        h->size = (uint32_t)n - start;
+        n->size = end - (uint32_t)n;
+        n->prev = h->size;
+        fl_insert(a, h);
+      }
+      n->free = 0;
+      n->owner = owner;
+      split(a, n, need);
+      return (uint8_t*)n + hs;
+    }
+  }
+  return 0;
+}
+
 void ufree(void* ptr) { arena_free(&high, ptr); }
 
 uint32_t usize(void* ptr) {
@@ -1157,4 +1195,90 @@ int mm_map_wc(uint64_t phys, uint64_t size) {
     kt_tlb_shootdown();   /* as outras CPUs tambem tinham o mapeamento velho */
   }
   return n;
+}
+
+/* ---- Uma pagina de 4 KB "emprestada" num endereco fixo ----
+ * O kernel mapeia tudo na identidade com paginas de 2 MB/1 GB. A pagina
+ * KUSER_SHARED_DATA dos programas Windows tem endereco fixo (0x7FFE0000) e,
+ * num PC com UEFI, esse endereco pode ser do firmware ou estar fora do heap.
+ * Aqui a pagina de 2 MB (ou 1 GB) que o contem vira uma tabela de paginas de
+ * 4 KB, igual a identidade, menos `va`, que passa a apontar para `pa`.
+ * Um alias por vez; mm_alias_undo devolve o mapeamento original. */
+static uint64_t alias_pt[512] __attribute__((aligned(4096)));
+static uint64_t alias_pd[512] __attribute__((aligned(4096)));
+static uint64_t* alias_pdpt_e;   /* entrada do PDPT trocada (pagina de 1 GB) */
+static uint64_t alias_pdpt_old;
+static uint64_t* alias_pd_e;     /* entrada do PD trocada */
+static uint64_t alias_pd_old;
+static uint64_t* alias_pt_e;     /* entrada de 4 KB trocada (ja havia tabela) */
+static uint64_t alias_pt_old;
+#define PG_ADDR 0x000FFFFFFFFFF000ULL
+#define PG_NX (1ULL << 63)
+
+static void alias_flush(void) {
+  uint64_t cr3;
+  __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+  __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+  kt_tlb_shootdown();
+}
+
+int mm_alias_page(uint64_t va, uint64_t pa) {
+  uint64_t cr3, *pml4, *pdpt, *pd, pde;
+  uint32_t gi = (uint32_t)(va >> 30), pi = (uint32_t)((va >> 21) & 511), ti = (uint32_t)((va >> 12) & 511);
+  uint32_t i;
+  if (alias_pd_e || alias_pt_e || va >= (512ULL << 30) || (va & 0xFFF) || (pa & 0xFFF)) return 0;
+  __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+  pml4 = (uint64_t*)(uintptr_t)(cr3 & PG_ADDR);
+  if (!(pml4[0] & 1u)) return 0;
+  pdpt = (uint64_t*)(uintptr_t)(pml4[0] & PG_ADDR);
+  if (!(pdpt[gi] & 1u)) return 0;
+  if (pdpt[gi] & 0x80u) { /* 1 GB: vira 512 paginas de 2 MB */
+    uint64_t e = pdpt[gi], base = e & 0x000FFFFFC0000000ULL;
+    uint64_t fl = (e & 0x11Fu) | (e & 0x1000u) | (e & PG_NX) | 0x80u;
+    for (i = 0; i < 512; i++) alias_pd[i] = (base + ((uint64_t)i << 21)) | fl;
+    alias_pdpt_e = &pdpt[gi];
+    alias_pdpt_old = e;
+    pdpt[gi] = (uint64_t)(uintptr_t)alias_pd | (e & 7u);
+  }
+  pd = (uint64_t*)(uintptr_t)(pdpt[gi] & PG_ADDR);
+  pde = pd[pi];
+  if (!(pde & 1u)) {
+    if (alias_pdpt_e) {
+      *alias_pdpt_e = alias_pdpt_old;
+      alias_pdpt_e = 0;
+    }
+    return 0;
+  }
+  if (!(pde & 0x80u)) { /* ja e tabela de 4 KB: troca so a entrada */
+    uint64_t* pt = (uint64_t*)(uintptr_t)(pde & PG_ADDR);
+    alias_pt_e = &pt[ti];
+    alias_pt_old = pt[ti];
+    pt[ti] = pa | 3u | (pt[ti] & (0x100u | PG_NX));
+  } else {
+    uint64_t base = pde & 0x000FFFFFFFE00000ULL;
+    uint64_t fl = (pde & 0x11Fu) | ((pde & 0x1000u) ? 0x80u : 0) | (pde & PG_NX);
+    for (i = 0; i < 512; i++) alias_pt[i] = (base + ((uint64_t)i << 12)) | fl;
+    alias_pt[ti] = pa | 3u | (pde & PG_NX); /* write-back, presente, escrita */
+    alias_pd_e = &pd[pi];
+    alias_pd_old = pde;
+    pd[pi] = (uint64_t)(uintptr_t)alias_pt | (pde & 7u);
+  }
+  alias_flush();
+  return 1;
+}
+
+void mm_alias_undo(void) {
+  if (alias_pt_e) {
+    *alias_pt_e = alias_pt_old;
+    alias_pt_e = 0;
+  }
+  if (alias_pd_e) {
+    *alias_pd_e = alias_pd_old;
+    alias_pd_e = 0;
+  }
+  if (alias_pdpt_e) {
+    *alias_pdpt_e = alias_pdpt_old;
+    alias_pdpt_e = 0;
+  }
+  alias_flush();
 }

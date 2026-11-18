@@ -31,6 +31,7 @@ typedef struct {
   const char* input;     /* digitado no console depois do boot (pode ser 0) */
   const char* input_after; /* espera este texto na saida antes de digitar */
   int verbose;
+  int net;               /* 1 = placa virtio-net com NAT (nat_init ja ligou) */
 } vmm_config;
 
 /* Checa AMD-V. 0 ok; senao preenche why. */
@@ -57,6 +58,8 @@ void svm_enter(struct vcpu_regs* r);
 /* Dispositivos (dev.c) */
 struct vm;
 void dev_init(struct vm* vm);
+/* Liga a placa virtio-net ao NAT (nat_init ja deu certo). */
+void dev_net_enable(struct vm* vm);
 /* Porta de I/O. size 1/2/4. */
 uint32_t dev_in(struct vm* vm, uint16_t port, int size);
 void dev_out(struct vm* vm, uint16_t port, int size, uint32_t val);

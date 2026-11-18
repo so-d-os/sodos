@@ -1409,7 +1409,10 @@ void drives_dir(const char* spec, int flags) {
     uint32_t total, livre;
     if (drv_ops[idx]->space(drv_vol[idx], &total, &livre) == 0) {
       put_num(livre, 34);
-      puts_k(" KB livres (somente leitura)\n");
+      /* FAT32.DLL com abi 3 grava; so o antigo e somente leitura */
+      puts_k(drv_ops[idx]->abi >= FSDRV_ABI_WRITE && drv_ops[idx]->write
+                 ? " KB livres\n"
+                 : " KB livres (somente leitura)\n");
     }
   }
 }
@@ -1616,7 +1619,15 @@ int drives_rename(const char* from, const char* to) {
   idx = letter_idx(L1);
   if (idx < 0 || idx != letter_idx(L2)) return -6;
   if (!drv_ready(idx)) return -2;
-  if (drv_kind[idx] == DRV_EXT) return -2;   /* FAT32: so leitura */
+  if (drv_kind[idx] == DRV_EXT) {
+    /* FAT32.DLL: abi 4 renomeia no lugar; o abi 3 so grava e apaga, entao quem
+     * chama copia e apaga (-5). Devolvia -2 para todos: o rename() da libc
+     * falhava e o Firefox parava o download ao tirar o ".part" do nome. */
+    const struct fsdrv_ops* o = drv_ops[idx];
+    if (o->abi >= FSDRV_ABI_RENAME && o->rename) return o->rename(drv_vol[idx], n1, n2);
+    if (o->abi >= FSDRV_ABI_WRITE && o->write && o->remove) return -5;
+    return -4;
+  }
   if (drv_kind[idx] != DRV_FAT) return -5;
   return fat_rename(n1, n2);
 }

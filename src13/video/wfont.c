@@ -14,7 +14,12 @@
 #define MAXE 6144       /* retas por glifo */
 #define MAXX 256        /* cruzamentos por linha de amostra */
 #define FIRST 32
+/* O kernel desenha so ASCII; o WINE.DLL compila com WFONT_LAST=255 (Latin-1). */
+#ifndef WFONT_LAST
 #define LAST 126
+#else
+#define LAST WFONT_LAST
+#endif
 #define NGLYPH (LAST - FIRST + 1)
 
 /* ---- leitura do arquivo ---- */

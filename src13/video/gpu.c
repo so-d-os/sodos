@@ -31,6 +31,7 @@ static const struct {
 
 /* VIDEO.CFG */
 static int cfg_off;          /* gpu=0 */
+static int cfg_estendida;    /* telas=estendida no [video] do SODOS.CFG */
 static char cfg_dll[16];     /* gpudrv=X.DLL: forca um driver (testes) */
 
 /* SODOS.CFG, secao [video]: uma entrada por placa= */
@@ -198,10 +199,12 @@ static int key_is(const char* line, int n, const char* key) {
   return i;
 }
 
-/* Le a secao [video] do SODOS.CFG: placa=, nome=, driver=, ativo=. */
+/* Le a secao [video] do SODOS.CFG: placa=, nome=, driver=, ativo= e
+ * telas= (estendida ou espelho; vale para a placa com duas telas). */
 static void cfg_parse(const char* t, int n) {
   int i = 0, in_video = 0;
   cfg_n = 0;
+  cfg_estendida = 0;
   while (i < n) {
     int j = i, k, len;
     const char* l;
@@ -223,6 +226,8 @@ static void cfg_parse(const char* t, int n) {
       copy_val(cfg_ent[cfg_n - 1].nome, (int)sizeof(cfg_ent[0].nome), l + k, len - k);
     } else if (in_video && cfg_n > 0 && (k = key_is(l, len, "driver=")) > 0) {
       copy_val(cfg_ent[cfg_n - 1].dll, (int)sizeof(cfg_ent[0].dll), l + k, len - k);
+    } else if (in_video && (k = key_is(l, len, "telas=")) > 0) {
+      cfg_estendida = k < len && (l[k] == 'e' || l[k] == 'E');
     } else if (in_video && cfg_n > 0 && (k = key_is(l, len, "ativo=")) > 0) {
       cfg_ent[cfg_n - 1].on = !(k < len && l[k] == '0');
     }
@@ -321,6 +326,26 @@ void gpu_cfg_line(const char* line, int n) {
   } else if ((k = key_is(line, n, "gpu=")) > 0) {
     cfg_off = k < n && line[k] == '0';
   }
+}
+
+int gpu_telas_cfg(void) {
+  cfg_load();
+  return cfg_estendida;
+}
+
+static void with_pci(struct gpu_mode* mm, const struct gpu_mode* m);
+
+int gpu_telas(int op, struct gpu_telas* t, const struct gpu_mode* m) {
+  const struct gpu_drv* d = gpu_drv;
+  struct gpu_mode mm;
+  if (!d || !(d->caps & GPU_CAP_TELAS) || !d->telas || !t) return -1;
+  if (m) with_pci(&mm, m);
+  if (d->telas(op, t, m ? &mm : 0) != 0) {
+    if (op == GPU_TELAS_CONSULTA) return -1;   /* so nao ha duas telas */
+    gpu_stop(op == GPU_TELAS_ESTENDE ? "tela estendida falhou" : "volta a uma tela falhou");
+    return -1;
+  }
+  return 0;
 }
 
 int gpu_wanted(void) {

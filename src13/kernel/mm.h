@@ -6,6 +6,9 @@
 void mm_init(void);
 /* Paginas de 2 MB de [phys, phys+size) viram write-combining (LFB). */
 int mm_map_wc(uint64_t phys, uint64_t size);
+/* Uma pagina de 4 KB em va passa a ser pa (um alias por vez); undo desfaz. */
+int mm_alias_page(uint64_t va, uint64_t pa);
+void mm_alias_undo(void);
 void* kmalloc(uint32_t nbytes);
 void kfree(void* ptr);
 int mm_ready(void);
@@ -24,6 +27,8 @@ void* umalloc_owned(uint32_t nbytes, uint32_t owner);
 /* Bloco do kernel (dono 0) tirado do fim da arena: para caches que ficam. */
 void* umalloc_top(uint32_t nbytes);
 void* umalloc_aligned(uint32_t nbytes, uint32_t align);
+/* Bloco no endereco addr (multiplo de 16) se a faixa estiver livre; 0 se nao. */
+void* umalloc_at(uint32_t addr, uint32_t nbytes, uint32_t owner);
 void* urealloc(void* ptr, uint32_t nbytes);
 void ufree(void* ptr);
 uint32_t usize(void* ptr);

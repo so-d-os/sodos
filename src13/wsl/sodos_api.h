@@ -13,5 +13,11 @@ int k_nvme_raw_read(unsigned long long lba, unsigned count, void* buf);
 unsigned long long k_nvme_raw_sectors(void);
 /* Teclado cru: Ctrl+C nao para o programa e Ctrl+letra chega como 1..26. */
 void k_kbd_raw(int on);
+/* NAT da VM (net/net.c net_tap_*): pacotes IP para o IP do SODOS. */
+int k_net_tap_open(int lo, int hi);
+void k_net_tap_close(void);
+int k_net_tap_recv(void* buf, int cap);
+int k_net_tap_send(const void* ip, int len);
+void k_net_addr(unsigned* ip, unsigned* mask, unsigned* gw, unsigned* dns);
 
 #endif

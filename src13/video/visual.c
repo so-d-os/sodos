@@ -15,6 +15,7 @@
 #include "drives.h"
 #include "mm.h"
 #include "module.h"
+#include "wine.h"
 #include "kexports.h"
 #include "net.h"
 #include "sched.h"
@@ -1554,13 +1555,96 @@ static void gfx_copy_back(void) {
   }
 }
 
+/* A tela em memoria mora na RAM de 1 MB a ~10 MB. Um EXE do Windows sem
+ * relocacoes precisa carregar em 0x400000, bem ali (kernel/wine.c). Enquanto
+ * um deles roda, a tela em memoria vai para o heap alto (gfx_back_heap) e a
+ * faixa baixa fica com o programa; quando ele sai, volta. Sem EXE desses,
+ * nada muda e nada e alocado. Chamado com o BKL, pela tarefa do mundo. */
+static uint8_t* gfx_back_heap;
+static int gfx_low_claimed;
+static void gfx_gpu_try(void);
+
+/* Tela estendida (docs/GPU.md, etapa M; telas=estendida no SODOS.CFG): o
+ * driver de placa mostra uma imagem 2x mais larga nas duas telas. O quadro
+ * em memoria vai para o heap alto (3840x1080 = 16,6 MB nao cabe na faixa de
+ * 1 MB) e gfx_w passa a ser a largura das duas. Ao suspender, parar o driver
+ * ou sair do WIN, volta a uma tela (o driver volta o fb do GOP). */
+static int gfx_wide;
+static uint32_t gfx_wide_x2;          /* onde a segunda tela comeca */
+static uint32_t gfx_uma_w, gfx_uma_pitch;
+static volatile uint8_t* gfx_uma_lfb;
+
+/* Volta as variaveis de uma tela. O quadro largo (gfx_back_heap) fica: quem
+ * chama remonta o quadro (gfx_buf_init) ou usa o largo, que tambem serve. */
+static void gfx_tela_uma(void) {
+  if (!gfx_wide) return;
+  gfx_wide = 0;
+  gfx_wide_x2 = 0;
+  gfx_w = gfx_uma_w;
+  gfx_pitch_bytes = gfx_uma_pitch;
+  gfx_lfb = gfx_uma_lfb;
+  serial_puts("[visual] uma tela de novo\n");
+}
+
+/* Monitor de um ponto: x0 e largura da tela onde x cai. */
+static void gfx_tela_de(int x, int* x0, int* w) {
+  if (gfx_wide && x >= (int)gfx_wide_x2) {
+    *x0 = (int)gfx_wide_x2;
+    *w = (int)gfx_w - (int)gfx_wide_x2;
+  } else {
+    *x0 = 0;
+    *w = gfx_wide ? (int)gfx_wide_x2 : (int)gfx_w;
+  }
+}
+
+static uint32_t gfx_back_bytes(void) { return gfx_w * gfx_h * (gfx_bochs ? 4u : 1u); }
+
+int gfx_back_move(int to_heap) {
+  uint32_t bytes = gfx_back_bytes(), i;
+  if (to_heap) {
+    gfx_low_claimed = 1;
+    if (gfx_back == (uint8_t*)GFX_BACK_PHYS && bytes) {
+      uint8_t* p = (uint8_t*)umalloc_top(bytes);
+      if (!p) {
+        gfx_low_claimed = 0;
+        return -1;
+      }
+      gpu_suspend();   /* o driver da placa guarda o ponteiro do back buffer */
+      for (i = 0; i < bytes; i++) p[i] = gfx_back[i];
+      gfx_back = p;
+      gfx_back_heap = p;
+      if (gpu_suspended()) gfx_gpu_try();
+      serial_puts("[visual] tela em memoria movida para o heap (EXE de base fixa)\n");
+    }
+    return 0;
+  }
+  gfx_low_claimed = 0;
+  if (gfx_back_heap && !gfx_wide) {
+    if (gfx_back == gfx_back_heap) {
+      gpu_suspend();
+      for (i = 0; i < bytes; i++) ((uint8_t*)GFX_BACK_PHYS)[i] = gfx_back_heap[i];
+      gfx_back = (uint8_t*)GFX_BACK_PHYS;
+      if (gpu_suspended()) gfx_gpu_try();
+    }
+    ufree(gfx_back_heap);
+    gfx_back_heap = 0;
+    serial_puts("[visual] tela em memoria de volta a 1 MB\n");
+  }
+  return 0;
+}
+
 /* Desenha o quadro inteiro fora da tela e so depois troca a pagina visivel. */
 static void gfx_buf_init(void) {
+  gfx_tela_uma();
   gfx_draw_y0 = 0;
   gfx_front_y = 0;
   gfx_offscreen = 0;
   gfx_dbuf = 0;
   gfx_back = 0;
+  if (gfx_back_heap) {
+    ufree(gfx_back_heap);
+    gfx_back_heap = 0;
+  }
   if (gfx_bochs && !gfx_gop && !gfx_for_gpu) {
     uint32_t vram = 0;
     uint32_t frame = gfx_w * gfx_h * 4u;
@@ -1573,6 +1657,12 @@ static void gfx_buf_init(void) {
       serial_puts("[visual] tela dupla\n");
       return;
     }
+  }
+  if (gfx_low_claimed) {
+    /* troca de modo com a faixa baixa cedida a um EXE do Windows */
+    gfx_back_heap = (uint8_t*)umalloc_top(gfx_back_bytes());
+    gfx_back = gfx_back_heap;
+    return;
   }
   if (gfx_ram_ok()) {
     gfx_back = (uint8_t*)GFX_BACK_PHYS;
@@ -1617,6 +1707,54 @@ static void gfx_frame_end(void) {
  * escolha de sempre. Sem placa conhecida, so gpu_wanted() roda. */
 static void gfx_hwcur_on(void);   /* com o cursor, mais abaixo */
 
+/* Com o driver ativo e telas=estendida: pede ao driver a imagem larga e
+ * passa a desenhar nela. Qualquer falha deixa uma tela. */
+static void gfx_tela_estende(void) {
+  struct gpu_telas t;
+  struct gpu_mode mm;
+  uint8_t* nb;
+  uint32_t bytes, y, i;
+  if (gfx_wide || !gpu_drv || !gfx_back || !gpu_telas_cfg()) return;
+  if (gpu_telas(GPU_TELAS_CONSULTA, &t, 0) != 0 || t.n < 2 || t.h != gfx_h || t.w <= gfx_w) return;
+  bytes = t.w * t.h * 4u;
+  nb = (uint8_t*)umalloc_top(bytes);
+  if (!nb) {
+    serial_puts("[visual] sem memoria para a tela estendida\n");
+    return;
+  }
+  /* a tela de agora na esquerda, a direita preta (o WIN redesenha tudo) */
+  for (y = 0; y < gfx_h; y++) {
+    uint32_t* d = (uint32_t*)(nb + y * t.w * 4u);
+    const uint32_t* o = (const uint32_t*)(gfx_back + y * gfx_w * 4u);
+    for (i = 0; i < gfx_w; i++) d[i] = o[i];
+    for (; i < t.w; i++) d[i] = 0;
+  }
+  mm.w = t.w;
+  mm.h = t.h;
+  mm.pitch = t.w * 4u;
+  mm.back = nb;
+  mm.fb = t.fb;
+  mm.fb_pitch = t.fb_pitch;
+  mm.pci_id = mm.pci_bus = mm.pci_dev = mm.pci_fun = 0;
+  if (gpu_telas(GPU_TELAS_ESTENDE, &t, &mm) != 0) {
+    ufree(nb);
+    serial_puts("[visual] o driver nao estendeu a tela\n");
+    return;
+  }
+  gfx_uma_w = gfx_w;
+  gfx_uma_pitch = gfx_pitch_bytes;
+  gfx_uma_lfb = gfx_lfb;
+  if (gfx_back_heap) ufree(gfx_back_heap);
+  gfx_back_heap = nb;
+  gfx_back = nb;
+  gfx_w = t.w;
+  gfx_pitch_bytes = t.fb_pitch;
+  gfx_lfb = t.fb;
+  gfx_wide = 1;
+  gfx_wide_x2 = t.x2;
+  serial_puts("[visual] tela estendida nas duas telas\n");
+}
+
 static void gfx_gpu_try(void) {
   struct gpu_mode m;
   int volta = gpu_suspended();
@@ -1635,6 +1773,7 @@ static void gfx_gpu_try(void) {
     m.fb_pitch = gfx_pitch_bytes;
     m.pci_id = m.pci_bus = m.pci_dev = m.pci_fun = 0;
     if (volta ? gpu_resume(&m) == 0 : gpu_start(&m) == 0) {
+      gfx_tela_estende();
       gfx_hwcur_on();
       return;
     }
@@ -1988,8 +2127,16 @@ static void gfx_dmg_add(int x, int y, int w, int h) {
 }
 
 /* Mostra o back buffer pela placa; se o driver cair, pela CPU. */
+static int win_api_dirty;   /* definida mais abaixo */
+
 static void gfx_gpu_show(const struct gpu_rect* r, int n) {
   if (gpu_present(r, n) != 0) {
+    if (gfx_wide) {
+      /* o fini do driver ja voltou o fb do GOP; o proximo quadro e inteiro */
+      gfx_buf_init();
+      win_api_dirty = 1;
+      return;
+    }
     gfx_copy_back();
     gfx_offscreen = 0;
   }
@@ -2029,6 +2176,11 @@ static int win_api_dirty;
  * proximo quadro inteiro ja desenha o cursor por software. */
 static void gfx_hwcur_move(int x, int y) {
   if (gpu_cursor_move(x, y) != 0) {
+    if (gfx_wide) {
+      gfx_buf_init();
+      win_api_dirty = 1;
+      return;
+    }
     gfx_copy_back();
     gfx_offscreen = 0;
     win_api_dirty = 1;
@@ -6502,9 +6654,11 @@ static void wm_exec_arg(struct wm_win* wins, int* focus, int big, const char* pa
     return;
   }
   /* file_load le no maximo max-1 bytes (poe um NUL no fim) */
-  /* SOX (x32), SOX2 (LP64) ou ELF dinamico: o carregador de modulos decide. */
+  /* SOX (x32), SOX2 (LP64), ELF dinamico ou EXE do Windows (MZ/PE, que so
+   * roda com SET WINE=1): o carregador de modulos decide. */
   if (file_load(path, (char*)magic, 5) == 4 &&
-      (magic[0] == SOX_MAGIC || magic[0] == SOX_MAGIC2 || magic[0] == 0x464C457Fu)) {
+      (magic[0] == SOX_MAGIC || magic[0] == SOX_MAGIC2 || magic[0] == 0x464C457Fu ||
+       ((magic[0] & 0xFFFFu) == 0x5A4Du && wine_is_pe(path)))) {
     char* argv[3];
     argv[0] = (char*)path;
     argv[1] = (char*)arg;
@@ -7945,17 +8099,20 @@ static void title_max_btn(int x, int y, int s, int maxed) {
 /* Retangulo de "restaurar": 80% da largura e da altura da tela, centrado
  * acima da barra de tarefas. */
 static void max_restore_rect(int scale, int* x, int* y, int* w, int* h) {
-  int bar = max_bar_h(scale);
-  *w = (int)gfx_w * 8 / 10;
+  int bar = max_bar_h(scale), x0, tw;
+  gfx_tela_de(*x, &x0, &tw);   /* *x: um ponto da janela (o monitor dela) */
+  *w = tw * 8 / 10;
   *h = (int)gfx_h * 8 / 10;
   if (*h > (int)gfx_h - bar) *h = (int)gfx_h - bar;
-  *x = ((int)gfx_w - *w) / 2;
+  *x = x0 + (tw - *w) / 2;
   *y = ((int)gfx_h - bar - *h) / 2;
   if (*y < 0) *y = 0;
 }
 
 static int gw_is_max(struct gui_win* g) {
-  return g->maxed || (g->ox <= 0 && g->oy <= 0 && g->cw >= (int)gfx_w);
+  int x0, tw;
+  gfx_tela_de(g->ox + g->cw / 2, &x0, &tw);
+  return g->maxed || (g->ox <= x0 && g->oy <= 0 && g->cw >= tw);
 }
 
 /* Troca o tamanho da area do programa: novo buffer com o que cabia do
@@ -7989,26 +8146,32 @@ static int gw_set_rect(struct gui_win* g, int x, int y, int cw, int ch) {
 static void gw_toggle_max(struct gui_win* g) {
   int scale = g->scale > 0 ? g->scale : 1;
   if (gw_is_max(g)) {
-    int x, y, w, h;
+    int x = g->ox + g->cw / 2, y, w, h;
     max_restore_rect(scale, &x, &y, &w, &h);
     if (gw_set_rect(g, x, y, w, h - g->title_h) == 0) g->maxed = 0;
   } else {
-    int h = (int)gfx_h - max_bar_h(scale);
-    if (gw_set_rect(g, 0, 0, (int)gfx_w, h - g->title_h) == 0) g->maxed = 1;
+    int h = (int)gfx_h - max_bar_h(scale), x0, tw;
+    gfx_tela_de(g->ox + g->cw / 2, &x0, &tw);
+    if (gw_set_rect(g, x0, 0, tw, h - g->title_h) == 0) g->maxed = 1;
   }
 }
 
 static int wm_is_max(struct wm_win* w) {
-  return w->x <= 0 && w->y <= 0 && w->w >= (int)gfx_w;
+  int x0, tw;
+  gfx_tela_de(w->x + w->w / 2, &x0, &tw);
+  return w->x <= x0 && w->y <= 0 && w->w >= tw;
 }
 
 static void wm_toggle_max(struct wm_win* w, int scale) {
   if (wm_is_max(w)) {
+    w->x += w->w / 2;
     max_restore_rect(scale, &w->x, &w->y, &w->w, &w->h);
   } else {
-    w->x = 0;
+    int x0, tw;
+    gfx_tela_de(w->x + w->w / 2, &x0, &tw);
+    w->x = x0;
     w->y = 0;
-    w->w = (int)gfx_w;
+    w->w = tw;
     w->h = (int)gfx_h - max_bar_h(scale);
   }
   win_api_dirty = 1;
@@ -9036,6 +9199,7 @@ static void win_vt_away(int to) {
   cursor_restore();
   gfx_live = 0;
   gpu_suspend();
+  gfx_tela_uma();
   if (gfx_gop) {
     fbcon_suspend(0);
   } else {
@@ -11245,6 +11409,7 @@ gfx_session_leave:
   gfx_live = 0;
   gfx_session_on = 0;
   gpu_close();
+  gfx_tela_uma();
   gfx_offscreen = 0;   /* com driver ele ficava 1 entre os quadros */
 
   cursor_restore();

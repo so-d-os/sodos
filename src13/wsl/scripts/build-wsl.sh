@@ -15,7 +15,7 @@ CF="-m64 -O2 -Wall -Wno-unused-function -ffreestanding -fno-pic -fno-pie -fno-st
   -mno-red-zone -mcmodel=large -mstackrealign -fno-asynchronous-unwind-tables \
   -fno-tree-loop-distribute-patterns -nostdinc -isystem $C/include"
 OBJS=
-for f in main wslcore wslcli ntfs vhdx ext4 vmm/vmm vmm/dev vmm/term; do
+for f in main wslcore wslcli ntfs vhdx ext4 vmm/vmm vmm/dev vmm/term vmm/nat; do
   o=$B/obj/$(basename "$f").o
   gcc $CF -c "$S/$f.c" -o "$o"
   OBJS="$OBJS $o"

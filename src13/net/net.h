@@ -88,6 +88,14 @@ int net_dhcp_reboot(void);
 /* Segundos ate renovar o aluguel; 0 sem aluguel (IP fixo ou sem DHCP). */
 uint32_t net_dhcp_renew_in(void);
 void net_get_addr(uint32_t* ip, uint32_t* mask, uint32_t* gw, uint32_t* dns);
+
+/* NAT da VM do WSL.EXE: pacotes IP para o nosso IP com porta TCP/UDP (ou id
+ * ICMP) em [lo, hi] vao para net_tap_recv em vez da pilha. net_tap_send manda
+ * um pacote IP (o kernel poe o Ethernet e resolve o ARP). 0/len ok; <0 erro. */
+int net_tap_open(uint16_t lo, uint16_t hi);
+void net_tap_close(void);
+int net_tap_recv(uint8_t* buf, int cap);
+int net_tap_send(const uint8_t* ip, int len);
 /* Falha de ARP/DNS/TCP com o WiFi ligado (wifi.c grava em U:\NET\WIFI.LOG). */
 void wifi_note(const char* what, uint32_t v);
 

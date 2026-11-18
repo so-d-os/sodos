@@ -22,6 +22,7 @@
 #define FSDRV_ABI 1      /* fsdrv_host e as ops ate space */
 #define FSDRV_ABI_MKDIR 2 /* ops->abi 2: tem mkdir (DLL antigo com 1 continua valendo) */
 #define FSDRV_ABI_WRITE 3 /* ops->abi 3: tambem grava e apaga arquivos */
+#define FSDRV_ABI_RENAME 4 /* ops->abi 4: tambem renomeia/move sem copiar */
 #define FSDRV_SYM "fs_driver"
 
 /* Igual a struct dir_item de drives.h (k_dirent dos programas). */
@@ -76,6 +77,13 @@ struct fsdrv_ops {
   /* Apaga um arquivo (nao pasta). 0 ok; -1 nao existe; -3 e pasta; -4
    * somente leitura; -5 erro de disco. */
   int (*remove)(void* vol, const char* path);
+  /* So com abi >= FSDRV_ABI_RENAME. Troca o nome e/ou a pasta sem copiar os
+   * dados. Um to que ja existe (arquivo) e substituido; pasta so muda de nome
+   * dentro da mesma pasta-mae. Mesmos codigos de drives_rename: 0 ok; -1 nao
+   * existe (from ou a pasta de to); -2 nome invalido ou pasta/disco cheio;
+   * -3 to e pasta (ou from e pasta e to existe); -4 somente leitura ou erro
+   * de disco; -7 pasta para outra pasta. */
+  int (*rename)(void* vol, const char* from, const char* to);
 };
 
 typedef const struct fsdrv_ops* (*fsdrv_entry_fn)(void);

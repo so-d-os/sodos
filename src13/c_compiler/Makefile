@@ -40,7 +40,7 @@ CC_SRC = cc/main.c cc/util.c cc/lex.c cc/pp.c cc/type.c cc/parse.c cc/gen.c
 all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/HELLO.EXE $(O)/CRASHT.EXE $(O)/SOCKT.EXE $(O)/SIGT64.EXE $(O)/FAT32T.EXE \
 	$(O)/CC.EXE $(O)/LINK.EXE $(O)/TLS.DLL $(O)/HTTPS.EXE $(O)/GUI.DLL $(O)/IMG.DLL \
 	$(O)/BROWSER.EXE $(O)/IMAGEVW.EXE $(O)/VIDPLAY.EXE $(O)/FONTADV.EXE $(O)/COMMAND.EXE $(O)/HTTPD.EXE \
-	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE $(O)/VIDEOCFG.EXE $(O)/IMGBIG.DLL $(O)/AIPANEL.EXE $(O)/MENUCFG.EXE $(O)/TEMAS.EXE $(O)/WINTAB.EXE $(O)/LINKEXT.EXE $(O)/DISKSYNC.EXE $(O)/PENDRIVE.EXE \
+	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE $(O)/VIDEOCFG.EXE $(O)/TELAS.EXE $(O)/IMGBIG.DLL $(O)/AIPANEL.EXE $(O)/MENUCFG.EXE $(O)/TEMAS.EXE $(O)/WINTAB.EXE $(O)/LINKEXT.EXE $(O)/DISKSYNC.EXE $(O)/PENDRIVE.EXE \
 	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
 	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
 	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/TOP.EXE $(O)/COBRA.EXE $(O)/WIFI.EXE $(O)/XCOPY.EXE $(O)/GIT.EXE $(O)/MAKE.EXE \
@@ -103,6 +103,10 @@ $(O)/EXPLORER.EXE: ../utils/explorer.c $(O)/GUI.DLL include/widgets.h $(HCC) $(H
 # Configurador de tela: modelo retro/avancado, cor e imagem de fundo.
 $(O)/VIDEOCFG.EXE: ../utils/video_cfg.c $(O)/GUI.DLL $(O)/IMGBIG.DLL include/widgets.h $(HCC) $(HEADERS)
 	$(HCC) -o $@ ../utils/video_cfg.c $(O)/GUI.DLL $(O)/IMGBIG.DLL
+
+# configurador das duas telas (duplicado/estendido): utils/telas_cfg.c
+$(O)/TELAS.EXE: ../utils/telas_cfg.c $(O)/GUI.DLL include/widgets.h $(HCC) $(HEADERS)
+	$(HCC) -o $@ ../utils/telas_cfg.c $(O)/GUI.DLL
 
 # Prompt de comando. A janela preta e desenhada pelo WIN; o EXE abre outra copia.
 $(O)/COMMAND.EXE: examples/command.c $(HCC) $(HEADERS)
@@ -301,16 +305,23 @@ $(DRV)/AMDCUR.DLL: $(B)/drv_amdcur.o $(LINK64) | $(DRV)
 	$(LINK64) /dll /export:gpu_driver /out:$@ $(B)/drv_amdcur.o
 
 # AMDSMC.DLL: AMDCUR + carga do firmware do SMU da RX 570 (docs/GPU.md, etapa C2).
-$(B)/drv_amdsmc.o: ../drivers/amdgop/amdgop.c ../video/gpu.h | $(B)
+$(B)/drv_amdsmc.o: ../drivers/amdgop/amdgop.c ../drivers/amdgop/vbios.c ../video/gpu.h | $(B)
 	$(DRVCC) -DAMD_SMC -c $< -o $@
 $(DRV)/AMDSMC.DLL: $(B)/drv_amdsmc.o $(LINK64) | $(DRV)
 	$(LINK64) /dll /export:gpu_driver /out:$@ $(B)/drv_amdsmc.o
 
 # AMDSDMA.DLL: AMDSMC + motor de copia SDMA0 da RX 570 (docs/GPU.md, etapa E).
-$(B)/drv_amdsdma.o: ../drivers/amdgop/amdgop.c ../video/gpu.h | $(B)
+$(B)/drv_amdsdma.o: ../drivers/amdgop/amdgop.c ../drivers/amdgop/vbios.c ../video/gpu.h | $(B)
 	$(DRVCC) -DAMD_SDMA -c $< -o $@
 $(DRV)/AMDSDMA.DLL: $(B)/drv_amdsdma.o $(LINK64) | $(DRV)
 	$(LINK64) /dll /export:gpu_driver /out:$@ $(B)/drv_amdsdma.o
+
+# AMDDUAL.DLL: AMDSDMA + segunda tela em espelho pelo AtomBIOS (docs/GPU.md,
+# etapa M). Os .c incluidos pelo amdgop.c entram como dependencia.
+$(B)/drv_amddual.o: ../drivers/amdgop/amdgop.c ../drivers/amdgop/vbios.c ../drivers/amdgop/atom.c ../drivers/amdgop/tela2.c ../video/gpu.h | $(B)
+	$(DRVCC) -DAMD_TELA2 -c $< -o $@
+$(DRV)/AMDDUAL.DLL: $(B)/drv_amddual.o $(LINK64) | $(DRV)
+	$(LINK64) /dll /export:gpu_driver /out:$@ $(B)/drv_amddual.o
 
 # FAT32.DLL (fs/fsdrv.h): leitura de FAT32, carregado so quando o kernel
 # acha uma unidade FAT32 (pendrive em U:, mount).
@@ -326,7 +337,7 @@ $(B)/drv_linkext.o: ../drivers/linkext/linkext.c ../kernel/linkext.h | $(B)
 $(DRV)/LINKEXT.DLL: $(B)/drv_linkext.o $(LINK64) | $(DRV)
 	$(LINK64) /dll /export:linkext_driver /out:$@ $(B)/drv_linkext.o
 
-drivers: $(DRV)/LINKEXT.DLL $(DRV)/FAT32.DLL $(DRV)/GPUTEST.DLL $(DRV)/GPUFAIL.DLL $(DRV)/VIRTGPU.DLL $(DRV)/AMDGOP.DLL $(DRV)/AMDCUR.DLL $(DRV)/AMDSMC.DLL $(DRV)/AMDSDMA.DLL
+drivers: $(DRV)/LINKEXT.DLL $(DRV)/FAT32.DLL $(DRV)/GPUTEST.DLL $(DRV)/GPUFAIL.DLL $(DRV)/VIRTGPU.DLL $(DRV)/AMDGOP.DLL $(DRV)/AMDCUR.DLL $(DRV)/AMDSMC.DLL $(DRV)/AMDSDMA.DLL $(DRV)/AMDDUAL.DLL
 
 # LIBCX64 estatica: mesma libc, compilada -m64, ligada no HELLO64C.
 LIBC64_SRC = string ctype stdlib stdio printf scanf fpconv math time misc sigfault64 wchar setjmp64 ctors64

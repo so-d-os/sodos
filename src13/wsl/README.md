@@ -13,8 +13,14 @@ WSL run                     sobe o Ubuntu (bash como root no console)
 ```
 
 Use `-d NOME` para escolher a distro (prefixo do nome da pasta, por exemplo
-`-d {b4b8`). **Ctrl+]** encerra a VM. O `poweroff -f` dentro do Ubuntu também
-encerra.
+`-d {b4b8`). `exit` no bash desliga a VM e volta ao prompt do SODOS;
+**Ctrl+]** encerra na hora.
+
+O console é um terminal `TERM=linux` (`wsl/vmm/term.c`): cores ANSI, cursor,
+apagar e rolar, UTF-8 para CP850 e setas/F1-F12/Home/End/PgUp/PgDn. Enquanto a
+VM roda, o teclado fica "cru" (`k_kbd_raw`): Ctrl+C e as outras Ctrl+letra vão
+para o Linux em vez de parar o `WSL.EXE`. Com a saída desviada (WIN, API), as
+sequências são retiradas e só o texto passa.
 
 ## Como funciona
 
@@ -43,13 +49,26 @@ SSD NVMe (cru, só leitura: k_nvme_raw_read)
   - FPU/AVX trocada com XSAVE dentro do CLGI e XCR0 da VM emulado (XSETBV).
   - O kernel sobe pelo protocolo de 64 bits (`boot_params`, e820) com
     `nolapic acpi=off nokaslr root=/dev/vda`.
+- **Rede** (`wsl/vmm/nat.c`): um virtio-net (00:02.0, IRQ 11) ligado a um NAT
+  para o IP do SODOS, como o NAT do WSL2. Funciona também no WiFi, porque não
+  faz ponte com outro MAC. A VM é 10.0.3.15/24 (pelo `ip=` do kernel, sem
+  cliente DHCP); o "roteador" 10.0.3.2 responde ARP e ping; o DNS é o mesmo
+  do SODOS (`/etc/resolv.conf` sai de `/proc/net/pnp`). Cada fluxo TCP/UDP, e
+  cada eco ICMP, usa uma porta do SODOS entre 30000 e 39999. O kernel desvia
+  as respostas para essas portas (`net_tap_*` em `net/net.c`, exportado como
+  `k_net_tap_*`). Só IPv4; não aceita conexões de fora para a VM. `-n` sobe
+  sem rede.
 - **Disco da VM**: as leituras vêm do vhdx. **As escritas ficam numa camada em
   RAM e somem quando a VM termina** (`-w MB`, padrão 512). O `ext4.vhdx` do
   Windows nunca é alterado.
 - **init**: o `/init` das distros WSL é o binário da Microsoft (precisa de
   Hyper-V). Por isso o padrão é `/bin/bash`, que antes monta `/proc`, `/sys`,
-  `/dev/pts`, `/run` e `/tmp`. Um `/init` que seja script (`#!`) é usado como
-  está, e `-i /sbin/init` sobe o systemd.
+  `/dev/pts`, `/run` e `/tmp`. O shell PID 1 não é o seu bash: ele roda o bash
+  como filho no `/dev/ttyS0` (`setsid -w -c`, com job control) e, quando o bash
+  sai, faz `poweroff`. Se o init morresse, o Linux daria "Attempted to kill
+  init"; `panic=-1` fica de rede de segurança (panic = reboot = a VM para). Um
+  `/init` que seja script (`#!`) é usado como está, e `-i /sbin/init` sobe o
+  systemd.
 
 ### Opções do `run`
 
@@ -65,6 +84,7 @@ SSD NVMe (cru, só leitura: k_nvme_raw_read)
 | `-x "texto"` | | digita no console (`\n` = Enter) |
 | `-a "texto"` | | espera este texto na saída antes do `-x` |
 | `-v` | | mostra portas/MMIO sem dispositivo e o total de saídas |
+| `-n` | | sem rede (sem a placa virtio-net) |
 
 ## Requisitos e limites
 
@@ -76,7 +96,7 @@ SSD NVMe (cru, só leitura: k_nvme_raw_read)
   A leitura costuma funcionar, mas o que mudou depois do último desligamento
   completo pode não aparecer. Se o vhdx avisar "log pendente", o WSL não foi
   fechado direito (`wsl --shutdown` antes de reiniciar resolve).
-- Um processador, sem rede (ainda), sem compartilhamento de arquivos com o
+- Um processador, rede só IPv4 de saída, sem compartilhamento de arquivos com o
   SODOS (use `WSL cp`).
 
 ## Build e teste (no WSL)

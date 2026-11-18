@@ -19,10 +19,10 @@ CFLAGS = -m64 -O2 -fno-strict-aliasing -fno-tree-loop-distribute-patterns -ffree
   -fno-pic -fno-pie -fno-stack-protector -mno-red-zone -mcmodel=large -mstackrealign \
   -fno-asynchronous-unwind-tables -nostdinc -isystem $(CC_DIR)/include -Wall -Wno-unused-function
 
-SRC = main pe k32 crt util
+SRC = main pe k32 crt util vm obj exc file sys tables net reg misc crypt winrt pkg zip proc sig compat user gdi ctl dlg text wfont shell uimisc comctl
 OBJ = $(patsubst %,$(B)/%.o,$(SRC))
 
-TESTS = HELLOW MSGBOXW
+TESTS = HELLOW MSGBOXW WRT KUSER EXPLTEST
 TEST_EXE = $(patsubst %,$(B)/tests/%.EXE,$(TESTS))
 
 all: $(B)/WINE.DLL tests
@@ -30,8 +30,12 @@ all: $(B)/WINE.DLL tests
 $(B) $(B)/tests:
 	mkdir -p $@
 
-$(B)/%.o: dll/%.c dll/wine_int.h ../kernel/wine.h | $(B)
-	gcc $(CFLAGS) -c $< -o $@
+$(B)/%.o: dll/%.c dll/wine_int.h dll/gui_int.h dll/zip.h dll/winrt.h ../kernel/wine.h | $(B)
+	gcc $(CFLAGS) -I../video -c $< -o $@
+
+# fonte TrueType: o mesmo rasterizador do WIN, com o Latin-1
+$(B)/wfont.o: ../video/wfont.c ../video/wfont.h | $(B)
+	gcc $(CFLAGS) -DWFONT_LAST=255 -I../video -c $< -o $@
 
 $(KIMP): ../kernel/kexports.c
 	$(MAKE) -C $(CC_DIR) out/KERNEL.IMP
@@ -58,3 +62,15 @@ clean:
 	rm -rf $(B)
 
 .PHONY: all tests clean
+
+$(B)/tests/WRT.EXE: tests/wrt.c | $(B)/tests
+	$(ZIG) cc -target x86_64-windows-gnu -O2 $< -o $@
+	rm -f $(B)/tests/WRT.pdb
+
+$(B)/tests/KUSER.EXE: tests/kuser.c | $(B)/tests
+	$(ZIG) cc -target x86_64-windows-gnu -O2 $< -o $@
+	rm -f $(B)/tests/KUSER.pdb
+
+$(B)/tests/EXPLTEST.EXE: tests/explorer.c | $(B)/tests
+	$(ZIG) cc -target x86_64-windows-gnu -O2 $< -o $@
+	rm -f $(B)/tests/EXPLTEST.pdb

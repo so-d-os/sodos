@@ -18,9 +18,13 @@ typedef char* msva;
 /* ---------- FILE ---------- */
 /* O ucrt trata FILE como opaco; so comparamos ponteiros. */
 struct wfile {
-  int fd;
+  uint8_t pad[28];
+  int fd;          /* FILE._file do msvcrt (offset 28) */
+  uint8_t rest[16];
 };
-static struct wfile iob[3] = {{0}, {1}, {2}};
+/* stdin, stdout, stderr: tambem e o "_iob" que o msvcrt antigo exporta */
+static struct wfile iob[3] = {{{0}, 0, {0}}, {{0}, 1, {0}}, {{0}, 2, {0}}};
+_Static_assert(sizeof(struct wfile) == 48, "FILE do msvcrt x64");
 
 static int is_std(void* f) { return f == &iob[1] || f == &iob[2]; }
 
@@ -362,13 +366,13 @@ static WINAPI int ms_fflush(void* f) {
 }
 static WINAPI int ms_fgetc(void* f) {
   if (f != &iob[0]) return -1;
-  return k_getc();
+  return wcon_getc();
 }
-static WINAPI int ms_getchar(void) { return k_getc(); }
+static WINAPI int ms_getchar(void) { return wcon_getc(); }
 static WINAPI char* ms_fgets(char* buf, int n, void* f) {
   int len;
   if (f != &iob[0] || n < 2) return 0;
-  len = k_readline(buf, n - 1);
+  len = wcon_readline(buf, n - 1);
   if (len < 0) return 0;
   buf[len++] = '\n';
   buf[len] = 0;
@@ -499,7 +503,7 @@ static WINAPI void* ms_signal(int s, void* h) {
   (void)h;
   return 0;
 }
-static WINAPI int* _errno(void) { return &wp()->crt_errno; }
+static WINAPI int* _errno(void) { return (int*)(wteb() + 0x1810); }
 static WINAPI void _invalid_parameter_noinfo(void) {}
 static WINAPI __attribute__((noreturn)) void _invalid_parameter_noinfo_noreturn(void) {
   wsay("parametro invalido (CRT)", 0);
@@ -635,10 +639,42 @@ static WINAPI int64_t _time64(int64_t* t) {
 }
 static WINAPI long ms_clock(void) { return (long)k_ms(); }
 
+/* msvcrt antigo: variaveis importadas como DADO (o slot do import recebe o
+ * endereco da variavel). Sao do DLL, nao do processo: valem para o EXE que
+ * esta rodando (crt_set_process, chamado no inicio de cada processo). */
+static int crt_fmode, crt_commode, crt_argc_v;
+static char* crt_acmdln_v;
+static wchar16* crt_wcmdln_v;
+static char** crt_argv_v;
+static char** crt_environ_v;
+void crt_set_process(struct wproc* p) {
+  crt_acmdln_v = p->cmdline;
+  crt_wcmdln_v = p->wcmdline;
+  crt_argc_v = p->argc;
+  crt_argv_v = p->argv;
+  crt_environ_v = p->environ;
+  crt_fmode = 0;
+  crt_commode = 0;
+}
+static WINAPI int _XcptFilter(unsigned long code, void* ep) {
+  (void)code;
+  (void)ep;
+  return 0; /* EXCEPTION_CONTINUE_SEARCH */
+}
+static WINAPI int ms__purecall(void) {
+  wsay("chamada de funcao virtual pura", 0);
+  wexit(3);
+}
+static WINAPI void* ms_memcpy_s(void* d, size_t dn, const void* s2, size_t n) {
+  if (n > dn) n = dn;
+  memcpy(d, s2, n);
+  return 0;
+}
+
 #define S(n) {#n, (void*)n}
 #define M(n) {#n, (void*)ms_##n}
 
-static const struct wine_sym crt_syms[] = {
+const struct wine_sym crt_syms[] = {
     /* stdio */
     S(__acrt_iob_func), S(__stdio_common_vfprintf), S(__stdio_common_vfwprintf),
     S(__stdio_common_vsprintf), S(__stdio_common_vsnprintf_s), S(__stdio_common_vswprintf),
@@ -658,6 +694,11 @@ static const struct wine_sym crt_syms[] = {
     {"_onexit", (void*)ms_onexit}, S(_cexit), S(_c_exit), M(exit), {"_exit", (void*)ms__exit},
     {"quick_exit", (void*)ms__exit}, M(abort), M(signal), S(_errno), S(_invalid_parameter_noinfo),
     S(_invalid_parameter_noinfo_noreturn), S(__getmainargs), S(__wgetmainargs), S(__set_app_type),
+    {"_iob", (void*)iob}, {"__initenv", (void*)&crt_environ_v},
+    {"_fmode", (void*)&crt_fmode}, {"_commode", (void*)&crt_commode}, {"_acmdln", (void*)&crt_acmdln_v},
+    {"_wcmdln", (void*)&crt_wcmdln_v}, {"__argc", (void*)&crt_argc_v}, {"__argv", (void*)&crt_argv_v},
+    {"_environ", (void*)&crt_environ_v}, S(_XcptFilter), {"_purecall", (void*)ms__purecall},
+    {"memcpy_s", (void*)ms_memcpy_s},
     /* heap */
     M(malloc), M(calloc), M(free), M(realloc), {"_msize", (void*)ms_msize}, S(_aligned_malloc),
     S(_aligned_free),
@@ -671,4 +712,3 @@ static const struct wine_sym crt_syms[] = {
     S(_tzset), S(_time64), {"time", (void*)_time64}, M(clock),
     {0, 0}};
 
-const struct wine_builtin wine_ucrt = {"ucrtbase", crt_syms};

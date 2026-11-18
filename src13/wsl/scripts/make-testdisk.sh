@@ -33,7 +33,7 @@ mkdir -p "$R/usr/bin" "$R/usr/sbin" "$R/etc" "$R/proc" "$R/sys" "$R/dev" "$R/tmp
 ln -s usr/bin "$R/bin"
 ln -s usr/sbin "$R/sbin"
 cp "$T/root/usr/bin/busybox" "$R/usr/bin/busybox"
-for a in sh ls cat echo mount uname dmesg ps free df mkdir rm cp mv vi grep head tail sleep poweroff reboot halt top; do
+for a in sh ls cat echo mount uname dmesg ps free df mkdir rm cp mv vi grep head tail sleep poweroff reboot halt top setsid stty hostname sync ip ping nslookup wget nc; do
   ln -s busybox "$R/usr/bin/$a"
 done
 cat > "$R/etc/os-release" <<'EOF'
@@ -57,6 +57,18 @@ exec sh
 EOF
 chmod +x "$R/init"
 echo "ola do ext4" > "$R/home/teste/ola.txt"
+# teste da rede (NAT) da VM: sh /etc/nettest.sh
+cat > "$R/etc/nettest.sh" <<'EOF'
+ip addr show eth0 | grep inet
+cat /etc/resolv.conf
+ping -c 2 10.0.3.2
+ping -c 2 10.0.2.2
+nslookup example.com
+wget -q -O - http://example.com | head -4
+echo NETTEST-FIM
+EOF
+# teste do terminal do WSL.EXE: cores ANSI e UTF-8 (cat /etc/cores.txt)
+printf '\033[31mVERMELHO \033[1;32mVERDE \033[44;33mFUNDO\033[0m \033[7mREVERSO\033[0m a\303\247\303\243o \342\224\214\342\224\200\342\224\220\n' > "$R/etc/cores.txt"
 # arquivo maior que um bloco e com extents
 head -c 300000 /dev/urandom > "$R/home/teste/grande.bin"
 

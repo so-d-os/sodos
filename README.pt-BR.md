@@ -258,7 +258,7 @@ Várias unidades FAT podem ficar montadas ao mesmo tempo (`D:`, `E:`, `U:`...). 
 ### Sistema de arquivos
 
 - FAT12 e FAT16 para leitura; escrita, `md` e `rd` em FAT16.
-- **FAT32** pelo `FAT32.DLL` (`src13/drivers/fat32`), carregado só quando aparece uma unidade FAT32. Ele é procurado em `%FAT32DLL%`, `Z:\SODOS\DRV` (vem no `SODOS.PAK`), `D:` e `U:`. Lê, cria pastas (`md`), grava arquivos inteiros (`copy`, `k_fsave`) e apaga (`del`); `rd` e renomear ainda não.
+- **FAT32** pelo `FAT32.DLL` (`src13/drivers/fat32`), carregado só quando aparece uma unidade FAT32. Ele é procurado em `%FAT32DLL%`, `Z:\SODOS\DRV` (vem no `SODOS.PAK`), `D:` e `U:`. Lê, cria pastas (`md`), grava arquivos inteiros (`copy`, `k_fsave`), apaga (`del`) e renomeia/move sem copiar (`k_frename`, o `rename()` da libc); `rd` ainda não.
 - **Nomes longos (VFAT LFN)** em FAT16 e FAT32: o `dir` mostra o nome inteiro; programas recebem até 31 caracteres, ou o apelido 8.3 (`NOME~1.EXT`). Sem exFAT.
 - Subpastas até 8 componentes de 12 caracteres, com `.` e `..`.
 - Partições primárias MBR (4 entradas); sem partições estendidas, GPT ou lógica.
@@ -1116,7 +1116,7 @@ dlls      módulos carregados, base, tamanho e referências
 ## Limitações conhecidas
 
 - **Sem proteção de memória**: tudo roda em ring 0, com um único espaço de endereçamento. Só programas de janela são preemptados; um laço infinito num programa de texto, ou dentro do kernel, trava a máquina. O kernel roda numa CPU por vez (BKL).
-- **FAT32 parcial** (sem `rd` e renomear), sem exFAT, partições estendidas ou GPT; passar de uma unidade FAT16 para outra relê a FAT do disco.
+- **FAT32 parcial** (sem `rd`), sem exFAT, partições estendidas ou GPT; passar de uma unidade FAT16 para outra relê a FAT do disco.
 - O cliente TCP antigo (`k_tcp_*`) é uma conexão por vez; os soquetes `k_sock_*` vão até 64. Sem IPv6, SACK ou soquetes UDP genéricos.
 - **Sem áudio** (o Firefox usa uma saída nula), sem disquete, sem DMA.
 - **USB só para o mouse e o pendrive**: um mouse HID boot e um disco mass storage bulk-only num controlador xHCI, nas portas do PC ou atrás de hubs USB 2; sem hubs USB 3, sem teclado USB, sem touchpad I2C.

@@ -146,23 +146,29 @@ static struct wmod* mod_new(const char* name) {
   return m;
 }
 
-/* "api-ms-win-crt-stdio-l1-1-0.dll" -> tabela embutida. */
+/* "api-ms-win-crt-stdio-l1-1-0.dll", "C:\Windows\System32
+tdll.dll" -> embutida. */
 static struct wmod* builtin_load(const char* name) {
   char n[WMOD_NAME];
-  const struct wine_builtin* b;
   struct wmod* m;
   char* dot;
   norm_name(n, name);
   dot = strrchr(n, '.');
   if (dot && wstreq(dot, ".dll")) *dot = 0;
-  b = builtin_for(n);
-  if (!b) return 0;
+  if (!builtin_known(n)) return 0;
   m = mod_new(name);
   if (!m) return 0;
-  m->magic = WMOD_MAGIC;
-  m->builtin = b;
+  m->builtin = 1;
   m->is_dll = 1;
   return m;
+}
+
+struct wmod* pe_from_addr(uint64_t addr) {
+  struct wmod* m;
+  for (m = wp()->mods; m; m = m->next)
+    if (m->base && addr >= (uint64_t)(uintptr_t)m->base && addr < (uint64_t)(uintptr_t)m->base + m->size)
+      return m;
+  return 0;
 }
 
 /* ---------- exports ---------- */
@@ -176,11 +182,8 @@ static void* export_lookup(struct wmod* m, const char* name, int depth) {
   const struct pe_info* unused = 0;
   (void)unused;
   if (m->builtin) {
-    const struct wine_sym* s;
-    if ((uintptr_t)name < 0x10000) return 0;
-    for (s = m->builtin->syms; s->name; s++)
-      if (strcmp(s->name, name) == 0) return s->fn;
-    return 0;
+    if ((uintptr_t)name < 0x10000) return builtin_ordinal(m->name, (unsigned)(uintptr_t)name);
+    return builtin_lookup(name);
   }
   {
     struct pe_info pi;
@@ -275,7 +278,7 @@ static int resolve_imports(struct wmod* m, const struct pe_info* pi) {
         if (dep) fn = export_lookup(dep, fname, 0);
       }
       if (!fn) {
-        wlog("nao implementado (stub): ", fname);
+        if (wine_debug) wlog("nao implementado (stub): ", fname);
         fn = wine_make_stub(dll, fname);
         if (!fn) return -1;
       }
@@ -330,7 +333,25 @@ static void tls_setup(struct wmod* m) {
   }
   m->tls_index = p->tls_next++;
   if (RD64(td + 16)) *(uint32_t*)(uintptr_t)RD64(td + 16) = (uint32_t)m->tls_index;
-  pe_tls_attach(m, p->teb);
+  /* A thread que esta carregando ja recebe o bloco; as novas, ao nascer. */
+  pe_tls_attach(m, wteb());
+}
+
+void pe_tls_attach_all(uint8_t* teb) {
+  struct wmod* m;
+  for (m = wp()->mods; m; m = m->next)
+    if (m->tls_index >= 0) pe_tls_attach(m, teb);
+}
+
+/* DLL_THREAD_ATTACH (2) / DLL_THREAD_DETACH (3) na thread corrente. */
+void pe_thread_notify(uint32_t reason) {
+  struct wmod* m;
+  typedef int (WINAPI * dllmain_fn)(void*, uint32_t, void*);
+  for (m = wp()->mods; m; m = m->next) {
+    if (!m->base) continue;
+    pe_call_tls_callbacks(m, reason);
+    if (m->is_dll && m->entry) ((dllmain_fn)(uintptr_t)m->entry)(m->base, reason, 0);
+  }
 }
 
 /* ---------- carga ---------- */
@@ -373,7 +394,10 @@ ok:
   return 0;
 }
 
+void* k_win_lowmem(unsigned addr, unsigned size);
+
 struct wmod* pe_load(const char* name, int is_exe) {
+  int fixed = 0;
   char path[200];
   struct wmod* m;
   struct pe_info pi;
@@ -411,7 +435,22 @@ struct wmod* pe_load(const char* name, int is_exe) {
     k_free(file);
     return 0;
   }
-  base = (uint8_t*)k_malloc_aligned(pi.size_image, 0x10000);
+  {
+    uint32_t rrva, rsz;
+    dir_of(&pi, DIR_BASERELOC, &rrva, &rsz);
+    if ((!rrva || !rsz || (pi.chars & 1)) && pi.image_base < 0x100000000ull) {
+      /* sem relocacoes: so serve no endereco pedido (kernel/wine.h) */
+      base = (uint8_t*)k_win_lowmem((unsigned)pi.image_base, pi.size_image);
+      if (!base) {
+        wsay(path, ": base fixa e o endereco nao esta livre no SODOS (outro EXE de base fixa rodando, ou imagem grande demais)");
+        k_free(file);
+        return 0;
+      }
+      fixed = 1;
+    } else {
+      base = (uint8_t*)k_malloc_aligned(pi.size_image, 0x10000);
+    }
+  }
   if (!base) {
     wsay("sem memoria para a imagem de ", path);
     k_free(file);
@@ -425,7 +464,7 @@ struct wmod* pe_load(const char* name, int is_exe) {
     uint32_t n = rsz < vsz || !vsz ? rsz : vsz;
     if (va + (vsz > rsz ? vsz : rsz) > pi.size_image || roff + n > (uint32_t)fsz) {
       wsay(path, ": secao fora da imagem");
-      k_free(base);
+      if (!fixed) k_free(base);
       k_free(file);
       return 0;
     }
@@ -434,7 +473,7 @@ struct wmod* pe_load(const char* name, int is_exe) {
   k_free(file);
   /* daqui em diante a imagem mapeada tem os cabecalhos */
   if (pe_parse(base, pi.size_image, &pi, path) != 0 || relocate(base, &pi, path) != 0) {
-    k_free(base);
+    if (!fixed) k_free(base);
     return 0;
   }
   m = mod_new(is_exe ? path : name);
@@ -444,6 +483,9 @@ struct wmod* pe_load(const char* name, int is_exe) {
   m->size = pi.size_image;
   m->entry = pi.entry ? (uint64_t)(uintptr_t)(base + pi.entry) : 0;
   m->is_dll = !is_exe;
+  m->stack_reserve = (uint32_t)RD64(pi.opt + 72);
+  dir_of(&pi, DIR_EXCEPTION, &m->pdata_rva, &m->pdata_size);
+  vm_register_image(base, pi.size_image);
   if (is_exe) {
     wp()->exe = m;
     *(uint64_t*)(wp()->peb + PEB_IMAGEBASE) = (uint64_t)(uintptr_t)base;
@@ -470,4 +512,49 @@ void pe_detach_all(void) {
     pe_call_tls_callbacks(m, 0);
     if (m->entry) ((dllmain_fn)(uintptr_t)m->entry)(m->base, 0, (void*)1);
   }
+}
+
+/* ---------- recursos ---------- */
+static const uint8_t* res_entry(const uint8_t* rsrc, const uint8_t* dir, uintptr_t id, int any) {
+  uint32_t nnamed = RD16(dir + 12), nid = RD16(dir + 14), i;
+  const uint8_t* e = dir + 16;
+  for (i = 0; i < nnamed + nid; i++, e += 8) {
+    uint32_t name = RD32(e);
+    if (any) return e;
+    if (id < 0x10000) {
+      if (!(name & 0x80000000u) && name == (uint32_t)id) return e;
+    } else if (name & 0x80000000u) {
+      const uint8_t* ns = rsrc + (name & 0x7FFFFFFFu);
+      const wchar16* want = (const wchar16*)id;
+      uint32_t len = RD16(ns), k;
+      for (k = 0; k < len; k++) {
+        wchar16 a = ((const wchar16*)(ns + 2))[k], b = want[k];
+        if (a >= 'a' && a <= 'z') a = (wchar16)(a - 32);
+        if (b >= 'a' && b <= 'z') b = (wchar16)(b - 32);
+        if (a != b || !b) break;
+      }
+      if (k == len && !want[len]) return e;
+    }
+  }
+  return 0;
+}
+
+const uint8_t* pe_find_resource(struct wmod* m, uintptr_t type, uintptr_t name, uint32_t* size) {
+  struct pe_info pi;
+  uint32_t rva, rsz;
+  const uint8_t* rsrc;
+  const uint8_t* e;
+  if (!m || !m->base || pe_parse(m->base, m->size, &pi, m->name) != 0) return 0;
+  dir_of(&pi, 2, &rva, &rsz);
+  if (!rva) return 0;
+  rsrc = m->base + rva;
+  e = res_entry(rsrc, rsrc, type, 0);
+  if (!e || !(RD32(e + 4) & 0x80000000u)) return 0;
+  e = res_entry(rsrc, rsrc + (RD32(e + 4) & 0x7FFFFFFFu), name, 0);
+  if (!e || !(RD32(e + 4) & 0x80000000u)) return 0;
+  e = res_entry(rsrc, rsrc + (RD32(e + 4) & 0x7FFFFFFFu), 0, 1);
+  if (!e || (RD32(e + 4) & 0x80000000u)) return 0;
+  e = rsrc + RD32(e + 4); /* IMAGE_RESOURCE_DATA_ENTRY: rva, size, codepage, 0 */
+  if (size) *size = RD32(e + 4);
+  return e;
 }

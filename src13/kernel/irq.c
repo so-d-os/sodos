@@ -1,5 +1,6 @@
 /* irq.c - Envia EOI para IRQ 32..47 */
 #include "irq.h"
+#include "wine.h"
 #include "pic.h"
 #include "reboot.h"
 #include "kthread.h"
@@ -29,6 +30,8 @@ void irq_handle(isr_frame_t* f) {
     if (irq == 0) {
       /* So conta: nenhum outro estado do kernel e tocado aqui. */
       irq_tick_count++;
+      /* relogio dos programas Windows; so existe com um EXE deles rodando */
+      if (wine_kuser) wine_tick(irq_tick_count);
       if (bsp_idle_flag || kt_cpu_idle(0)) bsp_idle_ticks++;
       else bsp_busy_ticks++;
     } else if (irq == 1 || irq == 12) {

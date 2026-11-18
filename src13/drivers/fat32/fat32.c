@@ -1141,31 +1141,15 @@ out:
   return err;
 }
 
-static int f_remove(void* p, const char* path) {
-  struct vol* v = (struct vol*)p;
-  struct ent e;
-  uint8_t* sbuf;
-  uint32_t clus, off, i;
-  int err = 0;
-  if (!v || !path || !path[0]) return -1;
-  if (lookup(v, path, &e) != 0) return -1;
-  if (e.attr & 0x10) return -3;
-  if (e.attr & 0x01) return -4;
-  sbuf = (uint8_t*)v->h->alloc(512);
-  if (!sbuf) return -5;
-  /* LFN + 8.3 marcados como livres; depois a cadeia */
-  clus = e.first_clus;
-  off = e.first_off;
-  for (i = 0; i < e.nslots && valid_clus(v, clus); i++) {
-    if (load_clus(v, clus) != 0) {
-      err = -5;
-      break;
-    }
+/* Marca como livres as entradas de e (LFN + 8.3). 0 ok; -5 erro de disco. */
+static int ent_unlink(struct vol* v, const struct ent* e) {
+  uint32_t clus = e->first_clus, off = e->first_off, i;
+  for (i = 0; i < e->nslots && valid_clus(v, clus); i++) {
+    if (load_clus(v, clus) != 0) return -5;
     v->cbuf[off] = 0xE5;
     if (v->h->write(v->disk, clus_lba(v, clus) + off / 512u, 1, v->cbuf + (off & ~511u)) != 0) {
       v->cbuf_clus = 0;
-      err = -5;
-      break;
+      return -5;
     }
     off += 32;
     if (off >= v->csize) {
@@ -1173,6 +1157,22 @@ static int f_remove(void* p, const char* path) {
       clus = fat_next(v, clus);
     }
   }
+  return 0;
+}
+
+static int f_remove(void* p, const char* path) {
+  struct vol* v = (struct vol*)p;
+  struct ent e;
+  uint8_t* sbuf;
+  int err;
+  if (!v || !path || !path[0]) return -1;
+  if (lookup(v, path, &e) != 0) return -1;
+  if (e.attr & 0x10) return -3;
+  if (e.attr & 0x01) return -4;
+  sbuf = (uint8_t*)v->h->alloc(512);
+  if (!sbuf) return -5;
+  /* LFN + 8.3 marcados como livres; depois a cadeia */
+  err = ent_unlink(v, &e);
   if (!err && valid_clus(v, e.clus)) chain_free(v, e.clus, sbuf);
   fsinfo_save(v, sbuf);
   v->h->free(sbuf);
@@ -1180,9 +1180,73 @@ static int f_remove(void* p, const char* path) {
   return err;
 }
 
+/* Acha leaf na pasta de path (*dir = cluster dela). 1 achou (e preenchido),
+ * 0 nao existe, -1 a pasta nao existe, -2 nome invalido, -4 erro de disco.
+ * par e de quem chama: leaf aponta para dentro dele. */
+static int find_in_parent(struct vol* v, const char* path, char* par, const char** leaf,
+                          uint32_t* dir, struct ent* e) {
+  struct find_ctx fc;
+  const char* parent;
+  int r;
+  if (split_path(path, par, &parent, leaf) != 0) return -2;
+  if (lookup(v, parent, e) != 0 || !(e->attr & 0x10)) return -1;
+  *dir = e->clus;
+  fc.want = *leaf;
+  r = dir_scan(v, *dir, find_cb, &fc, e);
+  return r < 0 ? -4 : r;
+}
+
+/* Troca o nome e/ou a pasta sem copiar: uma entrada nova aponta para a mesma
+ * cadeia e a antiga some. Codigos em fsdrv.h (os de drives_rename). */
+static int f_rename(void* p, const char* from, const char* to) {
+  struct vol* v = (struct vol*)p;
+  struct ent src, dst;
+  char par[PATH_MAX];
+  const char* leaf;
+  uint8_t tpl[32];
+  uint8_t* sbuf;
+  uint32_t sdir = 0, dir = 0;
+  int r, exists, same, err = 0;
+  if (!v || !from || !to) return -2;
+  r = find_in_parent(v, from, par, &leaf, &sdir, &src);
+  if (r <= 0) return r == 0 ? -1 : r;
+  r = find_in_parent(v, to, par, &leaf, &dir, &dst);
+  if (r < 0) return r;
+  if ((src.attr & 0x10) && dir != sdir) return -7;
+  exists = r == 1;
+  same = exists && dst.pos_clus == src.pos_clus && dst.pos_off == src.pos_off;  /* so muda a caixa */
+  if (exists && !same) {
+    if ((dst.attr & 0x10) || (src.attr & 0x10)) return -3;
+    if (dst.attr & 0x01) return -4;
+  }
+  /* o 8.3 da origem vira o molde: atributo, datas, cluster e tamanho */
+  if (load_clus(v, src.pos_clus) != 0) return -4;
+  mcopy(tpl, v->cbuf + src.pos_off, 32);
+  sbuf = (uint8_t*)v->h->alloc(512);
+  if (!sbuf) return -4;
+  v->lvalid = 0;
+  /* O nome que sai da pasta de destino sai antes, para o novo poder usar o
+   * mesmo 8.3: o arquivo substituido, ou a propria origem se so muda a caixa. */
+  if (exists && ent_unlink(v, same ? &src : &dst) != 0) {
+    err = -4;
+    goto out;
+  }
+  r = dir_add(v, dir, leaf, tpl, sbuf);
+  if (r == 0 && !same && ent_unlink(v, &src) != 0) r = -3;
+  if (r != 0) err = r == -3 ? -4 : -2;
+  /* o substituido ja saiu da pasta: a cadeia dele volta para o disco */
+  if (exists && !same && valid_clus(v, dst.clus) && dst.clus != src.clus)
+    chain_free(v, dst.clus, sbuf);
+out:
+  fsinfo_save(v, sbuf);
+  v->h->free(sbuf);
+  v->lvalid = 0;
+  return err;
+}
+
 static const struct fsdrv_ops ops = {
-  FSDRV_ABI_WRITE, FAT32_NAME, f_probe, f_mount, f_umount, f_stat, f_read, f_items, f_long_name,
-  f_space, f_mkdir, f_write, f_remove,
+  FSDRV_ABI_RENAME, FAT32_NAME, f_probe, f_mount, f_umount, f_stat, f_read, f_items, f_long_name,
+  f_space, f_mkdir, f_write, f_remove, f_rename,
 };
 
 const struct fsdrv_ops* fs_driver(void) { return &ops; }

@@ -1077,6 +1077,7 @@ int vmm_run(const vmm_config* cfg) {
   vm->regs.gpr[6] = G_BOOTP; /* rsi = boot_params */
 
   dev_init(vm);
+  if (vm->dev && cfg->net) dev_net_enable(vm);
   if (!vm->dev) {
     printf("WSL: sem memoria para os dispositivos\n");
     return 1;

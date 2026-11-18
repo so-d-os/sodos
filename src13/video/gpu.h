@@ -49,6 +49,24 @@ struct gpu_rect { int32_t x, y, w, h; };
 #define GPU_CAP_CURSOR   4u   /* cursor por hardware */
 #define GPU_CAP_FILL     8u   /* reservado: preenchimento na placa */
 #define GPU_CAP_BLIT    16u   /* reservado: copia na placa */
+#define GPU_CAP_TELAS   32u   /* duas telas: o campo telas existe (2026-11-18) */
+
+/* Duas telas (docs/GPU.md, etapa M). CONSULTA: o driver diz quantas telas
+ * tem e o tamanho da area estendida (w x h, a segunda comeca em x2) e onde
+ * fica a imagem larga (fb, fb_pitch). ESTENDE: o driver passa a mostrar a
+ * imagem larga (cada tela uma parte) e adota o modo m (back buffer largo).
+ * UMA: volta a uma tela so (a segunda em espelho ou apagada), com o fb do
+ * GOP; o kernel ja voltou o modo para o de antes e o entrega em m. */
+#define GPU_TELAS_UMA 0
+#define GPU_TELAS_CONSULTA 1
+#define GPU_TELAS_ESTENDE 2
+struct gpu_telas {
+  uint32_t n;              /* telas ligadas */
+  uint32_t w, h;           /* area estendida */
+  uint32_t x2;             /* onde a segunda tela comeca */
+  volatile uint8_t* fb;    /* imagem larga (CPU) */
+  uint32_t fb_pitch;
+};
 
 struct gpu_drv {
   int abi;
@@ -69,6 +87,8 @@ struct gpu_drv {
    * quadro. argb: w*h palavras 0xAARRGGBB (w, h <= 64); hot = ponta da seta. */
   int (*cursor_set)(const uint32_t* argb, int w, int h, int hot_x, int hot_y);
   int (*cursor_move)(int x, int y);
+  /* So com GPU_CAP_TELAS (um DLL antigo nao tem este campo). 0 = ok. */
+  int (*telas)(int op, struct gpu_telas* t, const struct gpu_mode* m);
 };
 
 /* Unico simbolo que o DLL exporta. */
@@ -113,6 +133,11 @@ int gpu_cursor_move(int x, int y);
  * nao achou. Nome dela no SODOS.CFG (nome=), ou 0. */
 uint32_t gpu_find_display(void);
 const char* gpu_card_name(void);
+/* telas= do [video] do SODOS.CFG: 1 = estendida, 0 = espelho (o padrao). */
+int gpu_telas_cfg(void);
+/* Repassa ao driver ativo (GPU_TELAS_*); -1 se ele nao tem duas telas.
+ * Se o driver falhar, ele e desligado e o quadro volta a CPU. */
+int gpu_telas(int op, struct gpu_telas* t, const struct gpu_mode* m);
 /* Para o TOP (k_vram): nome do driver ativo e KB que ele reservou. */
 const char* gpu_name(void);
 uint32_t gpu_mem_kb(void);

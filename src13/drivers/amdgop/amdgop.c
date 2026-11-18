@@ -24,6 +24,12 @@
  * firmware do SMU). AMDSDMA.DLL (-DAMD_SDMA): o AMDSMC mais a etapa E (liga
  * o motor de copia SDMA0 e o testa). AMDGOP_SIM: teste no host (drivers/amdgop/smcsim.c), os
  * registradores da Polaris passam por sim_r/sim_w em vez do BAR5. */
+/* AMDDUAL.DLL (-DAMD_TELA2): o AMDSDMA mais a segunda tela em espelho (etapa M). */
+#ifdef AMD_TELA2
+#ifndef AMD_SDMA
+#define AMD_SDMA
+#endif
+#endif
 #ifdef AMD_SDMA
 #ifndef AMD_SMC
 #define AMD_SMC
@@ -110,8 +116,11 @@ static void copia(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
   for (r = 0; r < h; r++) {
     const uint8_t* src = (const uint8_t*)m.back + (y + r) * m.pitch + x * 4u;
     volatile uint8_t* dst = m.fb + (y + r) * m.fb_pitch + x * 4u;
-    uint64_t n = w;
-    __asm__ volatile ("rep movsl" : "+S"(src), "+D"(dst), "+c"(n) : : "memory");
+    /* 2 pixels por movimento (rep movsq) e o pixel impar no fim (2026-11-18:
+     * metade das escritas pela abertura write-combining) */
+    uint64_t n = w >> 1, um = w & 1u;
+    __asm__ volatile ("rep movsq" : "+S"(src), "+D"(dst), "+c"(n) : : "memory");
+    if (um) __asm__ volatile ("rep movsl" : "+S"(src), "+D"(dst), "+c"(um) : : "memory");
   }
 }
 
@@ -215,6 +224,7 @@ static const uint32_t pl_crtc[PL_NCRTC] = { 0x0000u, 0x0200u, 0x0400u, 0x2600u, 
 #define PL_CRTC_STATUS_POSITION 0x1BA4u
 
 static int tela_crtc = -1;       /* CRTC que mostra a tela; -1 = nenhum */
+static int pl_espelho = -1;      /* CRTC em espelho (etapa M): o cursor vai nele tambem */
 
 static uint32_t pl_r(uint32_t reg) {
 #ifdef AMDGOP_SIM
@@ -586,16 +596,20 @@ static void sd_put(uint32_t v) {
   sd_wptr++;
 }
 
-/* entrega o que foi escrito no anel e espera o fence (ou o rptr) */
-static int sd_executa(uint32_t ms) {
-  uint32_t t0, voltas = 0, seq = ++sd_seq;
+/* entrega o que foi escrito no anel com um fence no fim; devolve o numero */
+static uint32_t sd_envia(void) {
+  uint32_t seq = ++sd_seq;
   sd_put(SD_OP_FENCE);
   sd_put((uint32_t)(sd_mc + SD_FENCE));
   sd_put((uint32_t)((sd_mc + SD_FENCE) >> 32));
   sd_put(seq);
   sd_hdp_flush();
   pl_w(SD0_GFX_RB_WPTR, (sd_wptr % SD_RING_DW) << 2);
-  t0 = k->ms();
+  return seq;
+}
+
+static int sd_espera(uint32_t seq, uint32_t ms) {
+  uint32_t t0 = k->ms(), voltas = 0;
   for (;;) {
     if (sd_le(SD_FENCE) == seq) return 0;
     if (k->ms() - t0 > ms || ++voltas > 50000000u) {
@@ -611,6 +625,9 @@ static int sd_executa(uint32_t ms) {
     }
   }
 }
+
+/* entrega e espera */
+static int sd_executa(uint32_t ms) { return sd_espera(sd_envia(), ms); }
 
 /* le \SODOS\FW\P10SDMA.BIN e (grava = 1) poe o ucode na VRAM; devolve o
  * tamanho do ucode ou 0 */
@@ -880,6 +897,80 @@ static int sd_testes(void) {
 static int sd_present_ok;
 static uint32_t sd_falhas_present;
 
+/* Abertura AGP do MC (MC_VM_AGP_BOT/TOP/BASE, em 4 MB). O GOP da RX 570 deixa
+ * BOT = TOP = BASE = 0: uma abertura ATIVA cobrindo os primeiros 4 MB fisicos.
+ * O back buffer do kernel comeca em 1 MB, e as linhas que caiam ali eram lidas
+ * por esse caminho, que nao ve o que ainda esta na cache da CPU: no primeiro
+ * boot com o present pela SDMA (2026-11-18) a parte de cima da tela comecou
+ * preta e ganhou riscos curtos (linhas de cache velhas). O teste da RAM tinha
+ * passado porque o buffer dele ficava acima de 4 MB. O Linux desliga a
+ * abertura (amdgpu_gmc_set_agp_default: BOT = 0x3FFFF > TOP = 0); aqui o mesmo,
+ * e o valor do GOP volta no fim. */
+#define SD_MC_VM_AGP_TOP 0x080Au
+#define SD_MC_VM_AGP_BOT 0x080Bu
+#define SD_MC_VM_AGP_BASE 0x080Cu
+static uint32_t sd_agp_top, sd_agp_bot, sd_agp_base;
+static int sd_agp_mexeu;
+
+static void sd_agp_desliga(void) {
+  sd_agp_top = pl_r(SD_MC_VM_AGP_TOP) & 0x3FFFFu;
+  sd_agp_bot = pl_r(SD_MC_VM_AGP_BOT) & 0x3FFFFu;
+  sd_agp_base = pl_r(SD_MC_VM_AGP_BASE) & 0x3FFFFu;
+  if (sd_agp_bot > sd_agp_top) return;   /* ja desligada */
+  log_kv("[amdsdma] abertura AGP ligada: bot ", sd_agp_bot);
+  log_kv(" top ", sd_agp_top);
+  log_kv(" base ", sd_agp_base);
+  log_kv(" (fisico ", sd_agp_bot << 2);
+  log_kv(" a ", (sd_agp_top << 2) + 3u);
+  k->log(" MB): desligada, como no Linux\n");
+  pl_w(SD_MC_VM_AGP_BOT, 0x3FFFFu);   /* primeiro o BOT: BOT > TOP ja desliga */
+  pl_w(SD_MC_VM_AGP_TOP, 0);
+  sd_agp_mexeu = 1;
+}
+
+static void sd_agp_volta(void) {
+  if (!sd_agp_mexeu) return;
+  pl_w(SD_MC_VM_AGP_TOP, sd_agp_top);
+  pl_w(SD_MC_VM_AGP_BOT, sd_agp_bot);
+  pl_w(SD_MC_VM_AGP_BASE, sd_agp_base);
+  sd_agp_mexeu = 0;
+}
+
+/* Testa a leitura do proprio back buffer (as primeiras linhas, as que a
+ * abertura AGP pegava): a CPU escreve um padrao (fica na cache), a SDMA copia
+ * na hora, a CPU confere e o conteudo antigo volta. */
+static int sd_teste_back(void) {
+  uint32_t* b = (uint32_t*)m.back;
+  uint32_t* salvo = (uint32_t*)k->alloc(SD_RAM_TAM, 64);
+  uint64_t fis = (uint64_t)(uintptr_t)m.back;
+  uint32_t i, ruins = 0;
+  if (!salvo || !b) return -1;
+  for (i = 0; i < SD_RAM_TAM / 4u; i++) salvo[i] = b[i];
+  for (i = 0; i < SD_RAM_TAM / 4u; i++) b[i] = 0x3C000000u ^ i * 2246822519u;
+  sd_put(SD_OP_COPY);
+  sd_put(SD_RAM_TAM);
+  sd_put(0);
+  sd_put((uint32_t)fis);
+  sd_put((uint32_t)(fis >> 32));
+  sd_put((uint32_t)(sd_mc + SD_B));
+  sd_put((uint32_t)((sd_mc + SD_B) >> 32));
+  if (sd_executa(1000) != 0) {
+    for (i = 0; i < SD_RAM_TAM / 4u; i++) b[i] = salvo[i];
+    k->free(salvo);
+    return -6;
+  }
+  for (i = 0; i < SD_RAM_TAM / 4u; i++)
+    if (sd_le(SD_B + i * 4u) != b[i]) ruins++;
+  log_kv("[amdsdma] back buffer (fisico ", (uint32_t)fis);
+  log_kv(") -> VRAM 64 KB: erradas ", ruins);
+  log_kv(" (palavra 0: ", sd_le(SD_B));
+  log_kv(" esperado ", b[0]);
+  k->log(")\n");
+  for (i = 0; i < SD_RAM_TAM / 4u; i++) b[i] = salvo[i];
+  k->free(salvo);
+  return ruins ? -7 : 0;
+}
+
 /* sub-janela de w x h pixels de 32 bits (Mesa cik_sdma_copy, GFX8) */
 static void sd_subjanela(uint64_t src, uint32_t sx, uint32_t sy, uint32_t spitch, uint32_t salt,
                          uint64_t dst, uint32_t dx, uint32_t dy, uint32_t dpitch, uint32_t dalt,
@@ -964,20 +1055,45 @@ static int sd_teste_ram(void) {
   k->log(")\n");
   k->free(buf);
   if (ruins || fora) return -5;
-  return 0;
+  return sd_teste_back();
 }
 
-/* present pela SDMA; 0 = feito, <0 = a CPU faz este quadro */
+/* ---------------------------------------------------------------------------
+ * Present dividido entre a SDMA e a CPU (2026-11-18).
+ *
+ * Medido na placa: a SDMA (com o SMU sem DPM, clocks provavelmente no minimo)
+ * copia RAM -> VRAM a ~3,4 ciclos por pixel; a CPU, pela abertura com
+ * write-combining, a ~2,5. Sozinha a SDMA perde. Mas as duas trabalham ao
+ * mesmo tempo: cada area e cortada na horizontal, a SDMA recebe as linhas de
+ * baixo e a CPU copia as de cima enquanto isso; no fim espera o fence.
+ * Somadas (~0,30 + ~0,40 pixel por ciclo) dao ~1,4 ciclos por pixel.
+ *
+ * A fatia da SDMA (sd_parte, em 1/1024) se ajusta a cada quadro: se o fence
+ * ja tinha chegado quando a CPU acabou, a SDMA estava folgada (fatia +16); se
+ * a espera passou de 1/8 do tempo da CPU, ela atrasou o quadro (fatia -16).
+ * Quadros pequenos (menos de SD_MIN_PX pixels) ficam so com a CPU: ali o
+ * custo fixo do fence e do HDP pesa mais que a copia.
+ * ------------------------------------------------------------------------- */
+#define SD_MIN_PX 65536u
+#define SD_MAX_AREAS 40
+#define SD_BLOCO 64u                          /* linhas da CPU entre olhadas no fence */
+static uint32_t sd_parte = 440;              /* fatia inicial: 0,30 / (0,30 + 0,40) */
+static uint64_t sd_px_sdma, sd_px_cpu;       /* pixels de cada lado (para o log) */
+static uint32_t sd_folgas, sd_atrasos;
+
+struct sd_area { uint32_t x, y, w, h; };
+
 static int sd_present(const struct gpu_rect* r, int n) {
-  uint64_t src = (uint64_t)(uintptr_t)m.back, dst = surf_gpu;
-  uint32_t sp = m.pitch / 4u, dp = m.fb_pitch / 4u;
-  int i, feitos = 0;
-  uint64_t px = 0;
+  uint64_t src = (uint64_t)(uintptr_t)m.back, dst = surf_gpu, t0, t1, t2, te, ts, px = 0, pxs = 0;
+  uint32_t sp = m.pitch / 4u, dp = m.fb_pitch / 4u, seq;
+  struct sd_area a[SD_MAX_AREAS];
+  int i, na = 0, pronto;
   if (!sd_ligada || (m.pitch & 3u) || (m.fb_pitch & 3u) || sp > 16384u || dp > 16384u) return -1;
-  if (!r || n <= 0 || n > 40) {
-    sd_subjanela(src, 0, 0, sp, m.h, dst, 0, 0, dp, m.h, m.w, m.h);
-    px = (uint64_t)m.w * m.h;
-    feitos = 1;
+  if (!r || n <= 0 || n > SD_MAX_AREAS) {
+    a[0].x = a[0].y = 0;
+    a[0].w = m.w;
+    a[0].h = m.h;
+    na = 1;
   } else {
     for (i = 0; i < n; i++) {
       int32_t x = r[i].x, y = r[i].y, w = r[i].w, h = r[i].h;
@@ -992,21 +1108,80 @@ static int sd_present(const struct gpu_rect* r, int n) {
       if (x + w > (int32_t)m.w) w = (int32_t)m.w - x;
       if (y + h > (int32_t)m.h) h = (int32_t)m.h - y;
       if (w <= 0 || h <= 0) continue;
-      sd_subjanela(src, (uint32_t)x, (uint32_t)y, sp, m.h, dst, (uint32_t)x, (uint32_t)y, dp, m.h,
-                   (uint32_t)w, (uint32_t)h);
-      px += (uint64_t)w * (uint32_t)h;
-      feitos++;
+      a[na].x = (uint32_t)x;
+      a[na].y = (uint32_t)y;
+      a[na].w = (uint32_t)w;
+      a[na].h = (uint32_t)h;
+      na++;
     }
   }
-  if (!feitos) return 0;
-  if (sd_executa(200) != 0) {
-    sd_falhas_present++;
-    sd_present_ok = 0;
-    sd_para();
-    sd_ligada = 0;
-    k->log("[amdsdma] present pela SDMA falhou: SDMA parada, a CPU volta a copiar\n");
-    return -1;
+  for (i = 0; i < na; i++) px += (uint64_t)a[i].w * a[i].h;
+  if (!na) return 0;
+  if (px < SD_MIN_PX) return -1;   /* a CPU faz sozinha */
+  /* 1. a SDMA recebe as linhas de baixo de cada area */
+  for (i = 0; i < na; i++) {
+    uint32_t hs = (uint32_t)(((uint64_t)a[i].h * sd_parte) >> 10);
+    if (!hs) continue;
+    sd_subjanela(src, a[i].x, a[i].y + a[i].h - hs, sp, m.h, dst, a[i].x, a[i].y + a[i].h - hs, dp, m.h,
+                 a[i].w, hs);
+    pxs += (uint64_t)a[i].w * hs;
   }
+  seq = pxs ? sd_envia() : 0;
+  te = tsc();
+  /* 2. a CPU copia as de cima ao mesmo tempo, em blocos de SD_BLOCO linhas;
+   * entre um bloco e outro olha o fence, para saber quando a SDMA acabou */
+  t0 = tsc();
+  ts = 0;
+  {
+    /* a SDMA acabou entre a ultima olhada sem fence e a primeira com ele:
+     * vale o meio (2026-11-18: usar a primeira olhada atrasava a SDMA em ate
+     * um bloco, e a fatia ficava em ~0,43 com a SDMA acabando antes da CPU
+     * em 99,8% dos quadros) */
+    uint64_t tult = te;
+    for (i = 0; i < na; i++) {
+      uint32_t hs = (uint32_t)(((uint64_t)a[i].h * sd_parte) >> 10), y, hc = a[i].h - hs;
+      for (y = 0; y < hc; y += SD_BLOCO) {
+        copia(a[i].x, a[i].y + y, a[i].w, hc - y > SD_BLOCO ? SD_BLOCO : hc - y);
+        if (pxs && !ts) {
+          uint64_t agora = tsc();
+          if (sd_le(SD_FENCE) == seq) ts = tult + (agora - tult) / 2u;
+          else tult = agora;
+        }
+      }
+    }
+  }
+  t1 = tsc();
+  /* 3. espera a SDMA */
+  if (pxs) {
+    pronto = ts != 0;
+    if (!pronto) {
+      if (sd_espera(seq, 200) != 0) {
+        sd_falhas_present++;
+        sd_present_ok = 0;
+        sd_para();
+        sd_ligada = 0;
+        k->log("[amdsdma] present pela SDMA falhou: SDMA parada, a CPU volta a copiar\n");
+        return -1;   /* a CPU refaz o quadro inteiro */
+      }
+      ts = tsc();
+    }
+    t2 = ts;
+    /* 4. ajusta a fatia pelas velocidades medidas neste quadro:
+     * SDMA pxs pixels em (t2 - te), CPU (px - pxs) em (t1 - t0); a fatia ideal
+     * e pxs/Ts / (pxs/Ts + pxc/Tc) = pxs*Tc / (pxs*Tc + pxc*Ts). Media com o
+     * valor anterior (3:1) para nao oscilar. */
+    if (pronto) sd_folgas++;
+    else sd_atrasos++;
+    if (px > pxs && t1 > t0 && t2 > te) {
+      uint64_t a1 = pxs * (t1 - t0), a2 = (px - pxs) * (t2 - te);
+      uint32_t f = a1 + a2 ? (uint32_t)((a1 << 10) / (a1 + a2)) : sd_parte;
+      sd_parte = (3u * sd_parte + f) / 4u;
+      if (sd_parte < 64u) sd_parte = 64u;
+      if (sd_parte > 960u) sd_parte = 960u;
+    }
+  }
+  sd_px_sdma += pxs;
+  sd_px_cpu += px - pxs;
   pixels += px;
   return 0;
 }
@@ -1036,6 +1211,7 @@ static int polaris_sdma(void) {
     return -10 + r;
   }
   k->log("[amdsdma] SDMA0 FUNCIONANDO\n");
+  sd_agp_desliga();
   r = sd_teste_ram();
   if (r == 0) {
     sd_present_ok = 1;
@@ -1138,6 +1314,13 @@ static void polaris_diag(void) {
   k->log("\n");
 }
 
+#ifdef AMD_SMC
+#include "vbios.c"   /* etapa M: VBIOS, saidas e HPD (dois monitores) */
+#endif
+#ifdef AMD_TELA2
+#include "tela2.c"   /* etapa M, parte 2: CRTC 1 em espelho pelo AtomBIOS */
+#endif
+
 static int a_init(const struct gpu_kapi* kapi, const struct gpu_mode* mode) {
   uint32_t b;
   k = kapi;
@@ -1166,6 +1349,10 @@ static int a_init(const struct gpu_kapi* kapi, const struct gpu_mode* mode) {
     smc_res = polaris_smc_carrega();
 #ifdef AMD_SDMA
     if (smc_res == 0) sd_res = polaris_sdma();
+#endif
+    polaris_saidas();   /* por ultimo: a copia do VBIOS enche o log */
+#ifdef AMD_TELA2
+    polaris_tela2();
 #endif
   } else {
     /* outra placa (QEMU): so confere o arquivo, para testar a leitura */
@@ -1290,15 +1477,21 @@ static int pl_hot_x, pl_hot_y;
 
 static uint32_t pl_creg(uint32_t r) { return r + pl_crtc[tela_crtc]; }
 
+/* escreve no CRTC da tela e no do espelho (segunda tela), se houver */
+static void pl_cw(uint32_t r, uint32_t v) {
+  pl_w(pl_creg(r), v);
+  if (pl_espelho >= 0 && pl_espelho != tela_crtc) pl_w(r + pl_crtc[pl_espelho], v);
+}
+
 static void pl_lock(int on) {
   uint32_t v = pl_r(pl_creg(PL_CUR_UPDATE));
-  pl_w(pl_creg(PL_CUR_UPDATE), on ? v | PL_CUR_LOCK : v & ~PL_CUR_LOCK);
+  pl_cw(PL_CUR_UPDATE, on ? v | PL_CUR_LOCK : v & ~PL_CUR_LOCK);
 }
 
 static void pl_cur_desliga(void) {
   if (!cur_ligado || tela_crtc < 0 || !mmio) return;
   pl_lock(1);
-  pl_w(pl_creg(PL_CUR_CONTROL), pl_r(pl_creg(PL_CUR_CONTROL)) & ~PL_CUR_EN);
+  pl_cw(PL_CUR_CONTROL, pl_r(pl_creg(PL_CUR_CONTROL)) & ~PL_CUR_EN);
   pl_lock(0);
   cur_ligado = 0;
 }
@@ -1317,8 +1510,8 @@ static void pl_pos(int x, int y) {
     oy = -y > (int)PL_LADO - 1 ? (int)PL_LADO - 1 : -y;
     y = 0;
   }
-  pl_w(pl_creg(PL_CUR_POSITION), ((uint32_t)x & 0x3FFFu) << 16 | ((uint32_t)y & 0x3FFFu));
-  pl_w(pl_creg(PL_CUR_HOT_SPOT), (uint32_t)ox << 16 | (uint32_t)oy);
+  pl_cw(PL_CUR_POSITION, ((uint32_t)x & 0x3FFFu) << 16 | ((uint32_t)y & 0x3FFFu));
+  pl_cw(PL_CUR_HOT_SPOT, (uint32_t)ox << 16 | (uint32_t)oy);
 }
 
 static int pl_cursor_set(const uint32_t* argb, int w, int h, int hot_x, int hot_y) {
@@ -1348,14 +1541,14 @@ static int pl_cursor_set(const uint32_t* argb, int w, int h, int hot_x, int hot_
   pl_hot_x = hot_x;
   pl_hot_y = hot_y;
   pl_lock(1);
-  pl_w(pl_creg(PL_CUR_SURF_HI), (uint32_t)(addr >> 32));
-  pl_w(pl_creg(PL_CUR_SURF), (uint32_t)addr);
-  pl_w(pl_creg(PL_CUR_SIZE), (PL_LADO - 1u) << 16 | (PL_LADO - 1u));
+  pl_cw(PL_CUR_SURF_HI, (uint32_t)(addr >> 32));
+  pl_cw(PL_CUR_SURF, (uint32_t)addr);
+  pl_cw(PL_CUR_SIZE, (PL_LADO - 1u) << 16 | (PL_LADO - 1u));
   if (!cur_ligado) pl_pos((int)m.w / 2, (int)m.h / 2);
   v = pl_r(pl_creg(PL_CUR_CONTROL));
   v &= ~(PL_CUR_MODE_MASK | PL_CUR_2X);
   v |= PL_CUR_EN | CUR_MODE_PREMULT << 8;
-  pl_w(pl_creg(PL_CUR_CONTROL), v);
+  pl_cw(PL_CUR_CONTROL, v);
   pl_lock(0);
   cur_ligado = 1;
   log_kv("[amdcur] polaris crtc ", (uint32_t)tela_crtc);
@@ -1458,6 +1651,9 @@ static int a_suspend(void) {
 #ifdef AMD_CURSOR
   cur_desliga();
 #endif
+#ifdef AMD_TELA2
+  if (t2_estendida) t2_layout(0);   /* a tela de texto usa o fb do GOP */
+#endif
   return 0;
 }
 
@@ -1475,10 +1671,20 @@ static void a_fini(void) {
     sd_ligada = 0;
     k->log("[amdsdma] SDMA0 parada (fim)\n");
   }
+  sd_agp_volta();
   log_kv("[amdsdma] quadros pela SDMA ", sd_quadros);
   log_kv(" falhas ", sd_falhas_present);
+  log_kv(" fatia da SDMA /1024 ", sd_parte);
+  /* em milhares de pixels (1024): em 32 bits a contagem em pixels estoura numa
+   * sessao de alguns minutos (4.859 quadros de 1,47 M pixels = 7,1 G) */
+  log_kv(" kpixels SDMA ", (uint32_t)(sd_px_sdma >> 10));
+  log_kv(" CPU ", (uint32_t)(sd_px_cpu >> 10));
+  log_kv(" folgas ", sd_folgas);
+  log_kv(" atrasos ", sd_atrasos);
   k->log("\n");
   sd_quadros = 0;
+  sd_px_sdma = sd_px_cpu = 0;
+  sd_folgas = sd_atrasos = 0;
   sd_present_ok = 0;
 #endif
 #ifdef AMD_CURSOR
@@ -1499,11 +1705,24 @@ static void a_fini(void) {
   log_kv(" (quadro inteiro: ciclos ", (uint32_t)ciclos_inteira);
   log_kv(" pixels ", m.w * m.h);
   k->log(")\n");
+#ifdef AMD_TELA2
+  polaris_tela2_fim();
+#endif
+#ifdef AMD_SMC
+  if (vb) {
+    k->free(vb);
+    vb = 0;
+    vb_tam = 0;
+  }
+#endif
 }
 
 static const struct gpu_drv drv = {
   GPU_ABI,
-#if defined(AMD_SDMA)
+#if defined(AMD_TELA2)
+  "amddual (Radeon, GOP, cursor, SMU, SDMA, 2 telas)",
+  GPU_CAP_PRESENT | GPU_CAP_DAMAGE | GPU_CAP_CURSOR | GPU_CAP_TELAS,
+#elif defined(AMD_SDMA)
   "amdsdma (Radeon, GOP, cursor, SMU, SDMA)",
   GPU_CAP_PRESENT | GPU_CAP_DAMAGE | GPU_CAP_CURSOR,
 #elif defined(AMD_SMC)
@@ -1528,6 +1747,9 @@ static const struct gpu_drv drv = {
 #else
   0,
   0,
+#endif
+#ifdef AMD_TELA2
+  a_telas,
 #endif
 };
 

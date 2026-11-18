@@ -35,6 +35,13 @@ static uint8_t* fw_ok;        /* arquivo "assinado" esperado */
 static long fw_ok_tam;
 static long data_escritas;    /* escritas em SMC_IND_DATA_11 */
 static long rst_escritas;
+/* VBIOS falso (etapa M): ROM_INDEX/ROM_DATA do SMC, com o indice avancando */
+#define VROM_TAM 0x1000u              /* a ROM falsa */
+static uint8_t vrom[0x20000];         /* cabe a ROM real (etapa M, parte 2) */
+static uint32_t vrom_tam = VROM_TAM;
+static int sim_traco;                 /* SIM_TRACE: escritas nos registradores */
+static uint32_t rom_ix;
+static int rom_surda;         /* cenario: a ROM devolve FF */
 
 static uint32_t ram_r(uint32_t a) {
   uint32_t v;
@@ -55,6 +62,13 @@ static uint32_t smc_r(uint32_t a) {
     case 0xE0003088u: return smu_status;
     case 0xE00030A4u: return smu_fw;
     case 0xC0000004u: return rcu;
+    case 0xC0600010u: return rom_ix;
+    case 0xC0600014u: {
+      uint32_t v = 0xFFFFFFFFu;
+      if (!rom_surda && rom_ix + 4u <= vrom_tam) memcpy(&v, vrom + rom_ix, 4);
+      rom_ix += 4u;
+      return v;
+    }
   }
   return ram_r(a);
 }
@@ -82,7 +96,9 @@ static void smc_w(uint32_t a, uint32_t v) {
     case 0xE0003088u: smu_status = v; return;
     case 0xE00030A4u: smu_fw = v; return;
     case 0xC0000004u: rcu = v; return;
+    case 0xC0600010u: rom_ix = v; return;
   }
+  if ((a & 0xFFFFFF00u) == 0xC0600000u) return;   /* outros registradores da ROM */
   ram_w(a, v);
 }
 
@@ -121,6 +137,10 @@ static uint8_t* vram(uint64_t mc, uint32_t n) {
  * sao ponteiros do host, como fisico = virtual no SODOS) */
 static int ram_lixo;          /* cenario: a placa nao le a RAM direito */
 static long ram_leituras;
+static long agp_leituras;     /* leituras do back buffer com a abertura AGP ligada */
+static uint32_t* back;        /* back buffer do kernel (no SODOS, fisico 0x100000) */
+#define W 1920u
+#define H 1080u
 static const uint8_t* le_mem(uint64_t mc, uint32_t n) {
   static uint8_t lixo[1 << 22];
   if (mc >= VRAM_MC && mc + n <= VRAM_MC + VRAM_TAM) return fb + (mc - VRAM_MC);
@@ -129,6 +149,15 @@ static const uint8_t* le_mem(uint64_t mc, uint32_t n) {
     return 0;
   }
   ram_leituras++;
+  /* Na RX 570 o back buffer fica dentro dos 4 MB da abertura AGP que o GOP
+   * deixa ligada (BOT = TOP = 0), e por ela a placa le dados velhos. Aqui:
+   * abertura ligada (BOT <= TOP) + leitura do back buffer = zeros. */
+  if (back && (reg[0x80B] & 0x3FFFFu) <= (reg[0x80A] & 0x3FFFFu) &&
+      mc >= (uint64_t)(uintptr_t)back && mc < (uint64_t)(uintptr_t)back + (uint64_t)W * H * 4u) {
+    agp_leituras++;
+    memset(lixo, 0, n < sizeof lixo ? n : sizeof lixo);
+    return lixo;
+  }
   if (ram_lixo) {
     memset(lixo, 0x77, n < sizeof lixo ? n : sizeof lixo);
     return lixo;
@@ -241,28 +270,47 @@ static void sdma_anda(void) {
 
 uint32_t sim_r(uint32_t r) {
   uint32_t v;
+  if (sim_traco > 1 && r != 0x1ACu && r != 0x1ADu && r < NREG) printf("  r %04X -> %08X\n", r, reg[r]);
   if (r == 0x1ADu) {
     v = smc_r(ind_idx);
     if (reg[0x92] & 0x800u) ind_idx += 4;
     return v;
   }
   if (r == 0x1ACu) return ind_idx;
+#ifdef AMD_TELA2
+  /* DC_COMBOPHYTXREGSn_CMD_BUS_TX_CONTROL_LANEn (0x9nn0): bit 8 = pista
+   * pronta (DIG2TransmitterControl, 0xD968, espera antes e depois) */
+  if (r >= 0x9000u && r < 0xA000u && (r & 0xFu) == 0u) return reg[r] | 0x100u;
+#endif
   return r < NREG ? reg[r] : 0;
 }
 
 void sim_w(uint32_t r, uint32_t v) {
+  if (sim_traco && r != 0x1ACu && r != 0x1ADu) printf("  w %04X <- %08X\n", r, v);
   if (r == 0x1ACu) {
     ind_idx = v;
     return;
   }
   if (r == 0x1ADu) {
-    data_escritas++;
+    if ((ind_idx & 0xFFFFFF00u) != 0xC0600000u) data_escritas++;
     smc_w(ind_idx, v);
     if (reg[0x92] & 0x800u) ind_idx += 4;
     return;
   }
   if (r >= NREG) return;
   reg[r] = v;
+#ifdef AMD_TELA2
+  /* DC_COMBOPHYTXREGSn_CMD_BUS_GLOBAL_FOR_TX_LANEn (0x9nn2): o VBIOS pede
+   * pelo bit 12 e espera a resposta no bit 13 (SetPixelClock, 0xB4F0:
+   * espera 13 = 0, liga 12, espera 13 = 1); o PHY responde na hora */
+  if (r >= 0x9000u && r < 0xA000u && (r & 0xFu) == 2u) reg[r] = (v & 0x1000u) ? (v | 0x2000u) : (v & ~0x2000u);
+  /* DC_COMBOPHYPLLREGSn_PLL_WRAP_CNTRL (0x9n3F): bit 14 liga, bit 13 = travado */
+  if (r >= 0x9000u && r < 0xA000u && (r & 0xFFu) == 0x3Fu)
+    reg[r] = (v & 0x4000u) ? (v | 0x2000u) : (v & ~0x2000u);
+  /* 0x9nB1 (48D1 no bloco do PHY): bit 1 liga, bit 2 responde (0xD991) */
+  if (r >= 0x9000u && r < 0xA000u && (r & 0xFFu) == 0xB1u)
+    reg[r] = (v & 2u) ? (v | 4u) : (v & ~4u);
+#endif
   if (r == 0x94u) {                          /* SMC_MESSAGE_0 */
     uint32_t resp = 1;
     if (v == 0x100u && reg[0xA4] == 0x20000u) {
@@ -285,7 +333,7 @@ void sim_w(uint32_t r, uint32_t v) {
 }
 
 /* ---------- gpu_kapi falsa ---------- */
-static char logb[1 << 16];
+static char logb[1 << 18];
 static size_t logn;
 static uint32_t relogio;
 static const char* fw_arq;
@@ -355,10 +403,51 @@ static struct gpu_kapi kp = {
 };
 
 /* ---------- cenarios ---------- */
-#define W 1920u
-#define H 1080u
-static uint32_t* back;
 static int falhas;
+
+static void vw16(uint32_t o, uint16_t v) { vrom[o] = (uint8_t)v; vrom[o + 1] = (uint8_t)(v >> 8); }
+
+/* Um AtomBIOS minimo: cabecalhos, GPIO_Pin_LUT, conectores DP e HDMI (HPD nos
+ * bits 0 e 8 de DC_GPIO_HPD) e dois caminhos. */
+static void rom_monta(void) {
+  uint32_t i;
+  memset(vrom, 0, sizeof vrom);
+  vrom_tam = VROM_TAM;
+  vw16(0, 0xAA55u);
+  vrom[2] = VROM_TAM / 512u;
+  memcpy(vrom + 0x30, " 761295520", 10);
+  vw16(0x48, 0x100);
+  memcpy(vrom + 0x104, "ATOM", 4);
+  vw16(0x100 + 0x1E, 0x180);                 /* comandos */
+  vw16(0x100 + 0x20, 0x200);                 /* dados */
+  vw16(0x200 + 4 + 12 * 2, 0x300);           /* GPIO_Pin_LUT */
+  vw16(0x200 + 4 + 22 * 2, 0x400);           /* Object_Header */
+  vw16(0x300, 4 + 3 * 4);
+  vw16(0x304, 0x488Du); vrom[0x306] = 0; vrom[0x307] = 0x10;
+  vw16(0x308, 0x488Du); vrom[0x30A] = 8; vrom[0x30B] = 0x11;
+  vw16(0x30C, 0x1234u); vrom[0x30E] = 3; vrom[0x30F] = 0x12;   /* fora do bloco: ignorado */
+  vrom[0x402] = 1; vrom[0x403] = 3;
+  vw16(0x406, 0x20);                         /* conectores em 0x420 */
+  vw16(0x40E, 0x80);                         /* caminhos em 0x480 */
+  vrom[0x420] = 2;
+  vw16(0x424, 0x3113u); vw16(0x428, 0x40);
+  vw16(0x42C, 0x310Cu); vw16(0x430, 0x50);
+  vrom[0x440] = 1; vrom[0x441] = 4; vrom[0x442] = 0x90; vrom[0x443] = 0xA0;
+  vrom[0x444] = 2; vrom[0x445] = 4; vrom[0x446] = 0x10; vrom[0x447] = 1;
+  vrom[0x448] = 0xFF;
+  vrom[0x450] = 2; vrom[0x451] = 4; vrom[0x452] = 0x11; vrom[0x453] = 1;
+  vrom[0x454] = 0xFF;
+  vrom[0x480] = 2;
+  vw16(0x484, 0x0008); vw16(0x486, 10); vw16(0x488, 0x3113u); vw16(0x48A, 0x1100); vw16(0x48C, 0x211Eu);
+  vw16(0x48E, 0x0080); vw16(0x490, 10); vw16(0x492, 0x310Cu); vw16(0x494, 0x1100); vw16(0x496, 0x221Eu);
+  for (i = 0x800; i < VROM_TAM; i++) vrom[i] = 0xFF;
+}
+
+static uint32_t rom_fnv(void) {
+  uint32_t h = 2166136261u, i;
+  for (i = 0; i < VROM_TAM; i++) h = (h ^ vrom[i]) * 16777619u;
+  return h;
+}
 
 static void placa_nova(void) {
   memset(reg, 0, sizeof reg);
@@ -383,6 +472,10 @@ static void placa_nova(void) {
   reg[0x1A07] = 0xF4u;
   reg[0x1A06] = W;
   reg[0x1A66] = 0x04000010u;
+  rom_monta();
+  rom_ix = 0x55u;
+  rom_surda = 0;
+  reg[0x488F] = 0x1u;        /* DC_GPIO_HPD_Y: monitor no DP, nada no HDMI */
   logn = 0;
   logb[0] = 0;
   relogio = 0;
@@ -393,6 +486,9 @@ static void placa_nova(void) {
   smu_recusa_load = sdma_surda = sdma_ucode = 0;
   ram_lixo = 0;
   ram_leituras = 0;
+  agp_leituras = 0;
+  /* MC_VM_AGP_TOP/BOT/BASE como o GOP da RX 570 deixa: abertura ligada (0..4 MB) */
+  reg[0x80A] = reg[0x80B] = reg[0x80C] = 0;
   drv_dram = smu_dram = 0;
   sdma_pacotes = 0;
   memset(fb + 0x02000000u, 0, 0x01000000u);   /* area da SDMA */
@@ -621,6 +717,9 @@ int main(int argc, char** argv) {
       confere("14 teste da RAM passou: present pela placa", d && sd_res == 0 && sd_present_ok == 1);
       confere("14 log 'present passa a ser pela placa'", strstr(logb, "present passa a ser pela placa") != 0);
       confere("14 a placa leu a RAM (modo PA)", ram_leituras > 0);
+      confere("14 abertura AGP desligada antes de ler a RAM (BOT > TOP)",
+              (reg[0x80B] & 0x3FFFFu) > (reg[0x80A] & 0x3FFFFu) && agp_leituras == 0);
+      confere("14 teste do proprio back buffer no log", strstr(logb, "back buffer (fisico") != 0);
       for (y = 0; y < H; y++)
         for (x = 0; x < W; x++) back[y * W + x] = 0x00100000u * (x & 0xF) + y * 7u + x;
       memset(fb, 0, W * H * 4u);
@@ -635,6 +734,7 @@ int main(int argc, char** argv) {
           tela[899 * W + 1500])
         fora = 0;
       confere("14 areas copiadas pela SDMA (recortadas na borda)", ok && sd_quadros == 1);
+      confere("14 quadro dividido: parte pela SDMA, parte pela CPU", sd_px_sdma > 0 && sd_px_cpu > 0);
       confere("14 nada fora das areas", fora);
       memset(fb, 0, W * H * 4u);
       d->present(0, 0);
@@ -644,17 +744,29 @@ int main(int argc, char** argv) {
           if (tela[y * W + x] != back[y * W + x]) ok = 0;
       confere("14 quadro inteiro pela SDMA", ok && sd_quadros == 2);
       /* a SDMA para no meio da sessao: a CPU assume o quadro */
+      /* area pequena: so a CPU (abaixo de SD_MIN_PX) */
+      {
+        uint32_t q = sd_quadros;
+        uint64_t ps = sd_px_sdma;
+        struct gpu_rect pq = { 40, 40, 101, 100 };   /* largura impar: rep movsq + 1 pixel */
+        memset(fb, 0, W * H * 4u);
+        d->present(&pq, 1);
+        confere("14 area pequena: so a CPU, certa (largura impar, ultimo pixel)",
+                sd_quadros == q && sd_px_sdma == ps && tela[90 * W + 90] == back[90 * W + 90] &&
+                    tela[90 * W + 140] == back[90 * W + 140] && tela[90 * W + 141] == 0);
+      }
       sdma_surda = 1;
       memset(fb, 0, W * H * 4u);
-      d->present(rr, 1);
+      d->present(0, 0);
       ok = 1;
-      for (y = 20; y < 220; y += 3)
-        for (x = 10; x < 310; x += 5)
+      for (y = 0; y < H; y += 17)
+        for (x = 0; x < W; x += 13)
           if (tela[y * W + x] != back[y * W + x]) ok = 0;
-      confere("14 SDMA parou: a CPU copiou o quadro", ok);
+      confere("14 SDMA parou: a CPU copiou o quadro inteiro", ok);
       confere("14 caminho da SDMA desligado e SDMA em HALT",
               sd_present_ok == 0 && (reg[0x3412] & 1u) && strstr(logb, "present pela SDMA falhou") != 0);
       d->fini();
+      confere("14 fini devolve a abertura AGP do GOP", reg[0x80A] == 0 && reg[0x80B] == 0);
     }
 
     /* 15. a placa le lixo da RAM: o present continua pela CPU, SDMA ligada */
@@ -664,6 +776,178 @@ int main(int argc, char** argv) {
     confere("15 RAM ilegivel: sd_res 0, present pela CPU", d && sd_res == 0 && sd_present_ok == 0);
     confere("15 log 'nao leu a RAM'", strstr(logb, "nao leu a RAM") != 0);
     if (d) d->fini();
+  }
+#endif
+
+  /* 16. etapa M: VBIOS pela ROM do SMC, conectores, HPD e copia no log */
+  {
+    char esperado[64];
+    placa_nova();
+    ind_idx = 0x1234u;
+    d = liga();
+    confere("16 init ok com a leitura do VBIOS", d != 0);
+    confere("16 conector 0: DisplayPort, i2c 90, MONITOR",
+            strstr(logb, "conector 00000000 id 00003113 DisplayPort i2c 00000090 hpd_gpio 00000010 "
+                         "pino 0000488D.00000000 nivel 00000001 (ligado = 00000001) MONITOR") != 0);
+    confere("16 conector 1: HDMI sem monitor (bit 8 em 0)",
+            strstr(logb, "conector 00000001 id 0000310C HDMI i2c FFFFFFFF hpd_gpio 00000011 "
+                         "pino 0000488D.00000008 nivel 00000000 (ligado = 00000001)\n") != 0);
+    confere("16 mascara de monitores = 1", strstr(logb, "com monitor (mascara) 00000001") != 0);
+    confere("16 caminhos com os codificadores",
+            strstr(logb, "caminho 00000001 disp 00000080 conector 0000310C gpu 00001100 "
+                         "codificadores 0000221E") != 0);
+    snprintf(esperado, sizeof esperado, "bytes 00001000 fnv1a %08X", rom_fnv());
+    confere("16 copia inteira no log (fnv confere)", strstr(logb, esperado) != 0);
+#ifdef AMD_VBIOS_COPIA
+    confere("16 linhas so de FF resumidas", strstr(logb, "[vbios] 00800 =FF") != 0 &&
+                                                strstr(logb, "[vbios] 00000 55AA08") != 0);
+#else
+    confere("16 sem a copia no log (so o fnv)", strstr(logb, "[vbios] 00000 ") == 0);
+#endif
+    confere("16 indice do SMC e auto-incremento devolvidos",
+            ind_idx == 0x1234u && !(reg[0x92] & 0x800u));
+    if (getenv("SIM_LOG")) {   /* para testar o vbios-extrai.py */
+      FILE* g = fopen(getenv("SIM_LOG"), "wb");
+      if (g) {
+        fwrite(logb, 1, logn, g);
+        fclose(g);
+      }
+      g = fopen("/tmp/sodos-vrom.bin", "wb");
+      if (g) {
+        fwrite(vrom, 1, VROM_TAM, g);
+        fclose(g);
+      }
+    }
+    if (d) d->fini();
+    placa_nova();
+    reg[0x488F] = 0x101u;
+    d = liga();
+    confere("16 dois monitores: mascara 3", d && strstr(logb, "com monitor (mascara) 00000003") != 0);
+    if (d) d->fini();
+    placa_nova();
+    rom_surda = 1;
+    d = liga();
+    confere("16 ROM surda: init ok e log 'nao respondeu'",
+            d && strstr(logb, "ROM nao respondeu") != 0 && strstr(logb, "conector") == 0);
+    if (d) d->fini();
+  }
+
+#ifdef AMD_TELA2
+  /* 17. etapa M, parte 2: as tabelas do AtomBIOS da RX 570 de verdade (a ROM
+   * tirada da placa, argv[3]) sobre os registradores do simulador. A tela
+   * principal esta no DIG2 (DP 3, UNIPHY1 link A); a segunda, no HDMI. */
+  if (argc > 3) {
+    FILE* g = fopen(argv[3], "rb");
+    long n;
+    if (!g) {
+      perror(argv[3]);
+      return 95;
+    }
+    placa_nova();
+    n = (long)fread(vrom, 1, sizeof vrom, g);
+    fclose(g);
+    vrom_tam = (uint32_t)n;
+    reg[0x488F] = 0x04000001u;            /* HPD: DP 3 (bit 0) e HDMI (bit 26) */
+    reg[0x4C00] = 0x01000000u;            /* DIG2 FE: CRTC 0, SYMCLK_FE_ON */
+    reg[0x4C48] = 0x00000101u;            /* DIG2 BE: ligado */
+    reg[0x4C47] = 0x00000000u;            /* DIG2 BE: modo DP */
+    reg[0x0321] = reg[0x0322] = 0x12u;    /* DMIF: alocacao concluida */
+    sim_traco = getenv("SIM_TRACE") ? atoi(getenv("SIM_TRACE")) : 0;
+    d = liga();
+    sim_traco = 0;
+    confere("17 init ok com a ROM real", d != 0);
+    confere("17 conectores da ROM real: 4, DP 3 e HDMI com monitor",
+            vb_ncon == 4 && vb_con[2].nivel == 1 && vb_con[3].nivel == 1 && vb_con[3].hpd == 4);
+    confere("17 tela principal: DIG2", strstr(logb, "DIG 00000002 fe 01000000") != 0 &&
+                                         strstr(logb, "<- tela principal") != 0);
+    confere("17 segunda tela: conector 3 (HDMI), DIG3, PHY D",
+            strstr(logb, "segunda tela: conector 00000003 dig 00000003 phy 00000003") != 0);
+    confere("17 nenhuma tabela abortou", strstr(logb, "ABORTOU") == 0);
+    confere("17 todas as tabelas rodaram",
+            strstr(logb, "SetPixelClock v7 (148,5 MHz) v00000107 ok") != 0 &&
+                strstr(logb, "SetCRTC_UsingDTDTiming (1920x1080) v") != 0 &&
+                strstr(logb, "UNIPHYTransmitterControl v6 ENABLE v00000106 ok") != 0);
+    confere("17 log 'segunda tela LIGADA'", strstr(logb, "segunda tela LIGADA") != 0);
+    confere("17 CRTC 1 com a superficie do CRTC 0",
+            reg[0x1A04 + 0x200] == reg[0x1A04] && reg[0x1A07 + 0x200] == reg[0x1A07] &&
+                reg[0x1A06 + 0x200] == reg[0x1A06] && (reg[0x1A00 + 0x200] & 1u));
+    confere("17 CRTC 0 e DIG2 intactos",
+            reg[0x1B9C] == 0x80410311u && reg[0x4C00] == 0x01000000u && reg[0x4C48] == 0x101u);
+    if (d) {
+      uint32_t seta[16 * 16];
+      for (int i = 0; i < 256; i++) seta[i] = 0xFFFFFFFFu;
+      confere("17 cursor nas duas telas",
+              d->cursor_set(seta, 16, 16, 0, 0) == 0 && d->cursor_move(300, 400) == 0 &&
+                  (reg[0x1A66] & 1u) && (reg[0x1A66 + 0x200] & 1u) &&
+                  reg[0x1A6A + 0x200] == reg[0x1A6A] && reg[0x1A67 + 0x200] == reg[0x1A67]);
+    }
+    /* tela estendida: imagem 3840x1080 na VRAM, CRTC 0 na esquerda e CRTC 1
+     * na direita; o present copia o quadro largo; UMA e o suspend voltam */
+    if (d) {
+      struct gpu_telas t;
+      struct gpu_mode mw;
+      uint32_t* larga = calloc(2u * W * H, 4);
+      uint32_t* tela = (uint32_t*)fb;
+      int ok = 1;
+      uint32_t x, y;
+      confere("17 telas: consulta 2 telas, 3840x1080, segunda em 1920",
+              d->telas && (d->caps & GPU_CAP_TELAS) && d->telas(GPU_TELAS_CONSULTA, &t, 0) == 0 &&
+                  t.n == 2 && t.w == 2u * W && t.h == H && t.x2 == W && t.fb_pitch == 2u * W * 4u);
+      mw.w = 2u * W;
+      mw.h = H;
+      mw.pitch = 2u * W * 4u;
+      mw.back = larga;
+      mw.fb = t.fb;
+      mw.fb_pitch = t.fb_pitch;
+      mw.pci_id = AMD_POLARIS10;
+      mw.pci_bus = 1;
+      mw.pci_dev = mw.pci_fun = 0;
+      confere("17 telas: estende", d->telas(GPU_TELAS_ESTENDE, &t, &mw) == 0);
+      confere("17 telas: CRTC 0 e 1 com pitch 3840, CRTC 1 a partir de x 1920",
+              reg[0x1A06] == 2u * W && reg[0x1A06 + 0x200] == 2u * W && reg[0x1B5C] == 0 &&
+                  reg[0x1B5C + 0x200] == (W << 16) && reg[0x1A0D + 0x200] == 2u * W);
+      for (y = 0; y < H; y++)
+        for (x = 0; x < 2u * W; x++) larga[y * 2u * W + x] = x * 3u + y * 7919u;
+      memset(fb, 0, 2u * W * H * 4u);
+      d->present(0, 0);
+      for (y = 0; y < H; y += 7)
+        for (x = 0; x < 2u * W; x += 11)
+          if (tela[y * 2u * W + x] != larga[y * 2u * W + x]) ok = 0;
+      confere("17 telas: quadro largo inteiro na VRAM (SDMA + CPU)", ok);
+      ok = 1;
+      memset(fb, 0, 2u * W * H * 4u);
+      {
+        struct gpu_rect r = { 2000, 100, 1500, 600 };   /* so na segunda tela */
+        d->present(&r, 1);
+      }
+      for (y = 100; y < 700; y += 5)
+        for (x = 2000; x < 3500; x += 9)
+          if (tela[y * 2u * W + x] != larga[y * 2u * W + x]) ok = 0;
+      confere("17 telas: area na segunda tela", ok && tela[99 * 2u * W + 2000] == 0);
+      confere("17 telas: suspend volta o pitch do GOP (tela de texto)",
+              d->suspend() == 0 && reg[0x1A06] == W && reg[0x1B5C + 0x200] == 0);
+      confere("17 telas: resume + estende de novo", d->resume(&mw) == 0 &&
+                                                       d->telas(GPU_TELAS_ESTENDE, &t, &mw) == 0 &&
+                                                       reg[0x1A06] == 2u * W);
+      confere("17 telas: UMA volta a uma tela", d->telas(GPU_TELAS_UMA, &t, 0) == 0 &&
+                                                    reg[0x1A06] == W && reg[0x1A06 + 0x200] == W);
+      d->telas(GPU_TELAS_ESTENDE, &t, &mw);
+      d->fini();
+      confere("17 telas: fini volta o pitch do GOP", reg[0x1A06] == W);
+      free(larga);
+      d = 0;
+    }
+    if (getenv("SIM_LOG17")) {
+      FILE* h = fopen(getenv("SIM_LOG17"), "wb");
+      if (h) {
+        fwrite(logb, 1, logn, h);
+        fclose(h);
+      }
+    }
+    if (d) d->fini();
+    confere("17 fini desliga a segunda tela", strstr(logb, "segunda tela desligada (fim)") != 0);
+  } else {
+    printf("17 (sem a ROM da RX 570 em argv[3]: pulado)\n");
   }
 #endif
 

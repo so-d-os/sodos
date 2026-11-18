@@ -1920,13 +1920,100 @@ static void ip_rx(const uint8_t* p, int len) {
   else if (p[9] == 1) icmp_rx(src, p[8], p + ihl, plen);
 }
 
+/* ---- desvio para o NAT do WSL.EXE (net_tap_*) ----
+ * Pacotes IP para o nosso IP cujas portas TCP/UDP (ou id de eco ICMP, ou o
+ * pacote original dentro de um erro ICMP) caem em [tap_lo, tap_hi] nao
+ * passam pela pilha: vao para uma fila que o NAT da VM le. */
+#define TAP_Q 256
+static int tap_on;
+static uint16_t tap_lo, tap_hi;
+static uint8_t tap_buf[TAP_Q][1514];
+static uint16_t tap_len[TAP_Q];
+static uint32_t tap_h, tap_t;
+
+static int tap_port(uint16_t p) { return p >= tap_lo && p <= tap_hi; }
+
+static void tap_copy(uint8_t* d, const uint8_t* s, int n) {
+  while (n-- > 0) *d++ = *s++;
+}
+
+static int tap_match(const uint8_t* ip, int len) {
+  int ihl;
+  const uint8_t* l4;
+  if (len < 20 || (ip[0] >> 4) != 4) return 0;
+  ihl = (ip[0] & 15) * 4;
+  if (ihl < 20 || len < ihl + 8 || rd32(ip + 16) != our_ip) return 0;
+  if (rd16(ip + 6) & 0x3FFF) return 0; /* fragmento */
+  l4 = ip + ihl;
+  if (ip[9] == 6 || ip[9] == 17) return tap_port(rd16(l4 + 2));
+  if (ip[9] == 1) {
+    if (l4[0] == 0) return tap_port(rd16(l4 + 4));
+    if ((l4[0] == 3 || l4[0] == 11) && len >= ihl + 8 + 28) {
+      const uint8_t* in = l4 + 8;
+      int ih = (in[0] & 15) * 4;
+      if (ih < 20 || len < ihl + 8 + ih + 8) return 0;
+      if (in[9] == 6 || in[9] == 17) return tap_port(rd16(in + ih));
+      if (in[9] == 1) return tap_port(rd16(in + ih + 4));
+    }
+  }
+  return 0;
+}
+
+int net_tap_open(uint16_t lo, uint16_t hi) {
+  if (!nic_ok || lo > hi) return -1;
+  tap_lo = lo;
+  tap_hi = hi;
+  tap_h = tap_t = 0;
+  tap_on = 1;
+  return 0;
+}
+
+void net_tap_close(void) { tap_on = 0; }
+
+int net_tap_recv(uint8_t* buf, int cap) {
+  int n;
+  if (!tap_on) return -1;
+  if (tap_h == tap_t && !polling) nic_poll();
+  if (tap_h == tap_t) return 0;
+  n = tap_len[tap_t % TAP_Q];
+  if (n > cap) n = cap;
+  tap_copy(buf, tap_buf[tap_t % TAP_Q], n);
+  tap_t++;
+  return n;
+}
+
+int net_tap_send(const uint8_t* ip, int len) {
+  static uint8_t f[1514];
+  uint32_t dst, hop;
+  int i;
+  if (!tap_on || len < 20 || len > 1500) return -1;
+  dst = rd32(ip + 16);
+  hop = ((dst ^ our_ip) & our_mask) ? our_gw : dst;
+  if (arp_resolve(hop, f) != 0) return -2;
+  for (i = 0; i < 6; i++) f[6 + i] = our_mac[i];
+  wr16(f + 12, 0x0800);
+  tap_copy(f + 14, ip, len);
+  return ne_tx(f, len + 14);
+}
+
 static void eth_rx(const uint8_t* f, int len) {
   uint16_t typ;
   if (len < 14) return;
   if (!mac_eq(f, our_mac) && !mac_bcast(f)) return;
   typ = rd16(f + 12);
   if (typ == 0x0806) arp_rx(f, len);
-  else if (typ == 0x0800) ip_rx(f + 14, len - 14);
+  else if (typ == 0x0800) {
+    if (tap_on && tap_match(f + 14, len - 14)) {
+      if (tap_h - tap_t < TAP_Q) {
+        int n = len - 14 > 1514 ? 1514 : len - 14;
+        tap_copy(tap_buf[tap_h % TAP_Q], f + 14, n);
+        tap_len[tap_h % TAP_Q] = (uint16_t)n;
+        tap_h++;
+      }
+      return;
+    }
+    ip_rx(f + 14, len - 14);
+  }
 }
 
 static int ne_rx_one(void) {

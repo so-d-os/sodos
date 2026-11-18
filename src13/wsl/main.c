@@ -13,6 +13,7 @@
 #include "wslcore.h"
 #include "wslcli.h"
 #include "vmm/vmm.h"
+#include "vmm/nat.h"
 
 static int nvme_rd(void* ctx, uint64_t lba, uint32_t count, void* buf) {
   (void)ctx;
@@ -48,7 +49,9 @@ static int cmd_run(int argc, char** argv, const wsl_io* disk) {
   static char cmdline[2048];
   uint8_t* kbuf = 0;
   uint64_t ksize = 0;
-  int i, rc;
+  int i, rc, nonet = 0;
+  static char ipp[160];
+  uint32_t dns = 0;
   memset(&cfg, 0, sizeof cfg);
   cfg.ram_mb = 1024;
   cfg.cow_mb = 512;
@@ -84,6 +87,7 @@ static int cmd_run(int argc, char** argv, const wsl_io* disk) {
     else if (!strcmp(a, "-d") && v) which = v, i++;
     else if (!strcmp(a, "-p") && v) cfg.cpu = atoi(v), i++;
     else if (!strcmp(a, "-v")) cfg.verbose = 1;
+    else if (!strcmp(a, "-n")) nonet = 1;
     else {
       printf("WSL run: opcao desconhecida %s\n", a);
       return 1;
@@ -132,6 +136,20 @@ static int cmd_run(int argc, char** argv, const wsl_io* disk) {
     ntfs_close(kf);
   }
 
+  /* Rede: NAT para o IP do SODOS. A VM e 10.0.3.15 (ip= do kernel, sem
+   * cliente DHCP), o roteador 10.0.3.2 e o DNS o mesmo do SODOS. */
+  ipp[0] = 0;
+  if (!nonet) {
+    if (nat_init(&dns) == 0) {
+      if (!dns) dns = 0x08080808u;
+      cfg.net = 1;
+      snprintf(ipp, sizeof ipp, "ip=10.0.3.15::10.0.3.2:255.255.255.0:sodos-wsl:eth0:off:%u.%u.%u.%u",
+               dns >> 24, (dns >> 16) & 255, (dns >> 8) & 255, dns & 255);
+    } else {
+      printf("WSL: o SODOS esta sem rede (sem placa ou sem IP): a VM sobe sem rede\n");
+    }
+  }
+
   if (!init) {
     if (is_script(st.fs, "/init")) init = "/init";
     else if (exists_ext4(st.fs, "/bin/bash")) init = "/bin/bash";
@@ -140,18 +158,31 @@ static int cmd_run(int argc, char** argv, const wsl_io* disk) {
   {
     /* Shell como init: monta o basico antes (o "login" do WSL e direto como
      * root). Os argumentos depois de "--" vao para o init. */
-    const char* sh_args = "";
+    static char sh_args[1024];
     size_t il = strlen(init);
+    int cols = 80, rows = 25;
+    k_textsize(&cols, &rows);
+    sh_args[0] = 0;
+    /* O shell nao e o PID 1: roda como filho, com o ttyS0 como terminal de
+     * controle (Ctrl+C, job control), e quando ele sai a VM desliga. Se o
+     * init morresse o Linux daria "Attempted to kill init" (panic). */
     if ((il >= 5 && !strcmp(init + il - 5, "/bash")) || (il >= 3 && !strcmp(init + il - 3, "/sh")))
-      sh_args = " -- -c \"mount -t proc proc /proc;mount -t sysfs sys /sys;"
-                "mount -t devtmpfs dev /dev 2>/dev/null;mkdir -p /dev/pts /run;mount -t devpts devpts /dev/pts;"
-                "mount -t tmpfs tmpfs /run;mount -t tmpfs tmpfs /tmp;hostname sodos-wsl;"
-                "export HOME=/root TERM=vt100;cd /root;exec $0 -l\"";
+      snprintf(sh_args, sizeof sh_args,
+               " -- -c \"mount -t proc proc /proc;mount -t sysfs sys /sys;"
+               "mount -t devtmpfs dev /dev 2>/dev/null;mkdir -p /dev/pts /run;"
+               "mount -t devpts devpts /dev/pts;mount -t tmpfs tmpfs /run;mount -t tmpfs tmpfs /tmp;"
+               "hostname sodos-wsl;export HOME=/root TERM=linux;cd /root;"
+               "rm -f /etc/resolv.conf;grep nameserver /proc/net/pnp >/etc/resolv.conf 2>/dev/null;"
+               "stty rows %d cols %d </dev/ttyS0 2>/dev/null;"
+               "if setsid --help 2>&1 | grep -q -- --wait;"
+               "then setsid -w -c $0 -l <>/dev/ttyS0 >&0 2>&0;else $0 -l;fi;"
+               "sync;poweroff -ff 2>/dev/null;poweroff -f\"",
+               rows, cols);
     snprintf(cmdline, sizeof cmdline,
              "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 nolapic noapic acpi=off "
-             "nokaslr tsc=reliable mitigations=off nosmp maxcpus=1 nr_cpus=1 "
-             "pci=conf1,nomsi root=/dev/vda rw rootfstype=ext4 rootwait %s init=%s%s",
-             extra, init, sh_args);
+             "nokaslr tsc=reliable mitigations=off nosmp maxcpus=1 nr_cpus=1 panic=-1 "
+             "pci=conf1,nomsi root=/dev/vda rw rootfstype=ext4 rootwait %s %s init=%s%s",
+             ipp, extra, init, sh_args);
   }
   cfg.kernel = kbuf;
   cfg.kernel_len = (uint32_t)ksize;

@@ -1,9 +1,11 @@
 /*
  * main.c - Entrada do WINE.DLL: monta o processo Windows e chama o EXE.
  *
- * O kernel (kernel/wine.c) so chega aqui com SET WINE=1. start() roda como a
- * thread principal de um programa comum do SODOS (pid, pilha e argv do
- * mod_exec); tudo que se aloca aqui e do programa e some quando ele termina.
+ * O kernel (kernel/wine.c) so chega aqui com SET WINE=1 e um EXE do Windows.
+ * start() roda na tarefa que o shell criou para o programa: carrega o EXE,
+ * cria a thread principal do Windows (k_thread com TEB e pilha proprios) e
+ * espera o ExitProcess, que pode vir de qualquer thread. Tudo que se aloca e
+ * do programa e some quando start() devolve.
  */
 #include <so.h>
 #include <string.h>
@@ -11,6 +13,11 @@
 #include "../../kernel/wine.h"
 
 void k_win_teb(void* teb);
+void wgui_world_service(void);
+void crt_set_process(struct wproc* p);
+void wexplorer_stub(void);
+
+int wine_debug;
 
 static int quote_needed(const char* s) {
   if (!*s) return 1;
@@ -46,27 +53,59 @@ static char* build_cmdline(int argc, char** argv) {
   return c;
 }
 
+/* RTL_USER_PROCESS_PARAMETERS: so o que programas leem direto do PEB. */
+static void build_params(struct wproc* p) {
+  uint8_t* pp = (uint8_t*)wzalloc(0x400);
+  wchar16* img = wdup8to16(p->argv[0]);
+  if (!pp || !img) return;
+  *(uint32_t*)(pp + 0) = 0x400;
+  *(uint32_t*)(pp + 4) = 0x400;
+  *(uint32_t*)(pp + 8) = 1; /* normalizado */
+  *(uint64_t*)(pp + 0x20) = 0x10;
+  *(uint64_t*)(pp + 0x28) = 0x14;
+  *(uint64_t*)(pp + 0x30) = 0x18;
+  /* ImagePathName 0x60, CommandLine 0x70 (UNICODE_STRING: len, max, ptr) */
+  *(uint16_t*)(pp + 0x60) = (uint16_t)(wstrlen16(img) * 2);
+  *(uint16_t*)(pp + 0x62) = (uint16_t)(wstrlen16(img) * 2 + 2);
+  *(uint64_t*)(pp + 0x68) = (uint64_t)(uintptr_t)img;
+  *(uint16_t*)(pp + 0x70) = (uint16_t)(wstrlen16(p->wcmdline) * 2);
+  *(uint16_t*)(pp + 0x72) = (uint16_t)(wstrlen16(p->wcmdline) * 2 + 2);
+  *(uint64_t*)(pp + 0x78) = (uint64_t)(uintptr_t)p->wcmdline;
+  *(uint64_t*)(p->peb + PEB_PARAMS) = (uint64_t)(uintptr_t)pp;
+  /* OSMajorVersion 0x118, Minor 0x11C, Build 0x120 (Windows 10 22H2) */
+  *(uint32_t*)(p->peb + 0x118) = 10;
+  *(uint32_t*)(p->peb + 0x11C) = 0;
+  *(uint16_t*)(p->peb + 0x120) = 19045;
+  *(uint32_t*)(p->peb + 0x124) = 2; /* VER_PLATFORM_WIN32_NT */
+  *(uint32_t*)(p->peb + 0xB8) = 1;  /* NumberOfProcessors */
+}
+
+/* Thread principal do Windows: callbacks de TLS do EXE e o ponto de entrada. */
+static WINAPI DWORD main_thread(void* arg) {
+  struct wproc* p = wp();
+  typedef int (WINAPI * entry_fn)(void*);
+  (void)arg;
+  wexit(((entry_fn)(uintptr_t)p->exe->entry)(p->peb));
+}
+
 static int start(int argc, char** argv) {
   struct wproc* p;
   uint8_t* teb;
   void** tlsarr;
-  uint64_t rsp;
+  char dbg[8];
   int i;
-  typedef int (WINAPI * entry_fn)(void*);
   struct wmod* exe;
 
   if (argc < 1 || !argv || !argv[0]) return 1;
   p = (struct wproc*)wzalloc(sizeof(*p));
-  teb = (uint8_t*)k_malloc_aligned(TEB_SIZE, 16);
+  teb = (uint8_t*)k_malloc_aligned(TEB_SIZE, 64);
   tlsarr = (void**)wzalloc(sizeof(void*) * TLS_SLOTS);
   if (!p || !teb || !tlsarr) {
     k_puts("wine: sem memoria\n");
     return 1;
   }
+  /* TEB de carga: desta tarefa (loader), nao da thread principal do EXE. */
   memset(teb, 0, TEB_SIZE);
-  __asm__ volatile("mov %%rsp, %0" : "=r"(rsp));
-  *(uint64_t*)(teb + TEB_STACKBASE) = (rsp + 0xFFF) & ~0xFFFull;
-  *(uint64_t*)(teb + TEB_STACKLIMIT) = (rsp & ~0xFFFull) - (WINE_STACK - 0x20000u);
   *(uint64_t*)(teb + TEB_SELF) = (uint64_t)(uintptr_t)teb;
   *(uint64_t*)(teb + TEB_PID) = 0x100;
   *(uint64_t*)(teb + TEB_TID) = 0x104;
@@ -74,7 +113,9 @@ static int start(int argc, char** argv) {
   *(uint64_t*)(teb + TEB_PEB) = (uint64_t)(uintptr_t)p;
   *(uint64_t*)(p->peb + PEB_HEAP) = 1;   /* GetProcessHeap() */
   p->teb = teb;
-  k_win_teb(teb);   /* daqui em diante gs:0x30/0x58/0x60 sao deste processo */
+  p->next_tid = 0x108;
+  k_win_teb(teb);   /* daqui em diante gs:0x30/0x60 sao deste processo */
+  wine_debug = k_getenv("WINEDEBUG", dbg, (int)sizeof(dbg)) > 0 && dbg[0] != '0';
 
   p->argc = argc;
   p->argv = (char**)wzalloc(sizeof(char*) * ((size_t)argc + 1));
@@ -91,6 +132,10 @@ static int start(int argc, char** argv) {
   }
   p->cmdline = build_cmdline(argc, argv);
   p->wcmdline = wdup8to16(p->cmdline ? p->cmdline : "");
+  k_pwd(p->cwd, (int)sizeof(p->cwd));
+  build_params(p);
+  crt_set_process(p);
+  wexplorer_stub();
   wlog("start ", p->cmdline);
 
   exe = pe_load(argv[0], 1);
@@ -99,25 +144,40 @@ static int start(int argc, char** argv) {
     wsay(exe->name, ": sem ponto de entrada");
     return 1;
   }
-  {
-    struct wmod* m;
-    for (m = p->mods; m; m = m->next)
-      if (m == exe) pe_call_tls_callbacks(m, 1);
+  exc_arm();
+  if (!wthread_create_main((void*)main_thread, 0, exe->stack_reserve)) {
+    k_puts("wine: nao consegui criar a thread principal\n");
+    return 1;
   }
-  k_win_teb(teb);
-  /* O EXE do Windows recebe o PEB em rcx e quase sempre termina por
-   * ExitProcess (wexit -> k_exit), sem voltar aqui. */
-  wexit(((entry_fn)(uintptr_t)exe->entry)(p->peb));
+  /* Espera o ExitProcess. O futex cede a CPU ao resto do SODOS. */
+  while (!p->exit_req) {
+    wgui_world_service();   /* abrir/fechar a janela so esta tarefa pode */
+    wcon_flush();           /* console das threads */
+    wspawn_world_service(); /* processo filho: k_exec so daqui */
+    k_futex_wait(&p->exit_req, 0, 20);
+  }
+  wcon_flush();
+  wlogx("ExitProcess ", (uint32_t)p->exit_code);
+  wfile_proc_exit();
+  return p->exit_code;
 }
 
 __attribute__((noreturn)) void wexit(int code) {
   struct wproc* p = wp();
-  if (p && !p->exiting) {
-    p->exiting = 1;
+  int first = !__sync_lock_test_and_set(&p->exiting, 1);
+  if (first) {
     pe_detach_all();
+    p->exit_code = code;
+    __sync_lock_test_and_set(&p->exit_req, 1);
+    k_futex_wake(&p->exit_req, -1);
+    wsignal();
   }
-  wlog("ExitProcess", 0);
-  k_exit(code);
+  /* A tarefa do loader devolve o codigo; as threads so param. */
+  if (!wthread()) {
+    wfile_proc_exit();
+    k_exit(code);
+  }
+  k_thread_exit(code);
   for (;;) {
   }
 }

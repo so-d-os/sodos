@@ -1,10 +1,10 @@
 /*
- * wine_int.h - Estruturas internas do WINE.DLL (W0).
+ * wine_int.h - Estruturas internas do WINE.DLL.
  *
  * Todo o estado de um processo Windows fica em struct wproc, que comeca com o
- * PEB: o codigo acha o processo corrente por gs:0x60 (TEB->Peb), e o kernel
- * troca a janela do gs a cada tarefa (kernel/wine.h). Assim dois EXEs do
- * Windows (duas janelas do WIN) nao dividem nada alem do codigo do DLL.
+ * PEB: o codigo acha o processo corrente por gs:0x60 (TEB->Peb). A base do GS
+ * de uma thread Windows e o TEB dela (kernel/kthread.c). Assim dois EXEs do
+ * Windows nao dividem nada alem do codigo do DLL.
  *
  * As funcoes chamadas pelo codigo do Windows usam a ABI da Microsoft
  * (WINAPI = ms_abi): rcx, rdx, r8, r9 + 32 bytes de sombra.
@@ -16,10 +16,13 @@
 #define WINAPI __attribute__((ms_abi))
 
 typedef uint16_t wchar16;
+typedef uint32_t DWORD;
+typedef int BOOL;
+typedef void* HANDLE;
 
 /* ---------- TEB / PEB (layout x64 do Windows, so os campos usados) ---------- */
 #define TEB_SIZE 0x2000u
-#define TEB_STACKBASE 0x08
+#define TEB_STACKBASE 0x08    /* do kernel: struct task (kthread.c) */
 #define TEB_STACKLIMIT 0x10
 #define TEB_SELF 0x30
 #define TEB_PID 0x40
@@ -28,6 +31,8 @@ typedef uint16_t wchar16;
 #define TEB_PEB 0x60
 #define TEB_LASTERR 0x68
 #define TEB_TLSSLOTS 0x1480   /* 64 ponteiros */
+#define TEB_DEALLOC 0x1478    /* DeallocationStack */
+#define TEB_WTHREAD 0x1800    /* nosso: struct wobj da thread */
 #define TLS_SLOTS 64
 
 #define PEB_IMAGEBASE 0x10
@@ -36,8 +41,32 @@ typedef uint16_t wchar16;
 #define PEB_HEAP 0x30
 #define PEB_SIZE 0x800u
 
+/* ---------- erros ---------- */
+#define ERROR_FILE_NOT_FOUND 2
+#define ERROR_PATH_NOT_FOUND 3
+#define ERROR_ACCESS_DENIED 5
+#define ERROR_INVALID_HANDLE 6
+#define ERROR_NOT_ENOUGH_MEMORY 8
+#define ERROR_NO_MORE_FILES 18
+#define ERROR_HANDLE_EOF 38
+#define ERROR_NOT_SUPPORTED 50
+#define ERROR_FILE_EXISTS 80
+#define ERROR_INVALID_PARAMETER 87
+#define ERROR_INSUFFICIENT_BUFFER 122
+#define ERROR_MOD_NOT_FOUND 126
+#define ERROR_PROC_NOT_FOUND 127
+#define ERROR_ALREADY_EXISTS 183
+#define ERROR_ENVVAR_NOT_FOUND 203
+#define ERROR_MORE_DATA 234
+#define WAIT_TIMEOUT 258
+#define ERROR_NO_MORE_ITEMS 259
+#define ERROR_INVALID_ADDRESS 487
+#define ERROR_IO_PENDING 997
+#define WAIT_FAILED 0xFFFFFFFFu
+#define INFINITE 0xFFFFFFFFu
+#define INVALID_HANDLE_VALUE ((HANDLE)(intptr_t)-1)
+
 /* ---------- modulos ---------- */
-#define WMOD_MAGIC 0x444F4D57u  /* "WMOD": HMODULE de DLL embutida */
 #define WMOD_NAME 64
 
 struct wine_sym {
@@ -45,13 +74,7 @@ struct wine_sym {
   void* fn;
 };
 
-struct wine_builtin {
-  const char* name;             /* "kernel32", "ucrtbase", ... */
-  const struct wine_sym* syms;  /* termina com {0, 0} */
-};
-
 struct wmod {
-  uint32_t magic;               /* WMOD_MAGIC (so para embutidas) */
   struct wmod* next;
   char name[WMOD_NAME];         /* minusculas, sem pasta, com .dll/.exe */
   char path[160];
@@ -60,11 +83,85 @@ struct wmod {
   uint64_t entry;
   int is_dll;
   int tls_index;                /* -1 sem TLS */
-  const struct wine_builtin* builtin;
+  int builtin;                  /* DLL do sistema: funcoes do WINE.DLL */
+  uint32_t pdata_rva, pdata_size;
+  uint32_t stack_reserve;
 };
 
+/* ---------- memoria virtual (vm.c) ---------- */
+#define VM_PRIVATE 1
+#define VM_IMAGE 2
+#define VM_STACK 3
+struct vmreg {
+  struct vmreg* next;
+  uint8_t* base;
+  size_t size;
+  void* raw;                    /* bloco do kernel */
+  int high;                     /* 1 = k_hmalloc */
+  int kind;
+  uint8_t* commit;              /* 1 bit por pagina; 0 = tudo commitado */
+};
+
+/* Arquivo temporario grande mantido em RAM (file.c). */
+struct ramfile {
+  struct ramfile* next;
+  char* path;
+  uint8_t* data;
+  uint32_t size, cap;
+  int users;                    /* handles de leitura abertos */
+  int dead;                     /* apagado com handles abertos */
+  struct wproc* owner;          /* processo dono da memoria */
+};
+
+/* ---------- objetos (obj.c) ---------- */
+enum { OBJ_NONE, OBJ_EVENT, OBJ_THREAD, OBJ_MUTEX, OBJ_SEM, OBJ_TIMER, OBJ_IOCP, OBJ_FILE, OBJ_FIND,
+       OBJ_KEY, OBJ_SOCKET, OBJ_MISC, OBJ_PROCESS };
+
+struct iocp_ent {
+  DWORD bytes;
+  uintptr_t key;
+  void* ov;
+};
+
+struct wobj {
+  int type;
+  int refs;
+  /* evento / semaforo / mutex / timer */
+  int manual, signaled;
+  int count, max;
+  uintptr_t owner;
+  uint64_t due;                 /* timer: k_ms de disparo (64 bits) */
+  int armed;
+  int period;
+  /* thread */
+  int ktid;
+  int exited;
+  DWORD exit_code;
+  DWORD tid;
+  uint8_t* teb;
+  struct vmreg* stack;
+  void* start;
+  void* param;
+  volatile int suspend;
+  /* iocp */
+  struct iocp_ent* q;
+  int qhead, qn, qcap;
+  /* arquivo */
+  char* path;
+  uint8_t* data;                /* conteudo em memoria */
+  uint32_t size, cap;
+  uint64_t pos;
+  int writable, dirty, is_dir, append;
+  struct ramfile* ram;          /* leitura de um arquivo em RAM (data nao e do handle) */
+  /* generico */
+  void* p1;
+  void* p2;
+  uint64_t u1, u2;
+};
+
+#define WHANDLE_MAX 1024
 #define WATEXIT_MAX 64
-#define WFILE_MAX 32
+#define WVEH_MAX 16
 
 struct wproc {
   uint8_t peb[PEB_SIZE];        /* TEM de ser o primeiro campo */
@@ -79,11 +176,44 @@ struct wproc {
   char** environ;
   wchar16** wenviron;
   int tls_next;
+  uint8_t tls_used[TLS_SLOTS];  /* TlsAlloc */
   void (WINAPI* atexit_fn[WATEXIT_MAX])(void);
   int natexit;
-  int crt_errno;
   int commode, fmode;
   int exiting;
+  /* saida do processo: a tarefa principal do SODOS espera aqui */
+  volatile int exit_req;
+  int exit_code;
+  /* sincronizacao */
+  volatile int lock;            /* protege objetos, handles e regioes */
+  volatile int gen;             /* muda a cada sinal: futex das esperas */
+  struct wobj* handles[WHANDLE_MAX];
+  DWORD next_tid;
+  struct vmreg* regs;
+  /* um bloco liberado ha pouco: o Go libera e pede de novo alinhado */
+  struct vmreg* spare;
+  void* veh[WVEH_MAX];
+  void* vch[WVEH_MAX];
+  void* unhandled_filter;
+  int fault_armed;
+  struct wobj* main_thread;
+  char cwd[200];
+  void* user;                   /* estado do user32/gdi32 (gui.c) */
+  void* reg;                    /* registro em memoria (reg.c) */
+  void* net;                    /* soquetes (net.c) */
+  /* console: as threads do Windows nao escrevem direto (no WIN a saida de
+   * uma k_thread de outro programa vai para a serial); a tarefa principal
+   * escreve por elas (util.c) */
+  char* cbuf;
+  uint32_t cn, ccap;
+  volatile int clk;
+  volatile int in_req;          /* 1 = linha pedida, 2 = pronta; 3/4 = tecla */
+  int in_len;
+  char in_line[260];
+  /* processo filho pedido a tarefa principal (proc.c) */
+  volatile int spawn_req;
+  char* spawn_cmd;
+  struct wobj* spawn_obj;
 };
 
 /* Processo corrente: PEB = gs:0x60. */
@@ -99,45 +229,84 @@ static inline uint8_t* wteb(void) {
 }
 static inline void wset_lasterr(uint32_t e) { *(uint32_t*)(wteb() + TEB_LASTERR) = e; }
 static inline uint32_t wget_lasterr(void) { return *(uint32_t*)(wteb() + TEB_LASTERR); }
+static inline struct wobj* wthread(void) { return *(struct wobj**)(wteb() + TEB_WTHREAD); }
 
 /* ---------- pe.c ---------- */
-/* Carrega um EXE ou DLL (PE32+) com as dependencias. 0 se falhou (ja disse). */
 struct wmod* pe_load(const char* name, int is_exe);
-/* Endereco exportado (nome ou, se name < 0x10000, ordinal). 0 se nao tem. */
 void* pe_getproc(struct wmod* m, const char* name);
-/* HMODULE (base da imagem ou wmod embutida) -> wmod; 0 se invalido. */
 struct wmod* pe_from_handle(void* h);
 void* pe_handle(struct wmod* m);
-/* Ja carregado (nome sem pasta, com ou sem .dll). */
 struct wmod* pe_find(const char* name);
-/* TLS do modulo para a thread (teb) e callbacks com reason. */
+struct wmod* pe_from_addr(uint64_t addr);
 void pe_tls_attach(struct wmod* m, uint8_t* teb);
+void pe_tls_attach_all(uint8_t* teb);
 void pe_call_tls_callbacks(struct wmod* m, uint32_t reason);
+void pe_thread_notify(uint32_t reason);
 void pe_detach_all(void);
+/* Recurso (.rsrc) por tipo/nome/idioma: ponteiro e tamanho, 0 se nao tem. */
+const uint8_t* pe_find_resource(struct wmod* m, uintptr_t type, uintptr_t name, uint32_t* size);
 
-/* ---------- tabelas embutidas (k32.c, crt.c) ---------- */
-extern const struct wine_builtin wine_kernel32;
-extern const struct wine_builtin wine_ntdll;
-extern const struct wine_builtin wine_ucrt;
-extern const struct wine_builtin wine_user32;
-const struct wine_builtin* builtin_for(const char* lname);
+/* ---------- tabelas embutidas ---------- */
+extern const struct wine_sym k32_syms[], crt_syms[], vm_syms[], obj_syms[], exc_syms[], file_syms[],
+    sys_syms[], gui_syms[], reg_syms[], net_syms[], misc_syms[], crypt_syms[], winrt_syms[], proc_syms[], sig_syms[], compat_syms[], gdi_syms[], dlg_syms[], shell_syms[], uimisc_syms[];
+void* uimisc_ordinal(const char* dll, unsigned ord); /* uimisc.c */
+int builtin_known(const char* lname);              /* nome sem .dll */
+void* builtin_lookup(const char* name);
+void* builtin_ordinal(const char* dll, unsigned ord);   /* compat.c */
+
+/* ---------- vm.c ---------- */
+struct vmreg* vm_reserve(size_t n, int kind, int committed);
+void vm_register_image(uint8_t* base, size_t size);
+struct vmreg* vm_find(const void* addr);
+void* WINAPI wVirtualAlloc(void* addr, size_t n, DWORD type, DWORD prot);
+
+/* ---------- obj.c ---------- */
+void wlock(void);
+void wunlock(void);
+void wsignal(void);                                /* gen++ e acorda as esperas */
+HANDLE wh_new(struct wobj* o);
+struct wobj* wh_get(HANDLE h, int type);           /* type 0 = qualquer */
+struct wobj* wobj_new(int type);
+int wh_close(HANDLE h);
+DWORD wwait(int n, struct wobj** objs, int all, DWORD timeout_ms);
+struct wobj* wthread_create_main(void* entry, void* arg, uint32_t stack_reserve);
+uint64_t wnow_ms(void);                            /* k_ms em 64 bits */
+/* Chama fn(arg) (ms_abi) com a pilha em stack_top. */
+uint64_t wine_call_on_stack(void* fn, void* arg, void* stack_top);
+
+/* ---------- proc.c ---------- */
+void wspawn_world_service(void);
+/* ---------- file.c ---------- */
+void wfile_proc_exit(void);                        /* solta os temporarios em RAM do processo */
+
+/* ---------- exc.c ---------- */
+void exc_arm(void);
+
+/* ---------- file.c ---------- */
+/* Caminho do Windows -> caminho do SODOS (D:\X). Devolve out. */
+char* wpath(const char* in, char* out, int max);
+char* wpath16(const wchar16* in, char* out, int max);
 
 /* ---------- util.c ---------- */
 void wlog(const char* a, const char* b);           /* serial */
+void wlogx(const char* a, uint64_t v);             /* serial, com hexa */
 void wsay(const char* a, const char* b);           /* console + serial */
 void wcon_write(const char* s, size_t n);          /* console (tira o \r de \r\n) */
+void wcon_flush(void);                             /* tarefa principal: escreve o que as threads deixaram */
+int wcon_readline(char* buf, int max);
+int wcon_getc(void);
 void wlower(char* d, const char* s, int max);
 void wbase(char* d, const char* path, int max);    /* sem pasta, minusculas */
 int wstreq(const char* a, const char* b);
 size_t wstrlen16(const wchar16* s);
-/* UTF-16 <-> UTF-8. Devolvem bytes/unidades escritos (sem o 0); n < 0 = ate o 0. */
 int wutf16_to_8(const wchar16* s, int n, char* d, int max);
 int wutf8_to_16(const char* s, int n, wchar16* d, int max);
 char* wdup16to8(const wchar16* s);
 wchar16* wdup8to16(const char* s);
 void* wzalloc(size_t n);
-__attribute__((noreturn)) void wexit(int code);    /* ExitProcess */
+__attribute__((noreturn)) void wexit(int code);    /* ExitProcess, de qualquer thread */
 
-/* Chamado pelo stub de uma funcao que nao existe ("kernel32.dll!Foo"). */
 void WINAPI wine_unimplemented(const char* what);
 void* wine_make_stub(const char* dll, const char* name);
+/* 1 = registra na serial cada GetProcAddress/import que faltou (SET WINEDEBUG=1). */
+extern int wine_debug;

@@ -48,6 +48,7 @@ struct spin { volatile int v; };
 struct task {
   uint64_t rsp;
   uint8_t* xs;              /* area do xsave/fxsave (alinhada a 64); 0 = idle */
+  uint8_t* xs_raw;          /* bloco do kmalloc de xs (so threads de programa) */
   uint64_t fs;
   volatile int state;
   volatile int on_cpu;
@@ -80,16 +81,16 @@ struct task {
 /* self e curr nos offsets 0 e 8: lidos com um mov %gs:N (atomico frente a
  * preempcao, como o "current" do Linux).
  *
- * teb_win cobre os offsets 0x10..0x67: codigo do Windows x64 le o TEB por
- * gs:0x30 (Self), gs:0x58 (TLS) e gs:0x60 (PEB). O kernel nao usa essa faixa;
- * a cada troca para uma thread Windows (task.teb != 0) ela recebe uma copia
- * de TEB+0x10..0x67 (ver teb_load e k_win_teb). */
-#define TEB_WIN_LO 0x10u
-#define TEB_WIN_N 11
+ * Thread do Windows (task.teb != 0, WINE.DLL): o codigo dela le o TEB direto
+ * pelo gs (gs:0x30, gs:0x58, e o Go ate gs:0x1480+n), entao enquanto ela roda
+ * a base do GS e o TEB, tambem dentro do kernel. Para o kernel continuar
+ * achando a CPU e a tarefa, TEB+0 (ExceptionList, sem uso em x64) recebe a
+ * struct cpu e TEB+8 a task a cada troca (gs_load). Sem thread Windows nada
+ * disso roda: o GS fica sempre na struct cpu. */
 struct cpu {
   struct cpu* self;
   struct task* volatile curr;
-  uint64_t teb_win[TEB_WIN_N];
+  uint64_t gs_now;          /* base do GS carregada nesta CPU */
   int index;
   volatile int online;
   struct spin lock;
@@ -163,11 +164,20 @@ static inline struct task* cur(void) {
 /* Excecao fatal em outra CPU: esta para (a que trata a falha continua). */
 static inline int stop_here(void) { return stopping && this_cpu()->index != stop_cpu; }
 
-/* Copia TEB+0x10..0x67 para a janela do gs desta CPU. */
-static inline void teb_load(struct cpu* c, uint64_t teb) {
-  const uint64_t* src = (const uint64_t*)(uintptr_t)(teb + TEB_WIN_LO);
-  int i;
-  for (i = 0; i < TEB_WIN_N; i++) c->teb_win[i] = src[i];
+static void gs_write(uint64_t v);
+/* Base do GS da tarefa t nesta CPU (interrupcoes desligadas). */
+static inline void gs_load(struct cpu* c, struct task* t) {
+  uint64_t v = (uint64_t)(uintptr_t)c;
+  if (t->teb) {
+    uint64_t* tb = (uint64_t*)(uintptr_t)t->teb;
+    tb[0] = (uint64_t)(uintptr_t)c;
+    tb[1] = (uint64_t)(uintptr_t)t;
+    v = t->teb;
+  }
+  if (c->gs_now != v) {
+    c->gs_now = v;
+    gs_write(v);
+  }
 }
 
 static uint64_t fs_read(void) {
@@ -349,10 +359,12 @@ static void kt_schedule(void) {
   ctx_switch(&prev->rsp, next->rsp);
   /* De volta como prev, talvez noutra CPU. */
   c = this_cpu();
+  /* Antes do finish_switch: ele libera a tarefa anterior para outra CPU, e
+   * se ela for thread Windows o TEB (o GS daqui ate agora) muda de dono. */
+  gs_load(c, prev);
   finish_switch(c);
   fpu_restore(prev);
   if (fs_read() != prev->fs) fs_write(prev->fs);
-  if (prev->teb) teb_load(c, prev->teb);
   irq_restore(fl);
 }
 
@@ -811,6 +823,7 @@ static void kt_die(struct task* t) {
 static void kt_entry(void) {
   struct cpu* c = this_cpu();
   struct task* t = c->curr;
+  gs_load(c, t);
   finish_switch(c);
   fpu_restore(t);
   fs_write(t->fs);
@@ -839,7 +852,11 @@ static void kt_idle_loop(void) {
 }
 
 static void kt_idle_entry(void) {
-  finish_switch(this_cpu());
+  {
+    struct cpu* c = this_cpu();
+    gs_load(c, c->idle);   /* a tarefa anterior pode ser thread Windows */
+    finish_switch(c);
+  }
   kt_idle_loop();
 }
 
@@ -918,6 +935,7 @@ int kt_thread_create(int (*fn)(void*), void* arg, uint32_t stack_size, uint32_t 
   if (!t->xs) {
     uint8_t* raw = (uint8_t*)kmalloc(xs_size + 64u);
     if (!raw) return E_NOMEM;
+    t->xs_raw = raw;
     t->xs = (uint8_t*)(((uintptr_t)raw + 63u) & ~(uintptr_t)63u);
   }
   t->pid = mod_current_pid();
@@ -1024,13 +1042,14 @@ int kt_thread_tls(uint64_t fs) {
   return 0;
 }
 
-/* TEB do Windows da tarefa corrente (WINE.DLL). 0 desliga. Chamar de novo
- * depois de mudar os campos 0x10..0x67 do TEB (a janela e uma copia). */
+/* TEB do Windows da tarefa corrente (WINE.DLL): vira a base do GS dela.
+ * 0 desliga (o GS volta para a struct cpu). */
 void kt_win_teb_set(uint64_t teb) {
   uint64_t fl = irq_save();
+  struct cpu* c = this_cpu();
   struct task* t = cur();
   t->teb = teb;
-  if (teb) teb_load(this_cpu(), teb);
+  gs_load(c, t);
   irq_restore(fl);
 }
 
@@ -1043,6 +1062,20 @@ void kt_thread_fault_exit(void) {
 }
 
 /* Fim do programa: as threads dele morrem antes do heap ser liberado. */
+/* Slots livres nao guardam a area de FPU: um programa que usou threads e
+ * terminou nao deixa nada no heap do kernel. Chamado com o BKL (fim de
+ * programa), como o k_thread_create que aloca. */
+static void xs_sweep(void) {
+  int i;
+  for (i = 0; i < KT_MAX; i++) {
+    struct task* t = &kts[i];
+    if (t->state != T_FREE || !t->xs_raw || t->on_cpu) continue;
+    kfree(t->xs_raw);
+    t->xs_raw = 0;
+    t->xs = 0;
+  }
+}
+
 void kt_release_pid(uint32_t pid) {
   int i, n = 0;
   uint32_t t0;
@@ -1063,7 +1096,10 @@ void kt_release_pid(uint32_t pid) {
     if (t->state == T_RUNNING) resched_cpu(&cpus[t->cpu]);
     irq_restore(fl);
   }
-  if (!n) return;
+  if (!n) {
+    xs_sweep();
+    return;
+  }
   t0 = (uint32_t)irq_ticks();
   for (i = 0; i < KT_MAX; i++) {
     struct task* t = &kts[i];
@@ -1087,6 +1123,7 @@ void kt_release_pid(uint32_t pid) {
   serial_puts(": threads encerradas=");
   put_dec((uint32_t)n);
   serial_puts("\n");
+  xs_sweep();
 }
 
 /* ---------- ticks e IPIs ---------- */
@@ -1186,8 +1223,16 @@ void kt_world_migrate(int cpu) {
 }
 
 /* ---------- inicializacao ---------- */
+static void gs_write(uint64_t v) {
+  if (fsgs) {
+    __asm__ volatile ("wrgsbase %0" :: "r"(v) : "memory");
+    return;
+  }
+  __asm__ volatile ("wrmsr" :: "c"(0xC0000101), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
+}
 static void set_gs(struct cpu* c) {
   uint64_t v = (uint64_t)(uintptr_t)c;
+  c->gs_now = v;
   __asm__ volatile ("wrmsr" :: "c"(0xC0000101), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
 }
 

@@ -1,10 +1,12 @@
 /* dev.c - Dispositivos da VM do WSL: PIC 8259, PIT 8254, UART 16550, CMOS,
- * PCI tipo 1 (ponte + virtio-blk moderno) e o disco copy-on-write. */
+ * PCI tipo 1 (ponte, virtio-blk e virtio-net modernos), o disco
+ * copy-on-write e a placa de rede ligada ao NAT (nat.c). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "vmm.h"
+#include "nat.h"
 #include "../sodos_api.h"
 
 #define PIT_HZ 1193182ull
@@ -35,12 +37,21 @@ struct vq {
   uint16_t last;
 };
 
-struct vblk {
+#define VD_BLK 0
+#define VD_NET 1
+#define NVDEV 2
+
+/* Um dispositivo virtio-pci moderno: config PCI, BAR0 de 16 KB (common em
+ * 0x0000, isr em 0x1000, config do dispositivo em 0x2000, notify em 0x3000) */
+struct vdev {
+  int kind, irq, nq;
+  uint8_t cfg[256];
+  uint32_t feat[2]; /* oferecidas */
   uint32_t dfsel, gfsel;
   uint32_t gfeat[2];
   uint8_t status, isr, gen;
   uint16_t qsel;
-  struct vq q;
+  struct vq q[2];
 };
 
 struct cow {
@@ -60,16 +71,17 @@ struct devs {
   uint8_t cmos[128];
   uint32_t cf8;
   uint8_t cfg_host[256];
-  uint8_t cfg_blk[256];
-  struct vblk blk;
+  struct vdev vd[NVDEV];
   struct cow cow;
-  uint64_t ticks_tsc_num; /* tsc_hz */
+  int net_up;
+  uint64_t net_next; /* TSC da proxima leitura do NAT */
+  uint8_t net_pend[1514];
+  int net_pend_len;
   int warned_ports;
 };
 
 #define D(vm) ((struct devs*)(vm)->dev)
 #define BAR_SIZE 0x4000u
-#define BAR_DEFAULT 0xE0000000u
 
 /* ================= PIC ================= */
 
@@ -491,7 +503,7 @@ static int blk_write(struct vm* vm, uint64_t off, const uint8_t* buf, uint32_t l
   return 0;
 }
 
-/* ================= virtio-blk ================= */
+/* ================= virtio ================= */
 
 #define VIRTQ_SIZE 256
 #define VRING_DESC_F_NEXT 1
@@ -503,51 +515,83 @@ struct seg {
   int w;
 };
 
-static void vblk_reset(struct vm* vm) {
-  struct vblk* b = &D(vm)->blk;
-  memset(b, 0, sizeof *b);
-  b->q.size = VIRTQ_SIZE;
-  pic_set_irq(vm, 5, 0);
+static void vdev_reset(struct vm* vm, struct vdev* v) {
+  int i;
+  v->dfsel = v->gfsel = 0;
+  v->gfeat[0] = v->gfeat[1] = 0;
+  v->status = v->isr = 0;
+  v->qsel = 0;
+  memset(v->q, 0, sizeof v->q);
+  for (i = 0; i < v->nq; i++) v->q[i].size = VIRTQ_SIZE;
+  pic_set_irq(vm, v->irq, 0);
 }
 
-static void vblk_process(struct vm* vm) {
-  struct vblk* b = &D(vm)->blk;
-  struct vq* q = &b->q;
+static void vdev_irq(struct vm* vm, struct vdev* v) {
+  v->isr |= 1;
+  pic_set_irq(vm, v->irq, 1);
+}
+
+/* aneis da fila; 0 se a VM ainda nao montou */
+static int vq_rings(struct vm* vm, struct vq* q, uint8_t** desc, uint8_t** avail, uint8_t** used) {
+  if (!q->ready || !q->size) return 0;
+  *desc = gpa_ptr(vm, q->desc, 16ull * q->size);
+  *avail = gpa_ptr(vm, q->avail, 6 + 2ull * q->size);
+  *used = gpa_ptr(vm, q->used, 6 + 8ull * q->size);
+  return *desc && *avail && *used;
+}
+
+/* Cadeia de descritores a partir de head. Quantos; -1 invalida. */
+static int vq_chain(struct vm* vm, struct vq* q, uint8_t* desc, uint16_t head, struct seg* sg) {
+  uint16_t i = head;
+  int n = 0;
+  for (;;) {
+    const uint8_t* e = desc + 16u * (i % q->size);
+    uint64_t a = rd64(e);
+    uint32_t l = rd32(e + 8);
+    uint16_t f = rd16(e + 12);
+    uint8_t* p = gpa_ptr(vm, a, l);
+    if (!p || n >= VIRTQ_SIZE) return -1;
+    sg[n].p = p;
+    sg[n].len = l;
+    sg[n].w = (f & VRING_DESC_F_WRITE) != 0;
+    n++;
+    if (!(f & VRING_DESC_F_NEXT)) return n;
+    i = rd16(e + 14);
+  }
+}
+
+static void vq_used(struct vq* q, uint8_t* used, uint16_t head, uint32_t len) {
+  uint16_t u = *(volatile uint16_t*)(used + 2);
+  uint8_t* ue = used + 4 + 8 * (u % q->size);
+  uint32_t id32 = head;
+  memcpy(ue, &id32, 4);
+  memcpy(ue + 4, &len, 4);
+  __asm__ volatile("" ::: "memory");
+  *(volatile uint16_t*)(used + 2) = (uint16_t)(u + 1);
+}
+
+/* ---- virtio-blk ---- */
+
+static void vblk_process(struct vm* vm, struct vdev* v) {
+  struct vq* q = &v->q[0];
   uint8_t *desc, *avail, *used;
   uint16_t idx;
   int did = 0;
-  if (!q->ready || !q->size) return;
-  desc = gpa_ptr(vm, q->desc, 16ull * q->size);
-  avail = gpa_ptr(vm, q->avail, 6 + 2ull * q->size);
-  used = gpa_ptr(vm, q->used, 6 + 8ull * q->size);
-  if (!desc || !avail || !used) return;
+  if (!vq_rings(vm, q, &desc, &avail, &used)) return;
   idx = *(volatile uint16_t*)(avail + 2);
   while (q->last != idx) {
     static struct seg sg[VIRTQ_SIZE];
-    uint16_t head = rd16(avail + 4 + 2 * (q->last % q->size)), i = head;
-    int n = 0, k, guard = 0;
+    uint16_t head = rd16(avail + 4 + 2 * (q->last % q->size));
+    int n = vq_chain(vm, q, desc, head, sg), k;
     uint8_t hdr[16];
     uint32_t hgot = 0, written = 0;
     uint8_t* status = 0;
     uint8_t st = 0;
     uint32_t type;
-    uint64_t sector, pos;
-    for (;;) {
-      const uint8_t* e = desc + 16u * (i % q->size);
-      uint64_t a = rd64(e);
-      uint32_t l = rd32(e + 8);
-      uint16_t f = rd16(e + 12);
-      uint8_t* p = gpa_ptr(vm, a, l);
-      if (!p || n >= VIRTQ_SIZE || ++guard > VIRTQ_SIZE) {
-        st = 1;
-        break;
-      }
-      sg[n].p = p;
-      sg[n].len = l;
-      sg[n].w = (f & VRING_DESC_F_WRITE) != 0;
-      n++;
-      if (!(f & VRING_DESC_F_NEXT)) break;
-      i = rd16(e + 14);
+    uint64_t pos;
+    if (n < 0) {
+      n = 0;
+      st = 1;
     }
     /* cabecalho: primeiros 16 bytes legiveis */
     for (k = 0; k < n && hgot < 16 && !sg[k].w; k++) {
@@ -564,8 +608,7 @@ static void vblk_process(struct vm* vm) {
     }
     if (hgot < 16 || !status) st = 1;
     type = rd32(hdr);
-    sector = rd64(hdr + 8);
-    pos = sector * 512;
+    pos = rd64(hdr + 8) * 512;
     if (!st) {
       switch (type) {
       case 0: /* IN */
@@ -603,115 +646,197 @@ static void vblk_process(struct vm* vm) {
       *status = st;
       written += 1;
     }
-    {
-      uint16_t u = *(volatile uint16_t*)(used + 2);
-      uint8_t* ue = used + 4 + 8 * (u % q->size);
-      uint32_t id32 = head;
-      memcpy(ue, &id32, 4);
-      memcpy(ue + 4, &written, 4);
-      __asm__ volatile("" ::: "memory");
-      *(volatile uint16_t*)(used + 2) = (uint16_t)(u + 1);
-    }
+    vq_used(q, used, head, written);
     q->last++;
     did = 1;
     idx = *(volatile uint16_t*)(avail + 2);
   }
-  if (did) {
-    b->isr |= 1;
-    pic_set_irq(vm, 5, 1);
+  if (did) vdev_irq(vm, v);
+}
+
+/* ---- virtio-net: fila 0 recebe, fila 1 manda. Cabecalho de 12 bytes
+ * (virtio 1.x), sem offload: a VM calcula os checksums. ---- */
+#define VNET_HDR 12
+
+static void vnet_tx(struct vm* vm, struct vdev* v) {
+  struct vq* q = &v->q[1];
+  uint8_t *desc, *avail, *used;
+  uint16_t idx;
+  int did = 0;
+  if (!vq_rings(vm, q, &desc, &avail, &used)) return;
+  idx = *(volatile uint16_t*)(avail + 2);
+  while (q->last != idx) {
+    static struct seg sg[VIRTQ_SIZE];
+    static uint8_t frame[VNET_HDR + 1514];
+    uint16_t head = rd16(avail + 4 + 2 * (q->last % q->size));
+    int n = vq_chain(vm, q, desc, head, sg), k;
+    uint32_t got = 0;
+    for (k = 0; k < n; k++) {
+      uint32_t t = sg[k].len;
+      if (sg[k].w) continue;
+      if (got + t > sizeof frame) t = (uint32_t)sizeof frame - got;
+      memcpy(frame + got, sg[k].p, t);
+      got += t;
+    }
+    if (got > VNET_HDR && D(vm)->net_up) nat_from_guest(frame + VNET_HDR, (int)(got - VNET_HDR));
+    vq_used(q, used, head, 0);
+    q->last++;
+    did = 1;
+    idx = *(volatile uint16_t*)(avail + 2);
   }
+  if (did) vdev_irq(vm, v);
+}
+
+/* Entrega quadros do NAT nos buffers que a VM deixou na fila 0. */
+static void vnet_rx(struct vm* vm, struct vdev* v) {
+  struct devs* d = D(vm);
+  struct vq* q = &v->q[0];
+  uint8_t *desc, *avail, *used;
+  int did = 0, guard = 0;
+  if (!(v->status & 4) || !vq_rings(vm, q, &desc, &avail, &used)) return;
+  while (guard++ < 64) {
+    static struct seg sg[VIRTQ_SIZE];
+    uint16_t head;
+    int n, k;
+    uint32_t off = 0, total;
+    uint8_t hdr[VNET_HDR];
+    if (!d->net_pend_len) {
+      d->net_pend_len = nat_to_guest(d->net_pend, (int)sizeof d->net_pend);
+      if (!d->net_pend_len) break;
+    }
+    if (q->last == *(volatile uint16_t*)(avail + 2)) break; /* sem buffer: espera */
+    head = rd16(avail + 4 + 2 * (q->last % q->size));
+    n = vq_chain(vm, q, desc, head, sg);
+    memset(hdr, 0, sizeof hdr);
+    hdr[10] = 1; /* num_buffers */
+    total = VNET_HDR + (uint32_t)d->net_pend_len;
+    for (k = 0; k < n && off < total; k++) {
+      uint32_t t, w = 0;
+      if (!sg[k].w) continue;
+      while (w < sg[k].len && off < total) {
+        if (off < VNET_HDR) {
+          t = VNET_HDR - off;
+          if (t > sg[k].len - w) t = sg[k].len - w;
+          memcpy(sg[k].p + w, hdr + off, t);
+        } else {
+          t = total - off;
+          if (t > sg[k].len - w) t = sg[k].len - w;
+          memcpy(sg[k].p + w, d->net_pend + (off - VNET_HDR), t);
+        }
+        w += t;
+        off += t;
+      }
+    }
+    vq_used(q, used, head, off);
+    q->last++;
+    d->net_pend_len = 0;
+    did = 1;
+  }
+  if (did) vdev_irq(vm, v);
 }
 
 /* common cfg do virtio 1.x, montado em 64 bytes */
-static void common_image(struct vm* vm, uint8_t* c) {
-  struct vblk* b = &D(vm)->blk;
-  uint32_t df = 0;
+static void common_image(struct vdev* v, uint8_t* c) {
+  uint32_t df = v->dfsel < 2 ? v->feat[v->dfsel] : 0;
   memset(c, 0, 64);
-  if (b->dfsel == 0) df = 1u << 9;      /* FLUSH */
-  else if (b->dfsel == 1) df = 1u << 0; /* VERSION_1 (bit 32) */
-  memcpy(c + 0x00, &b->dfsel, 4);
+  memcpy(c + 0x00, &v->dfsel, 4);
   memcpy(c + 0x04, &df, 4);
-  memcpy(c + 0x08, &b->gfsel, 4);
-  if (b->gfsel < 2) memcpy(c + 0x0C, &b->gfeat[b->gfsel], 4);
+  memcpy(c + 0x08, &v->gfsel, 4);
+  if (v->gfsel < 2) memcpy(c + 0x0C, &v->gfeat[v->gfsel], 4);
   c[0x10] = 0xFF;
   c[0x11] = 0xFF; /* msix_config = NO_VECTOR */
-  c[0x12] = 1;    /* num_queues */
-  c[0x14] = b->status;
-  c[0x15] = b->gen;
-  memcpy(c + 0x16, &b->qsel, 2);
-  if (b->qsel == 0) {
-    memcpy(c + 0x18, &b->q.size, 2);
+  c[0x12] = (uint8_t)v->nq;
+  c[0x14] = v->status;
+  c[0x15] = v->gen;
+  memcpy(c + 0x16, &v->qsel, 2);
+  if (v->qsel < v->nq) {
+    struct vq* q = &v->q[v->qsel];
+    memcpy(c + 0x18, &q->size, 2);
     c[0x1A] = 0xFF;
     c[0x1B] = 0xFF;
-    memcpy(c + 0x1C, &b->q.ready, 2);
-    memcpy(c + 0x20, &b->q.desc, 8);
-    memcpy(c + 0x28, &b->q.avail, 8);
-    memcpy(c + 0x30, &b->q.used, 8);
+    memcpy(c + 0x1C, &q->ready, 2);
+    memcpy(c + 0x20, &q->desc, 8);
+    memcpy(c + 0x28, &q->avail, 8);
+    memcpy(c + 0x30, &q->used, 8);
   }
 }
 
-static void common_write(struct vm* vm, uint32_t off, int size, uint64_t v) {
-  struct vblk* b = &D(vm)->blk;
+static void common_write(struct vm* vm, struct vdev* v, uint32_t off, int size, uint64_t val) {
   uint8_t c[64];
   if (off + (uint32_t)size > 64) return;
-  common_image(vm, c);
-  memcpy(c + off, &v, (size_t)size);
-  if (off < 4) memcpy(&b->dfsel, c, 4);
-  else if (off >= 8 && off < 12) memcpy(&b->gfsel, c + 8, 4);
+  common_image(v, c);
+  memcpy(c + off, &val, (size_t)size);
+  if (off < 4) memcpy(&v->dfsel, c, 4);
+  else if (off >= 8 && off < 12) memcpy(&v->gfsel, c + 8, 4);
   else if (off >= 0x0C && off < 0x10) {
-    if (b->gfsel < 2) memcpy(&b->gfeat[b->gfsel], c + 0x0C, 4);
+    if (v->gfsel < 2) memcpy(&v->gfeat[v->gfsel], c + 0x0C, 4);
   } else if (off == 0x14) {
-    b->status = c[0x14];
-    if (b->status == 0) vblk_reset(vm);
-  } else if (off >= 0x16 && off < 0x18) memcpy(&b->qsel, c + 0x16, 2);
-  else if (b->qsel == 0) {
+    v->status = c[0x14];
+    if (v->status == 0) vdev_reset(vm, v);
+  } else if (off >= 0x16 && off < 0x18) memcpy(&v->qsel, c + 0x16, 2);
+  else if (v->qsel < v->nq) {
+    struct vq* q = &v->q[v->qsel];
     if (off >= 0x18 && off < 0x1A) {
       uint16_t s;
       memcpy(&s, c + 0x18, 2);
-      if (s && s <= VIRTQ_SIZE && !(s & (s - 1))) b->q.size = s;
+      if (s && s <= VIRTQ_SIZE && !(s & (s - 1))) q->size = s;
     } else if (off >= 0x1C && off < 0x1E) {
-      memcpy(&b->q.ready, c + 0x1C, 2);
-      if (b->q.ready) b->q.last = 0;
-    } else if (off >= 0x20 && off < 0x28) memcpy(&b->q.desc, c + 0x20, 8);
-    else if (off >= 0x28 && off < 0x30) memcpy(&b->q.avail, c + 0x28, 8);
-    else if (off >= 0x30 && off < 0x38) memcpy(&b->q.used, c + 0x30, 8);
+      memcpy(&q->ready, c + 0x1C, 2);
+      if (q->ready) q->last = 0;
+    } else if (off >= 0x20 && off < 0x28) memcpy(&q->desc, c + 0x20, 8);
+    else if (off >= 0x28 && off < 0x30) memcpy(&q->avail, c + 0x28, 8);
+    else if (off >= 0x30 && off < 0x38) memcpy(&q->used, c + 0x30, 8);
   }
 }
 
-static uint32_t bar0(struct vm* vm) { return rd32(D(vm)->cfg_blk + 0x10) & ~0xFu; }
+static void dev_cfg_image(struct vm* vm, struct vdev* v, uint8_t* c) {
+  memset(c, 0, 64);
+  if (v->kind == VD_BLK) {
+    uint64_t cap = vm->disk_bytes / 512;
+    memcpy(c, &cap, 8);
+  } else {
+    memcpy(c, nat_guest_mac, 6);
+    c[6] = 1; /* status: link no ar */
+  }
+}
+
+static uint32_t bar0(struct vdev* v) { return rd32(v->cfg + 0x10) & ~0xFu; }
 
 int dev_mmio(struct vm* vm, uint64_t gpa, int size, int write, uint64_t* val) {
-  struct vblk* b = &D(vm)->blk;
-  uint64_t base = bar0(vm);
-  if (base && gpa >= base && gpa + (uint64_t)size <= base + BAR_SIZE) {
-    uint32_t off = (uint32_t)(gpa - base);
+  int i;
+  for (i = 0; i < NVDEV; i++) {
+    struct vdev* v = &D(vm)->vd[i];
+    uint64_t base = bar0(v);
+    uint32_t off;
+    if (!base || gpa < base || gpa + (uint64_t)size > base + BAR_SIZE) continue;
+    off = (uint32_t)(gpa - base);
     if (off < 0x1000) {
-      if (write) common_write(vm, off, size, *val);
+      if (write) common_write(vm, v, off, size, *val);
       else {
         uint8_t c[64];
         *val = 0;
-        common_image(vm, c);
+        common_image(v, c);
         if (off + (uint32_t)size <= 64) memcpy(val, c + off, (size_t)size);
       }
     } else if (off < 0x2000) {
       if (!write) {
-        *val = b->isr;
-        b->isr = 0;
-        pic_set_irq(vm, 5, 0);
+        *val = v->isr;
+        v->isr = 0;
+        pic_set_irq(vm, v->irq, 0);
       }
     } else if (off < 0x3000) {
       uint8_t c[64];
-      uint64_t cap = vm->disk_bytes / 512;
       uint32_t o = off - 0x2000;
-      memset(c, 0, sizeof c);
-      memcpy(c, &cap, 8);
+      dev_cfg_image(vm, v, c);
       if (!write) {
         *val = 0;
         if (o + (uint32_t)size <= 64) memcpy(val, c + o, (size_t)size);
       }
     } else {
-      if (write) vblk_process(vm);
-      else *val = 0;
+      if (!write) *val = 0;
+      else if (v->kind == VD_BLK) vblk_process(vm, v);
+      else if ((*val & 0xFFFF) == 1) vnet_tx(vm, v);
+      else vnet_rx(vm, v);
     }
     return 1;
   }
@@ -741,31 +866,47 @@ static void vcap(uint8_t* c, int at, int next, int len, int type, uint32_t off, 
   cfg32(c, at + 12, ln);
 }
 
-static void pci_init(struct devs* d) {
-  uint8_t* h = d->cfg_host;
-  uint8_t* c = d->cfg_blk;
-  cfg16(h, 0, 0x8086);
-  cfg16(h, 2, 0x1237);
-  cfg16(h, 4, 0x0006);
-  h[0x0B] = 0x06; /* ponte host */
+static void vdev_pci(struct vdev* v, uint16_t devid, uint8_t cls, uint8_t sub, uint16_t subsys,
+                     uint32_t bar, int irq) {
+  uint8_t* c = v->cfg;
   cfg16(c, 0, 0x1AF4);
-  cfg16(c, 2, 0x1042); /* virtio-blk moderno */
-  cfg16(c, 4, 0x0000);
+  cfg16(c, 2, devid);
   cfg16(c, 6, 0x0010); /* lista de capacidades */
   c[0x08] = 1;         /* revisao */
-  c[0x0A] = 0x80;
-  c[0x0B] = 0x01; /* armazenamento, outro */
-  cfg32(c, 0x10, BAR_DEFAULT);
+  c[0x0A] = sub;
+  c[0x0B] = cls;
+  cfg32(c, 0x10, bar);
   cfg16(c, 0x2C, 0x1AF4);
-  cfg16(c, 0x2E, 0x0002);
+  cfg16(c, 0x2E, subsys);
   c[0x34] = 0x40;
-  c[0x3C] = 5; /* IRQ 5 */
+  c[0x3C] = (uint8_t)irq;
   c[0x3D] = 1; /* INTA */
   vcap(c, 0x40, 0x50, 16, 1, 0x0000, 0x1000); /* common */
   vcap(c, 0x50, 0x64, 20, 2, 0x3000, 0x1000); /* notify */
   cfg32(c, 0x60, 0);                          /* notify_off_multiplier */
   vcap(c, 0x64, 0x74, 16, 3, 0x1000, 0x1000); /* isr */
   vcap(c, 0x74, 0x00, 16, 4, 0x2000, 0x1000); /* device */
+  v->irq = irq;
+}
+
+static void pci_init(struct devs* d) {
+  uint8_t* h = d->cfg_host;
+  struct vdev* b = &d->vd[VD_BLK];
+  struct vdev* n = &d->vd[VD_NET];
+  cfg16(h, 0, 0x8086);
+  cfg16(h, 2, 0x1237);
+  cfg16(h, 4, 0x0006);
+  h[0x0B] = 0x06; /* ponte host */
+  b->kind = VD_BLK;
+  b->nq = 1;
+  b->feat[0] = 1u << 9; /* FLUSH */
+  b->feat[1] = 1u << 0; /* VERSION_1 */
+  vdev_pci(b, 0x1042, 0x01, 0x80, 2, 0xE0000000u, 5);
+  n->kind = VD_NET;
+  n->nq = 2;
+  n->feat[0] = (1u << 5) | (1u << 16); /* MAC, STATUS */
+  n->feat[1] = 1u << 0;
+  vdev_pci(n, 0x1041, 0x02, 0x00, 1, 0xE0004000u, 11);
 }
 
 static uint8_t* pci_dev(struct devs* d) {
@@ -773,7 +914,8 @@ static uint8_t* pci_dev(struct devs* d) {
   if (!(a & 0x80000000u) || ((a >> 16) & 0xFF) != 0 || ((a >> 8) & 7) != 0) return 0;
   switch ((a >> 11) & 31) {
   case 0: return d->cfg_host;
-  case 1: return d->cfg_blk;
+  case 1: return d->vd[VD_BLK].cfg;
+  case 2: return d->vd[VD_NET].cfg;
   }
   return 0;
 }
@@ -909,14 +1051,24 @@ void dev_poll(struct vm* vm, uint64_t now) {
       c->next = 0;
     }
   }
+  /* rede: o NAT passa pelo kernel (BKL), entao no maximo a cada 1 ms */
+  if (d->net_up && now >= d->net_next) {
+    d->net_next = now + vm->tsc_hz / 1000;
+    vnet_rx(vm, &d->vd[VD_NET]);
+  }
   uart_update(vm);
 }
 
 uint64_t dev_next_event(struct vm* vm) {
-  struct pit_ch* c = &D(vm)->pit[0];
+  struct devs* d = D(vm);
+  struct pit_ch* c = &d->pit[0];
+  uint64_t n = c->armed ? c->next : ~0ull;
   if (rx_avail(vm)) return 0;
-  return c->armed ? c->next : ~0ull;
+  if (d->net_up && d->net_next < n) n = d->net_next;
+  return n;
 }
+
+void dev_net_enable(struct vm* vm) { D(vm)->net_up = 1; }
 
 void dev_init(struct vm* vm) {
   struct devs* d = (struct devs*)k_hmalloc(sizeof(struct devs), 4096);
@@ -929,7 +1081,8 @@ void dev_init(struct vm* vm) {
   d->pic[1].base = 0x70;
   d->u.thre = 1;
   pci_init(d);
-  vblk_reset(vm);
+  vdev_reset(vm, &d->vd[VD_BLK]);
+  vdev_reset(vm, &d->vd[VD_NET]);
   while (cap < vm->cow_max_chunks * 2u) cap <<= 1;
   d->cow.cap = cap;
   d->cow.keys = (uint64_t*)k_hmalloc((uint64_t)cap * 8, 4096);

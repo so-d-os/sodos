@@ -10,6 +10,16 @@ void wlog(const char* a, const char* b) {
   k_dbg("\n", 1);
 }
 
+void wlogx(const char* a, uint64_t v) {
+  char h[19];
+  int i;
+  h[0] = '0';
+  h[1] = 'x';
+  for (i = 0; i < 16; i++) h[2 + i] = "0123456789abcdef"[(v >> (60 - 4 * i)) & 15];
+  h[18] = 0;
+  wlog(a, h);
+}
+
 void wsay(const char* a, const char* b) {
   wlog(a, b);
   k_puts("wine: ");
@@ -18,7 +28,7 @@ void wsay(const char* a, const char* b) {
   k_puts("\n");
 }
 
-void wcon_write(const char* s, size_t n) {
+static void con_raw(const char* s, size_t n) {
   size_t i = 0, start = 0;
   /* O console do SODOS quebra linha com \n; o \r de \r\n sairia como lixo. */
   for (i = 0; i < n; i++) {
@@ -28,6 +38,110 @@ void wcon_write(const char* s, size_t n) {
     }
   }
   if (n > start) k_write(s + start, (int)(n - start));
+}
+
+static void clock_(struct wproc* p) {
+  while (__sync_lock_test_and_set(&p->clk, 1)) k_thread_yield();
+}
+static void cunlock(struct wproc* p) { __sync_lock_release(&p->clk); }
+
+/* Da tarefa principal: direto. De uma thread do Windows: fica no buffer e a
+ * tarefa principal escreve (wcon_flush), na mesma ordem. */
+void wcon_write(const char* s, size_t n) {
+  struct wproc* p = wp();
+  if (!wthread()) {
+    wcon_flush();
+    con_raw(s, n);
+    return;
+  }
+  for (;;) {
+    clock_(p);
+    if (p->cn + n <= 65536 || !p->cn) {
+      if (p->cn + n > p->ccap) {
+        uint32_t nc = p->ccap ? p->ccap : 4096;
+        char* nb;
+        while (nc < p->cn + n) nc *= 2;
+        nb = (char*)k_realloc(p->cbuf, nc);
+        if (!nb) {
+          cunlock(p);
+          return;
+        }
+        p->cbuf = nb;
+        p->ccap = nc;
+      }
+      memcpy(p->cbuf + p->cn, s, n);
+      p->cn += (uint32_t)n;
+      cunlock(p);
+      k_futex_wake(&p->exit_req, -1);
+      return;
+    }
+    cunlock(p);
+    k_futex_wake(&p->exit_req, -1);
+    if (p->exit_req) return;
+    k_thread_yield();
+  }
+}
+
+void wcon_flush(void) {
+  struct wproc* p = wp();
+  char* b;
+  uint32_t n;
+  if (!p->cn) goto input;
+  clock_(p);
+  b = p->cbuf;
+  n = p->cn;
+  p->cbuf = 0;
+  p->cn = 0;
+  p->ccap = 0;
+  cunlock(p);
+  con_raw(b, n);
+  k_free(b);
+input:
+  /* leitura do teclado pedida por uma thread */
+  if (p->in_req == 1) {
+    int len = k_readline(p->in_line, (int)sizeof(p->in_line) - 1);
+    p->in_len = len;
+    p->in_req = 2;
+    k_futex_wake(&p->in_req, -1);
+  } else if (p->in_req == 3) {
+    p->in_len = k_getc();
+    p->in_req = 4;
+    k_futex_wake(&p->in_req, -1);
+  }
+}
+
+int wcon_readline(char* buf, int max) {
+  struct wproc* p = wp();
+  int len;
+  if (!wthread()) {
+    wcon_flush();
+    return k_readline(buf, max);
+  }
+  p->in_req = 1;
+  k_futex_wake(&p->exit_req, -1);
+  while (p->in_req != 2 && !p->exit_req) k_futex_wait(&p->in_req, 1, 50);
+  len = p->in_req == 2 ? p->in_len : -1;
+  p->in_req = 0;
+  if (len < 0) return -1;
+  if (len >= max) len = max - 1;
+  memcpy(buf, p->in_line, (size_t)len);
+  buf[len] = 0;
+  return len;
+}
+
+int wcon_getc(void) {
+  struct wproc* p = wp();
+  int c;
+  if (!wthread()) {
+    wcon_flush();
+    return k_getc();
+  }
+  p->in_req = 3;
+  k_futex_wake(&p->exit_req, -1);
+  while (p->in_req != 4 && !p->exit_req) k_futex_wait(&p->in_req, 3, 50);
+  c = p->in_req == 4 ? p->in_len : -1;
+  p->in_req = 0;
+  return c;
 }
 
 static char lc(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
@@ -59,6 +173,7 @@ int wstreq(const char* a, const char* b) {
 
 size_t wstrlen16(const wchar16* s) {
   size_t n = 0;
+  if ((uintptr_t)s < 0x10000 || (intptr_t)s == -1) return 0; /* ATOM, LPSTR_TEXTCALLBACK */
   while (s[n]) n++;
   return n;
 }
