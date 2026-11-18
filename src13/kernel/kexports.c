@@ -42,6 +42,15 @@ static const struct kexp_textscr* tkey_on(void) {
 }
 
 /* ---------- console ---------- */
+/* O con_hook e global: e a tela do programa que o WIN esta rodando no mundo
+ * (console_attach em visual.c). Uma thread de outro programa (k_thread numa
+ * AP, ex.: o console.log do Firefox) escreveria na janela desse programa,
+ * por cima do TOP num Command. A saida dela vai so para a serial (e o
+ * \LOG\SERIAL.LOG). */
+static int con_alheio(void) {
+  return kt_in_thread() && kt_cur_pid() != mod_current_pid();
+}
+
 /* Cada chamada de console e um ponto de Ctrl+C (con_break_poll). */
 static void con_out(int c) {
   if (con_hook) con_hook((char)c);
@@ -49,12 +58,20 @@ static void con_out(int c) {
 }
 
 static void k_putc(int c) {
+  if (con_alheio()) {
+    serial_putc((char)c);
+    return;
+  }
   con_break_poll();
   con_out(c);
 }
 
 static void k_write(const char* s, int n) {
   int i;
+  if (s && con_alheio()) {
+    for (i = 0; i < n; i++) serial_putc(s[i]);
+    return;
+  }
   con_break_poll();
   if (!s) return;
   for (i = 0; i < n; i++) con_out(s[i]);
@@ -69,6 +86,10 @@ static void k_dbg(const char* s, int n) {
 }
 
 static void k_puts(const char* s) {
+  if (s && con_alheio()) {
+    while (*s) serial_putc(*s++);
+    return;
+  }
   con_break_poll();
   if (!s) return;
   while (*s) con_out(*s++);
@@ -657,21 +678,70 @@ void kexp_release_pid(uint32_t pid) {
 }
 
 /* ---------- janela canvas do WIN (visual.c) ---------- */
+/* gui_thread_enter/leave: chamado por uma thread do programa (o compositor
+ * do Firefox pinta de outra CPU), o desenho vai para a janela do programa
+ * dela, e nao para a do programa que o mundo esta rodando. */
 static int k_gui_open(const char* title) { return gui_open(title); }
 static void k_gui_close(void) { gui_close(); }
-static void k_gui_title(const char* title) { gui_title(title); }
-static void k_gui_size(int* w, int* h) { gui_size(w, h); }
-static void k_gui_font(int* cw, int* ch) { gui_font(cw, ch); }
-static void k_gui_fill(int x, int y, int w, int h, uint32_t rgb) { gui_fill(x, y, w, h, rgb); }
-static void k_gui_text(int x, int y, const char* s, int n, uint32_t fg, uint32_t bg, int flags) {
-  gui_text(x, y, s, n, fg, bg, flags);
+static void k_gui_title(const char* title) {
+  int g = gui_thread_enter();
+  gui_title(title);
+  gui_thread_leave(g);
 }
-static void k_gui_present(void) { gui_present(); }
-static int k_gui_event(int* ev, int timeout_ms) { return gui_event(ev, timeout_ms); }
-static int k_gui_raw(int on) { return gui_raw_set(on); }
-static int k_gui_clip(int on) { return gui_clip_set(on); }
+static void k_gui_size(int* w, int* h) {
+  int g = gui_thread_enter();
+  gui_size(w, h);
+  gui_thread_leave(g);
+}
+static void k_gui_font(int* cw, int* ch) { gui_font(cw, ch); }
+static void k_gui_fill(int x, int y, int w, int h, uint32_t rgb) {
+  int g = gui_thread_enter();
+  gui_fill(x, y, w, h, rgb);
+  gui_thread_leave(g);
+}
+static void k_gui_text(int x, int y, const char* s, int n, uint32_t fg, uint32_t bg, int flags) {
+  int g = gui_thread_enter();
+  gui_text(x, y, s, n, fg, bg, flags);
+  gui_thread_leave(g);
+}
+static void k_gui_present(void) {
+  int g = gui_thread_enter();
+  gui_present();
+  gui_thread_leave(g);
+}
+/* Numa thread a espera fica aqui, cedendo a CPU dela entre uma olhada e
+ * outra: o gui_event so tira da fila, e a janela trocada pelo
+ * gui_thread_enter nao pode ficar assim enquanto a thread solta o BKL. */
+static int k_gui_event(int* ev, int timeout_ms) {
+  uint32_t t0;
+  if (!kt_in_thread()) return gui_event(ev, timeout_ms);
+  if (!ev) return -1;
+  t0 = net_ms_fast();
+  for (;;) {
+    int g = gui_thread_enter();
+    int r = gui_event(ev, 0);
+    gui_thread_leave(g);
+    if (r != 0 || timeout_ms == 0) return r;
+    if (timeout_ms > 0 && (int)(net_ms_fast() - t0) >= timeout_ms) return 0;
+    kt_yield_in_thread();
+  }
+}
+static int k_gui_raw(int on) {
+  int g = gui_thread_enter();
+  int r = gui_raw_set(on);
+  gui_thread_leave(g);
+  return r;
+}
+static int k_gui_clip(int on) {
+  int g = gui_thread_enter();
+  int r = gui_clip_set(on);
+  gui_thread_leave(g);
+  return r;
+}
 static void k_gui_pixels(int x, int y, int w, int h, const void* rgba, int stride) {
+  int g = gui_thread_enter();
   gui_pixels(x, y, w, h, rgba, stride);
+  gui_thread_leave(g);
 }
 
 /* 0 = retro, 1 = avancado; devolve o modo anterior (mode < 0 so consulta). */

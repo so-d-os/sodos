@@ -62,6 +62,11 @@ int gui_raw_set(int on);
 /* 1: o programa trata Ctrl+V (recebe 22) em vez de o WIN digitar o texto. */
 int gui_clip_set(int on);
 void gui_pixels(int x, int y, int w, int h, const void* rgba, int stride);
+/* Thread de programa (outra CPU) em volta de um gui_*: a janela corrente
+ * passa a ser a do programa dela. enter devolve o que leave repoe (-1: nada
+ * a repor). Fora de uma thread os dois nao fazem nada. */
+int gui_thread_enter(void);
+void gui_thread_leave(int save);
 /* chamado pelo WIN em volta de mod_exec: so ai a janela pode abrir */
 void gui_session(int allowed);
 /* API HTTP: move o cursor. click 1 gera o aperto e o soltar do botao esquerdo. */

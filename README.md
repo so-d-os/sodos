@@ -540,7 +540,7 @@ With `SET LINKEXT=1` the kernel loads `LINKEXT.DLL` (from `PATHSODOS\DRV`, `D:\S
 | `WGET.EXE` | Downloads a file over HTTP or HTTPS (`WGET http://example.com/a.txt`) |
 | `BAT.EXE` | Batch file (`BAT DEMO.BAT` or just `DEMO.BAT`) |
 | `MC.EXE` | Two-panel file manager in the style of Linux mc (sources in `src13/mc`). Arrows/Tab move, Enter enters a directory or runs `.EXE`/`.BAT`, Insert marks; F2 drive, F3 view (UTF-8 and hex), F4 edit, F5 copy, F6 move/rename, F7 make directory, F8 delete (directories with everything inside), F9 menu, F10 quit. Text mode only (outside `win`) |
-| `GIT.EXE` | Minimal git (sources in `src13/git`): `git clone https://github.com/owner/project [dir]` fetches only the latest commit over HTTPS; `git pull`, `git status` (changed/deleted) and `git log`. Long names become 8.3 (`README~1.MD`); the list is in `_GIT\NAMES.TXT`. Read-only: no commit or push yet |
+| `GIT.EXE` | Minimal git (sources in `src13/git`): `git clone https://github.com/owner/project [dir]` fetches only the latest commit over HTTPS; `git pull`, `git status`, `git log`, `git add -u` / `-A` / file, `git diff [--cached]`, `git commit [-a] -m msg` and `git push` (needs `git config --global user.name/user.email` and a token: `git config --global token ...` or `SET GIT_TOKEN=...`). Long names become 8.3 (`README~1.MD`); the list is in `_GIT\NAMES.TXT`. No merge: `pull` refuses when there are unpushed commits and the server moved on |
 | `HELLO.EXE`, `HELLO2.EXE` | `argc`/`argv` examples |
 | `CRT0.OBJ`, `KERNEL.IMP` | Entry point and kernel export list |
 | `*.H`, `*.C`, `*.CPP`, `*.BAT` | Headers, libc, examples, the `cc`/`link` sources and `DEMO.BAT` |

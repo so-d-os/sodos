@@ -1,0 +1,6 @@
+#!/bin/sh
+# Wrapper para o GN do Dart (x64_toolchain_prefix): gcc -> x86_64-sodos-gcc64 (SOX2/LP64).
+# Acrescenta os headers do port do Dart (dart/port/include) e o sodos_dart_compat.h.
+D=$(cd "$(dirname "$0")" && pwd)
+P=$D/../../port/include
+exec "$D/../../../firefox/toolchain/bin/x86_64-sodos-gcc64" -I "$P" -include "$P/sodos_dart_compat.h" "$@" -Wno-error

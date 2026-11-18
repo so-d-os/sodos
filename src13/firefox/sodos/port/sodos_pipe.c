@@ -75,7 +75,15 @@ static void put_ring(struct ring* r) {
 /* sodos_shm.c: a posix-lite manda para ca tudo o que e >= 2000. */
 #define SHM_FD(fd) ((fd) >= 3000 && (fd) < 4000)
 /* sodos_sock.c: soquetes TCP em 4000.. */
-#define SOCK_FD(fd) ((fd) >= 4000)
+#define SOCK_FD(fd) ((fd) >= 4000 && (fd) < 5000)
+/* 5000..: epoll/timerfd/eventfd do port do Dart (dart/port/sodos_epoll.c).
+ * Fracos: sem aquele objeto (Firefox), a faixa nao existe e da EBADF. */
+#define EVT_FD(fd) ((fd) >= 5000 && (fd) < 6000)
+extern int sodos_evt_close(int fd) __attribute__((weak));
+extern ssize_t sodos_evt_read(int fd, void* buf, size_t n) __attribute__((weak));
+extern ssize_t sodos_evt_write(int fd, const void* buf, size_t n) __attribute__((weak));
+extern int sodos_evt_fcntl(int fd, int cmd, long arg) __attribute__((weak));
+#define EVT_CALL(f, ...) ((f) ? f(__VA_ARGS__) : (errno = EBADF, -1))
 int sodos_sock_close(int fd);
 ssize_t sodos_sock_read(int fd, void* buf, size_t n);
 ssize_t sodos_sock_write(int fd, const void* buf, size_t n);
@@ -94,6 +102,7 @@ int sodos_pipe_close(int fd) {
   struct ring* tx;
   if (SOCK_FD(fd)) return sodos_sock_close(fd);
   if (SHM_FD(fd)) return sodos_shm_close(fd);
+  if (EVT_FD(fd)) return EVT_CALL(sodos_evt_close, fd);
   if (!e) {
     errno = EBADF;
     return -1;
@@ -115,6 +124,7 @@ ssize_t sodos_pipe_read(int fd, void* buf, size_t n) {
   size_t i;
   if (SOCK_FD(fd)) return sodos_sock_read(fd, buf, n);
   if (SHM_FD(fd)) return sodos_shm_read(fd, buf, n);
+  if (EVT_FD(fd)) return EVT_CALL(sodos_evt_read, fd, buf, n);
   if (!e || !e->rx) {
     errno = EBADF;
     return -1;
@@ -148,6 +158,7 @@ ssize_t sodos_pipe_write(int fd, const void* buf, size_t n) {
   size_t done = 0;
   if (SOCK_FD(fd)) return sodos_sock_write(fd, buf, n);
   if (SHM_FD(fd)) return sodos_shm_write(fd, buf, n);
+  if (EVT_FD(fd)) return EVT_CALL(sodos_evt_write, fd, buf, n);
   if (!e || !e->tx) {
     errno = EBADF;
     return -1;
@@ -264,6 +275,7 @@ int fcntl(int fd, int cmd, ...) {
   arg = va_arg(ap, long);
   va_end(ap);
   if (SOCK_FD(fd)) return sodos_sock_fcntl(fd, cmd, arg);
+  if (EVT_FD(fd)) return EVT_CALL(sodos_evt_fcntl, fd, cmd, arg);
   switch (cmd) {
     case F_GETFD:
     case F_SETFD:

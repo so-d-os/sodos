@@ -815,10 +815,14 @@ void* getgrgid(unsigned a) {
 }
 
 ENOSYS_STUB(accept, int a, void* b, unsigned* c)
-ENOSYS_STUB(epoll_create1, int a)
-ENOSYS_STUB(epoll_ctl, int a, int b, int c, void* d)
-ENOSYS_STUB(epoll_wait, int a, void* b, int c, int d)
-ENOSYS_STUB(eventfd, unsigned a, int b)
+/* Fracos: o port do Dart (dart/port/sodos_epoll.c) liga a emulacao de
+ * epoll/timerfd/eventfd; no Firefox continuam ENOSYS. */
+#define WEAK_ENOSYS_STUB(name, ...) \
+  __attribute__((weak)) ENOSYS_STUB(name, __VA_ARGS__)
+WEAK_ENOSYS_STUB(epoll_create1, int a)
+WEAK_ENOSYS_STUB(epoll_ctl, int a, int b, int c, void* d)
+WEAK_ENOSYS_STUB(epoll_wait, int a, void* b, int c, int d)
+WEAK_ENOSYS_STUB(eventfd, unsigned a, int b)
 ENOSYS_STUB(fallocate, int a, int b, long c, long d)
 ENOSYS_STUB(recvmmsg, int a, void* b, unsigned c, int d, void* e)
 ENOSYS_STUB(semget, int a, int b, int c)

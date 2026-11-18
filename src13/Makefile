@@ -429,6 +429,12 @@ run: os.img disk.img disk2.img
 	  -drive format=raw,file=disk.img,if=ide,index=1 \
 	  -drive format=raw,file=disk2.img,if=ide,index=2
 
+# Etapa C2 da RX 570 (docs/GPU.md) sem a placa: o amdgop.c com AMD_SMC contra
+# um SMC simulado no host (drivers/amdgop/smcsim.c). 0 falhas = ok.
+test-amdsmc:
+	gcc -O2 -Wall -Wextra -Wno-unused-function -Ivideo drivers/amdgop/smcsim.c -o /tmp/sodos-smcsim
+	/tmp/sodos-smcsim firmware/amdgpu/polaris10_k_smc.bin
+
 # Placa virtio-gpu (docs/GPU.md): o WIN usa D:\SODOS\DRV\VIRTGPU.DLL.
 # Sem o DLL, a mesma placa responde como Bochs VBE e tudo segue pela CPU.
 run-virtio: os.img disk.img disk2.img
@@ -528,11 +534,17 @@ grow-disk:
 # Nomes em maiusculo 8.3 para o mtools nao criar entradas de nome longo.
 # Tudo vai para a raiz do D: em maiusculas: binarios, headers, fontes da libc,
 # exemplos e os fontes do proprio cc/link (para recompilar dentro do SO).
-# Fontes do MC em D:\SRC\MC, do TOP em D:\SRC\TOP e do git em D:\SRC\GIT, compilados no proprio SODOS por BUILD.BAT.
-MC_SRC = mc/mc.h mc/mc.c mc/scr.c mc/panel.c mc/ops.c mc/view.c mc/BUILD.BAT
-TOP_SRC = top/top.h top/top.c top/tela.c top/dados.c top/procs.c top/mapa.c top/video.c top/cpu.c top/BUILD.BAT
-GIT_SRC = git/git.h git/git.c git/http.c git/pack.c git/sha1.c git/zinf.c git/BUILD.BAT git/GETSODOS.BAT
+# Fontes do MC em D:\SRC\MC, do TOP em D:\SRC\TOP e do git em D:\SRC\GIT, compilados no proprio SODOS por BUILD.BAT ou, com o MAKE.EXE, pelo MAKEFILE da pasta.
+MC_SRC = mc/mc.h mc/mc.c mc/scr.c mc/panel.c mc/ops.c mc/view.c mc/BUILD.BAT mc/MAKEFILE
+TOP_SRC = top/top.h top/top.c top/tela.c top/dados.c top/procs.c top/mapa.c top/video.c top/cpu.c top/BUILD.BAT top/MAKEFILE
+GIT_SRC = git/git.h git/git.c git/http.c git/pack.c git/sha1.c git/zinf.c git/BUILD.BAT git/GETSODOS.BAT git/MAKEFILE
 WIFI_SRC = wifi/wifi.cpp wifi/BUILD.BAT wifi/WIFI.SIM
+# Comandos externos (.EXE) com fonte em cmd/<nome>: fontes em D:\SRC\CMD\<NOME>.
+XCOPY_SRC = cmd/xcopy/xcopy.cpp cmd/xcopy/BUILD.BAT cmd/xcopy/MAKEFILE
+# Ferramentas de desenvolvimento: fontes em D:\DEVELOP\<ferramenta>.
+# O MAKE.EXE (port do pdpmake) vai para a raiz do D: com os outros .EXE.
+MAKE_SRC = develop/make/*.c develop/make/*.h develop/make/BUILD.BAT develop/make/MAKEFILE \
+	develop/make/LEIA.TXT develop/make/LICENSE
 
 DISK_FILES = c_compiler/out/*.EXE c_compiler/out/*.DLL c_compiler/out/*.OBJ \
 	c_compiler/out/*.IMP c_compiler/include/*.h c_compiler/include/sys/*.h \
@@ -604,6 +616,10 @@ disk-files: $(DISK)
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/IMGBIG.DLL ::/SODOS/IMGBIG.DLL
 	@if ! mdir -i $(DISK)@@512 ::/SODOS/DRV >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS/DRV; fi
 	@for f in c_compiler/out/DRV/*.DLL; do [ -f "$$f" ] && mcopy -o -i $(DISK)@@512 "$$f" ::/SODOS/DRV/ || true; done
+	@# Firmware das placas (firmware/README.txt): o AMDSMC.DLL le \SODOS\FW\P10KSMC.BIN.
+	@if ! mdir -i $(DISK)@@512 ::/SODOS/FW >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS/FW; fi
+	@mcopy -o -i $(DISK)@@512 firmware/amdgpu/polaris10_k_smc.bin ::/SODOS/FW/P10KSMC.BIN
+	@mcopy -o -i $(DISK)@@512 firmware/amdgpu/LICENSE.amdgpu ::/SODOS/FW/LICAMDGP.TXT
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/AIPANEL.EXE ::/SODOS/AIPANEL.EXE
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/MENUCFG.EXE ::/SODOS/MENUCFG.EXE
 	@# Temas (Configuracoes > Temas): TEMAS.EXE e \SODOS\ICONS\<TEMA> com
@@ -668,6 +684,16 @@ disk-files: $(DISK)
 	@if ! mdir -i $(DISK)@@512 ::/SRC/WIFI >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SRC/WIFI; fi
 	@for f in $(WIFI_SRC); do \
 	  mcopy -o -i $(DISK)@@512 "$$f" "::/SRC/WIFI/$$(basename "$$f" | tr 'a-z' 'A-Z')" || exit 1; \
+	done
+	@if ! mdir -i $(DISK)@@512 ::/SRC/CMD >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SRC/CMD; fi
+	@if ! mdir -i $(DISK)@@512 ::/SRC/CMD/XCOPY >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SRC/CMD/XCOPY; fi
+	@for f in $(XCOPY_SRC); do \
+	  mcopy -o -i $(DISK)@@512 "$$f" "::/SRC/CMD/XCOPY/$$(basename "$$f" | tr 'a-z' 'A-Z')" || exit 1; \
+	done
+	@if ! mdir -i $(DISK)@@512 ::/DEVELOP >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/DEVELOP; fi
+	@if ! mdir -i $(DISK)@@512 ::/DEVELOP/MAKE >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/DEVELOP/MAKE; fi
+	@for f in $(MAKE_SRC); do \
+	  mcopy -o -i $(DISK)@@512 "$$f" "::/DEVELOP/MAKE/$$(basename "$$f" | tr 'a-z' 'A-Z')" || exit 1; \
 	done
 	@# AGENT.CFG tem a chave da API: fica fora do git, vai so para o disco
 	@if [ -f AGENT.CFG ]; then mcopy -o -i $(DISK)@@512 AGENT.CFG ::/AGENT.CFG || exit 1; fi

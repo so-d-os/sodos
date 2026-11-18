@@ -1,0 +1,11 @@
+# Makefile do MC do SODOS, para o MAKE.EXE (so recompila o que mudou).
+#   cd \src\mc   e depois   make
+# Sem o MAKE.EXE, ou se o make falhar: use o BUILD.BAT (compila tudo).
+# CC, CFLAGS, SYSINC e SYSLIB ja vem definidos pelo make.
+
+OBJS = mc.obj scr.obj panel.obj ops.obj view.obj
+
+MC.EXE: $(OBJS)
+	$(CC) $(CFLAGS) -o $@ $(OBJS)
+
+$(OBJS): mc.h

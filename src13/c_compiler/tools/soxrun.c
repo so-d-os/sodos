@@ -819,7 +819,7 @@ static int k_ci_start(const char* s, const char* p) {
 
 static int k_shell(char* line) {
   char buf[512];
-  char* argv[16];
+  char* argv[31]; /* como o exec_line do kernel */
   char* p;
   int argc = 0;
   int rc;
@@ -835,7 +835,7 @@ static int k_shell(char* line) {
     k_putc('\n');
     return 0;
   }
-  while (*p && argc < 16) {
+  while (*p && argc < 31) {
     while (*p == ' ' || *p == '\t') p++;
     if (!*p) break;
     argv[argc++] = p;
@@ -843,7 +843,8 @@ static int k_shell(char* line) {
     if (*p) *p++ = 0;
   }
   if (argc == 0) return 0;
-  rc = k_exec(argv[0], argc, argv);
+  /* argv daqui e do Linux (ponteiros de 8 bytes): wide=1, nao k_exec. */
+  rc = run_exe(argv[0], argc, argv, 1);
   if (rc <= -1000) {
     k_puts("Bad command or file name\n");
     return 1;

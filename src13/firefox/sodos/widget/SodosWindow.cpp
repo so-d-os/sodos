@@ -2,6 +2,7 @@
 #include "SodosWindow.h"
 
 #include "mozilla/MouseEvents.h"
+#include "mozilla/StaticMutex.h"
 #include "mozilla/TextEvents.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/gfx/2D.h"
@@ -9,6 +10,8 @@
 #include "nsIWidgetListener.h"
 #include "nsIRollupListener.h"
 #include "nsCOMPtr.h"
+#include "nsISupportsImpl.h"
+#include "nsTArray.h"
 #include "mozilla/widget/InitData.h"
 #include "nsThreadUtils.h"
 #include "prenv.h"
@@ -47,13 +50,36 @@ namespace mozilla {
 namespace widget {
 namespace sodos {
 
+/* Duas threads entram aqui: a principal (WindowShown, WindowDestroyed,
+ * PumpEvents) e a do compositor (StartDrawing/EndDrawing, chamadas pelo
+ * RenderCompositorSWGL na thread "Renderer"). sLock guarda a tabela de
+ * camadas, a faixa do Compose, sDirty e o tamanho da janela. Com ele na mao
+ * nao se chama nada do Gecko que possa voltar para ca (Resize, Move,
+ * SetFocus, eventos): a trava nao e recursiva. Funcoes que recebem um
+ * "const Lock&" exigem a trava ja presa. */
+static StaticMutex sLock MOZ_UNANNOTATED;
+using Lock = StaticMutexAutoLock;
+
 static bool sOpen;
-static int sWidth, sHeight;
+static int sWidth, sHeight;  // escritos so pela principal, com sLock
 static nsIWidget* sMain;  // a primeira janela de topo; nao segura referencia
-static UniquePtr<uint8_t[]> sRow;  // faixa RGBA mandada ao WIN
+static UniquePtr<uint8_t[]> sRow;  // faixa RGBA mandada ao WIN (sLock)
 static int sRowW;
 static LayoutDeviceIntPoint sMouse;
-static bool sDirty;  // ha pixels novos esperando o k_gui_present
+static bool sDirty;  // ha pixels novos esperando o k_gui_present (sLock)
+
+/* Pixels de uma camada. Contados porque o compositor desenha neles fora da
+ * trava: o DrawTarget do StartDrawing segura uma referencia, e a janela pode
+ * ser destruida (ou mudar de tamanho) com o quadro pela metade. */
+struct Pixels {
+  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(Pixels)
+  explicit Pixels(size_t aBytes) : data(MakeUnique<uint8_t[]>(aBytes)) {}
+  UniquePtr<uint8_t[]> data;
+
+ private:
+  ~Pixels() = default;
+};
+static UserDataKey sPixelsKey;
 
 /* Camadas: o WIN da uma so janela por processo, entao cada widget do Gecko
  * que aparece (janela principal, outra janela de topo, dialogo, menu, lista
@@ -63,7 +89,7 @@ static bool sDirty;  // ha pixels novos esperando o k_gui_present
  * principal fica em 0,0). */
 struct Layer {
   nsIWidget* w;  // sem referencia: WindowDestroyed tira daqui
-  UniquePtr<uint8_t[]> buf;  // BGRA (popups e dialogos) ou BGRX (topo)
+  RefPtr<Pixels> buf;  // BGRA (popups e dialogos) ou BGRX (topo)
   IntSize size;
   bool shown;
   bool painted;
@@ -71,8 +97,8 @@ struct Layer {
   uint32_t seq;  // ordem de empilhamento
 };
 static const int kMaxLayers = 24;
-static Layer sLayers[kMaxLayers];
-static uint32_t sSeq;
+static Layer sLayers[kMaxLayers];  // sLock
+static uint32_t sSeq;  // sLock
 static nsIWidget* sCapture;  // quem recebeu o botao (arrasto e soltura)
 
 // Marcos na serial (COM1): poucos, para acompanhar a partida da janela.
@@ -103,7 +129,7 @@ bool IsOpen() { return sOpen; }
 
 LayoutDeviceIntSize Size() { return LayoutDeviceIntSize(sWidth, sHeight); }
 
-static Layer* Find(nsIWidget* aWidget) {
+static Layer* Find(nsIWidget* aWidget, const Lock&) {
   for (Layer& l : sLayers) {
     if (l.w && l.w == aWidget) {
       return &l;
@@ -112,8 +138,8 @@ static Layer* Find(nsIWidget* aWidget) {
   return nullptr;
 }
 
-static Layer* Add(nsIWidget* aWidget) {
-  if (Layer* l = Find(aWidget)) {
+static Layer* Add(nsIWidget* aWidget, const Lock& aLock) {
+  if (Layer* l = Find(aWidget, aLock)) {
     return l;
   }
   for (Layer& l : sLayers) {
@@ -135,7 +161,7 @@ static bool FullWindow(nsIWidget* aWidget) {
 }
 
 /* Retangulo da camada na tela. */
-static IntRect LayerRect(const Layer& l) {
+static IntRect LayerRect(const Layer& l, const Lock&) {
   if (FullWindow(l.w)) {
     return IntRect(0, 0, sWidth, sHeight);
   }
@@ -144,7 +170,7 @@ static IntRect LayerRect(const Layer& l) {
 }
 
 /* Camadas visiveis de baixo para cima. */
-static int Stack(Layer** aOut) {
+static int Stack(Layer** aOut, const Lock&) {
   int n = 0;
   for (Layer& l : sLayers) {
     if (l.w && l.shown && l.painted && l.buf) {
@@ -166,7 +192,7 @@ static int Stack(Layer** aOut) {
 }
 
 /* Janela de topo (ou dialogo) mais alta: recebe teclado e o fechar do WIN. */
-static nsIWidget* Top() {
+static nsIWidget* Top(const Lock&) {
   Layer* best = nullptr;
   for (Layer& l : sLayers) {
     if (l.w && l.shown && !l.popup && (!best || l.seq > best->seq)) {
@@ -176,14 +202,28 @@ static nsIWidget* Top() {
   return best ? best->w : sMain;
 }
 
-/* Recompoe um retangulo da tela e manda ao WIN. */
-static void Compose(IntRect aRect) {
+static nsIWidget* Top() {
+  Lock lock(sLock);
+  return Top(lock);
+}
+
+/* O widget ainda tem camada (nao foi destruido). */
+static bool Known(nsIWidget* aWidget) {
+  Lock lock(sLock);
+  return !!Find(aWidget, lock);
+}
+
+/* Recompoe um retangulo da tela e manda ao WIN. A trava fica presa ate o
+ * k_gui_pixels: a faixa e uma so e duas composicoes do mesmo lugar tem de
+ * chegar ao WIN na ordem. Uma camada que o compositor esta desenhando pode
+ * sair pela metade; o EndDrawing dela recompoe a regiao que mudou. */
+static void Compose(IntRect aRect, const Lock& aLock) {
   aRect = aRect.Intersect(IntRect(0, 0, sWidth, sHeight));
   if (aRect.IsEmpty()) {
     return;
   }
   Layer* st[kMaxLayers];
-  int n = Stack(st);
+  int n = Stack(st, aLock);
   if (!sRow || sRowW < sWidth) {
     sRow = MakeUnique<uint8_t[]>(size_t(sWidth) * 64 * 4);
     sRowW = sWidth;
@@ -200,7 +240,7 @@ static void Compose(IntRect aRect) {
     }
     for (int k = 0; k < n; k++) {
       Layer* l = st[k];
-      IntRect lr = LayerRect(*l);
+      IntRect lr = LayerRect(*l, aLock);
       IntRect r = band.Intersect(lr).Intersect(
           IntRect(lr.x, lr.y, l->size.width, l->size.height));
       if (r.IsEmpty()) {
@@ -209,7 +249,7 @@ static void Compose(IntRect aRect) {
       bool blend = l->popup || !FullWindow(l->w);
       for (int j = r.y; j < r.YMost(); j++) {
         const uint8_t* s =
-            l->buf.get() +
+            l->buf->data.get() +
             (size_t(j - lr.y) * l->size.width + (r.x - lr.x)) * 4;
         uint8_t* d =
             sRow.get() + (size_t(j - y) * aRect.width + (r.x - aRect.x)) * 4;
@@ -235,11 +275,20 @@ static void Compose(IntRect aRect) {
 }
 
 static void FitMain() {
-  for (Layer& l : sLayers) {
-    if (l.w && l.shown && FullWindow(l.w) &&
-        !l.w->GetBounds().IsEqualEdges(LayoutDeviceIntRect(0, 0, sWidth, sHeight))) {
-      l.w->Resize(DesktopRect(0, 0, sWidth, sHeight), true);
+  // O Resize avisa o layout: fora da trava.
+  AutoTArray<RefPtr<nsIWidget>, 4> fit;
+  {
+    Lock lock(sLock);
+    for (Layer& l : sLayers) {
+      if (l.w && l.shown && FullWindow(l.w) &&
+          !l.w->GetBounds().IsEqualEdges(
+              LayoutDeviceIntRect(0, 0, sWidth, sHeight))) {
+        fit.AppendElement(l.w);
+      }
     }
+  }
+  for (auto& w : fit) {
+    w->Resize(DesktopRect(0, 0, sWidth, sHeight), true);
   }
 }
 
@@ -259,14 +308,15 @@ void WindowShown(nsIWidget* aWidget, bool aVisible, bool aTopLevel) {
   if (!sOpen || aWidget->GetWindowType() == WindowType::Invisible) {
     return;
   }
-  Layer* l = aVisible ? Add(aWidget) : Find(aWidget);
+  Lock lock(sLock);
+  Layer* l = aVisible ? Add(aWidget, lock) : Find(aWidget, lock);
   if (!l) {
     return;
   }
   if (l->shown == aVisible) {
     return;
   }
-  IntRect before = l->shown && l->painted ? LayerRect(*l) : IntRect();
+  IntRect before = l->shown && l->painted ? LayerRect(*l, lock) : IntRect();
   l->shown = aVisible;
   if (aVisible) {
     l->seq = ++sSeq;  // aparece por cima
@@ -284,34 +334,38 @@ void WindowShown(nsIWidget* aWidget, bool aVisible, bool aTopLevel) {
     } else if (!l->popup) {
       NS_DispatchToMainThread(NS_NewRunnableFunction(
           "sodos::KeepInside", [w = RefPtr<nsIWidget>(aWidget)] {
-            if (Find(w) && w->IsVisible()) {
+            if (Known(w) && w->IsVisible()) {
               KeepInside(w);
             }
           }));
     }
     if (l->painted) {
-      Compose(LayerRect(*l));
+      Compose(LayerRect(*l, lock), lock);
     }
   } else {
     if (sCapture == aWidget) {
       sCapture = nullptr;
     }
     // o que estava embaixo ja esta nos buffers das outras camadas
-    Compose(before);
+    Compose(before, lock);
   }
 }
 
 void WindowDestroyed(nsIWidget* aWidget) {
-  Layer* l = Find(aWidget);
+  Lock lock(sLock);
+  Layer* l = Find(aWidget, lock);
   if (sCapture == aWidget) {
     sCapture = nullptr;
   }
   if (l) {
-    IntRect before = l->shown && l->painted ? LayerRect(*l) : IntRect();
+    IntRect before = l->shown && l->painted ? LayerRect(*l, lock) : IntRect();
     l->w = nullptr;
+    // Se o compositor esta no meio de um quadro desta janela, os pixels
+    // vivem ate o DrawTarget dele ser solto.
     l->buf = nullptr;
     l->shown = false;
-    Compose(before);
+    l->painted = false;
+    Compose(before, lock);
   }
   if (sMain == aWidget) {
     sMain = nullptr;
@@ -329,60 +383,80 @@ already_AddRefed<DrawTarget> StartDrawing(nsIWidget* aWidget) {
   if (!sOpen || aWidget->GetWindowType() == WindowType::Invisible) {
     return nullptr;
   }
-  Layer* l = Add(aWidget);
-  if (!l) {
+  bool full = FullWindow(aWidget);
+  RefPtr<Pixels> px;
+  IntSize size;
+  {
+    Lock lock(sLock);
+    Layer* l = Add(aWidget, lock);
+    if (!l) {
+      return nullptr;
+    }
+    if (full) {
+      size = IntSize(sWidth, sHeight);
+    } else {
+      LayoutDeviceIntSize b = aWidget->GetBounds().Size();
+      size = IntSize(std::max(1, std::min(b.width, sWidth)),
+                     std::max(1, std::min(b.height, sHeight)));
+    }
+    if (!l->buf || l->size != size) {
+      l->buf = new Pixels(size_t(size.width) * size.height * 4);
+      l->size = size;
+      l->painted = false;
+    }
+    px = l->buf;
+  }
+  // O compositor desenha sem a trava; o DrawTarget leva uma referencia aos
+  // pixels, solta quando ele morre (depois do EndDrawing).
+  RefPtr<DrawTarget> dt = Factory::CreateDrawTargetForData(
+      BackendType::SKIA, px->data.get(), size, size.width * 4,
+      full ? SurfaceFormat::B8G8R8X8 : SurfaceFormat::B8G8R8A8);
+  if (!dt) {
     return nullptr;
   }
-  IntSize size;
-  if (FullWindow(aWidget)) {
-    size = IntSize(sWidth, sHeight);
-  } else {
-    LayoutDeviceIntSize b = aWidget->GetBounds().Size();
-    size = IntSize(std::max(1, std::min(b.width, sWidth)),
-                   std::max(1, std::min(b.height, sHeight)));
-  }
-  if (!l->buf || l->size != size) {
-    l->buf = MakeUnique<uint8_t[]>(size_t(size.width) * size.height * 4);
-    l->size = size;
-    l->painted = false;
-  }
-  bool full = FullWindow(aWidget);
-  return Factory::CreateDrawTargetForData(
-      BackendType::SKIA, l->buf.get(), size, size.width * 4,
-      full ? SurfaceFormat::B8G8R8X8 : SurfaceFormat::B8G8R8A8);
+  dt->AddUserData(&sPixelsKey, px.forget().take(),
+                  [](void* aPx) { static_cast<Pixels*>(aPx)->Release(); });
+  return dt.forget();
 }
 
 void EndDrawing(nsIWidget* aWidget, const LayoutDeviceIntRegion& aRegion) {
-  Layer* l = sOpen ? Find(aWidget) : nullptr;
-  if (!l || !l->buf) {
+  if (!sOpen) {
     return;
   }
-  static int sFrames;
+  static int sFrames;  // so a thread do compositor
   if (sFrames++ < 3) {
-    Mark("quadro", aRegion.GetBounds().width, aRegion.GetBounds().height);
+    Mark(NS_IsMainThread() ? "quadro (thread principal)" : "quadro",
+         aRegion.GetBounds().width, aRegion.GetBounds().height);
+  }
+  Lock lock(sLock);
+  // Janela destruida no meio do quadro: nao ha mais camada.
+  Layer* l = Find(aWidget, lock);
+  if (!l || !l->buf) {
+    return;
   }
   bool first = !l->painted;
   l->painted = true;
   if (!l->shown) {
     return;
   }
-  IntRect lr = LayerRect(*l);
+  IntRect lr = LayerRect(*l, lock);
   if (first) {
-    Compose(lr);
+    Compose(lr, lock);
     return;
   }
   for (auto iter = aRegion.RectIter(); !iter.Done(); iter.Next()) {
     IntRect r = iter.Get().ToUnknownRect();
-    Compose(IntRect(r.x + lr.x, r.y + lr.y, r.width, r.height));
+    Compose(IntRect(r.x + lr.x, r.y + lr.y, r.width, r.height), lock);
   }
 }
 
 /* Popup visivel mais alto sob o ponto (coordenadas de tela). */
 static nsIWidget* PopupAt(LayoutDeviceIntPoint aPt) {
+  Lock lock(sLock);
   Layer* st[kMaxLayers];
-  int n = Stack(st);
+  int n = Stack(st, lock);
   for (int k = n - 1; k >= 0; k--) {
-    if (st[k]->popup && LayerRect(*st[k]).Contains(aPt.x, aPt.y)) {
+    if (st[k]->popup && LayerRect(*st[k], lock).Contains(aPt.x, aPt.y)) {
       return st[k]->w;
     }
   }
@@ -391,19 +465,21 @@ static nsIWidget* PopupAt(LayoutDeviceIntPoint aPt) {
 
 /* Janela (de topo ou dialogo) mais alta sob o ponto. */
 static nsIWidget* WindowAt(LayoutDeviceIntPoint aPt) {
+  Lock lock(sLock);
   Layer* st[kMaxLayers];
-  int n = Stack(st);
+  int n = Stack(st, lock);
   for (int k = n - 1; k >= 0; k--) {
-    if (!st[k]->popup && LayerRect(*st[k]).Contains(aPt.x, aPt.y)) {
+    if (!st[k]->popup && LayerRect(*st[k], lock).Contains(aPt.x, aPt.y)) {
       return st[k]->w;
     }
   }
-  return Top();
+  return Top(lock);
 }
 
 static bool InWidget(nsIWidget* aWidget, LayoutDeviceIntPoint aPt) {
-  Layer* l = Find(aWidget);
-  return l && l->shown && LayerRect(*l).Contains(aPt.x, aPt.y);
+  Lock lock(sLock);
+  Layer* l = Find(aWidget, lock);
+  return l && l->shown && LayerRect(*l, lock).Contains(aPt.x, aPt.y);
 }
 
 /* Clique (ou roda) fora do menu aberto fecha o menu, como o GTK faz em
@@ -472,11 +548,14 @@ static void Raise(nsIWidget* aWidget) {
   if (!top) {
     return;
   }
-  if (Layer* l = Find(top)) {
-    if (l->seq != sSeq) {
-      l->seq = ++sSeq;
-      if (l->painted && l->shown) {
-        Compose(LayerRect(*l));
+  {
+    Lock lock(sLock);
+    if (Layer* l = Find(top, lock)) {
+      if (l->seq != sSeq) {
+        l->seq = ++sSeq;
+        if (l->painted && l->shown) {
+          Compose(LayerRect(*l, lock), lock);
+        }
       }
     }
   }
@@ -625,7 +704,7 @@ void PumpEvents() {
           Mouse(target, nsIWidget::NativeMouseMessage::ButtonDown, ev[3]);
         }
         // Botao direito: menu de contexto ao apertar, como no GTK.
-        if (ev[3] == 2 && target && sCapture == target && Find(target)) {
+        if (ev[3] == 2 && target && sCapture == target && Known(target)) {
           WidgetPointerEvent cm(true, eContextMenu, target);
           cm.mRefPoint = sMouse - target->WidgetToScreenOffset();
           cm.AssignEventTime(WidgetEventTime());
@@ -655,7 +734,7 @@ void PumpEvents() {
         }
         nsCOMPtr<nsIWidget> target = MouseTarget(sMouse);
         Mouse(target, nsIWidget::NativeMouseMessage::Move, 0);
-        if (!target || !Find(target)) {
+        if (!target || !Known(target)) {
           break;
         }
         // ev[3] > 0 desce; o HeadlessWidget inverte o sinal do delta
@@ -690,13 +769,19 @@ void PumpEvents() {
   int w = 0, h = 0;
   k_gui_size(&w, &h);
   if (w >= 64 && h >= 64 && (w != sWidth || h != sHeight)) {
+    Lock lock(sLock);
     sWidth = w;
     sHeight = h;
   }
   // O tamanho e o do WIN: o XUL restaura o tamanho que ele mesmo guardou.
   FitMain();
-  if (sDirty) {
+  bool present;
+  {
+    Lock lock(sLock);
+    present = sDirty;
     sDirty = false;
+  }
+  if (present) {
     k_gui_present();
   }
 }

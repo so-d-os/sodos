@@ -400,6 +400,28 @@ struct sodos_thread* sodos__self(void) {
   return cur;
 }
 
+/* Limites da pilha de uma thread criada por pthread_create: [*lo, *lo+*size).
+ * -1 para a thread principal (a pilha do processo: pthread_attr_getstack) ou
+ * uma k_thread que ainda nao entrou no kt_entry. A margem de 4 KB cobre a
+ * distancia entre o quadro do kt_entry e o topo de verdade; os KT_STACK_SLACK
+ * do fundo ficam para IRQs e codigo do kernel. */
+int sodos_thread_stack(pthread_t th, void** lo, size_t* size) {
+  struct sodos_thread* t = th;
+  if (!t || t == &main_thread) return -1;
+  if (sodos__kt) {
+    size_t usable;
+    if (!t->kt_stack_top || t->stack_size <= KT_STACK_SLACK + 8192) return -1;
+    usable = t->stack_size - KT_STACK_SLACK - 4096;
+    *lo = (void*)(t->kt_stack_top - usable);
+    *size = usable;
+    return 0;
+  }
+  if (!t->stack || !t->stack_size) return -1;
+  *lo = (void*)(uintptr_t)t->stack;
+  *size = t->stack_size;
+  return 0;
+}
+
 /* Erro de uso de pthread no modo k_thread: vai para a serial (o log do port
  * so e gravado com sodos_init) com o endereco de quem chamou. */
 void sodos__kt_warn(const char* what, const void* obj) {
@@ -540,6 +562,9 @@ static uint32_t alloc_stack(struct sodos_thread* t, size_t size) {
 
 static int kt_entry(void* p) {
   struct sodos_thread* t = (struct sodos_thread*)p;
+  /* O kernel entra aqui no topo da pilha nova: o quadro deste kt_entry esta
+   * acima de tudo o que a thread vai usar (sodos_thread_stack). */
+  t->kt_stack_top = (uintptr_t)__builtin_frame_address(0) + 16;
   k_thread_tls((unsigned long long)(uintptr_t)t->tls_tp);
   kt_self_set(t);
   sodos_thread_finish(t->fn(t->arg));

@@ -126,12 +126,16 @@ static int fat_breath_n;
 
 static void fat_breathe_run(uint32_t nsec);
 
+/* fat.c tem um estado so (FAT, sub_dir, unidade carregada) e o write_chain
+ * segura um ponteiro para dentro do sub_dir entre os setores. Ceder a CPU
+ * aqui deixa outra chamada entrar no meio: outro programa (gui_coop_pause)
+ * ou outra thread (o yield da thread solta o BKL) carrega outra pasta no
+ * sub_dir ou troca a unidade, e a gravacao volta por cima dela. Foi o que
+ * deixou pastas com nomes e datas de lixo no Z: com o Firefox (threads de
+ * cache/SQLite gravando o perfil) e um COPY/DIR no CMD ao mesmo tempo.
+ * Ramdisk: e so copia de memoria, nao precisa ceder. */
 static void fat_breathe(void) {
-  /* Ramdisk: um setor e so uma copia; pausa so a cada 512, como em blocos. */
-  if (current_drive == DISK_RAM) {
-    fat_breathe_run(1);
-    return;
-  }
+  if (current_drive == DISK_RAM) return;
   if (++fat_breath_n < 4) return;
   fat_breath_n = 0;
   sched_yield();
@@ -140,6 +144,7 @@ static void fat_breathe(void) {
 /* O mesmo, depois de ler nsec setores de uma vez: em blocos o disco rende
  * muito mais, e cada volta ao desktop custa mais que a leitura. */
 static void fat_breathe_run(uint32_t nsec) {
+  if (current_drive == DISK_RAM) return;
   fat_breath_n += (int)nsec;
   if (fat_breath_n < 512) return;
   fat_breath_n = 0;

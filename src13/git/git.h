@@ -35,6 +35,7 @@ int zinflate(const unsigned char* src, int slen, unsigned char* dst, int dlen, i
 /* ---------- http.c ---------- */
 /* GET (body = 0) ou POST para https://... Segue redirecionamentos.
  * *out e malloc. Devolve o status HTTP, ou -1 com err preenchido. */
+extern char http_auth[400];   /* "Authorization: Basic ..." ou vazio */
 int http_req(const char* url, const char* ctype, const char* body, int blen, char** out, int* olen,
              char* err);
 

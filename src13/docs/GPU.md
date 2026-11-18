@@ -332,7 +332,7 @@ virtio). O kernel le o arquivo a cada abertura do WIN; o TOP o le uma vez.
 ## GPU.LOG
 
 O notebook nao tem COM1. Sempre que ha driver para tentar, o kernel grava
-`X:\SODOS\GPU.LOG` (na unidade do `SODOS.CFG`, ou D:) com a placa achada
+`X:\LOG\GPU.LOG` (na unidade do `SODOS.CFG`, ou `D:\LOG`, junto do `SERIAL.LOG` e do `BOOT.LOG`; antes de 2026-11-17 era `X:\SODOS\GPU.LOG`) com a placa achada
 (id, barramento:dispositivo:funcao, nome), o modo e o framebuffer, o caminho
 do DLL, o que o driver escreveu e cada evento (ativo, suspenso, ativo de
 novo, desativado e o motivo). O arquivo e regravado ao ativar, ao suspender
@@ -380,7 +380,7 @@ Para testar no notebook:
 1. `make grub` (kernel novo em `/boot/sodos/kernel.elf`; pede sudo);
 2. no pendrive: `U:\SODOS.CFG`, `U:\SODOS\DRV\AMDGOP.DLL`, `U:\TOP.EXE`;
 3. iniciar o SODOS, `win`, usar um pouco, Ctrl+F1 e `top` (aba Video);
-4. sair do WIN com Esc e trazer o `U:\SODOS\GPU.LOG`.
+4. sair do WIN com Esc e trazer o `U:\LOG\GPU.LOG`.
 
 ### Primeiro boot no notebook (2026-11-08)
 
@@ -471,6 +471,387 @@ o mouse.** O `GPU.LOG`:
 - falta exercitar Ctrl+F1/Ctrl+F7 com o cursor da placa (nao houve nesta
   sessao).
 
+## Radeon RX 570 (desktop, Polaris 10)
+
+A placa do desktop e uma **Radeon RX 570 (Polaris 10, GCN 4 / GFX8),
+PCI 1002:67DF**, no barramento 1 (`01:00.0`). O mesmo PC tem a Radeon
+integrada do Ryzen 7000 (`1002:164E`, RDNA2), sem uso no SODOS. O
+`D:\SODOS.CFG` aponta a RX 570 para o `AMDGOP.DLL`:
+
+```
+[video]
+placa=1002:67DF
+nome=AMD Radeon RX 570 (Polaris)
+driver=AMDGOP.DLL
+ativo=1
+```
+
+### Primeiro boot com o AMDGOP.DLL (2026-11-17)
+
+```
+[gpu] placa 100267DF em 00010000 (AMD Radeon RX 570 (Polaris)), SODOS.CFG em D:
+[gpu] modo 00000780x00000438 fb 00000000 pitch 00001E00
+[amdgop] pci 100267DF classe/rev 030000EF
+[amdgop] BARs 0000000C 000000FB 0000000C 000000FC 0000F001 F6F00000
+[amdgop] copia do quadro inteiro: ciclos 004F6376
+[gpu] ativo: amdgop (Radeon, GOP)
+```
+
+- tela 1920x1080; o `fb 00000000` era o log cortando o endereco em 32 bits:
+  o framebuffer e o **BAR0 de 64 bits em `0xFB_0000_0000`** (acima de 4 GB,
+  BAR grande/Resizable BAR); BAR2 `0xFC_0000_0000` (doorbells), BAR4 portas
+  `0xF000`, **BAR5 `0xF6F00000` (registradores, 32 bits)**;
+- **copia do quadro inteiro: 5.203.830 ciclos** (o caminho por CPU);
+- o log termina em "ativo": a sessao nao saiu do WIN com Esc, entao nao ha
+  a linha `fim` com ciclos por quadro. Falta essa medida.
+
+Desde esta data o `gpu.c` e o `AMDGOP.DLL` escrevem o `fb` com 64 bits
+(`000000FB:00000000`).
+
+### Por que a RX 570 e o melhor alvo de 3D
+
+Comparada a Barcelo (notebook) e a integrada RDNA2 deste PC:
+
+- **firmware sem PSP**: no VI (Polaris) o amdgpu carrega os microcodigos
+  pelo SMU7 (`AMDGPU_FW_LOAD_SMU`), nao pelo PSP fechado das placas novas;
+- **codigo de referencia estavel**: `gmc_v8_0.c`, `gfx_v8_0.c`,
+  `sdma_v3_0.c`, `dce_v11_0.c`, `smu7_*` no Linux; registradores em
+  `asic_reg/{dce/dce_11_2,gmc/gmc_8_1,gca/gfx_8_0,bif/bif_5_0}_d.h`;
+- **Mesa**: radeonsi (GL) e RADV (Vulkan) suportam GFX8.
+
+### Etapa A: diagnostico so leitura (`AMDGOP.DLL`, 2026-11-17)
+
+Com `pci_id == 1002:67DF`, o `a_init` chama `polaris_diag()`, que **so le**
+o BAR5 (registrador `r` em `BAR5 + r * 4`, sem segmentos) e registra:
+
+- `CONFIG_MEMSIZE` (VRAM em MB). Se der 0 ou `FFFFFFFF`, para ai (BAR5
+  errado ou placa desligada) e nao le mais nada;
+- BAR0 de 64 bits e `fb - BAR0` (onde o GOP pos a tela dentro da VRAM);
+- MC: `MC_VM_FB_LOCATION` (base/topo da VRAM vista pela GPU, em 16 MB),
+  `FB_OFFSET`, AGP, abertura de sistema, `L1_TLB`, `VM_CONTEXT0_CNTL`,
+  `MC_ARB_RAMCFG`, `MC_SEQ_MISC0` (bits 31:28 = tipo de memoria, 5 = GDDR5);
+- GFX: `GRBM_STATUS`/`2`, `CP_ME_CNTL` (bits 24/26/28 = CE/PFP/ME parados),
+  `CP_MEC_CNTL`, `CP_RB0_CNTL`, `RLC_CNTL`, `GB_ADDR_CONFIG`; SMC:
+  `SMC_MESSAGE_0`/`SMC_RESP_0`;
+- DCE 11.2, os 6 CRTCs (passo `0, 0x200, 0x400, 0x2600, 0x2800, 0x2A00`):
+  `CRTC_CONTROL`, `GRPH_ENABLE`/`CONTROL`, superficie, pitch, fim X/Y,
+  posicao do feixe, e os `CUR_*` (controle, superficie, tamanho, posicao,
+  hot spot);
+- o **CRTC da tela** (CRTC e GRPH ligados, superficie != 0, pitch = largura)
+  e se a superficie cai dentro da VRAM do MC.
+
+Para testar: iniciar o SODOS, `win`, usar um pouco, **sair com Esc** (para
+a linha `fim`) e trazer o `D:\LOG\GPU.LOG` (no Windows: `E:\LOG\GPU.LOG`).
+
+**Primeiro boot com a etapa A (2026-11-17):**
+
+```
+[amdgop] polaris vram MB 00001000 bar0 000000FB:00000000 fb-bar0 00000000
+[amdgop] mc fb_location F4FFF400 fb_offset 00000000 agp_bot 00000000 agp_top 00000000 agp_base 00000000
+[amdgop] mc sys_low 00000000 sys_high 00000000 l1_tlb 00000503 vm_ctx0 00FFFED8 ramcfg 00006062 seq_misc0 506091F2
+[amdgop] gfx grbm 00003028 grbm2 00000008 cp_me 15000000 cp_mec 50000000 rb0 00418000 rlc 00000000 gb_addr 22011003
+[amdgop] smc msg 00000000 resp 00000001
+[amdgop] crtc 00000000 ctl 80410311 grph_en 00000001 grph_ctl 0A10800A surf 000000F4:00000000 pitch 00000780 fim 00000780x00000438 pos 077B0085
+[amdgop]   cur_ctl 04000010 cur_surf 00000000:00000000 size 00000000 pos 00000000 hot 00000000
+[amdgop] crtc 00000001 ctl 80400310 grph_en 00000001 grph_ctl 0A10800A surf 000000F4:00000000 pitch 00000780 ...
+[amdgop] crtc 00000002..5 ctl 80400310 surf 00000000:00000000 pitch 00000000
+[amdgop] crtc da tela 00000000 surf-mc_base 00000000 (dentro da VRAM do MC)
+[amdgop] copia do quadro inteiro: ciclos 004F81F0
+```
+
+Os offsets conferem: o `GB_ADDR_CONFIG` lido (`22011003`) e o valor
+"golden" da Polaris 10 no `gfx_v8_0.c`, e o CRTC 0 mostra o feixe andando
+(`pos`). O que a placa diz:
+
+- **VRAM: 4096 MB GDDR5** (`seq_misc0` bits 31:28 = 5). A CPU ve a VRAM no
+  BAR0 em `0xFB_0000_0000`, e a tela comeca no inicio dela (`fb-bar0 0`);
+- **a GPU ve a VRAM em `0xF4_0000_0000`..`0xF4_FFFF_FFFF`** (`fb_location`
+  base `F400`, topo `F4FF`), a mesma base da Barcelo. AGP e abertura de
+  sistema zeradas e `VM_CONTEXT0_CNTL` bit 0 = 0: **nao ha GART nem VM**
+  ligados (etapa D comeca do zero);
+- **motores parados**: `GRBM_STATUS` bit 31 (GUI_ACTIVE) = 0; `CP_ME_CNTL`
+  `15000000` = CE, PFP e ME em halt; `CP_MEC_CNTL` `50000000` = MEC1 e MEC2
+  em halt; `RLC_CNTL` 0 = RLC desligado. Nenhum microcodigo de GFX rodando:
+  as etapas E e F carregam tudo;
+- **SMC**: `SMC_RESP_0` = 1 (`PPSMC_Result_OK` da ultima mensagem). Indica
+  um firmware do SMU respondendo, mas so a etapa C confirma;
+- **tela no CRTC 0**: ligado (`CRTC_MASTER_EN`), superficie
+  `0xF4_0000_0000` (inicio da VRAM), pitch 1920, 1920x1080;
+  `GRPH_CONTROL` `0A10800A` = 32 bpp, ARGB8888, `ARRAY_LINEAR_ALIGNED`
+  (linear: por isso a CPU escreve direto). O CRTC 1 tem a mesma superficie,
+  mas esta desligado (sobra do GOP); os CRTCs 2 a 5 estao vazios;
+- **cursor desligado** em todos os CRTCs (`CUR_CONTROL` bit 0 = 0,
+  endereco 0): a etapa B parte de um estado limpo;
+- copia do quadro inteiro: 5.210.608 ciclos (igual ao boot anterior).
+
+Faltou de novo a linha `fim` (ciclos por quadro): o log termina em "ativo
+de novo" (uma ida e volta com Ctrl+F1), entao a sessao nao saiu do WIN com
+Esc.
+
+### Etapa B: cursor pelo DCE 11.2 (`AMDCUR.DLL`, 2026-11-17)
+
+O `AMDCUR.DLL` (o mesmo fonte com `-DAMD_CURSOR`) ganhou um caminho Polaris,
+escolhido por `pci_id == 1002:67DF`. Ele segue `dce_v11_0_lock_cursor`,
+`show_cursor`, `hide_cursor` e `cursor_move_locked` do amdgpu (Linux 6.12),
+sempre no CRTC da tela achado na etapa A:
+
+- toda escrita fica entre `CUR_UPDATE.CURSOR_UPDATE_LOCK` = 1 e 0 (a placa
+  aplica tudo junto no proximo quadro);
+- imagem 64x64 ARGB pre-multiplicado 16 MB adiante do inicio da VRAM, como
+  na Barcelo: CPU `fb + 0x01000000` (`0xFB_0100_0000`), GPU
+  `0xF4_0100_0000`, conferido dentro de `MC_VM_FB_LOCATION`; os 16 KB que
+  estavam la sao guardados e devolvidos no fim;
+- `CUR_SURFACE_ADDRESS(_HIGH)`, `CUR_SIZE` = 63/63 (64x64: a placa le com
+  pitch 64), `CUR_CONTROL`: `CURSOR_EN` 1, `CURSOR_MODE` 2 (24.8
+  pre-multiplicado), sem `2X_MAGNIFY`; os outros campos ficam como o GOP
+  deixou;
+- diferenca do DCN: no DCE o `CUR_POSITION` e o **canto de cima** da imagem
+  (a placa nao subtrai o hot spot). O driver faz `ponta - hot`, e o que passa
+  da borda esquerda/de cima vai para `CUR_HOT_SPOT` (recorte), como o Linux;
+- `cursor_move` so escreve `CUR_POSITION`/`CUR_HOT_SPOT` (com o lock);
+  suspender (Ctrl+F1) e sair desligam `CURSOR_EN`;
+- sem CRTC da tela ou com imagem invalida, recusa e a CPU continua
+  desenhando a seta.
+
+No log, a ativacao escreve `[amdcur] polaris crtc ... cur_ctl ... size ...
+update ...`. Esperado: `cur_ctl` com o bit 0 e `0x200` ligados, `size
+003F003F`, e `update` sem o bit 16 (lock solto).
+
+Instalado em `E:` (2026-11-17): `D:\SODOS\DRV\AMDCUR.DLL` (o anterior em
+`AMDCUR.OLD`) e `D:\SODOS.CFG` com `driver=AMDCUR.DLL` (o anterior em
+`D:\SODOS.BAK`). **Para desfazer**, basta voltar para `driver=AMDGOP.DLL`.
+
+Teste: entrar no `win`, mover o mouse (a seta deve seguir sem rastro e sem
+redesenhar a tela), Ctrl+F1 e Ctrl+F7 (a seta some e volta), sair com Esc e
+trazer o `E:\LOG\GPU.LOG`.
+
+**Primeiro boot com o cursor (2026-11-17): a seta da placa apareceu e segue
+o mouse, mas com metade da altura e um bloco de ruido logo abaixo dela.**
+Causa: o DCE 11 le a imagem do cursor com **pitch fixo de 128 pixels** (o
+tamanho maximo), nao com a largura do `CUR_SIZE`. Com a imagem em 64x64, a
+linha `r` da tela vinha da linha `2r` da imagem (seta achatada) e as linhas
+32..63 liam os 16 KB seguintes da VRAM, fora da imagem (o ruido). O Linux
+nunca ve isso porque sempre usa 128x128 (`max_cursor_width`).
+
+Correcao: no caminho Polaris a imagem passou a 128x128 (64 KB, guardados e
+devolvidos como antes) e `CUR_SIZE` = 127/127, igual ao amdgpu. A Barcelo
+(DCN, com pitch programavel) continua em 64x64. O nome no TOP virou "amdcur
+(Radeon, GOP, cursor da placa)".
+
+O `GPU.LOG` desse boot nao tem a linha `[amdcur] polaris ...`: o log so e
+regravado ao suspender, voltar e sair, e a sessao nao passou por nenhum
+deles depois de o cursor ligar.
+
+**Segundo boot, imagem 128x128 (2026-11-17):**
+
+```
+[gpu] ativo: amdcur (Radeon, GOP, cursor da placa)
+[amdcur] polaris crtc 00000000 imagem gpu 000000F4:01000000 cur_ctl 04000211 size 007F007F update 00000000
+[gpu] cursor pela placa: amdcur (Radeon, GOP, cursor da placa)
+[gpu] desativado: fim do WIN
+[amdgop] fim: quadros 000003B9 ciclos/quadro 00378695 pixels/quadro 0016899E (quadro inteiro: ciclos 004F6A70 pixels 001FA400)
+```
+
+- **na tela: a seta tem o tamanho certo e o ruido sumiu** (conferido pelo
+  usuario); a correcao do pitch 128 esta confirmada;
+- `cur_ctl 04000211`: `CURSOR_EN`, `CURSOR_MODE` 2, o resto como o GOP
+  deixou; `size 007F007F` (128x128); `update 00000000` (lock solto, nada
+  pendente): o cursor foi aceito pelo kernel ("cursor pela placa");
+- saida limpa com Esc ("desativado: fim do WIN"), com a imagem devolvida;
+- 953 quadros, **3.638.933 ciclos por quadro** contra 5.204.592 da copia
+  inteira (1,4 vez menos) e 1.476.766 pixels por quadro (71% da tela). Na
+  Barcelo foram 10,7% da tela: aqui a sessao redesenhou areas grandes (a
+  pagina do C8X no Firefox), entao o ganho das areas e pequeno. Mover o
+  mouse ja nao entra nessa conta: so escreve `CUR_POSITION`;
+- falta exercitar Ctrl+F1/Ctrl+F7 com o cursor da placa (nao houve nesta
+  sessao).
+
+### Etapa C: estado do SMC (`AMDGOP.DLL`, 2026-11-17)
+
+O SMC e o processador do SMU7 (energia, clocks, tensoes). No VI o amdgpu
+carrega os microcodigos de SDMA e GFX **pelo SMU** (`AMDGPU_FW_LOAD_SMU`),
+entao o que fazer nas etapas E e F depende de o firmware do SMU ja estar
+rodando ou nao. O `polaris_smc_diag()` (dentro da etapa A) le pela porta
+indireta, como `vi_smc_rreg`: endereco em `SMC_IND_INDEX_11` (`0x1AC`),
+valor em `SMC_IND_DATA_11` (`0x1AD`), offsets de `smu_7_1_3_d.h`. A unica
+escrita e o indice, devolvido ao valor de antes no fim.
+
+| Endereco SMC | Registrador | O que diz |
+|---|---|---|
+| `0x80000000` | `SMC_SYSCON_RESET_CNTL` | bit 0 `rst_reg`: SMC em reset |
+| `0x80000004` | `SMC_SYSCON_CLOCK_CNTL_0` | bit 0 `ck_disable`: clock do SMC parado |
+| `0x80000370` | `SMC_PC_C` | contador de programa do SMC |
+| `0xE0003088` | `SMU_STATUS` | bit 0 `SMU_DONE` |
+| `0xE00030A4` | `SMU_FIRMWARE` | bit 16 `SMU_MODE` (modo protegido), bit 17 `SMU_SEL` |
+| `0x3F000` | `FIRMWARE_FLAGS` | bit 0 `INTERRUPTS_ENABLED` (o firmware terminou de iniciar) |
+| `0x3F010` | `FEATURE_STATUS` | bit 13 `VOLTAGE_CONTROLLER_ON` (`polaris10_is_dpm_running`) |
+| `0x20000` | `SMU7_Firmware_Header` | versao, tamanho, flags, entrada e tamanho do codigo |
+
+O log termina com o veredito de `smu7_is_smc_ram_running`: **RODANDO** se
+`ck_disable` = 0 e `SMC_PC_C >= 0x20100`, senao **PARADO**, e se o SMU esta
+em modo protegido. Se estiver rodando, o `polaris10_start_smu` do Linux nao
+recarrega o firmware: as etapas seguintes so mandam mensagens ao SMU. Se
+estiver parado, a proxima etapa e carregar o `polaris10_smc.bin` (modo
+protegido ou nao, conforme `SMU_MODE`).
+
+**Primeiro boot com a etapa C (2026-11-17):**
+
+```
+[amdgop] smc msg 00000000 resp 00000001
+[amdgop] smc rst 00000000 ck 01000000 pc 00002B4C smu_status 00000000 smu_fw 00030006
+[amdgop] smc fw_flags 8791F2F6 feature_status 6DFE4798 hdr versao 55B3F277 tam CFDEA551 flags 7FEBFFB5 entrada F118A16C codigo 08483B6E
+[amdgop] smc PARADO (sem firmware rodando), modo protegido
+```
+
+- **O SMC esta ligado, mas so na ROM de boot**: fora de reset (`rst` 0) e
+  com clock (`ck_disable` = 0), mas o contador de programa esta em
+  `0x2B4C`, abaixo de `0x20100` (onde fica o firmware na RAM do SMC). E o
+  estado que o amdgpu chama de "SMC RAM not running": o GOP/VBIOS nao
+  carregou o firmware do SMU;
+- a RAM do SMC so tem lixo: `FIRMWARE_FLAGS`, `FEATURE_STATUS` e o
+  cabecalho em `0x20000` sao valores aleatorios (memoria nunca escrita).
+  Sem firmware, o `SMC_RESP_0` = 1 da etapa A nao quer dizer nada;
+- **`SMU_FIRMWARE` = `00030006`**: `SMU_MODE` (bit 16) = 1, **modo
+  protegido**, e `SMU_SEL` (bit 17) = 1 (chave de producao). O Linux iria
+  por `polaris10_start_smu_in_protection_mode`: o firmware tem de ser a
+  imagem **assinada** da AMD, e o SMC confere a assinatura;
+- qual imagem: a RX 570 e `1002:67DF` revisao `EF`, que o amdgpu marca como
+  "kicker" (`ASICID_IS_P20` em `amdgpu.h`), entao o arquivo e
+  **`amdgpu/polaris10_k_smc.bin`** do linux-firmware (`amdgpu_cgs.c`);
+- consequencia para as etapas seguintes: no VI os microcodigos de SDMA e GFX
+  sao carregados **pelo SMU** (`AMDGPU_FW_LOAD_SMU`), entao antes de ligar
+  qualquer motor o SODOS tem de carregar e iniciar esse firmware. Isso vira
+  a etapa C2 (abaixo).
+
+Nessa sessao tambem: 469 quadros, 2.563.120 ciclos por quadro contra
+5.204.493 da copia inteira (2,0 vezes menos, 50% da tela por quadro), e o
+cursor da placa ligou de novo sem ruido.
+
+### Etapa C2: firmware do SMU (`AMDSMC.DLL`, 2026-11-17)
+
+O `AMDSMC.DLL` e o mesmo `amdgop.c` com `-DAMD_SMC` (que inclui o
+`AMD_CURSOR`): tela, areas, cursor do DCE e, no `init`, a carga do firmware
+do SMU. Segue `polaris10_start_smu_in_protection_mode`,
+`smu7_upload_smu_firmware_image` e `smu7_send_msg_to_smc_offset` (Linux
+6.12, `pm/powerplay/smumgr`):
+
+1. se o SMC ja roda firmware (`ck_disable` 0 e `SMC_PC_C >= 0x20100`, por
+   exemplo numa segunda entrada no WIN), so registra e nao mexe em nada;
+2. exige `SMU_FIRMWARE` com modo protegido (bit 16) e chave de producao
+   (bit 17); outro caso usaria outra imagem e outra sequencia, entao nao
+   carrega;
+3. le `\SODOS\FW\P10KSMC.BIN` (o `amdgpu/polaris10_k_smc.bin` do
+   linux-firmware, em `firmware/amdgpu/` com a licenca) e confere o
+   `smc_firmware_header_v1_0`: tamanho total, versao 1, ucode multiplo de
+   4 dentro do arquivo, ate 128 KB, inicio em `0x20000`;
+4. reset do SMC (`SYSCON_RESET_CNTL.rst_reg` 1), ucode na RAM do SMC a partir
+   de `0x20000` por `SMC_IND_INDEX_11`/`DATA_11` com `AUTO_INCREMENT_IND_11`
+   (`SMC_IND_ACCESS_CNTL` bit 11), auto-incremento desligado no fim;
+5. `SMU_STATUS` 0, clock ligado, reset solto; espera `RCU_UC_EVENTS`
+   `INTERRUPTS_ENABLED` (a ROM de boot pronta);
+6. mensagem `PPSMC_MSG_Test` (`0x100`) com argumento `0x20000`
+   (`SMC_MSG_ARG_0` `0xA4`, `SMC_RESP_0`, `SMC_MESSAGE_0`): a ROM confere a
+   assinatura e responde em `SMU_STATUS` (`SMU_DONE`, `SMU_PASS`);
+7. com `SMU_PASS`, zera `FIRMWARE_FLAGS`, pulsa o reset e espera
+   `FIRMWARE_FLAGS.INTERRUPTS_ENABLED` (o firmware iniciou).
+
+Toda espera tem limite (1 a 2 s pelo `k->ms` e um teto de voltas), o indice
+do SMC volta ao valor de antes, e qualquer falha so vai para o log: a tela e
+o cursor nao dependem do SMU. Codigos no log: `-1` nao tentou (arquivo,
+modo, kernel antigo), `-2` a ROM nao ligou as interrupcoes, `-3` sem
+`SMU_DONE`, `-4` assinatura recusada (`SMU_PASS` 0), `-5` aceito mas nao
+iniciou.
+
+**Leitura de arquivo pelos drivers.** A `gpu_kapi` ganhou, no fim, `ext`
+(`GPU_KAPI_EXT`, "FWRD"), `fw_size` e `fw_read`, que leem
+`X:\SODOS\FW\<nome>` (X = unidade do `SODOS.CFG`, ou D:; nome sem pastas).
+O `GPU_ABI` continua 1: os DLLs antigos nao olham os campos novos, e um DLL
+novo num kernel antigo ve `ext` diferente e passa sem eles. O
+`make disk-files`/`make sendpc` copia o firmware para `\SODOS\FW\P10KSMC.BIN`
+(e a licenca em `LICAMDGP.TXT`).
+
+**Testes sem a placa (2026-11-17):**
+
+- `make test-amdsmc`: o `amdgop.c` com `AMD_SMC` contra um SMC simulado no
+  host (`drivers/amdgop/smcsim.c`): porta indireta com auto-incremento, RAM
+  do SMC, reset/clock, a ROM que liga as interrupcoes, confere a imagem na
+  mensagem Test e inicia o firmware no reset seguinte. 9 cenarios, 0
+  falhas: carga normal (RAM = ucode, Test com `0x20000`, `FIRMWARE_FLAGS`,
+  SMC rodando, cursor ainda funciona), firmware ja rodando (nenhuma
+  escrita), imagem adulterada (`-4`, nao fica rodando), sem arquivo,
+  modo nao protegido, ROM travada (`-2` dentro do limite), cabecalho
+  invalido, `gpu_kapi` antiga, indice devolvido;
+- QEMU, `-vga std` com o `SODOS.CFG` apontando a Bochs (`1234:1111`) para o
+  `AMDSMC.DLL`: o kernel leu os 130.244 bytes pelo `fw_read`, o cabecalho
+  conferiu, "placa nao e a RX 570: nada carregado", driver ativo, cursor da
+  placa recusado (sem DCE), desktop normal;
+- QEMU, `-device virtio-vga`: o `VIRTGPU.DLL` (sem mudanca) continua ativo
+  com a `gpu_kapi` nova, cursor pela placa.
+
+O que a simulacao nao cobre: o comportamento real da ROM do SMC (a
+assinatura, os tempos) e o efeito do firmware rodando sobre clocks e
+ventoinha. Isso so a placa responde: o `D:\SODOS.CFG` do desktop passa a
+`driver=AMDSMC.DLL` (o anterior em `D:\SODOS.BK2`). Para voltar, basta
+`driver=AMDCUR.DLL`. O firmware fica carregado ate desligar o PC (um
+reinicio a quente para o Windows encontra o SMC ja rodando, como depois do
+amdgpu do Linux).
+
+**Primeiro boot com o `AMDSMC.DLL` (2026-11-18): o firmware do SMU
+carregou e iniciou na RX 570.** Do `\LOG\SERIAL.LOG` (a primeira entrada no
+WIN; o `GPU.LOG` so guarda a ultima):
+
+```
+[amdgop] smc rst 00000000 ck 01000000 pc 000028DC smu_status 00000000 smu_fw 00030006
+[amdgop] smc fw_flags 00000001 feature_status 0001E083 hdr versao 02171113 tam 000000B4 flags 00000000 entrada 00020100 codigo 0001D2B8
+[amdgop] smc PARADO (sem firmware rodando), modo protegido
+[amdsmc] P10KSMC.BIN bytes 0001FCC4 cabecalho 00000024 v00000001 ucode_versao 00171100 ucode 0001FBC4 em 00000100 inicio 00020000
+[amdsmc] firmware do SMU RODANDO: versao 00171100 pc 00024220 flags 00000001 resp_test 00000001
+[gpu] ativo: amdsmc (Radeon, GOP, cursor, SMU)
+[gpu] cursor pela placa: amdsmc (Radeon, GOP, cursor, SMU)
+```
+
+E a segunda entrada no WIN, no mesmo boot (`GPU.LOG`):
+
+```
+[amdgop] smc msg 00000100 resp 00000001
+[amdgop] smc rst 40000000 ck 01000000 pc 0002421C smu_status 00000003 smu_fw 0003001E
+[amdgop] smc fw_flags 00000001 feature_status 00000000 hdr versao 02171100 tam 000000B4 flags 00000000 entrada 00020100 codigo 0001D250
+[amdgop] smc RODANDO (firmware do SMU na RAM do SMC), modo protegido
+[amdsmc] firmware do SMU ja roda: pc 0002055C flags 00000001 (nada a carregar)
+```
+
+- antes da carga, o SMC estava na ROM (`pc 28DC`), mas a RAM dele ainda
+  tinha o firmware que o **driver do Windows** carregou na sessao anterior
+  (cabecalho com versao `02171113`, entrada `0x20100`): o reinicio a quente
+  reinicia o SMC, mas nao apaga a RAM. Por isso o diagnostico decide por
+  `SMC_PC_C`, nao pelo conteudo da RAM;
+- a ROM aceitou a assinatura (`resp_test 1`, `SMU_STATUS` = 3:
+  `SMU_DONE` e `SMU_PASS`) e o firmware iniciou (`FIRMWARE_FLAGS` bit 0,
+  `pc 0x24220`, dentro do firmware). O cabecalho na RAM passou a ser o do
+  linux-firmware (`02171100`, codigo `0x1D250`);
+- na segunda entrada o driver so conferiu e nao mexeu em nada;
+  `FEATURE_STATUS` = 0: nenhum recurso de energia (DPM) ligado, como
+  esperado: o Linux so liga o DPM depois de mandar as tabelas ao SMU;
+- a tela e o cursor da placa seguiram normais; nessa sessao 96 quadros,
+  1.169.736 ciclos por quadro (4,4 vezes menos que a copia inteira).
+
+### Etapas da RX 570
+
+| # | Etapa | Estado |
+|---|---|---|
+| A | Diagnostico so leitura: VRAM, MC, motores, DCE (`polaris_diag`) | feito, rodou na placa (2026-11-17) |
+| B | Cursor pelo DCE 11.2 (`CUR_CONTROL`, `CUR_SURFACE_ADDRESS`, `CUR_SIZE`, `CUR_POSITION`, `CUR_UPDATE` com lock), imagem 64x64 na VRAM: `AMDCUR.DLL` passa a ter caminho Polaris | feito, rodou na placa (128x128); falta Ctrl+F1/F7 |
+| C | Estado do SMC: leitura indireta (`SMC_IND_INDEX_11`/`DATA_11`) de `SMC_SYSCON_CLOCK_CNTL_0` e `SMC_PC_C`, para saber se o firmware do SMU esta rodando | feito: SMC so na ROM, firmware a carregar, modo protegido |
+| C2 | Carregar o `polaris10_k_smc.bin` (assinado) na RAM do SMC em modo protegido, como `polaris10_start_smu_in_protection_mode` + `smu7_upload_smu_firmware_image`, e esperar `SMU_DONE`/`SMU_PASS` | feito: firmware do SMU rodando na placa (2026-11-18) |
+| D | GMC 8: GART (tabela de paginas da GPU para a RAM do sistema), VM contexto 0 | em aberto |
+| E | SDMA 3.0: microcodigo `polaris10_sdma*.bin`, anel em RAM, copia e preenchimento pela placa: o `GPU_CAP_FILL`/`BLIT` (etapa 5 geral) | em aberto |
+| F | GFX 8: microcodigos PFP/ME/CE/MEC/RLC, anel GFX, IH (interrupcoes), fences | em aberto |
+| G | Interface estilo DRM no kernel (BOs, mapear no processo, submeter, esperar) e Mesa radeonsi/RADV com um winsys do SODOS | em aberto |
+
+As etapas D a G escrevem na placa e podem travar a maquina: cada uma entra
+como DLL separado ou com `-D`, como o `AMDCUR.DLL`, e o `AMDGOP.DLL` continua
+sendo o caminho seguro.
+
 ## Configuracao (`D:\SODOS\VIDEO.CFG`)
 
 ```
@@ -486,6 +867,8 @@ gpudrv=GPUTEST.DLL forca este driver de D:\SODOS\DRV, com ou sem placa na tabela
 |---|---|---|
 | `1AF4:1050` virtio-gpu | `VIRTGPU.DLL` | funciona no QEMU (`-device virtio-vga`): 2D, tela inteira por quadro |
 | `1002:15E7` AMD Barcelo (pelo `SODOS.CFG`) | `AMDGOP.DLL` | funciona no notebook (1920x1200, GOP): 8,1x menos ciclos por quadro |
+| `1002:67DF` Radeon RX 570 (pelo `SODOS.CFG`) | `AMDGOP.DLL` | funciona no desktop (1920x1080, GOP acima de 4 GB); diagnostico Polaris (etapa A) rodou: tela no CRTC 0, motores parados |
+| `1002:67DF` Radeon RX 570 (pelo `SODOS.CFG`) | `AMDSMC.DLL` | funciona no desktop: tela, cursor da placa e firmware do SMU carregado (etapa C2) |
 | nenhuma (so `gpudrv=`) | `GPUTEST.DLL` | teste: copia o back buffer para o LFB pela CPU, reserva 64 KB para aparecer no TOP |
 | nenhuma (so `gpudrv=`) | `GPUFAIL.DLL` | o mesmo, mas `present` falha no 20o quadro |
 
@@ -504,7 +887,8 @@ Fontes em `drivers/<nome>/`; `make -C c_compiler drivers` gera
 | 5 | Operacoes na placa (`FILL`/`BLIT`), so se medido e registrado na tabela de custo | em aberto |
 
 Fora do escopo por enquanto: virtio-gpu 3D (virgl), VMware SVGA, amdgpu
-(o notebook segue no framebuffer GOP pelo caminho atual).
+(o notebook segue no framebuffer GOP pelo caminho atual). Excecao: a RX 570
+do desktop, com etapas proprias na secao "Radeon RX 570".
 
 O redesenho so das areas alteradas **no caminho por CPU** (sem driver) e
 outra mudanca, separada desta: ela mexeria no caminho atual e por isso so

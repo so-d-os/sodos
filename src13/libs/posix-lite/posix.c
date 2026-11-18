@@ -253,12 +253,29 @@ __export int chdir(const char* path) {
 __export char* getcwd(char* buf, size_t size) {
   PX_GUARD;
   char tmp[64];
-  if (!buf || size < 2) {
+  size_t n;
+  k_pwd(tmp, (int)sizeof(tmp));
+  n = strlen(tmp);
+  if (!buf) {
+    /* glibc/POSIX.1-2008: buf nulo aloca (size 0 = o necessario). A Dart VM
+     * usa getcwd(NULL, 0). */
+    if (size && n >= size) {
+      errno = ERANGE;
+      return 0;
+    }
+    buf = (char*)malloc(size ? size : n + 1);
+    if (!buf) {
+      errno = ENOMEM;
+      return 0;
+    }
+    strcpy(buf, tmp);
+    return buf;
+  }
+  if (size < 2) {
     errno = EINVAL;
     return 0;
   }
-  k_pwd(tmp, (int)sizeof(tmp));
-  if (strlen(tmp) >= size) {
+  if (n >= size) {
     errno = ERANGE;
     return 0;
   }
@@ -897,6 +914,19 @@ __export int fstat(int fd, struct stat* st) {
   if (!st) {
     errno = EINVAL;
     return -1;
+  }
+  if (fd >= 0 && fd < 3) {
+    /* Console: dispositivo de caractere, como o isatty() ja diz. O dart:io
+     * escolhe terminal/arquivo/pipe para stdout por aqui. */
+    memset(st, 0, sizeof(*st));
+    st->st_mode = S_IFCHR | S_IRUSR | S_IWUSR;
+    st->st_dev = 1;
+    st->st_ino = (unsigned long)(fd + 1);
+#if __SIZEOF_POINTER__ == 8
+    st->st_nlink = 1;
+    st->st_blksize = 512;
+#endif
+    return 0;
   }
   if (fd < 3 || fd >= FD_MAX || !fds[fd].used) {
     errno = EBADF;

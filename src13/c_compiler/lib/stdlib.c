@@ -410,6 +410,30 @@ int system(const char* cmd) {
   return rc;
 }
 
+/* Como system(), mas a linha vai para o prompt (k_shell): comando interno,
+ * .EXE ou .BAT, ate 255 caracteres. Guarda o estado da libc do chamador
+ * do mesmo jeito. Devolve o codigo do comando (erro de carga vira 1). */
+int __so_shell(const char* line) {
+  char buf[256];
+  struct heap_state saved;
+  void* io;
+  int rc;
+  if (!line) return 1;
+  strncpy(buf, line, sizeof(buf) - 1);
+  buf[sizeof(buf) - 1] = 0;
+
+  __so_stdio_flush_out();
+  saved = hs;
+  memset(&hs, 0, sizeof(hs));
+  hs.rand_state = saved.rand_state;
+  io = __so_stdio_swap(NULL);
+  rc = k_shell(buf);
+  __so_stdio_flush_out();
+  __so_stdio_swap(io);
+  hs = saved;
+  return rc;
+}
+
 /* ---------- conversoes ---------- */
 static int digit_val(int c) {
   if (c >= '0' && c <= '9') return c - '0';

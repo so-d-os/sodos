@@ -1,0 +1,65 @@
+MAKE do SODOS - port do pdpmake (Public Domain POSIX make)
+
+Origem: https://github.com/rmyorston/pdpmake  (commit 02f03e2, 2026-08-28)
+Licenca: dominio publico (arquivo LICENSE).
+
+O que cada arquivo e
+  main.c input.c macro.c make.c modtime.c rules.c target.c utils.c check.c
+  make.h        fontes do pdpmake; o que mudou esta entre #ifdef __SO__
+  sodos.h/.c    o que o SODOS nao tem: getopt, glob, execucao das
+                receitas, touch e comparacao de nomes de arquivo
+  BUILD.BAT     compila o MAKE.EXE so com o CC (primeira vez)
+  MAKEFILE      compila o MAKE.EXE com o proprio make
+
+Como compilar
+  No Linux/WSL:  make -C c_compiler out/MAKE.EXE     (teste: make maketest)
+  No SODOS:      cd \develop\make   e   build        (ou  make)
+  Precisa de LIBC.DLL com __so_shell e de POSIX.DLL (stat, opendir).
+
+Uso
+  make [-f arquivo] [-C pasta] [-n] [-k] [-s] [-i] [-q] [-t] [-p] [-r]
+       [MACRO=valor ...] [alvo ...]
+  Sem -f procura PDPmakefile, makefile, Makefile (a FAT nao diferencia caixa).
+
+Diferencas para o make do Unix
+  Receitas   Cada linha roda no prompt do SODOS (comando interno, .EXE ou
+             .BAT), nao em /bin/sh: vale o que o prompt aceita. Nada de &&,
+             $$var, if/for de shell (para isso, chame um .BAT).
+             Limite do prompt: 255 caracteres e 31 palavras por linha, depois
+             de expandir as macros.
+             @ (nao mostra), - (ignora erro) e + funcionam.
+  Nomes      Alvos e sufixos nao diferenciam caixa: MAIN.OBJ casa com .c.obj
+             e main.c. '/' e '\' valem o mesmo. Macros diferenciam caixa.
+  Unidade    "D:\X\A.OBJ: a.c" funciona: o ':' depois de uma letra sozinha e
+             antes de uma barra e da unidade, nao da regra. "D:A.OBJ" (sem
+             barra) nao e reconhecido.
+  Barra      '\' no fim da linha continua na linha de baixo (como em todo
+             make). Uma macro que termina em '\' precisa de algo depois:
+               DIR = D:\SRC\      <- junta com a linha seguinte
+               DIR = D:\SRC\#     <- certo (comentario vazio fecha a linha)
+  Horas      A FAT guarda a hora de 2 em 2 segundos. Hora igual conta como
+             em dia. Se um fonte for salvo no mesmo intervalo de 2 s em que
+             o alvo dele foi gerado, o make nao percebe: salve de novo.
+  Curingas   * e ? so no ultimo componente do caminho (SRC\*.C). Sem [abc].
+  Ambiente   O SODOS nao passa variaveis de ambiente (SET) aos programas:
+             so valem as macros do makefile e da linha de comando.
+  Fora       MACRO != comando (nao ha pipes), alvos lib.a(membro), sinais,
+             -j (aceito e ignorado, como no pdpmake).
+
+Macros e regras que ja vem prontas  (make -p mostra tudo)
+  CC      = cc
+  SYSINC  = D:\ se existe D:\STDIO.H, senao U:\INCLUDE\
+  SYSLIB  = D:\ se existe D:\LIBC.DLL, senao U:\
+  CFLAGS  = -I $(SYSINC) -L $(SYSLIB)
+  LDFLAGS =
+  .SUFFIXES: .obj .exe .c .cpp
+  .c.obj e .cpp.obj:   $(CC) $(CFLAGS) -c $< -o $@
+  .c.exe e .cpp.exe:   $(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
+
+Exemplo (o git do SODOS)
+  OBJS = git.obj http.obj pack.obj sha1.obj zinf.obj
+
+  GIT.EXE: $(OBJS)
+  	$(CC) $(CFLAGS) -o $@ $(OBJS) $(SYSLIB)TLS.DLL
+
+  $(OBJS): git.h

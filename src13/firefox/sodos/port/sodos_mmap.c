@@ -236,6 +236,18 @@ static void* mmap_impl(void* addr, size_t len, int prot, int flags, int fd, off_
       if ((flags & MAP_ANONYMOUS) && prot != PROT_NONE) {
         sodos_commit_zero(e, (char*)addr, len);
         memset(addr, 0, len);
+      } else if (!(flags & MAP_ANONYMOUS)) {
+        /* Arquivo dentro de uma reserva (o loader de ELF da Dart VM mapeia
+         * cada segmento do snapshot assim): copia como no caso sem MAP_FIXED. */
+        size_t got = 0;
+        sodos_commit_zero(e, (char*)addr, len);
+        while (got < len) {
+          ssize_t r = pread(fd, (char*)addr + got, len - got, (off_t)(off + got));
+          if (r < 0) return MAP_FAILED;
+          if (r == 0) break;
+          got += (size_t)r;
+        }
+        if (got < len) memset((char*)addr + got, 0, len - got);
       }
       return addr;
     }

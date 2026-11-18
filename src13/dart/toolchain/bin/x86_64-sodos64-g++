@@ -1,0 +1,15 @@
+#!/bin/sh
+# Wrapper para o GN do Dart (x64_toolchain_prefix): g++ -> x86_64-sodos-g++64 (SOX2/LP64).
+# - -I dart/port/include antes dos -isystem do port do Firefox (elf.h, sys/inotify.h)
+#   e -include sodos_dart_compat.h (atomic_ref, *at, constantes do glibc);
+# - -Wno-error no fim: o Dart usa -Werror pensando no clang; o gcc acusa avisos
+#   a mais (maybe-uninitialized) que nao sao erros de port;
+# - no link (sem -c/-E/-S), acrescenta dart/build/port/*.o (scripts/build-port.sh).
+D=$(cd "$(dirname "$0")" && pwd)
+P=$D/../../port/include
+EXTRA=
+case " $* " in
+  *" -c "*|*" -E "*|*" -S "*|*" -M "*|*" -MM "*) ;;
+  *) EXTRA=$(ls "$D"/../../build/port/*.o 2>/dev/null) ;;
+esac
+exec "$D/../../../firefox/toolchain/bin/x86_64-sodos-g++64" -I "$P" -include "$P/sodos_dart_compat.h" "$@" $EXTRA -Wno-error

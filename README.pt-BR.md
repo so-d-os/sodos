@@ -540,7 +540,7 @@ Com `SET LINKEXT=1` o kernel carrega `LINKEXT.DLL` (de `PATHSODOS\DRV`, `D:\SODO
 | `WGET.EXE` | Baixa um arquivo por HTTP ou HTTPS (`WGET http://exemplo.com/a.txt`) |
 | `BAT.EXE` | Arquivo de lote (`BAT DEMO.BAT` ou só `DEMO.BAT`) |
 | `MC.EXE` | Gerenciador de arquivos de dois painéis no estilo do mc do Linux (fontes em `src13/mc`). Setas/Tab navegam, Enter entra na pasta ou roda `.EXE`/`.BAT`, Insert marca; F2 unidade, F3 ver (UTF-8 e hexa), F4 editar, F5 copiar, F6 mover/renomear, F7 criar pasta, F8 apagar (pastas com tudo dentro), F9 menu, F10 sair. Só no modo texto (fora do `win`) |
-| `GIT.EXE` | git mínimo (fontes em `src13/git`): `git clone https://github.com/dono/projeto [pasta]` baixa só o último commit por HTTPS; `git pull`, `git status` (mudados/apagados) e `git log`. Nomes longos viram 8.3 (`README~1.MD`); a lista fica em `_GIT\NAMES.TXT`. Só leitura: ainda não faz commit nem push |
+| `GIT.EXE` | git mínimo (fontes em `src13/git`): `git clone https://github.com/dono/projeto [pasta]` baixa só o último commit por HTTPS; `git pull`, `git status`, `git log`, `git add -u` / `-A` / arquivo, `git diff [--cached]`, `git commit [-a] -m msg` e `git push` (precisa de `git config --global user.name/user.email` e de um token: `git config --global token ...` ou `SET GIT_TOKEN=...`). Nomes longos viram 8.3 (`README~1.MD`); a lista fica em `_GIT\NAMES.TXT`. Sem merge: o `pull` recusa quando há commits locais não enviados e o servidor andou |
 | `HELLO.EXE`, `HELLO2.EXE` | Exemplos de `argc`/`argv` |
 | `CRT0.OBJ`, `KERNEL.IMP` | Ponto de entrada e lista de exports do kernel |
 | `*.H`, `*.C`, `*.CPP`, `*.BAT` | Headers, libc, exemplos, fontes do `cc`/`link` e `DEMO.BAT` |

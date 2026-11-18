@@ -20,7 +20,16 @@ struct gpu_kapi {
   void* (*alloc)(uint32_t bytes, uint32_t align);
   void (*free)(void* p);
   uint32_t (*ms)(void);   /* relogio em ms, para timeouts */
+  /* Extensao (2026-11-17), so com ext == GPU_KAPI_EXT. O GPU_ABI continua 1:
+   * os DLLs antigos nao olham estes campos, e um DLL novo num kernel antigo
+   * ve ext != GPU_KAPI_EXT e passa sem eles. */
+  uint32_t ext;
+  /* Firmware da placa em X:\SODOS\FW\<nome> (X = unidade do SODOS.CFG, ou
+   * D:). fw_size: bytes, <0 se nao ha. fw_read: bytes lidos (ate max). */
+  int (*fw_size)(const char* nome);
+  int (*fw_read)(const char* nome, void* buf, uint32_t max);
 };
+#define GPU_KAPI_EXT 0x44525746u   /* "FWRD" */
 
 /* Placa achada e quadro que o kernel ja usa. */
 struct gpu_mode {

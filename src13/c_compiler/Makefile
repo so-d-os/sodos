@@ -43,7 +43,7 @@ all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/H
 	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE $(O)/VIDEOCFG.EXE $(O)/IMGBIG.DLL $(O)/AIPANEL.EXE $(O)/MENUCFG.EXE $(O)/TEMAS.EXE $(O)/WINTAB.EXE $(O)/LINKEXT.EXE $(O)/DISKSYNC.EXE $(O)/PENDRIVE.EXE \
 	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
 	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
-	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/TOP.EXE $(O)/COBRA.EXE $(O)/WIFI.EXE $(O)/GIT.EXE \
+	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/TOP.EXE $(O)/COBRA.EXE $(O)/WIFI.EXE $(O)/XCOPY.EXE $(O)/GIT.EXE $(O)/MAKE.EXE \
 	$(O)/AGENT.EXE $(O)/LLAMA.EXE $(O)/FFLAUNCH.EXE $(O)/SMPT.EXE \
 	drivers
 
@@ -212,10 +212,22 @@ $(O)/COBRA.EXE: ../cobra/cobra.cpp $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.D
 $(O)/WIFI.EXE: ../wifi/wifi.cpp $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
 	$(HCC) -o $@ ../wifi/wifi.cpp
 
-# GIT.EXE (../git): clone/pull raso por HTTPS, status e log. BUILD.BAT idem.
+# XCOPY.EXE (../cmd/xcopy): copia arquivos e arvores de pastas. BUILD.BAT idem.
+$(O)/XCOPY.EXE: ../cmd/xcopy/xcopy.cpp $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
+	$(HCC) -o $@ ../cmd/xcopy/xcopy.cpp
+
+# GIT.EXE (../git): clone/pull raso por HTTPS, status, log, add, commit, diff e push. BUILD.BAT idem.
 GIT_SRC = ../git/git.c ../git/http.c ../git/pack.c ../git/sha1.c ../git/zinf.c
 $(O)/GIT.EXE: $(GIT_SRC) ../git/git.h $(O)/TLS.DLL $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
 	$(HCC) -o $@ $(GIT_SRC) $(O)/TLS.DLL
+
+# MAKE.EXE (../develop/make): port do pdpmake. As receitas rodam no prompt
+# (__so_shell da libc); stat e opendir vem da POSIX.DLL. BUILD.BAT idem.
+MAKE_DIR = ../develop/make
+MAKE_SRC = $(addprefix $(MAKE_DIR)/,main.c input.c macro.c make.c modtime.c \
+	rules.c target.c utils.c check.c sodos.c)
+$(O)/MAKE.EXE: $(MAKE_SRC) $(MAKE_DIR)/make.h $(MAKE_DIR)/sodos.h $(O)/POSIX.DLL $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
+	$(HCC) -o $@ $(MAKE_SRC) $(O)/POSIX.DLL
 
 $(HCC): $(CC_SRC) cc/cc.h sox.h | $(B)
 	$(HOSTCC) $(HCFLAGS) -o $@ $(CC_SRC)
@@ -288,6 +300,12 @@ $(B)/drv_amdcur.o: ../drivers/amdgop/amdgop.c ../video/gpu.h | $(B)
 $(DRV)/AMDCUR.DLL: $(B)/drv_amdcur.o $(LINK64) | $(DRV)
 	$(LINK64) /dll /export:gpu_driver /out:$@ $(B)/drv_amdcur.o
 
+# AMDSMC.DLL: AMDCUR + carga do firmware do SMU da RX 570 (docs/GPU.md, etapa C2).
+$(B)/drv_amdsmc.o: ../drivers/amdgop/amdgop.c ../video/gpu.h | $(B)
+	$(DRVCC) -DAMD_SMC -c $< -o $@
+$(DRV)/AMDSMC.DLL: $(B)/drv_amdsmc.o $(LINK64) | $(DRV)
+	$(LINK64) /dll /export:gpu_driver /out:$@ $(B)/drv_amdsmc.o
+
 # FAT32.DLL (fs/fsdrv.h): leitura de FAT32, carregado so quando o kernel
 # acha uma unidade FAT32 (pendrive em U:, mount).
 $(B)/drv_fat32.o: ../drivers/fat32/fat32.c ../fs/fsdrv.h | $(B)
@@ -302,7 +320,7 @@ $(B)/drv_linkext.o: ../drivers/linkext/linkext.c ../kernel/linkext.h | $(B)
 $(DRV)/LINKEXT.DLL: $(B)/drv_linkext.o $(LINK64) | $(DRV)
 	$(LINK64) /dll /export:linkext_driver /out:$@ $(B)/drv_linkext.o
 
-drivers: $(DRV)/LINKEXT.DLL $(DRV)/FAT32.DLL $(DRV)/GPUTEST.DLL $(DRV)/GPUFAIL.DLL $(DRV)/VIRTGPU.DLL $(DRV)/AMDGOP.DLL $(DRV)/AMDCUR.DLL
+drivers: $(DRV)/LINKEXT.DLL $(DRV)/FAT32.DLL $(DRV)/GPUTEST.DLL $(DRV)/GPUFAIL.DLL $(DRV)/VIRTGPU.DLL $(DRV)/AMDGOP.DLL $(DRV)/AMDCUR.DLL $(DRV)/AMDSMC.DLL
 
 # LIBCX64 estatica: mesma libc, compilada -m64, ligada no HELLO64C.
 LIBC64_SRC = string ctype stdlib stdio printf scanf fpconv math time misc sigfault64 wchar setjmp64 ctors64
@@ -476,10 +494,33 @@ examples: $(O)/CC.EXE $(O)/LINK.EXE $(SOXRUN)
 	$(SOXRUN) -C $(EXD) VMAIN.EXE
 	@echo "examples ok"
 
+# O MAKE.EXE compila a si mesmo no soxrun com o proprio MAKEFILE: build
+# completo (igual ao do cc do Linux), segunda chamada sem nada a fazer e
+# rebuild de um so fonte. O sleep passa dos 2 s de resolucao da hora da FAT.
+MKD = $(B)/mk
+maketest: $(O)/MAKE.EXE $(O)/CC.EXE $(O)/LINK.EXE $(SOXRUN)
+	rm -rf $(MKD) && mkdir -p $(MKD)/SYS
+	cp $(O)/MAKE.EXE $(O)/CC.EXE $(O)/LINK.EXE $(O)/LIBC.DLL $(O)/POSIX.DLL $(O)/CRT0.OBJ $(O)/KERNEL.IMP $(MKD)/
+	@for f in include/*.h $(MAKE_DIR)/*.c $(MAKE_DIR)/*.h $(MAKE_DIR)/MAKEFILE; do \
+	  cp $$f $(MKD)/$$(basename $$f | tr a-z A-Z); done
+	@for f in include/sys/*.h; do cp $$f $(MKD)/SYS/$$(basename $$f | tr a-z A-Z); done
+	@mv $(MKD)/MAKE.EXE $(MKD)/MAKE0.EXE
+	@sleep 3
+	$(SOXRUN) -C $(MKD) MAKE0.EXE
+	cmp $(MKD)/MAKE.EXE $(O)/MAKE.EXE
+	@sleep 3
+	$(SOXRUN) -C $(MKD) MAKE0.EXE | grep -q "is up to date"
+	@touch $(MKD)/UTILS.C && sleep 3
+	$(SOXRUN) -C $(MKD) MAKE0.EXE -n | grep -q -- "-c utils.c"
+	! $(SOXRUN) -C $(MKD) MAKE0.EXE -n | grep -q -- "-c main.c"
+	$(SOXRUN) -C $(MKD) MAKE0.EXE
+	cmp $(MKD)/MAKE.EXE $(O)/MAKE.EXE
+	@echo "maketest ok: MAKE.EXE compila a si mesmo e so refaz o que mudou"
+
 clean:
 	rm -rf $(B) $(O)
 
-.PHONY: all clean test selfhost examples
+.PHONY: all clean test selfhost examples maketest
 
 # Configuracao do menu Iniciar: posicao, painel e transparencia.
 $(O)/MENUCFG.EXE: ../utils/menu_cfg.c $(O)/GUI.DLL include/widgets.h $(HCC) $(HEADERS)

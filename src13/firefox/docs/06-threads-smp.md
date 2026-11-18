@@ -63,6 +63,14 @@ uma thread por CPU.
   deixaram de pegar o BKL no thunk quando quem chama é uma thread (o futex já
   soltava logo em seguida; o relógio vem de `net_ms_fast`, ticks do IRQ0 +
   ajuste). O mundo continua pegando o BKL nessas chamadas.
+- **Janela (`k_gui_*`) chamada por thread** (2026-11-17): a thread do
+  compositor do Gecko chama `k_gui_pixels` de outra CPU. O kernel escolhia a
+  janela por `gui_ix`/`task_cur`, que são do mundo: com outro programa
+  rodando na CPU0 os pixels iam para a janela dele, ou eram descartados (a
+  janela do Firefox piscava com faixas velhas). Agora `gui_thread_enter`
+  (`video/visual.c`, chamado em `kernel/kexports.c`) aponta para a janela
+  aberta pelo programa da thread (`gui_win.pid`) enquanto ela segura o BKL.
+  `k_gui_open`/`k_gui_close` continuam só do programa principal.
 - **posix-lite**: `FD_MAX` 64 → 256 em LP64. Com as threads em paralelo o
   SQLite mantinha ~60 conexões abertas (places/favicons com 12 cada) e o
   `open("/dev/urandom")` do `nsID::GenerateUUID` falhava (abort). Quando a

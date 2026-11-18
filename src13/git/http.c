@@ -1,8 +1,12 @@
-/* http.c - pedidos HTTP/HTTPS do git (GET de info/refs, POST de upload-pack).
+/* http.c - pedidos HTTP/HTTPS do git (GET de info/refs, POST de upload-pack
+ * e receive-pack).
  * Le a resposta inteira na memoria; segue ate 5 redirecionamentos. */
 #include "git.h"
 
 #define BODY_MAX (96 * 1024 * 1024)
+
+/* "Authorization: Basic ..." do push; vazio = sem login */
+char http_auth[400];
 
 struct url {
   char host[128];
@@ -96,7 +100,23 @@ static int dechunk(char* b, int n) {
   }
 }
 
-static int c_send(int tls, const char* d, int n) { return tls ? tls_send(d, n) : k_tcp_send(d, n); }
+static int c_send1(int tls, const char* d, int n) { return tls ? tls_send(d, n) : k_tcp_send(d, n); }
+
+/* manda em pedacos de 16 KB (o pack do push pode ter MB) */
+static int c_send(int tls, const char* d, int n) {
+  int sent = 0, shown = 0;
+  while (sent < n) {
+    int k = n - sent > 16384 ? 16384 : n - sent;
+    if (c_send1(tls, d + sent, k) < 0) return -1;
+    sent += k;
+    if (n > 512 * 1024 && sent - shown >= 256 * 1024) {
+      shown = sent;
+      printf("\r  enviados %d KB", sent / 1024);
+    }
+  }
+  if (shown) printf("\r  enviados %d KB\n", n / 1024);
+  return n;
+}
 static int c_recv(int tls, char* d, int cap) { return tls ? tls_recv(d, cap) : k_tcp_recv(d, cap); }
 static void c_close(int tls) {
   if (tls) tls_close();
@@ -105,20 +125,23 @@ static void c_close(int tls) {
 
 static int once(const struct url* u, const char* ctype, const char* body, int blen, char** out, int* olen,
                 char* location, char* err) {
-  char req[1024];
+  char req[1600];
+  char auth[460];
   char* buf = 0;
   int len = 0, cap = 0, hdr_end = -1, clen = -1, chunked = 0, status = 0, shown = 0;
   int rn;
+  auth[0] = 0;
+  if (http_auth[0]) sprintf(auth, "%s\r\n", http_auth);
   if (body)
     rn = sprintf(req,
                  "POST %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: git/2.43.0 (SODOS)\r\n"
-                 "Accept: */*\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
-                 u->path, u->host, ctype, blen);
+                 "%sAccept: */*\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+                 u->path, u->host, auth, ctype, blen);
   else
     rn = sprintf(req,
                  "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: git/2.43.0 (SODOS)\r\n"
-                 "Accept: */*\r\nConnection: close\r\n\r\n",
-                 u->path, u->host);
+                 "%sAccept: */*\r\nConnection: close\r\n\r\n",
+                 u->path, u->host, auth);
   if (u->tls) {
     if (tls_connect(u->host, u->port) != 0) {
       sprintf(err, "TLS falhou: %s", tls_error());

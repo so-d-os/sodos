@@ -1,0 +1,7 @@
+# Makefile do XCOPY do SODOS, para o MAKE.EXE (so recompila o que mudou).
+#   cd \src\cmd\xcopy   e depois   make
+# Sem o MAKE.EXE, ou se o make falhar: use o BUILD.BAT.
+# CC, CFLAGS, SYSINC e SYSLIB ja vem definidos pelo make.
+
+XCOPY.EXE: xcopy.cpp
+	$(CC) $(CFLAGS) -o $@ xcopy.cpp

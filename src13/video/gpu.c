@@ -7,7 +7,7 @@
  * gpudrv= no VIDEO.CFG nada daqui roda alem de gpu_wanted() na troca de modo;
  * gpu_drv fica 0 e o quadro sai pela CPU.
  *
- * Quando ha driver para tentar, o que acontece vai para X:\SODOS\GPU.LOG
+ * Quando ha driver para tentar, o que acontece vai para X:\LOG\GPU.LOG
  * (o notebook nao tem COM1), alem do log serial.
  */
 #include <stdint.h>
@@ -117,19 +117,51 @@ static void log_hex(uint32_t v) {
   log_put(t);
 }
 
-/* Grava o GPU.LOG ao lado do SODOS.CFG (ou em D:\SODOS). */
+/* Grava o GPU.LOG em \LOG da unidade do SODOS.CFG (ou D:\LOG), junto do
+ * SERIAL.LOG e do BOOT.LOG. */
 static void log_save(void) {
-  char path[24] = "D:\\SODOS\\GPU.LOG";
+  char dir[8] = "D:\\LOG";
+  char path[24] = "D:\\LOG\\GPU.LOG";
   if (!log_buf) return;
-  if (cfg_drive) path[0] = cfg_drive;
+  if (cfg_drive) dir[0] = path[0] = cfg_drive;
   if (!drives_is_mounted(path[0])) return;
+  (void)drives_mkdir(dir);
   file_save(path, log_buf, log_len);
 }
 
 static void k_log(const char* s) { log_put(s); }
 
+/* X:\SODOS\FW\<nome>, X = unidade do SODOS.CFG (ou D:). Nome 8.3, sem pastas. */
+static int fw_path(const char* nome, char* path, int max) {
+  static const char pre[] = "D:\\SODOS\\FW\\";
+  int i, n = 0;
+  if (!nome || !nome[0]) return -1;
+  for (i = 0; pre[i] && n < max - 1; i++) path[n++] = pre[i];
+  if (cfg_drive) path[0] = cfg_drive;
+  for (i = 0; nome[i]; i++) {
+    if (nome[i] == '\\' || nome[i] == '/' || nome[i] == ':' || n >= max - 1) return -1;
+    path[n++] = nome[i];
+  }
+  path[n] = 0;
+  return drives_is_mounted(path[0]) ? 0 : -1;
+}
+
+static int k_fw_size(const char* nome) {
+  char path[40];
+  if (fw_path(nome, path, (int)sizeof(path)) != 0) return -1;
+  return file_size(path);
+}
+
+static int k_fw_read(const char* nome, void* buf, uint32_t max) {
+  char path[40];
+  if (!buf || max == 0 || max > 0x7FFFFFFFu) return -1;
+  if (fw_path(nome, path, (int)sizeof(path)) != 0) return -1;
+  return file_read_at(path, 0, (char*)buf, (int)max);
+}
+
 static const struct gpu_kapi kapi = {
-  GPU_ABI, k_log, log_hex, k_pci_read32, k_pci_write32, k_alloc, k_free, net_ms
+  GPU_ABI, k_log, log_hex, k_pci_read32, k_pci_write32, k_alloc, k_free, net_ms,
+  GPU_KAPI_EXT, k_fw_size, k_fw_read
 };
 
 static int hexval(char c) {
@@ -371,6 +403,8 @@ int gpu_start(const struct gpu_mode* m) {
   log_put("x");
   log_hex(m->h);
   log_put(" fb ");
+  log_hex((uint32_t)((uint64_t)(uintptr_t)m->fb >> 32));
+  log_put(":");
   log_hex((uint32_t)(uintptr_t)m->fb);
   log_put(" pitch ");
   log_hex(m->fb_pitch);

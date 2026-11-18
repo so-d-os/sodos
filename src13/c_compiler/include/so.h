@@ -204,6 +204,9 @@ int k_exec(const char* path, int argc, char** argv);
 /* Uma linha do prompt: comando interno, .EXE ou .BAT. Nao grava historico.
  * A linha do chamador nao e alterada. Erro de carga vira 1. */
 int k_shell(char* line);
+/* k_shell para quem usa a libc (malloc, stdio): guarda o estado da LIBC.DLL
+ * do chamador enquanto o comando roda, como system(). Esta na LIBC.DLL. */
+int __so_shell(const char* line);
 /* Como k_shell, mas a saida vai para out (com 0 no fim). *len = bytes
  * gravados, negativo se cortou em max-1. Devolve o codigo do comando. */
 int k_shell_capture(char* line, char* out, int max, int* len);

@@ -1,0 +1,43 @@
+diff --git a/runtime/bin/snapshot_utils.cc b/runtime/bin/snapshot_utils.cc
+index b3e16a32..eb13b748 100644
+--- a/runtime/bin/snapshot_utils.cc
++++ b/runtime/bin/snapshot_utils.cc
+@@ -27,8 +27,9 @@
+ #define LOG_SECTION_BOUNDARIES false
+ 
+ #if !defined(DART_INCLUDE_SIMULATOR)
+-#if defined(DART_HOST_OS_LINUX) || defined(DART_HOST_OS_ANDROID) ||            \
+-    defined(DART_HOST_OS_FUCHSIA)
++// SODOS: sem dlopen de ELF; o snapshot vai pelo loader proprio (Dart_LoadELF).
++#if (defined(DART_HOST_OS_LINUX) && !defined(__SODOS__)) ||                     \
++    defined(DART_HOST_OS_ANDROID) || defined(DART_HOST_OS_FUCHSIA)
+ #define NATIVE_SHARED_OBJECT_FORMAT_ELF 1
+ #elif defined(DART_HOST_OS_MACOS)
+ #define NATIVE_SHARED_OBJECT_FORMAT_MACHO 1
+diff --git a/runtime/vm/os_thread_linux.cc b/runtime/vm/os_thread_linux.cc
+index c3f112cc..4a063cb6 100644
+--- a/runtime/vm/os_thread_linux.cc
++++ b/runtime/vm/os_thread_linux.cc
+@@ -132,7 +132,7 @@ intptr_t OSThread::GetMaxStackSize() {
+ 
+ #ifdef SUPPORT_TIMELINE
+ ThreadId OSThread::GetCurrentThreadTraceId() {
+-  return syscall(__NR_gettid);
++  return reinterpret_cast<ThreadId>(syscall(__NR_gettid));  // SODOS: pthread_t e ponteiro
+ }
+ #endif  // SUPPORT_TIMELINE
+ 
+@@ -168,11 +168,11 @@ void OSThread::Detach(ThreadJoinId id) {
+ 
+ intptr_t OSThread::ThreadIdToIntPtr(ThreadId id) {
+   COMPILE_ASSERT(sizeof(id) <= sizeof(intptr_t));
+-  return static_cast<intptr_t>(id);
++  return reinterpret_cast<intptr_t>(id);  // SODOS: pthread_t e ponteiro
+ }
+ 
+ ThreadId OSThread::ThreadIdFromIntPtr(intptr_t id) {
+-  return static_cast<ThreadId>(id);
++  return reinterpret_cast<ThreadId>(id);  // SODOS: pthread_t e ponteiro
+ }
+ 
+ bool OSThread::GetCurrentStackBounds(uword* lower, uword* upper) {

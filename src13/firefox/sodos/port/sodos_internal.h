@@ -39,6 +39,7 @@ struct sodos_thread {
   int ktid;             /* FFTHREADS: tid da k_thread (0 = principal/cooperativa) */
   int err;              /* FFTHREADS: errno desta thread */
   struct sodos_thread* znext;  /* FFTHREADS: lista de threads destacadas */
+  uintptr_t kt_stack_top;      /* FFTHREADS: topo da pilha (anotado no kt_entry) */
 };
 
 /* sodos_tls.c */

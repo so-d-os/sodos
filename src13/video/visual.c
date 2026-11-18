@@ -3487,7 +3487,8 @@ static void font_draw(struct wm_win* w, int title_h, int scale,
                       uint32_t col_win, uint32_t col_title, uint32_t col_white, uint32_t col_black);
 
 /* Prompt de comando: varias janelas, fundo preto, texto claro. */
-#define CMD_ROWS 40
+/* Linhas guardadas (a roda do mouse e PgUp/PgDn rolam por elas). */
+#define CMD_ROWS 400
 #define CMD_COLS 80
 #define CMD_IN 128
 
@@ -3530,6 +3531,7 @@ struct cmd_con {
    * prompt) e coluna; na linha do prompt a coluna conta o prompt e depois in[]. */
   int sel;
   int ar, ac, br, bc;
+  int view; /* linhas roladas para cima (roda/PgUp); 0 = o fim, com o prompt */
 };
 
 static struct cmd_con* cons_cap;
@@ -3621,9 +3623,14 @@ static void cons_wipe(struct cmd_con* c) {
 static void cmd_push(struct cmd_con* c, const char* s) {
   int row, i;
   if (c->n >= CMD_ROWS) {
-    for (row = 1; row < CMD_ROWS; row++)
-      for (i = 0; i < CMD_COLS; i++) c->line[row - 1][i] = c->line[row][i];
+    /* sobe tudo uma linha (rep movsq: com 400 linhas o laco por byte pesa) */
+    void* d = c->line[0];
+    const void* src = c->line[1];
+    uint64_t q = (uint64_t)(CMD_ROWS - 1) * CMD_COLS / 8u;
+    __asm__ volatile ("rep movsq" : "+D"(d), "+S"(src), "+c"(q) : : "memory");
     c->n = CMD_ROWS - 1;
+  } else if (c->view) {
+    c->view++; /* quem esta lendo la em cima nao ve o texto andar */
   }
   c->sel = 0; /* as linhas mudam: a marcacao nao vale mais */
   row = c->n++;
@@ -3816,6 +3823,7 @@ static void cmd_paste(struct cmd_con* c) {
 static void cmd_move(struct cmd_con* c, uint8_t sc, int shift) {
   int plen;
   if (c->busy) return;
+  c->view = 0;
   plen = cmd_plen();
   if (shift && !(c->sel && c->ar == c->n)) {
     c->sel = 1;
@@ -3890,6 +3898,7 @@ static void cmd_tab(struct cmd_con* c) {
 static int cmd_key(struct wm_win* w, char ch) {
   struct cmd_con* c = (struct cmd_con*)w->st;
   if (!c || c->busy) return 0;
+  c->view = 0; /* digitar volta para o prompt */
   if (ch == '\t') {
     cmd_tab(c);
     return 0;
@@ -3930,6 +3939,7 @@ struct cmd_geo {
   int maxc;       /* colunas que cabem */
   int plen;       /* tamanho do prompt */
   int off;        /* primeiro caractere de in[] mostrado */
+  int vis;        /* linhas que cabem */
 };
 
 static void cmd_geom(struct wm_win* w, struct cmd_con* c, int title_h, int scale,
@@ -3941,13 +3951,19 @@ static void cmd_geom(struct wm_win* w, struct cmd_con* c, int title_h, int scale
   g->x0 = w->x + 6;
   vis = (w->h - title_h) / ch;
   if (vis < 1) vis = 1;
-  /* Nasce no topo. Desce com o texto. So fica no rodape quando a janela enche. */
+  g->vis = vis;
+  /* Nasce no topo. Desce com o texto. So fica no rodape quando a janela enche.
+   * Rolado (view > 0), o prompt fica abaixo da janela (prompt_row >= vis). */
   if (c->n + 1 <= vis) {
+    c->view = 0;
     g->start = 0;
     g->prompt_row = c->n;
   } else {
-    g->start = c->n - (vis - 1);
-    g->prompt_row = vis - 1;
+    int maxv = c->n - (vis - 1);
+    if (c->view > maxv) c->view = maxv;
+    if (c->view < 0) c->view = 0;
+    g->start = c->n - (vis - 1) - c->view;
+    g->prompt_row = vis - 1 + c->view;
   }
   g->cell = FONT_W * scale;
   g->maxc = g->cell > 0 ? (w->w - 12) / g->cell : 40;
@@ -3958,6 +3974,14 @@ static void cmd_geom(struct wm_win* w, struct cmd_con* c, int title_h, int scale
   if (room < 1) room = 1;
   g->off = c->inlen > room ? c->inlen - room : 0;
   if (c->cur < g->off) g->off = c->cur;
+}
+
+/* Rola o texto do Command: dz > 0 desce (para o prompt), < 0 sobe. */
+static void cmd_scroll(struct cmd_con* c, int dz) {
+  if (!c || (c->tty && c->tty->on)) return;
+  c->view -= dz;
+  if (c->view < 0) c->view = 0;
+  if (c->view > c->n) c->view = c->n; /* cmd_geom corta pelo tamanho da janela */
 }
 
 /* Linha virtual e coluna sob o ponto (mx, my). */
@@ -4125,6 +4149,7 @@ static void cmd_draw(struct wm_win* w, int focus, int title_h, int scale,
   cmd_geom(w, c, title_h, scale, &g);
   fill_rect(w->x, g.y0, w->w, w->h - title_h, col_black);
   last = c->busy ? g.prompt_row - 1 : g.prompt_row;
+  if (last > g.vis - 1) last = g.vis - 1;
   for (li = 0; li <= last; li++) {
     int r = li == g.prompt_row ? c->n : g.start + li;
     int len, py = g.y0 + li * g.ih;
@@ -4648,6 +4673,7 @@ struct gui_win {
   int clip;     /* k_gui_clip: o programa trata Ctrl+V (recebe 22) */
   int maxed;    /* maximizada pelo botao/duplo clique no titulo */
   int panel;    /* k_gui_panel: sem titulo nem moldura (WINTAB) */
+  uint32_t pid; /* programa que abriu: as threads dele pintam aqui (gui_thread_enter) */
 };
 
 static int (*task_pending_cmd)(int, char**); /* proximo task_spawn roda isto */
@@ -4987,8 +5013,38 @@ static void gui_clamp_pos(void);
 static int gui_ok(void) {
   if (!gwins || !gtasks) return 0;
   if (gui_ix < 0 || gui_ix >= GUI_MAX || !gui.open) return 0;
+  /* thread de programa: task_cur e do mundo; vale a janela do programa dela */
+  if (kt_in_thread()) return gui.pid && gui.pid == kt_cur_pid();
   if (task_cur >= 0 && gtasks[task_cur].gid != gui_ix) return 0;
   return 1;
+}
+
+/* Thread de programa (kthread.c, outra CPU) dentro de um k_gui_*. gui_ix e
+ * task_cur sao do mundo, que nessa hora pode estar rodando outro programa ou
+ * o laco do WIN: os pixels da thread do compositor do Firefox iam para a
+ * janela do programa da vez (conteudo de uma janela dentro de outra) ou eram
+ * descartados (faixas velhas e novas misturadas, a janela piscava).
+ * Aqui gui_ix passa a ser a janela aberta pelo programa da thread ate o
+ * gui_thread_leave. A thread segura o BKL: o mundo so volta ao kernel depois
+ * que ela soltar, entao ninguem ve o gui_ix trocado. Devolve o gui_ix a
+ * repor, ou -1 (nao e thread, ou o programa nao tem janela: gui_ok recusa). */
+int gui_thread_enter(void) {
+  uint32_t pid;
+  int i, save;
+  if (!kt_in_thread() || !gwins) return -1;
+  pid = kt_cur_pid();
+  if (!pid) return -1;
+  for (i = 0; i < GUI_MAX; i++) {
+    if (!gwins[i].open || gwins[i].pid != pid) continue;
+    save = gui_ix;
+    gui_ix = i;
+    return save;
+  }
+  return -1;
+}
+
+void gui_thread_leave(int save) {
+  if (save >= 0) gui_ix = save;
 }
 static void (*chrome_under)(void);
 static void (*chrome_over)(void);
@@ -5060,8 +5116,11 @@ int gui_open(const char* title) {
   int i, n = 0, slot = -1;
   if (!gui_ensure()) return -2;
   if (!gui_allowed || !gfx_live || vt_bg() || gfx_w == 0) return -1;
+  /* a janela fica ligada a tarefa do mundo (task_cur): so ele abre e fecha */
+  if (kt_in_thread()) return -1;
   if (task_cur >= 0 && gtasks[task_cur].gid >= 0 && gwins[gtasks[task_cur].gid].open) {
     gui_ix = gtasks[task_cur].gid;
+    gui.pid = mod_current_pid();   /* programa aninhado (k_exec) herda a janela */
     gui_title(title);
     gui.z = ++zseq;
     gui_focus = gui_ix;
@@ -5174,6 +5233,7 @@ int gui_open(const char* title) {
   gui.clip = 0;
   gui.maxed = 0;
   gui.panel = 0;
+  gui.pid = mod_current_pid();
   gui.z = ++zseq;
   gui_focus = gui_ix;
   gui_stole = 1;
@@ -5189,10 +5249,12 @@ void gui_close(void) {
   if (gui_ix < 0 || gui_ix >= GUI_MAX) return;
   /* Um programa so fecha a propria janela. */
   if (task_cur >= 0 && gtasks[task_cur].gid != gui_ix) return;
+  if (kt_in_thread()) return;   /* task_cur e do mundo, nao da thread */
   if (!host_on) sched_set_idle(0);
   if (gui.pix) ufree(gui.pix);
   gui.pix = 0;
   gui.open = 0;
+  gui.pid = 0;
   gui.ask_close = 0;
   gui.drag = 0;
   gui.qn = 0;
@@ -5387,6 +5449,14 @@ void gui_present(void) {
   int scale, ch, close_s, close_x, ty, xoff;
   uint32_t title_bg = gui_col(0x000080), white = gui_col(0xFFFFFF), btn = gui_col(0xC0C0C0);
   uint32_t edge = gui_col(0x000000);
+  /* Thread de programa: so marca a janela dela. Com o mundo no laco do WIN
+   * (task_cur < 0) ela cairia no desenho sem WIN, que limpa a tela inteira. */
+  if (kt_in_thread()) {
+    if (!host_on || !gui_ok()) return;
+    win_api_dirty |= 2;
+    if (gpu_drv) gfx_dmg_add(gui.ox, gui.oy, gui.cw, gui.title_h + gui.ch);
+    return;
+  }
   if (host_on && task_cur >= 0) {
     /* 2 = so o conteudo desta janela mudou; qualquer outro "= 1" vence */
     win_api_dirty |= 2;
@@ -5848,6 +5918,19 @@ static int gui_event_coop(int* ev, int timeout_ms) {
 
 /* Espera um evento ate timeout_ms (-1 = sem limite). 0 = nada aconteceu. */
 int gui_event(int* ev, int timeout_ms) {
+  /* Thread de programa: so tira da fila da janela dela, sem esperar (quem
+   * espera e o k_gui_event, fora do gui_thread_enter). O caminho sem WIN
+   * abaixo le o teclado e o mouse direto: e so do mundo. */
+  if (kt_in_thread()) {
+    ev[0] = ev[1] = ev[2] = ev[3] = 0;
+    if (!gui_ok()) return -1;
+    if (gui.ask_close) {
+      gui.ask_close = 0;
+      ev[0] = GUI_EV_CLOSE;
+      return GUI_EV_CLOSE;
+    }
+    return gui_q_pop(ev);
+  }
   if (host_on && task_cur >= 0) return gui_event_coop(ev, timeout_ms);
   uint32_t t0 = net_ms();
   int i;
@@ -9672,6 +9755,8 @@ static int win_wm_run(void) {
             if (wh >= 0) {
               if (wins[wh].kind == WM_KIND_NOTE) {
                 note_scroll_by(&wins[wh], title_h + note_menubar_h(ch), scale, dz);
+              } else if (wins[wh].kind == WM_KIND_CMD && wins[wh].st) {
+                cmd_scroll((struct cmd_con*)wins[wh].st, dz * 3);
               } else if ((wins[wh].kind == WM_KIND_APP || wins[wh].kind == WM_KIND_RUN) &&
                          wins[wh].st) {
                 app_scroll_by(wins[wh].st, app_vis_lines(&wins[wh], title_h, ch), dz);
@@ -10408,9 +10493,19 @@ static int win_wm_run(void) {
           }
         } else if (!(sc & 0x80) && focus >= 0 && wins[focus].used && wins[focus].kind == WM_KIND_CMD) {
           struct cmd_con* cc = (struct cmd_con*)wins[focus].st;
+          struct cmd_geo cg;
+          int pg = 1;
+          if (cc) {
+            cmd_geom(&wins[focus], cc, title_h, scale, &cg);
+            pg = cg.vis > 2 ? cg.vis - 1 : 1;
+          }
           if (sc == 0x48) cmd_hist(&wins[focus], 1);
           else if (sc == 0x50) cmd_hist(&wins[focus], -1);
           else if (sc == 0x53) cmd_key(&wins[focus], 0x7f);
+          else if (cc && sc == 0x49) cmd_scroll(cc, -pg);            /* PgUp */
+          else if (cc && sc == 0x51) cmd_scroll(cc, pg);             /* PgDn */
+          else if (cc && kbd_ctrl_down() && sc == 0x47) cmd_scroll(cc, -CMD_ROWS); /* Ctrl+Home */
+          else if (cc && kbd_ctrl_down() && sc == 0x4F) cmd_scroll(cc, CMD_ROWS);  /* Ctrl+End */
           else if (cc && (sc == 0x4B || sc == 0x4D || sc == 0x47 || sc == 0x4F))
             cmd_move(cc, sc, keymap_shift());
           if (!wm_present_win(&wins[focus])) need_draw = 1;

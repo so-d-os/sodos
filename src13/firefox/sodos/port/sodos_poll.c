@@ -16,6 +16,9 @@ extern int sodos_pipe_is(int fd);
 extern short sodos_pipe_poll(int fd, short events);
 extern int sodos_sock_is(int fd);                    /* sodos_sock.c */
 extern short sodos_sock_poll(int fd, short events);
+/* epoll/timerfd/eventfd do port do Dart (fracos: no Firefox nao existem). */
+extern int sodos_evt_is(int fd) __attribute__((weak));
+extern short sodos_evt_poll(int fd, short events) __attribute__((weak));
 #else
 #define sodos_pipe_is(fd) 0
 #define sodos_pipe_poll(fd, events) 0
@@ -75,6 +78,10 @@ int poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
         ev = sodos_sock_poll(fd, fds[i].events);
       } else if (sodos_pipe_is(fd)) {
         ev = sodos_pipe_poll(fd, fds[i].events);
+#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+      } else if (sodos_evt_is && sodos_evt_is(fd)) {
+        ev = sodos_evt_poll(fd, fds[i].events);
+#endif
       } else {
         ev = POLLNVAL;
       }
