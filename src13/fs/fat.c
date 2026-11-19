@@ -4,6 +4,7 @@
 #include "sched.h"
 #include "drives.h"
 #include "kexports.h"
+#include "../kernel/serial.h"
 
 // Estrutura do Boot Sector FAT
 struct fat_boot_sector {
@@ -1781,6 +1782,18 @@ static void free_chain(uint16_t cluster) {
 static void flush_fat(void) {
   uint8_t* fat_buf = (uint8_t*)fat_table;
   uint32_t n = boot_sector->sectors_per_fat_16;
+  if (fat_type == 16) {
+    /* FAT[0] = F8FF (midia), FAT[1] = FFFF: uma vez apareceram zerados no disco
+     * da VM (corrupcao em memoria ainda nao achada), e o volume ficou ilegivel */
+    uint16_t* f16 = (uint16_t*)fat_table;
+    uint16_t want0 = (uint16_t)(0xFF00u | boot_sector->media_type);
+    if (f16[0] != want0 || f16[1] != 0xFFFFu) {
+      serial_puts("[fat] FAT[0]/FAT[1] estragados na memoria, restaurados\n");
+      f16[0] = want0;
+      f16[1] = 0xFFFFu;
+      fat_dirty[0] |= 1u;
+    }
+  }
   for (uint32_t i = 0; i < n; i++) {
     if (!(fat_dirty[i >> 3] & (1u << (i & 7u)))) continue;
     for (uint32_t f = 0; f < boot_sector->fat_count; f++)

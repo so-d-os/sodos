@@ -281,35 +281,61 @@ static WINAPI void WakeAllConditionVariable(volatile int* cv) {
   k_futex_wake(cv, -1);
 }
 typedef void (WINAPI * lock_fn)(void*);
-static BOOL cv_wait(volatile int* cv, void* lock, const char* rel, const char* acq, DWORD ms) {
+static BOOL cv_wait(volatile int* cv, void* lock, const char* rel, const char* acq, DWORD ms, void* caller) {
   lock_fn r = (lock_fn)builtin_lookup(rel), a = (lock_fn)builtin_lookup(acq);
   int seq = *cv, rc;
   if (r) r(lock);
-  rc = k_futex_wait(cv, seq, ms == INFINITE ? -1 : (int)ms);
+  if (wine_debug >= 2 && ms == INFINITE) {
+    rc = k_futex_wait(cv, seq, 5000);
+    if (rc == -110 && *cv == seq) {
+      wwait_note("variavel de condicao", caller, 5000);
+      rc = k_futex_wait(cv, seq, -1);
+    }
+  } else {
+    rc = k_futex_wait(cv, seq, ms == INFINITE ? -1 : (int)ms);
+  }
   if (a) a(lock);
-  if (rc == -110) {
+  /* INFINITE nunca devolve FALSE (o Chromium chama abort() se devolver);
+   * acordar sem sinal e permitido no Windows tambem */
+  if (rc == -110 && ms != INFINITE) {
     wset_lasterr(1460); /* ERROR_TIMEOUT */
     return 0;
   }
   return 1;
 }
 static WINAPI BOOL SleepConditionVariableSRW(volatile int* cv, void* srw, DWORD ms, DWORD fl) {
-  (void)fl;
-  return cv_wait(cv, srw, "ReleaseSRWLockExclusive", "AcquireSRWLockExclusive", ms);
+  if (fl & 1)
+    return cv_wait(cv, srw, "ReleaseSRWLockShared", "AcquireSRWLockShared", ms, __builtin_return_address(0));
+  return cv_wait(cv, srw, "ReleaseSRWLockExclusive", "AcquireSRWLockExclusive", ms, __builtin_return_address(0));
 }
 static WINAPI BOOL SleepConditionVariableCS(volatile int* cv, void* cs, DWORD ms) {
-  return cv_wait(cv, cs, "LeaveCriticalSection", "EnterCriticalSection", ms);
+  return cv_wait(cv, cs, "LeaveCriticalSection", "EnterCriticalSection", ms, __builtin_return_address(0));
 }
+/* leitores de verdade: varios ao mesmo tempo (ver k32.c: -1 = escritor) */
+void wsrw_wait(volatile intptr_t* v, intptr_t seen); /* k32.c */
+void wsrw_wake(volatile intptr_t* v);
 static WINAPI void AcquireSRWLockShared(void** l) {
-  lock_fn a = (lock_fn)builtin_lookup("AcquireSRWLockExclusive");
-  if (a) a(l);
+  volatile intptr_t* v = (volatile intptr_t*)l;
+  int spins = 0;
+  for (;;) {
+    intptr_t cur = *v;
+    if (cur >= 0 && __sync_val_compare_and_swap(v, cur, cur + 1) == cur) return;
+    if (cur >= 0) continue; /* outro leitor mexeu: tenta de novo */
+    if (++spins < 64) {
+      __builtin_ia32_pause();
+      continue;
+    }
+    wsrw_wait(v, cur);
+  }
 }
 static WINAPI void ReleaseSRWLockShared(void** l) {
-  lock_fn r = (lock_fn)builtin_lookup("ReleaseSRWLockExclusive");
-  if (r) r(l);
+  if (__sync_sub_and_fetch((volatile intptr_t*)l, 1) == 0) wsrw_wake((volatile intptr_t*)l);
 }
+void wsrw_note(void* l, void* caller); /* k32.c */
 static WINAPI BOOL TryAcquireSRWLockExclusive(void** l) {
-  return __sync_val_compare_and_swap((volatile intptr_t*)l, 0, 1) == 0;
+  if (__sync_val_compare_and_swap((volatile intptr_t*)l, 0, -1) != 0) return 0;
+  wsrw_note(l, __builtin_return_address(0));
+  return 1;
 }
 static WINAPI BOOL InitOnceExecuteOnce(volatile intptr_t* once, BOOL (WINAPI* fn)(void*, void*, void**), void* p,
                                        void** ctx) {

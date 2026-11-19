@@ -1198,12 +1198,104 @@ static int dir_collect(int idx, char L, const char* name, struct dir_item* it, i
   return n;
 }
 
-/* Data, hora, tamanho e o nome no fim (nome longo de qualquer tamanho).
- * Na FAT o apelido 8.3 (NOME~1.EXT) vira o nome longo inteiro. */
-static void dir_line(const struct dir_item* e, int idx, const char* folder) {
+/* Nome para mostrar: na FAT o apelido 8.3 (NOME~1.EXT) vira o nome longo
+ * inteiro (lname guarda). */
+static const char* dir_show_name(const struct dir_item* e, int idx, const char* folder,
+                                 char* lname, int max) {
   char full[DRV_PATH];
+  if (is_tree(idx) && has_tilde(e->name)) {
+    int k = 0;
+    if (folder[0]) {
+      copy_str(full, (int)sizeof(full) - 33, folder);
+      k = str_len(full);
+      full[k++] = '\\';
+    }
+    copy_str(full + k, (int)sizeof(full) - k, e->name);
+    if (tree_long_name(idx, full, lname, max) == 0) return lname;
+  }
+  return e->name;
+}
+
+/* /b: so o nome; com /s o caminho inteiro (D:\PASTA\NOME). */
+static void dir_bare(const struct dir_item* e, int idx, char L, const char* folder, int full) {
   char lname[FAT_NAME_MAX];
-  const char* show = e->name;
+  if (full) {
+    putc(L);
+    puts_k(":\\");
+    if (folder[0]) {
+      puts_k(folder);
+      putc('\\');
+    }
+  }
+  puts_k(dir_show_name(e, idx, folder, lname, (int)sizeof(lname)));
+  putc('\n');
+}
+
+static int cmp_ci(const char* a, const char* b) {
+  while (*a && up_char(*a) == up_char(*b)) {
+    a++;
+    b++;
+  }
+  return (int)(unsigned char)up_char(*a) - (int)(unsigned char)up_char(*b);
+}
+
+static const char* ext_of(const char* s) {
+  int d = last_dot(s);
+  return d < 0 ? "" : s + d + 1;
+}
+
+/* /o: as chaves na ordem dada; empate final pelo nome. Nome com mais de 31
+ * letras ordena pelo apelido 8.3 (o que vem do disco). */
+static int dir_cmp(const struct dir_item* a, const struct dir_item* b, const char* order) {
+  for (; *order; order++) {
+    int rev = 0, r = 0;
+    char k;
+    if (*order == '-') {
+      rev = 1;
+      if (!*++order) break;
+    }
+    k = up_char(*order);
+    if (k == 'N') r = cmp_ci(a->name, b->name);
+    else if (k == 'E') r = cmp_ci(ext_of(a->name), ext_of(b->name));
+    else if (k == 'S') r = a->size < b->size ? -1 : a->size > b->size;
+    else if (k == 'D') {
+      uint32_t x = ((uint32_t)a->date << 16) | a->time;
+      uint32_t y = ((uint32_t)b->date << 16) | b->time;
+      r = x < y ? -1 : x > y;
+    } else if (k == 'G') r = (int)b->dir - (int)a->dir;
+    if (r) return rev ? -r : r;
+  }
+  return cmp_ci(a->name, b->name);
+}
+
+/* Ordena os indices a[0..n) (merge de baixo para cima, estavel; tmp com n). */
+static void dir_sort(const struct dir_item* it, int* a, int* tmp, int n, const char* order) {
+  int* src = a;
+  int* dst = tmp;
+  int w, lo;
+  for (w = 1; w < n; w *= 2) {
+    for (lo = 0; lo < n; lo += 2 * w) {
+      int mid = lo + w < n ? lo + w : n;
+      int hi = lo + 2 * w < n ? lo + 2 * w : n;
+      int i = lo, j = mid, k = lo;
+      while (i < mid && j < hi)
+        dst[k++] = dir_cmp(&it[src[j]], &it[src[i]], order) < 0 ? src[j++] : src[i++];
+      while (i < mid) dst[k++] = src[i++];
+      while (j < hi) dst[k++] = src[j++];
+    }
+    {
+      int* t = src;
+      src = dst;
+      dst = t;
+    }
+  }
+  if (src != a)
+    for (lo = 0; lo < n; lo++) a[lo] = src[lo];
+}
+
+/* Data, hora, tamanho e o nome no fim (nome longo de qualquer tamanho). */
+static void dir_line(const struct dir_item* e, int idx, const char* folder) {
+  char lname[FAT_NAME_MAX];
   /* Sem dia ou mes e data que o sistema nao gravou: fica em branco. */
   if ((e->date & 31u) && ((e->date >> 5) & 15u) && ((e->date >> 5) & 15u) <= 12u) {
     unsigned d = e->date, t = e->time;
@@ -1226,17 +1318,7 @@ static void dir_line(const struct dir_item* e, int idx, const char* folder) {
     put_num(e->size, 17);
     putc(' ');
   }
-  if (is_tree(idx) && has_tilde(e->name)) {
-    int k = 0;
-    if (folder[0]) {
-      copy_str(full, (int)sizeof(full) - 33, folder);
-      k = str_len(full);
-      full[k++] = '\\';
-    }
-    copy_str(full + k, (int)sizeof(full) - k, e->name);
-    if (tree_long_name(idx, full, lname, (int)sizeof(lname)) == 0) show = lname;
-  }
-  puts_k(show);
+  puts_k(dir_show_name(e, idx, folder, lname, (int)sizeof(lname)));
   putc('\n');
 }
 
@@ -1271,31 +1353,37 @@ struct dir_sum {
   int shown;
 };
 
-/* Imprime uma pasta e, com DIR_SUB, as de dentro. */
+/* Imprime uma pasta e, com DIR_SUB, as de dentro (na ordem do /o). */
 static int dir_walk(int idx, char L, const char* name, const char* pat, int flags,
-                    int depth, struct dir_sum* tot) {
+                    const char* order, int depth, struct dir_sum* tot) {
   struct dir_item* it;
-  int* sel;
-  int n, i, cnt = 0;
+  int* ord;   /* todos os itens, na ordem do /o */
+  int* sel;   /* os que passam no padrao e no /a (antes, o tmp do sort) */
+  int n, i, k, cnt = 0;
   uint32_t files = 0, dirs = 0, bytes = 0;
   if (shell_break()) return 0;
   it = (struct dir_item*)kmalloc(DIR_ITEMS_MAX * (uint32_t)sizeof(struct dir_item));
-  sel = (int*)kmalloc(DIR_ITEMS_MAX * (uint32_t)sizeof(int));
-  if (!it || !sel) {
+  ord = (int*)kmalloc(2u * DIR_ITEMS_MAX * (uint32_t)sizeof(int));
+  if (!it || !ord) {
     if (it) kfree(it);
-    if (sel) kfree(sel);
+    if (ord) kfree(ord);
     puts_k("sem memoria\n");
     return -1;
   }
+  sel = ord + DIR_ITEMS_MAX;
   n = dir_collect(idx, L, name, it, DIR_ITEMS_MAX);
   if (n < 0) {
     kfree(it);
-    kfree(sel);
+    kfree(ord);
     return -1;
   }
-  for (i = 0; i < n; i++) {
+  for (i = 0; i < n; i++) ord[i] = i;
+  if (order && order[0]) dir_sort(it, ord, sel, n, order);
+  for (k = 0; k < n; k++) {
+    i = ord[k];
     if (!dir_match(pat, it[i].name)) continue;
     if ((flags & DIR_DIRS) && !it[i].dir) continue;
+    if ((flags & DIR_FILES) && it[i].dir) continue;
     sel[cnt++] = i;
     if (it[i].dir) dirs++;
     else {
@@ -1303,8 +1391,11 @@ static int dir_walk(int idx, char L, const char* name, const char* pat, int flag
       bytes += it[i].size;
     }
   }
-  /* Com /s so mostra as pastas que tem algo que casa. */
-  if (cnt > 0 || !(flags & DIR_SUB)) {
+  if (flags & DIR_BARE) {
+    if (cnt > 0) tot->shown = 1;
+    for (i = 0; i < cnt; i++) dir_bare(&it[sel[i]], idx, L, name, flags & DIR_SUB);
+  } else if (cnt > 0 || !(flags & DIR_SUB)) {
+    /* Com /s so mostra as pastas que tem algo que casa. */
     if (tot->shown) putc('\n');
     tot->shown = 1;
     puts_k(" Diretorio de ");
@@ -1325,24 +1416,25 @@ static int dir_walk(int idx, char L, const char* name, const char* pat, int flag
   tot->dirs += dirs;
   tot->bytes += bytes;
   if ((flags & DIR_SUB) && depth < DIR_DEPTH_MAX) {
-    for (i = 0; i < n; i++) {
+    for (k = 0; k < n; k++) {
       char sub[DRV_PATH];
-      int k = 0, j = 0;
+      int s = 0, j = 0;
+      i = ord[k];
       if (!it[i].dir) continue;
       if (shell_break()) break;
-      while (name[j] && k < (int)sizeof(sub) - 2) sub[k++] = name[j++];
-      if (k) sub[k++] = '\\';
-      for (j = 0; it[i].name[j] && k < (int)sizeof(sub) - 1; j++) sub[k++] = it[i].name[j];
-      sub[k] = 0;
-      dir_walk(idx, L, sub, pat, flags, depth + 1, tot);
+      while (name[j] && s < (int)sizeof(sub) - 2) sub[s++] = name[j++];
+      if (s) sub[s++] = '\\';
+      for (j = 0; it[i].name[j] && s < (int)sizeof(sub) - 1; j++) sub[s++] = it[i].name[j];
+      sub[s] = 0;
+      dir_walk(idx, L, sub, pat, flags, order, depth + 1, tot);
     }
   }
   kfree(it);
-  kfree(sel);
+  kfree(ord);
   return 0;
 }
 
-void drives_dir(const char* spec, int flags) {
+void drives_dir(const char* spec, int flags, const char* order) {
   char dspec[DRV_PATH];
   char pat[32];
   char L;
@@ -1384,12 +1476,14 @@ void drives_dir(const char* spec, int flags) {
   }
   tot.files = tot.dirs = tot.bytes = 0;
   tot.shown = 0;
-  if (dir_walk(idx, L, name, pat, flags, 0, &tot) != 0) {
+  if (dir_walk(idx, L, name, pat, flags, order, 0, &tot) != 0) {
     puts_k("pasta nao encontrada\n");
     return;
   }
-  if ((flags & DIR_SUB) && !tot.shown)
+  if ((flags & (DIR_SUB | DIR_BARE)) && !tot.shown)
     puts_k((flags & DIR_DIRS) ? "pasta nao encontrada\n" : "arquivo nao encontrado\n");
+  /* /b: so os nomes, sem totais nem espaco livre. */
+  if (flags & DIR_BARE) return;
   if (flags & DIR_SUB) {
     puts_k("\n Total:\n");
     put_num(tot.files, 10);
@@ -1654,7 +1748,7 @@ int drives_space(char letter, uint32_t* total_kb, uint32_t* free_kb) {
 }
 
 void drives_print_dir(const char* spec) {
-  drives_dir(spec, 0);
+  drives_dir(spec, 0, 0);
 }
 
 int drives_names(char letter, char out[][32], int max) {

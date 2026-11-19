@@ -54,12 +54,18 @@ void drives_prompt(char* out, int max);
 int drives_chdir(const char* spec);
 void drives_print_dir(const char* spec);
 
-/* Opcoes do dir: /s subpastas, /w largo, /d so pastas. */
-#define DIR_SUB  1
-#define DIR_WIDE 2
-#define DIR_DIRS 4
-/* spec aceita * e ? no ultimo nome (*.exe, ???.txt). */
-void drives_dir(const char* spec, int flags);
+/* Opcoes do dir: /s subpastas, /w largo, /ad (/d) so pastas, /a-d so
+ * arquivos, /b so os nomes (com /s, o caminho inteiro). */
+#define DIR_SUB   1
+#define DIR_WIDE  2
+#define DIR_DIRS  4
+#define DIR_FILES 8
+#define DIR_BARE  16
+/* spec aceita * e ? no ultimo nome (*.exe, ???.txt). order e o /o, ja
+ * conferido: chaves N nome, E extensao, S tamanho, D data, G pastas antes,
+ * cada uma com - na frente para inverter ("GN", "-S"); 0 ou "" = a ordem
+ * da pasta no disco. */
+void drives_dir(const char* spec, int flags, const char* order);
 /* del: 0 apagou, >0 quantos (com * e ?), <0 erro (ver drives.c). */
 int drives_del(const char* spec);
 /* Renomeia/move no mesmo disco FAT: 0 ok, -1 nao existe, -2 invalido,

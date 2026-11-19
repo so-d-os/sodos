@@ -360,12 +360,15 @@ static int find_file(const char* name, char* out, int max) {
   char cand[200];
   struct wproc* p = wp();
   int i;
-  if (strchr(name, '\\') || strchr(name, ':')) {
-    if (k_fsize(name) > 0) {
-      strncpy(out, name, (size_t)max - 1);
+  if (strchr(name, '\\') || strchr(name, ':') || strchr(name, '/')) {
+    char np[300];
+    wpath(name, np, (int)sizeof(np)); /* tira o \\?\ e o \??\, troca / por \ */
+    if (k_fsize(np) > 0) {
+      strncpy(out, np, (size_t)max - 1);
       out[max - 1] = 0;
       return 0;
     }
+    if (wine_debug) wlog("DLL nao encontrada: ", np);
     return -1;
   }
   /* pasta do EXE */
@@ -396,14 +399,70 @@ ok:
 
 void* k_win_lowmem(unsigned addr, unsigned size);
 
+/* ---------- cache de arquivos de imagem grandes ----------
+ * O Chromium abre o mesmo Claude.exe (250 MB) em varios processos (crashpad,
+ * renderer, GPU). Ler do disco de novo, numa tarefa do WIN e disputando a CPU,
+ * levava minutos. O arquivo fica em memoria sem dono (compartilhada) enquanto
+ * houver processo do WINE; cada processo ainda monta e reloca a sua imagem. */
+void* k_malloc_shared(uint32_t n);
+void k_free_shared(void* p);
+#define IMG_CACHE_MIN (8u << 20)
+#define IMG_CACHE_MAX 8
+static struct {
+  char path[160];
+  int size;
+  uint8_t* data;
+} img_cache[IMG_CACHE_MAX];
+static volatile int img_lock, live_procs;
+static void ic_lock(void) {
+  while (__sync_lock_test_and_set(&img_lock, 1)) k_thread_yield();
+}
+static void ic_unlock(void) { __sync_lock_release(&img_lock); }
+static void* img_cache_get(const char* path, int size) {
+  int i;
+  void* d = 0;
+  if (size < (int)IMG_CACHE_MIN) return 0;
+  ic_lock();
+  for (i = 0; i < IMG_CACHE_MAX; i++)
+    if (img_cache[i].data && img_cache[i].size == size && wstreq(img_cache[i].path, path)) d = img_cache[i].data;
+  ic_unlock();
+  return d;
+}
+/* file ja e memoria compartilhada: passa a ser do cache (1) ou nao coube (0) */
+static int img_cache_put(const char* path, int size, uint8_t* file) {
+  int i, done = 0;
+  ic_lock();
+  for (i = 0; i < IMG_CACHE_MAX && !done; i++)
+    if (!img_cache[i].data) {
+      strncpy(img_cache[i].path, path, sizeof(img_cache[i].path) - 1);
+      img_cache[i].size = size;
+      img_cache[i].data = file;
+      done = 1;
+    }
+  ic_unlock();
+  return done;
+}
+/* main.c: um processo do WINE a mais / a menos; sem nenhum, o cache sai */
+void wimg_cache_proc(int delta) {
+  int i;
+  if (__sync_add_and_fetch(&live_procs, delta) > 0) return;
+  ic_lock();
+  for (i = 0; i < IMG_CACHE_MAX; i++)
+    if (img_cache[i].data) {
+      k_free_shared(img_cache[i].data);
+      img_cache[i].data = 0;
+    }
+  ic_unlock();
+}
+
 struct wmod* pe_load(const char* name, int is_exe) {
   int fixed = 0;
-  char path[200];
+  char path[300];
   struct wmod* m;
   struct pe_info pi;
   uint8_t* file;
   uint8_t* base;
-  int fsz, i;
+  int fsz, i, cached = 0, high = 0;
   if (!is_exe) {
     m = pe_find(name);
     if (m) return m;
@@ -416,23 +475,28 @@ struct wmod* pe_load(const char* name, int is_exe) {
     return 0;
   }
   fsz = k_fsize(path);
-  file = (uint8_t*)k_malloc((unsigned)fsz + 1u);
+  file = (uint8_t*)img_cache_get(path, fsz);
+  cached = file != 0;
+  /* grande: lido direto em memoria compartilhada, que vira o cache */
+  if (!file) file = (uint8_t*)(fsz >= (int)IMG_CACHE_MIN ? k_malloc_shared((unsigned)fsz + 1u)
+                                                          : k_malloc((unsigned)fsz + 1u));
   if (!file) {
     wsay("sem memoria para ", path);
     return 0;
   }
-  if (k_fload(path, (char*)file, fsz + 1) != fsz) {
+  if (!cached && k_fload(path, (char*)file, fsz + 1) != fsz) {
     wsay("erro lendo ", path);
     k_free(file);
     return 0;
   }
+  if (!cached && fsz >= (int)IMG_CACHE_MIN && img_cache_put(path, fsz, file)) cached = 1;
   if (pe_parse(file, (uint32_t)fsz, &pi, path) != 0) {
-    k_free(file);
+    if (!cached) k_free(file);
     return 0;
   }
   if (!is_exe != !!(pi.chars & 0x2000)) {
     wsay(path, is_exe ? ": e uma DLL, nao um EXE" : ": nao e uma DLL");
-    k_free(file);
+    if (!cached) k_free(file);
     return 0;
   }
   {
@@ -443,17 +507,22 @@ struct wmod* pe_load(const char* name, int is_exe) {
       base = (uint8_t*)k_win_lowmem((unsigned)pi.image_base, pi.size_image);
       if (!base) {
         wsay(path, ": base fixa e o endereco nao esta livre no SODOS (outro EXE de base fixa rodando, ou imagem grande demais)");
-        k_free(file);
+        if (!cached) k_free(file);
         return 0;
       }
       fixed = 1;
     } else {
-      base = (uint8_t*)k_malloc_aligned(pi.size_image, 0x10000);
+      /* acima de 4 GB quando der (codigo x64 com relocacoes roda em qualquer
+       * endereco): a arena baixa e pouca para 4 processos do Chromium com
+       * 260 MB de imagem cada */
+      base = (uint8_t*)k_hmalloc(pi.size_image, 0x10000);
+      high = base != 0;
+      if (!base) base = (uint8_t*)k_malloc_aligned(pi.size_image, 0x10000);
     }
   }
   if (!base) {
     wsay("sem memoria para a imagem de ", path);
-    k_free(file);
+    if (!cached) k_free(file);
     return 0;
   }
   memset(base, 0, pi.size_image);
@@ -464,16 +533,22 @@ struct wmod* pe_load(const char* name, int is_exe) {
     uint32_t n = rsz < vsz || !vsz ? rsz : vsz;
     if (va + (vsz > rsz ? vsz : rsz) > pi.size_image || roff + n > (uint32_t)fsz) {
       wsay(path, ": secao fora da imagem");
-      if (!fixed) k_free(base);
-      k_free(file);
+      if (!fixed) {
+        if (high) k_hfree(base);
+        else k_free(base);
+      }
+      if (!cached) k_free(file);
       return 0;
     }
     memcpy(base + va, file + roff, n);
   }
-  k_free(file);
+  if (!cached) k_free(file);
   /* daqui em diante a imagem mapeada tem os cabecalhos */
   if (pe_parse(base, pi.size_image, &pi, path) != 0 || relocate(base, &pi, path) != 0) {
-    if (!fixed) k_free(base);
+    if (!fixed) {
+      if (high) k_hfree(base);
+      else k_free(base);
+    }
     return 0;
   }
   m = mod_new(is_exe ? path : name);
@@ -486,6 +561,16 @@ struct wmod* pe_load(const char* name, int is_exe) {
   m->stack_reserve = (uint32_t)RD64(pi.opt + 72);
   dir_of(&pi, DIR_EXCEPTION, &m->pdata_rva, &m->pdata_size);
   vm_register_image(base, pi.size_image);
+  { /* VirtualQuery responde a protecao de cada secao (o Chromium confere a
+     * secao "somente leitura" do base::ProtectedMemory) */
+    void vm_image_prot(uint8_t* a, size_t n, DWORD characteristics); /* vm.c */
+    vm_image_prot(base, pi.size_headers, 0x40000000u); /* cabecalhos: leitura */
+    for (i = 0; i < pi.nsect; i++) {
+      const uint8_t* s = pi.sect + 40 * i;
+      uint32_t vsz = RD32(s + 8), va = RD32(s + 12), rsz = RD32(s + 16);
+      vm_image_prot(base + va, vsz ? vsz : rsz, RD32(s + 36));
+    }
+  }
   if (is_exe) {
     wp()->exe = m;
     *(uint64_t*)(wp()->peb + PEB_IMAGEBASE) = (uint64_t)(uintptr_t)base;

@@ -16,10 +16,11 @@ static const char* const known[] = {
     "bcrypt", "crypt32", "version", "userenv", "psapi", "iphlpapi", "dnsapi", "secur32", "sechost",
     "netapi32", "winhttp", "wintrust", "wtsapi32", "setupapi", "cfgmgr32", "dwmapi", "comctl32",
     "shlwapi", "uxtheme", "imm32", "powrprof", "shcore", "rpcrt4", "msimg32", "gdiplus",
-    "vcruntime140", "vcruntime140_1", "msvcp140", 0};
+    "vcruntime140", "vcruntime140_1", "msvcp140", "dwrite", "dxgi", "d3d11", "dcomp", "oleacc", "uiautomationcore", "propsys", "mpr", "ncrypt", "wevtapi", 0};
 
-static const struct wine_sym* const tables[] = {k32_syms, vm_syms,  obj_syms, exc_syms, file_syms,
-                                                crt_syms, sys_syms, reg_syms, net_syms, gui_syms, misc_syms, crypt_syms, winrt_syms, proc_syms, sig_syms, compat_syms, gdi_syms, dlg_syms, shell_syms, uimisc_syms, 0};
+/* sec_syms primeiro: substitui os stubs antigos de seguranca (sys, shell, compat) */
+static const struct wine_sym* const tables[] = {sec_syms, map_syms, nt_syms, pipe_syms, k32_syms, vm_syms,  obj_syms, exc_syms, file_syms,
+                                                crt_syms, sys_syms, reg_syms, net_syms, gui_syms, misc_syms, crypt_syms, winrt_syms, proc_syms, sig_syms, compat_syms, gdi_syms, dlg_syms, shell_syms, uimisc_syms, procmisc_syms, safearray_syms, dwrite_syms, fill_syms, 0};
 
 static int starts(const char* s, const char* p) {
   while (*p && *s == *p) {

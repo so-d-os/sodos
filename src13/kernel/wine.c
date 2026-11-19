@@ -63,7 +63,7 @@ static void kuser_on(void) {
   if (!k) {
     /* Num PC com UEFI o endereco pode ser do firmware ou estar fora do heap:
      * uma pagina nossa passa a aparecer em 0x7FFE0000 (tabela de paginas). */
-    uint8_t* raw = (uint8_t*)umalloc(0x2000);
+    uint8_t* raw = (uint8_t*)umalloc_owned(0x2000, 0); /* do kernel: dura ate o kuser_off */
     uint8_t* pg = raw ? (uint8_t*)(((uintptr_t)raw + 0xFFFu) & ~(uintptr_t)0xFFFu) : 0;
     if (!pg || !mm_alias_page(WINE_KUSER_ADDR, (uint64_t)(uintptr_t)pg)) {
       if (raw) ufree(raw);
@@ -89,6 +89,7 @@ static void kuser_on(void) {
   *(uint32_t*)(k + 0x270) = 0;           /* NtMinorVersion */
   *(uint32_t*)(k + 0x3C0) = 1;           /* ActiveProcessorCount */
   wine_kuser = k;
+  mm_null_guard(1); /* NULL falha, como no Windows */
   wine_tick(irq_ticks());
 }
 
@@ -96,6 +97,7 @@ static void kuser_off(void) {
   uint8_t* k = (uint8_t*)wine_kuser;
   if (!k) return;
   wine_kuser = 0;
+  mm_null_guard(0);
   if (kuser_raw) {
     mm_alias_undo();
     ufree(kuser_raw);

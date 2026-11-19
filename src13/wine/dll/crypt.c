@@ -226,8 +226,70 @@ static WINAPI BOOL CryptGenRandom(HANDLE prov, DWORD n, uint8_t* buf) {
   return 1;
 }
 
+/* ---------- DPAPI (CryptProtectData) ----------
+ * O Chromium guarda a chave dos cookies e senhas (os_crypt / safeStorage)
+ * protegida pela DPAPI. O SODOS nao tem conta de usuario nem chave mestra:
+ * aqui o dado so ganha um cabecalho e um XOR fixo. NAO e protecao de verdade
+ * (fica registrado no plano: safeStorage sem seguranca real no SODOS). */
+struct data_blob {
+  DWORD n;
+  uint8_t* p;
+};
+static const uint8_t dp_magic[8] = {'S', 'O', 'D', 'O', 'S', 'D', 'P', '1'};
+typedef void*(WINAPI* dp_la_fn)(DWORD, size_t);
+static uint8_t* dp_alloc(size_t n) {
+  dp_la_fn f = (dp_la_fn)builtin_lookup("LocalAlloc");
+  return f ? (uint8_t*)f(0x40, n) : 0; /* o programa solta com LocalFree */
+}
+static WINAPI BOOL CryptProtectData(const struct data_blob* in, const wchar16* desc, const struct data_blob* ent,
+                                    void* res, void* prompt, DWORD fl, struct data_blob* out) {
+  DWORD i;
+  (void)desc; (void)ent; (void)res; (void)prompt; (void)fl;
+  if (!in || !out) {
+    wset_lasterr(87);
+    return 0;
+  }
+  out->p = dp_alloc((size_t)in->n + 8);
+  if (!out->p) {
+    wset_lasterr(8);
+    return 0;
+  }
+  memcpy(out->p, dp_magic, 8);
+  for (i = 0; i < in->n; i++) out->p[8 + i] = in->p[i] ^ (uint8_t)(0x5A + i);
+  out->n = in->n + 8;
+  return 1;
+}
+static WINAPI BOOL CryptUnprotectData(const struct data_blob* in, wchar16** desc, const struct data_blob* ent,
+                                      void* res, void* prompt, DWORD fl, struct data_blob* out) {
+  DWORD i;
+  (void)ent; (void)res; (void)prompt; (void)fl;
+  if (desc) *desc = 0;
+  if (!in || !out || in->n < 8 || memcmp(in->p, dp_magic, 8) != 0) {
+    wset_lasterr(13); /* ERROR_INVALID_DATA: protegido em outro Windows */
+    return 0;
+  }
+  out->p = dp_alloc(in->n - 8 + 1);
+  if (!out->p) {
+    wset_lasterr(8);
+    return 0;
+  }
+  for (i = 0; i < in->n - 8; i++) out->p[i] = in->p[8 + i] ^ (uint8_t)(0x5A + i);
+  out->n = in->n - 8;
+  return 1;
+}
+/* memoria do proprio processo: um processo so ve a si mesmo, nada a fazer */
+static WINAPI BOOL CryptProtectMemory(void* p, DWORD n, DWORD fl) {
+  (void)p; (void)n; (void)fl;
+  return 1;
+}
+static WINAPI BOOL CryptUnprotectMemory(void* p, DWORD n, DWORD fl) {
+  (void)p; (void)n; (void)fl;
+  return 1;
+}
+
 #define S(n) {#n, (void*)n}
 const struct wine_sym crypt_syms[] = {
+    S(CryptProtectData), S(CryptUnprotectData), S(CryptProtectMemory), S(CryptUnprotectMemory),
     S(CertCreateCertificateContext), S(CertFreeCertificateContext), S(CertDuplicateCertificateContext),
     S(CertOpenStore), S(CertOpenSystemStoreW), S(CertCloseStore), S(CertAddCertificateContextToStore),
     S(CertEnumCertificatesInStore), S(CertGetCertificateChain), S(CertFreeCertificateChain),

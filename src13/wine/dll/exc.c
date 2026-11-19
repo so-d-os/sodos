@@ -43,7 +43,8 @@ struct exc_pointers {
   struct exc_record* rec;
   uint8_t* ctx;
 };
-typedef long (WINAPI * veh_fn)(struct exc_pointers*);
+/* LONG do Windows tem 32 bits (o long daqui tem 64): o retorno e int32_t */
+typedef int32_t (WINAPI * veh_fn)(struct exc_pointers*);
 
 enum { F_R11, F_R10, F_R9, F_R8, F_RDI, F_RSI, F_RBP, F_RBX, F_RDX, F_RCX,
        F_RAX, F_VEC, F_ERR, F_RIP, F_CS, F_RFLAGS, F_RSP, F_SS };
@@ -52,29 +53,10 @@ void wine_fault_entry(void);
 __attribute__((noreturn)) void wine_ctx_resume(const uint8_t* ctx);
 void wine_fault_dispatch(const uint64_t* fr, uint64_t cr2, uint8_t* ctx);
 
-/* 1 = algum handler mandou continuar (o contexto pode ter mudado). */
-static int exc_dispatch(struct exc_record* rec, uint8_t* ctx) {
-  struct wproc* p = wp();
-  struct exc_pointers ep;
-  int i, cont = 0;
-  ep.rec = rec;
-  ep.ctx = ctx;
-  for (i = 0; i < WVEH_MAX && !cont; i++)
-    if (p->veh[i] && ((veh_fn)p->veh[i])(&ep) == -1) cont = 1;
-  if (!cont && p->unhandled_filter && ((veh_fn)p->unhandled_filter)(&ep) == -1) cont = 1;
-  /* O Windows chama os "continue handlers" nos dois casos. */
-  for (i = 0; i < WVEH_MAX; i++)
-    if (p->vch[i] && ((veh_fn)p->vch[i])(&ep) == -1) {
-      cont = 1;
-      break;
-    }
-  return cont;
-}
-
-static void exc_fatal(const struct exc_record* rec, const uint8_t* ctx) {
+static void exc_report(const char* what, const struct exc_record* rec, const uint8_t* ctx) {
   uint64_t rip = *(const uint64_t*)(ctx + CTX_RIP);
   struct wmod* m;
-  wlogx("excecao nao tratada, codigo ", rec->code);
+  wlogx(what, rec->code);
   wlogx("  rip ", rip);
   wlogx("  rsp ", *(const uint64_t*)(ctx + CTX_RSP));
   if (rec->nparams >= 2) wlogx("  endereco ", rec->info[1]);
@@ -87,6 +69,87 @@ static void exc_fatal(const struct exc_record* rec, const uint8_t* ctx) {
     extern const void* wine_driver(void);
     wlogx("  WINE.DLL, wine_driver + ", rip - (uint64_t)(uintptr_t)wine_driver);
   }
+  if (wine_debug >= 2) { /* registradores; texto quando apontam para a imagem */
+    static const char* const nm[16] = {"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+                                       "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"};
+    const uint64_t* g = (const uint64_t*)(ctx + CTX_RAX);
+    uint64_t rsp = g[4];
+    int i;
+    for (i = 0; i < 16; i++) {
+      char t[64];
+      int k = 0;
+      const char* n = nm[i];
+      t[k++] = ' ';
+      t[k++] = ' ';
+      while (*n) t[k++] = *n++;
+      t[k++] = ' ';
+      t[k] = 0;
+      wlogx(t, g[i]);
+      /* ponteiro na pilha (uma struct como base::Location): campos que
+       * apontam para texto na imagem */
+      if (g[i] && g[i] - rsp < 0x10000 && g[i] + 0x60 <= *(uint64_t*)(wteb() + TEB_STACKBASE)) {
+        const uint64_t* f = (const uint64_t*)(uintptr_t)g[i];
+        const char* in = (const char*)(uintptr_t)g[i] + 1; /* std::string curta (libc++) */
+        int j;
+        if (in[0] >= 32 && in[0] <= 126 && in[1] >= 32 && in[1] <= 126 && in[2] >= 32 && in[2] <= 126)
+          wlog("    texto curto: ", in);
+        for (j = 0; j < 12; j++) {
+          struct wmod* mm = pe_from_addr(f[j]);
+          const char* str = (const char*)(uintptr_t)f[j];
+          int c, ok = 1;
+          /* imagem, ou heap abaixo de 4 GB (mapeado 1:1, sempre legivel) */
+          if ((!mm || !mm->base) && (f[j] < 0x100000 || f[j] >= 0x100000000ull)) continue;
+          for (c = 0; c < 4; c++)
+            if (str[c] < 32 || str[c] > 126) ok = 0;
+          if (ok) wlog("    texto: ", str);
+        }
+      }
+    }
+  }
+  { /* enderecos de retorno na pilha que caem em algum modulo (rva) */
+    const uint64_t* sp = (const uint64_t*)(uintptr_t)*(const uint64_t*)(ctx + CTX_RSP);
+    int i, shown = 0;
+    uint64_t top = *(uint64_t*)(wteb() + TEB_STACKBASE);
+    int lim = 256;
+    if (top > (uint64_t)(uintptr_t)sp && (top - (uint64_t)(uintptr_t)sp) / 8 < (uint64_t)lim)
+      lim = (int)((top - (uint64_t)(uintptr_t)sp) / 8);
+    for (i = 0; i < lim && shown < 12; i++) {
+      struct wmod* mm = pe_from_addr(sp[i]);
+      if (mm && mm->base) {
+        wlog("  pilha: ", mm->name);
+        wlogx("    rva ", sp[i] - (uint64_t)(uintptr_t)mm->base);
+        shown++;
+      }
+    }
+  }
+}
+
+/* 1 = algum handler mandou continuar (o contexto pode ter mudado). */
+static int exc_dispatch(struct exc_record* rec, uint8_t* ctx) {
+  struct wproc* p = wp();
+  struct exc_pointers ep;
+  int i, cont = 0;
+  ep.rec = rec;
+  ep.ctx = ctx;
+  for (i = 0; i < WVEH_MAX && !cont; i++)
+    if (p->veh[i] && ((veh_fn)p->veh[i])(&ep) == -1) cont = 1;
+  if (!cont && p->unhandled_filter) {
+    /* o filtro do programa (crashpad) costuma encerrar o processo sem dizer
+     * o que houve: com WINEDEBUG=2 o registro sai antes */
+    if (wine_debug >= 2) exc_report("excecao para o filtro do programa, codigo ", rec, ctx);
+    if (((veh_fn)p->unhandled_filter)(&ep) == -1) cont = 1;
+  }
+  /* O Windows chama os "continue handlers" nos dois casos. */
+  for (i = 0; i < WVEH_MAX; i++)
+    if (p->vch[i] && ((veh_fn)p->vch[i])(&ep) == -1) {
+      cont = 1;
+      break;
+    }
+  return cont;
+}
+
+static void exc_fatal(const struct exc_record* rec, const uint8_t* ctx) {
+  exc_report("excecao nao tratada, codigo ", rec, ctx);
   k_puts("wine: excecao do Windows nao tratada (detalhes na serial)\n");
   wexit((int)rec->code);
 }
@@ -121,6 +184,12 @@ void wine_fault_dispatch(const uint64_t* fr, uint64_t cr2, uint8_t* ctx) {
   rec.address = (void*)(uintptr_t)fr[F_RIP];
   switch (fr[F_VEC]) {
     case 0: rec.code = 0xC0000094; break;          /* INT_DIVIDE_BY_ZERO */
+    case 3:                                        /* int3: BREAKPOINT (o CHECK do Chromium) */
+      rec.code = 0x80000003;
+      rec.address = (void*)(uintptr_t)(fr[F_RIP] - 1);
+      *(uint64_t*)(ctx + CTX_RIP) = fr[F_RIP] - 1;
+      rec.nparams = 1;
+      break;
     case 6: rec.code = 0xC000001D; break;          /* ILLEGAL_INSTRUCTION */
     case 14:
       rec.code = 0xC0000005;                       /* ACCESS_VIOLATION */

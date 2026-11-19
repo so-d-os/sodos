@@ -84,13 +84,14 @@ static WINAPI DWORD GetDynamicTimeZoneInformation(uint8_t* tz) {
 
 /* ---------- processo ---------- */
 static WINAPI DWORD GetProcessId(HANDLE h) {
-  (void)h;
-  return 0x100;
+  struct wobj* o = wh_get(h, OBJ_PROCESS);
+  if (o && o->u2) return (DWORD)o->u2; /* filho: pid gravado quando ele comecou */
+  return wp()->pid;
 }
 static WINAPI HANDLE OpenProcess(DWORD acc, BOOL inh, DWORD pid) {
   (void)acc;
   (void)inh;
-  if (pid == 0x100) return (HANDLE)(intptr_t)-1;
+  if (pid == wp()->pid || pid == 0x100) return wh_self_process();
   wset_lasterr(ERROR_INVALID_PARAMETER);
   return 0;
 }
@@ -237,7 +238,7 @@ static WINAPI long NtQueryInformationProcess(HANDLE h, int cls, void* buf, DWORD
   memset(buf, 0, len);
   if (cls == 0 && len >= 48) { /* ProcessBasicInformation */
     ((uint64_t*)buf)[1] = (uint64_t)(uintptr_t)wp()->peb;
-    ((uint64_t*)buf)[4] = 0x100;
+    ((uint64_t*)buf)[4] = wp()->pid;
     if (ret) *ret = 48;
     return 0;
   }
@@ -311,22 +312,95 @@ static WINAPI BOOL GetProcessMemoryInfo(HANDLE h, void* c, DWORD n) {
   memset(c, 0, n);
   return 1;
 }
-/* version.dll: os EXEs de teste nao tem bloco de versao. */
+/* version.dll. As DLLs do sistema embutidas no WINE nao tem arquivo: para
+ * elas sai um VS_VERSIONINFO so com o VS_FIXEDFILEINFO, versao 10.0.19041.x
+ * (a mesma do RtlGetVersion, build 19045). O Chromium exige a versao do
+ * kernel32.dll (OSInfo::Kernel32BaseVersion) e para com CHECK se faltar.
+ * Os outros arquivos (EXEs de teste) seguem sem bloco de versao. */
+#define VI_SIZE 96 /* 92 do VS_VERSIONINFO + a traducao (idioma, codigo) */
+static int ver_builtin(const wchar16* f) {
+  char n[64];
+  int i = 0, k;
+  const wchar16* b = f;
+  if (!f) return 0;
+  for (; *f; f++)
+    if (*f == '\\' || *f == '/' || *f == ':') b = f + 1;
+  for (; b[i] && i < 63; i++) n[i] = (char)(b[i] >= 'A' && b[i] <= 'Z' ? b[i] + 32 : b[i]);
+  n[i] = 0;
+  k = i - 4;
+  if (k > 0 && n[k] == '.' && n[k + 1] == 'd' && n[k + 2] == 'l' && n[k + 3] == 'l') n[k] = 0;
+  return builtin_known(n);
+}
+static void ver_fill(uint8_t* d) {
+  static const char key[] = "VS_VERSION_INFO";
+  DWORD* ff = (DWORD*)(d + 40);
+  int i;
+  memset(d, 0, VI_SIZE);
+  *(uint16_t*)d = VI_SIZE;      /* wLength */
+  *(uint16_t*)(d + 2) = 52;     /* wValueLength: VS_FIXEDFILEINFO */
+  for (i = 0; key[i]; i++) ((uint16_t*)(d + 6))[i] = (uint16_t)key[i];
+  ff[0] = 0xFEEF04BDu;          /* dwSignature */
+  ff[1] = 0x00010000u;          /* dwStrucVersion */
+  ff[2] = (10u << 16) | 0u;     /* FileVersion 10.0 */
+  ff[3] = (19041u << 16) | 3636u; /* .19041.3636 */
+  ff[4] = ff[2];                /* ProductVersion */
+  ff[5] = ff[3];
+  ff[6] = 0x3F;                 /* dwFileFlagsMask */
+  ff[8] = 0x00040004u;          /* VOS_NT_WINDOWS32 */
+  ff[9] = 2;                    /* VFT_DLL */
+  *(uint16_t*)(d + 92) = 0x0409; /* \VarFileInfo\Translation: en-US */
+  *(uint16_t*)(d + 94) = 1200;   /* Unicode */
+}
 static WINAPI DWORD GetFileVersionInfoSizeW(const wchar16* f, DWORD* h) {
-  (void)f;
   if (h) *h = 0;
+  if (ver_builtin(f)) return VI_SIZE;
   wset_lasterr(1813); /* ERROR_RESOURCE_TYPE_NOT_FOUND */
   return 0;
 }
 static WINAPI BOOL GetFileVersionInfoW(const wchar16* f, DWORD h, DWORD n, void* d) {
-  (void)f; (void)h; (void)n; (void)d;
-  return 0;
+  (void)h;
+  if (!ver_builtin(f) || !d || n < VI_SIZE) {
+    wset_lasterr(1813);
+    return 0;
+  }
+  ver_fill((uint8_t*)d);
+  return 1;
+}
+static WINAPI DWORD GetFileVersionInfoSizeExW(DWORD fl, const wchar16* f, DWORD* h) {
+  (void)fl;
+  return GetFileVersionInfoSizeW(f, h);
+}
+static WINAPI BOOL GetFileVersionInfoExW(DWORD fl, const wchar16* f, DWORD h, DWORD n, void* d) {
+  (void)fl;
+  return GetFileVersionInfoW(f, h, n, d);
+}
+static int sub_is(const wchar16* a, const char* b) {
+  for (; *b; a++, b++) {
+    wchar16 x = *a;
+    char y = *b;
+    if (x >= 'A' && x <= 'Z') x += 32;
+    if (y >= 'A' && y <= 'Z') y += 32;
+    if (x != (wchar16)y) return 0;
+  }
+  return *a == 0;
 }
 static WINAPI BOOL VerQueryValueW(const void* b, const wchar16* sub, void** out, DWORD* n) {
-  (void)b; (void)sub;
+  const uint8_t* d = (const uint8_t*)b;
   if (out) *out = 0;
   if (n) *n = 0;
-  return 0;
+  /* so o bloco que montamos: raiz (VS_FIXEDFILEINFO) e a traducao */
+  if (!d || !sub || *(const uint16_t*)(d + 2) != 52 || *(const DWORD*)(d + 40) != 0xFEEF04BDu) return 0;
+  if (sub_is(sub, "\\")) {
+    if (out) *out = (void*)(d + 40);
+    if (n) *n = 52;
+    return 1;
+  }
+  if (sub_is(sub, "\\VarFileInfo\\Translation")) {
+    if (out) *out = (void*)(d + 92);
+    if (n) *n = 4;
+    return 1;
+  }
+  return 0; /* StringFileInfo: sem textos */
 }
 static WINAPI long DwmSetWindowAttribute(HANDLE w, DWORD a, const void* v, DWORD n) {
   (void)w; (void)a; (void)v; (void)n;
@@ -408,7 +482,7 @@ struct procentryw {
   DWORD size, usage, pid;
   uintptr_t heap;
   DWORD module, threads, parent;
-  long pri;
+  int32_t pri; /* LONG do Windows: 4 bytes */
   DWORD flags;
   wchar16 exe[260];
 };
@@ -418,7 +492,7 @@ static WINAPI BOOL Process32FirstW(HANDLE snap, struct procentryw* e) {
   if (!o) return 0;
   o->u2 = 1;
   e->usage = 0;
-  e->pid = 0x100;
+  e->pid = p->pid;
   e->heap = 0;
   e->module = 0;
   e->threads = 1;
@@ -434,7 +508,7 @@ static WINAPI BOOL Process32NextW(HANDLE snap, struct procentryw* e) {
   return 0;
 }
 static WINAPI BOOL EnumProcesses(DWORD* ids, DWORD n, DWORD* need) {
-  if (n >= 4) ids[0] = 0x100;
+  if (n >= 4) ids[0] = wp()->pid;
   if (need) *need = 4;
   return 1;
 }
@@ -651,7 +725,7 @@ const struct wine_sym misc_syms[] = {
     S(WinHttpCloseHandle), S(WinHttpGetIEProxyConfigForCurrentUser), S(WinHttpGetProxyForUrl),
     S(WinHttpDetectAutoProxyConfigUrl), S(GetProfilesDirectoryW), S(GetUserNameExW),
     S(GetModuleFileNameExW), S(GetProcessMemoryInfo), S(GetFileVersionInfoSizeW),
-    S(GetFileVersionInfoW), S(VerQueryValueW), 
+    S(GetFileVersionInfoW), S(VerQueryValueW), S(GetFileVersionInfoSizeExW), S(GetFileVersionInfoExW), 
     S(OpenSCManagerW), S(OpenServiceW), S(CloseServiceHandle), S(QueryServiceStatus),
     S(QueryServiceStatusEx), S(EnumServicesStatusExW), S(CreateToolhelp32Snapshot),
     S(Process32FirstW), S(Process32NextW), S(EnumProcesses), S(LookupPrivilegeValueW),

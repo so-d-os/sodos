@@ -1332,6 +1332,22 @@ espelho.**
     driver cair e sempre que o quadro e remontado.
   - A `gfx_back_move` do WINE nao devolve o quadro largo a faixa baixa.
   - Maximizar e restaurar usam o monitor onde esta o centro da janela.
+  - Janela nova (`gui_open`) e as janelas do proprio WIN (`wm_clamp_rect`):
+    tamanho e posicao padrao pela largura da primeira tela, para nao nascer
+    cortada na segunda (2026-11-19).
+  - Icones do desktop: a grade usa so a largura da primeira tela
+    (`desk_place`).
+  - Arrastar icone (2026-11-19): apertar e mover mais de 6 pixels arrasta;
+    soltar grava a posicao em `D:\SODOS\DESKPOS.CFG` (`NOME x y`), inclusive
+    na segunda tela. Clique simples continua abrindo (ao soltar). Um icone
+    com posicao fora da area de agora (segunda tela sem a tela estendida)
+    volta para a grade; os outros ocupam as vagas da grade. Testado no QEMU
+    pela API e pelo monitor (arrasto, gravacao, clique abrindo).
+  - Barra de tarefas com programas (2026-11-19, `tb_*` no `visual.c`): um
+    botao por programa aberto, as janelas do mesmo programa empilhadas no
+    mesmo botao (o clique passa de uma para a outra), tracinho embaixo dos
+    abertos (comprido no da frente). Botao direito fixa/desafixa; os fixados
+    ficam em `D:\SODOS\BARRA.CFG` e abrem com um clique quando fechados.
 - **Testes:**
   - Simulador, cenario 17: consulta, estende, quadro largo inteiro e uma
     area so na segunda tela copiados (SDMA + CPU), suspend/resume e
@@ -1434,6 +1450,7 @@ Para repetir, ponha a chave no `VIDEO.CFG` do `disk.img` (com `mcopy`) e:
 ```
 make run                        # sem placa na tabela: tudo pela CPU
 make run-virtio                 # virtio-gpu: VIRTGPU.DLL entra sozinho
+make run2                       # o SODOS do PC (E:) como D:, numa copia (tools/run2.sh)
 ```
 
 ## Arquivos

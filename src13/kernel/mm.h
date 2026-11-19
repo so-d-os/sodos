@@ -9,6 +9,8 @@ int mm_map_wc(uint64_t phys, uint64_t size);
 /* Uma pagina de 4 KB em va passa a ser pa (um alias por vez); undo desfaz. */
 int mm_alias_page(uint64_t va, uint64_t pa);
 void mm_alias_undo(void);
+/* 1 = os primeiros 4 KB saem do mapa (NULL falha), 0 = voltam */
+void mm_null_guard(int on);
 void* kmalloc(uint32_t nbytes);
 void kfree(void* ptr);
 int mm_ready(void);

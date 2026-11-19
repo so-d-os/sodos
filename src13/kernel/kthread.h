@@ -17,7 +17,7 @@
 #include <stdint.h>
 
 #define KT_CPU_MAX 8
-#define KT_MAX     256   /* o Firefox (FFTHREADS) cria ~60-100 threads */
+#define KT_MAX     1024  /* o Firefox cria ~60-100 threads; o Claude (Electron), 6-8 processos com 30-40 cada */
 
 /* Uma vez no kmain, antes do sti: CPU0, o mundo, GS base, thunks. */
 void kt_early_init(void);
@@ -69,6 +69,8 @@ int kt_thread_join(int tid, int* code);
 int kt_thread_detach(int tid);
 void kt_thread_exit(int code) __attribute__((noreturn));
 int kt_thread_self(void);
+/* 1 se a thread existe e nao terminou. */
+int kt_thread_alive(int tid);
 int kt_thread_affinity(int tid, uint32_t mask);
 void kt_thread_yield(void);
 int kt_thread_tls(uint64_t fs);

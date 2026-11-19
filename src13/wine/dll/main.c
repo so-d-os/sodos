@@ -73,6 +73,8 @@ static void build_params(struct wproc* p) {
   *(uint64_t*)(pp + 0x78) = (uint64_t)(uintptr_t)p->wcmdline;
   *(uint64_t*)(p->peb + PEB_PARAMS) = (uint64_t)(uintptr_t)pp;
   /* OSMajorVersion 0x118, Minor 0x11C, Build 0x120 (Windows 10 22H2) */
+  /* PEB.LoaderLock: CRITICAL_SECTION sem dono (o Chromium confere OwningThread) */
+  *(uint64_t*)(p->peb + 0x110) = (uint64_t)(uintptr_t)wzalloc(48);
   *(uint32_t*)(p->peb + 0x118) = 10;
   *(uint32_t*)(p->peb + 0x11C) = 0;
   *(uint16_t*)(p->peb + 0x120) = 19045;
@@ -107,7 +109,8 @@ static int start(int argc, char** argv) {
   /* TEB de carga: desta tarefa (loader), nao da thread principal do EXE. */
   memset(teb, 0, TEB_SIZE);
   *(uint64_t*)(teb + TEB_SELF) = (uint64_t)(uintptr_t)teb;
-  *(uint64_t*)(teb + TEB_PID) = 0x100;
+  p->pid = wnew_pid();
+  *(uint64_t*)(teb + TEB_PID) = p->pid;
   *(uint64_t*)(teb + TEB_TID) = 0x104;
   *(uint64_t*)(teb + TEB_TLSPTR) = (uint64_t)(uintptr_t)tlsarr;
   *(uint64_t*)(teb + TEB_PEB) = (uint64_t)(uintptr_t)p;
@@ -116,7 +119,65 @@ static int start(int argc, char** argv) {
   p->next_tid = 0x108;
   k_win_teb(teb);   /* daqui em diante gs:0x30/0x60 sao deste processo */
   wine_debug = k_getenv("WINEDEBUG", dbg, (int)sizeof(dbg)) > 0 && dbg[0] != '0';
+  if (wine_debug && dbg[0] >= '2' && dbg[0] <= '9') wine_debug = dbg[0] - '0';
 
+  /* filho iniciado em paralelo pelo CreateProcess (argv[1] = --wine-spawn=N):
+   * troca pela linha de comando que o pai registrou */
+  int is_child = wspawn_claim(&argc, &argv);
+  wimg_cache_proc(1); /* antes de qualquer wexit, que desconta */
+  if (is_child < 0) wexit(1); /* pedido orfao: nao roda como programa de cima */
+  /* SET WINE_ARGS=...: opcoes acrescentadas a linha de comando (ex.: as do
+   * Chromium). SET WINE_ARGS_EXE=claude.exe limita a um programa. */
+  {
+    static char extra[4096], only[64]; /* a lista de opcoes do Chromium passa de 600 */
+    static char* nargv[160];
+    int ne = k_getenv("WINE_ARGS", extra, (int)sizeof(extra));
+    /* o SET guarda ate 259 caracteres: WINE_ARGS2 e WINE_ARGS3 continuam */
+    {
+      static const char* const more[2] = {"WINE_ARGS2", "WINE_ARGS3"};
+      int k;
+      for (k = 0; k < 2 && ne > 0; k++) {
+        int used = (int)strlen(extra), m;
+        if (used + 2 >= (int)sizeof(extra)) break;
+        extra[used] = ' ';
+        m = k_getenv(more[k], extra + used + 1, (int)sizeof(extra) - used - 1);
+        if (m <= 0) extra[used] = 0;
+      }
+    }
+    /* so no processo de cima: o Chromium repassa aos filhos o que precisa e o
+     * crashpad-handler recusa opcoes que nao conhece */
+    int apply = ne > 0 && !is_child;
+    if (apply && k_getenv("WINE_ARGS_EXE", only, (int)sizeof(only)) > 0 && only[0]) {
+      const char* b = argv[0];
+      const char* q;
+      for (q = argv[0]; *q; q++)
+        if (*q == '\\' || *q == '/' || *q == ':') b = q + 1;
+      if (strchr(only, '\\')) {
+        /* "app\claude.exe": casa o final do caminho (o instalador D:\CLAUDE.EXE
+         * tem o mesmo nome e recusava as opcoes do Chromium) */
+        size_t la = strlen(argv[0]), lo = strlen(only);
+        apply = la >= lo && wstreq(argv[0] + la - lo, only) &&
+                (la == lo || argv[0][la - lo - 1] == '\\' || argv[0][la - lo - 1] == '/' ||
+                 argv[0][la - lo - 1] == ':');
+      } else {
+        apply = wstreq(b, only);
+      }
+    }
+    if (apply && argc < 32) {
+      char* s = extra;
+      int n = 0;
+      for (i = 0; i < argc; i++) nargv[n++] = argv[i];
+      while (*s && n < 159) {
+        while (*s == ' ') *s++ = 0;
+        if (!*s) break;
+        nargv[n++] = s;
+        while (*s && *s != ' ') s++;
+      }
+      nargv[n] = 0;
+      argc = n;
+      argv = nargv;
+    }
+  }
   p->argc = argc;
   p->argv = (char**)wzalloc(sizeof(char*) * ((size_t)argc + 1));
   p->wargv = (wchar16**)wzalloc(sizeof(wchar16*) * ((size_t)argc + 1));
@@ -166,6 +227,14 @@ __attribute__((noreturn)) void wexit(int code) {
   struct wproc* p = wp();
   int first = !__sync_lock_test_and_set(&p->exiting, 1);
   if (first) {
+    wspawn_exit(code);
+    {
+      void wmap_proc_exit(void); /* map.c */
+      void wpipe_proc_exit(void); /* pipe.c */
+      wmap_proc_exit();
+      wpipe_proc_exit();
+    }
+    wimg_cache_proc(-1);
     pe_detach_all();
     p->exit_code = code;
     __sync_lock_test_and_set(&p->exit_req, 1);
@@ -174,6 +243,8 @@ __attribute__((noreturn)) void wexit(int code) {
   }
   /* A tarefa do loader devolve o codigo; as threads so param. */
   if (!wthread()) {
+    void wpipe_proc_exit(void); /* pipe.c: de novo, as threads podem ter pedido leitura depois */
+    wpipe_proc_exit();
     wfile_proc_exit();
     k_exit(code);
   }

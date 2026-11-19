@@ -4630,7 +4630,8 @@ static int gfx_bar_h(int big) {
 /* Mantem a janela dentro da resolucao escolhida (640x480 ate 1024x768). */
 static void wm_clamp_rect(int* x, int* y, int* w, int* h, int big) {
   int limit_h = (int)gfx_h - gfx_bar_h(big) - 4;
-  int limit_w = (int)gfx_w - 8;
+  /* tela estendida: no maximo a largura de uma tela */
+  int limit_w = (gfx_wide ? (int)gfx_wide_x2 : (int)gfx_w) - 8;
   if (limit_w < 40) limit_w = (int)gfx_w;
   if (limit_h < 40) limit_h = (int)gfx_h;
   if (*w > limit_w) *w = limit_w;
@@ -4862,6 +4863,9 @@ static int gui_ix;
 static int gui_allowed;
 static int gui_painting;
 static int task_cur = -1;
+/* Tarefa do WIN em execucao (-1 = o laco do WIN / o mundo). kexports.c usa
+ * para saber quem esta dentro do sistema de arquivos. */
+int gui_task_cur(void) { return task_cur; }
 static int host_on;
 static uint64_t host_rsp;
 static struct mod_cpu host_cpu;
@@ -5201,6 +5205,7 @@ void gui_thread_leave(int save) {
 static void (*chrome_under)(void);
 static void (*chrome_over)(void);
 static int (*chrome_click)(int x, int y);
+static int tb_direito;   /* barra de tarefas: o clique que chega ao chrome e o direito */
 static int* chrome_menu;
 static int chrome_leave;
 
@@ -5265,7 +5270,7 @@ int gui_open_pct(const char* title, int wpct, int hpct) {
 
 int gui_open(const char* title) {
   uint32_t bytes;
-  int i, n = 0, slot = -1;
+  int i, n = 0, slot = -1, tw;
   if (!gui_ensure()) return -2;
   if (!gui_allowed || !gfx_live || vt_bg() || gfx_w == 0) return -1;
   /* a janela fica ligada a tarefa do mundo (task_cur): so ele abre e fecha */
@@ -5287,12 +5292,15 @@ int gui_open(const char* title) {
   if (slot < 0) return -1;
   gui_ix = slot;
   if (task_cur >= 0) gtasks[task_cur].gid = slot;
+  /* Tela estendida: o tamanho e a posicao padrao saem da primeira tela,
+   * para a janela nova nao nascer cortada na segunda (2026-11-19). */
+  tw = gfx_wide ? (int)gfx_wide_x2 : (int)gfx_w;
   {
     int scale = (gfx_h >= 400u) ? 2 : 1;
     int font_h = (vga_bios_font_ok ? FONT_H : 8) * scale;
     int bar = font_h + (gfx_h >= 400u ? 8 : 2);
-    int margin_l = (int)gfx_w / 8;
-    int margin_r = (int)gfx_w / 24;
+    int margin_l = tw / 8;
+    int margin_r = tw / 24;
     int margin_t = (int)gfx_h / 16;
     if (margin_l < 36) margin_l = 36;
     if (margin_r < 12) margin_r = 12;
@@ -5301,12 +5309,12 @@ int gui_open(const char* title) {
     gui.title_h = font_h + (gfx_h >= 400u ? 4 : 2);
     gui.ox = margin_l;
     gui.oy = margin_t;
-    gui.cw = (int)gfx_w - margin_l - margin_r;
+    gui.cw = tw - margin_l - margin_r;
     gui.ch = (int)gfx_h - margin_t - bar - 6 - gui.title_h;
     if (gui.cw < 160 || gui.ch < 48) {
       gui.ox = 0;
       gui.oy = 0;
-      gui.cw = (int)gfx_w;
+      gui.cw = tw;
       gui.ch = (int)gfx_h - bar - gui.title_h;
       if (gui.ch < 32) gui.ch = (int)gfx_h - gui.title_h;
     }
@@ -5317,7 +5325,7 @@ int gui_open(const char* title) {
   gui.oy += n * 28;
   if (gui.ox < 0) gui.ox = 0;
   if (gui.oy < 0) gui.oy = 0;
-  if (gui.ox + gui.cw > (int)gfx_w) gui.cw = (int)gfx_w - gui.ox;
+  if (gui.ox + gui.cw > tw) gui.cw = tw - gui.ox;
   {
     int scale = gui.scale > 0 ? gui.scale : 1;
     int bar = glyph_rows() * scale + (gfx_h >= 400u ? 8 : 2);
@@ -5336,15 +5344,15 @@ int gui_open(const char* title) {
     int scale = gui.scale > 0 ? gui.scale : 1;
     int bar = glyph_rows() * scale + (gfx_h >= 400u ? 8 : 2);
     int avail = (int)gfx_h - bar;
-    int w = gui_pct_w > 0 ? (int)gfx_w * gui_pct_w / 100 : gui.cw;
+    int w = gui_pct_w > 0 ? tw * gui_pct_w / 100 : gui.cw;
     int h = gui_pct_h > 0 ? avail * gui_pct_h / 100 - gui.title_h : gui.ch;
     if (w < 360) w = 360;
     if (h < 240) h = 240;
-    if (w > (int)gfx_w) w = (int)gfx_w;
+    if (w > tw) w = tw;
     if (h > avail - gui.title_h) h = avail - gui.title_h;
     gui.cw = w;
     gui.ch = h;
-    if (gui.ox + gui.cw > (int)gfx_w) gui.ox = (int)gfx_w - gui.cw;
+    if (gui.ox + gui.cw > tw) gui.ox = tw - gui.cw;
     if (gui.oy + gui.title_h + gui.ch > avail) gui.oy = avail - gui.title_h - gui.ch;
     if (gui.ox < 0) gui.ox = 0;
     if (gui.oy < 0) gui.oy = 0;
@@ -6146,7 +6154,9 @@ int gui_event(int* ev, int timeout_ms) {
         int close_s = gui.title_h - 4;
         int hit = 0;
         gui.prev_left = 1;
+        tb_direito = right && !left;
         if (chrome_click) hit = chrome_click((int)sys_mx, (int)sys_my);
+        tb_direito = 0;
         if (hit == 2) {
           ev[0] = GUI_EV_CLOSE;
           return GUI_EV_CLOSE;
@@ -6243,7 +6253,9 @@ static void gui_idle(void) {
         int y = (int)sys_my - (gui.oy + gui.title_h);
         int hit = 0;
         gui.prev_left = 1;
+        tb_direito = right && !left;
         if (chrome_click) hit = chrome_click((int)sys_mx, (int)sys_my);
+        tb_direito = 0;
         if (hit == 2) {
           gui_q_push(GUI_EV_CLOSE, 0, 0, 0);
           touch = 1;
@@ -6774,6 +6786,102 @@ struct desk_item {
 };
 static struct desk_item desk_items[DESK_MAX];
 static int desk_n;
+/* Icone arrastado pelo usuario (2026-11-19): fica onde foi solto, inclusive
+ * na segunda tela da tela estendida; os outros seguem a grade, na primeira
+ * tela. As posicoes ficam em D:\SODOS\DESKPOS.CFG ("NOME x y" por linha). */
+#define DESK_POS_CFG "D:\\SODOS\\DESKPOS.CFG"
+#define DESK_POS_MAX 64
+static struct { char name[16]; int16_t x, y; } desk_pos[DESK_POS_MAX];
+static int desk_pos_n;
+static int desk_press = -1;          /* icone com o botao apertado em cima */
+static int desk_press_mx, desk_press_my, desk_press_ox, desk_press_oy;
+static int desk_arr;                 /* 1 = passou do limiar: e arrasto */
+static int desk_drag_x, desk_drag_y; /* canto do icone durante o arrasto */
+static int desk_soltou = -1;         /* soltou sem arrastar: abre este */
+
+static int desk_nome_eq(const char* a, const char* b) {
+  int i = 0;
+  while (a[i] && a[i] == b[i]) i++;
+  return a[i] == 0 && b[i] == 0;
+}
+
+/* posicao gravada do item i; 0 = segue a grade */
+static int desk_pos_de(int i, int* x, int* y) {
+  int k;
+  for (k = 0; k < desk_pos_n; k++)
+    if (desk_nome_eq(desk_pos[k].name, desk_items[i].name)) {
+      *x = desk_pos[k].x;
+      *y = desk_pos[k].y;
+      return 1;
+    }
+  return 0;
+}
+
+static void desk_pos_load(void) {
+  char b[2048];
+  int n = file_load(DESK_POS_CFG, b, (int)sizeof(b) - 1), i = 0;
+  desk_pos_n = 0;
+  if (n <= 0) return;
+  b[n] = 0;
+  while (i < n && desk_pos_n < DESK_POS_MAX) {
+    int k = 0, v[2] = { 0, 0 }, c, neg;
+    while (i < n && (b[i] == '\r' || b[i] == '\n' || b[i] == ' ')) i++;
+    while (i < n && b[i] != ' ' && b[i] != '\r' && b[i] != '\n' && k < 15)
+      desk_pos[desk_pos_n].name[k++] = b[i++];
+    desk_pos[desk_pos_n].name[k] = 0;
+    for (c = 0; c < 2; c++) {
+      while (i < n && b[i] == ' ') i++;
+      neg = i < n && b[i] == '-';
+      if (neg) i++;
+      while (i < n && b[i] >= '0' && b[i] <= '9') v[c] = v[c] * 10 + (b[i++] - '0');
+      if (neg) v[c] = -v[c];
+    }
+    while (i < n && b[i] != '\n') i++;
+    if (k > 0) {
+      desk_pos[desk_pos_n].x = (int16_t)v[0];
+      desk_pos[desk_pos_n].y = (int16_t)v[1];
+      desk_pos_n++;
+    }
+  }
+}
+
+static void desk_pos_save(void) {
+  char b[DESK_POS_MAX * 28];
+  int n = 0, k, j;
+  for (k = 0; k < desk_pos_n; k++) {
+    int c;
+    for (j = 0; desk_pos[k].name[j]; j++) b[n++] = desk_pos[k].name[j];
+    for (c = 0; c < 2; c++) {
+      int v = c ? desk_pos[k].y : desk_pos[k].x, d = 1;
+      b[n++] = ' ';
+      if (v < 0) {
+        b[n++] = '-';
+        v = -v;
+      }
+      while (v / d >= 10) d *= 10;
+      for (; d; d /= 10) b[n++] = (char)('0' + (v / d) % 10);
+    }
+    b[n++] = '\r';
+    b[n++] = '\n';
+  }
+  (void)drives_mkdir("D:\\SODOS");
+  if (file_save(DESK_POS_CFG, b, n) != 0) serial_puts("[visual] DESKPOS.CFG nao gravou\n");
+}
+
+/* o item i passa a ficar em (x, y) */
+static void desk_pos_set(int i, int x, int y) {
+  int k;
+  for (k = 0; k < desk_pos_n; k++)
+    if (desk_nome_eq(desk_pos[k].name, desk_items[i].name)) break;
+  if (k == desk_pos_n) {
+    if (desk_pos_n >= DESK_POS_MAX) return;
+    for (int j = 0; j < 16; j++) desk_pos[k].name[j] = desk_items[i].name[j];
+    desk_pos_n++;
+  }
+  desk_pos[k].x = (int16_t)x;
+  desk_pos[k].y = (int16_t)y;
+  desk_pos_save();
+}
 static volatile int desk_dirty;   /* win_desk_touch: rele no proximo quadro */
 /* Renomear no desktop (depois de Nova pasta): indice, texto e nome antigo */
 static int desk_ren = -1;
@@ -6881,6 +6989,9 @@ static void desk_load(void) {
   const char* prefix;
   int plen = 0;
   desk_free();
+  desk_pos_load();
+  desk_press = -1;
+  desk_arr = 0;
   n = desk_read_list(list, &prefix);
   desk_last_n = n;
   for (p = 0; p < n && p < DESK_LIST; p++) desk_last[p] = list[p];
@@ -7160,7 +7271,28 @@ static int desk_place(int index, int icon, int ch, int scale, int sw, int sh, in
   int label_w = 12 * FONT_W * scale;
   int cell_w = icon + 16;
   int cell_h = icon + 6 + ch;
-  int x0, cols, rows, col, row;
+  int x0, cols, rows, col, row, px, py, i, slot;
+  if (index == desk_press && desk_arr) {
+    *x = desk_drag_x;
+    *y = desk_drag_y;
+    return 1;
+  }
+  /* posicao do usuario: so se o icone cabe na area de agora (sem a tela
+   * estendida, um icone da segunda tela volta para a grade) */
+  if (desk_pos_de(index, &px, &py) && px >= 0 && py >= 0 && px + icon <= sw &&
+      py + icon <= sh - bar_h) {
+    *x = px;
+    *y = py;
+    return 1;
+  }
+  /* a vaga na grade conta so os icones sem posicao propria */
+  slot = 0;
+  for (i = 0; i < index && i < desk_n; i++)
+    if (!desk_pos_de(i, &px, &py) || px < 0 || py < 0 || px + icon > sw || py + icon > sh - bar_h)
+      slot++;
+  index = slot;
+  /* tela estendida: a grade dos icones fica na primeira tela (2026-11-19) */
+  if (gfx_wide && sw > (int)gfx_wide_x2) sw = (int)gfx_wide_x2;
   if (cell_w < label_w) cell_w = label_w;
   x0 = 12 + cell_w;
   cols = (sw - x0 - 4) / cell_w;
@@ -8763,7 +8895,290 @@ static int ui_logo_x(int w, int lw) {
   return 6;
 }
 
-/* Barra de tarefas: logo "S" (abre o menu), marca e data/hora. */
+
+/* ---------------------------------------------------------------------------
+ * Barra de tarefas com programas (2026-11-19). Cada programa aberto ganha um
+ * botao com icone; varias janelas do mesmo programa ficam empilhadas no mesmo
+ * botao (como no Windows) e o clique passa de uma para a outra. Um tracinho
+ * embaixo marca o que esta aberto (comprido no da frente). Botao direito
+ * fixa ou desafixa o programa: os fixados ficam na barra mesmo fechados (o
+ * clique abre) e vao para D:\SODOS\BARRA.CFG, um por linha. Programas do
+ * proprio WIN ficam como "#Nome" (#Command, #Explorer...).
+ * ------------------------------------------------------------------------- */
+#define TB_MAX 16
+#define TB_KEY 80
+#define TB_CFG "D:\\SODOS\\BARRA.CFG"
+struct tb_item {
+  char key[TB_KEY];
+  char nome[16];
+  int fixo, n, foco;
+};
+static struct tb_item tb[TB_MAX];
+static int tb_n;
+static char tb_fix[TB_MAX][TB_KEY];
+static int tb_nfix, tb_fix_lido;
+
+static int tb_eq(const char* a, const char* b) {
+  int i = 0;
+  for (;; i++) {
+    char x = a[i], y = b[i];
+    if (x >= 'a' && x <= 'z') x = (char)(x - 32);
+    if (y >= 'a' && y <= 'z') y = (char)(y - 32);
+    if (x != y) return 0;
+    if (!x) return 1;
+  }
+}
+
+static void tb_cp(char* d, const char* o, int max) {
+  int i = 0;
+  while (o[i] && i < max - 1) {
+    d[i] = o[i];
+    i++;
+  }
+  d[i] = 0;
+}
+
+static void tb_fix_load(void) {
+  char b[TB_MAX * TB_KEY];
+  int n, i = 0;
+  tb_fix_lido = 1;
+  tb_nfix = 0;
+  n = file_load(TB_CFG, b, (int)sizeof(b) - 1);
+  if (n <= 0) return;
+  b[n] = 0;
+  while (i < n && tb_nfix < TB_MAX) {
+    int k = 0;
+    while (i < n && (b[i] == '\r' || b[i] == '\n')) i++;
+    while (i < n && b[i] != '\r' && b[i] != '\n' && k < TB_KEY - 1) tb_fix[tb_nfix][k++] = b[i++];
+    while (i < n && b[i] != '\n') i++;
+    tb_fix[tb_nfix][k] = 0;
+    if (k > 0) tb_nfix++;
+  }
+}
+
+static void tb_fix_save(void) {
+  char b[TB_MAX * (TB_KEY + 2)];
+  int n = 0, i, k;
+  for (i = 0; i < tb_nfix; i++) {
+    for (k = 0; tb_fix[i][k]; k++) b[n++] = tb_fix[i][k];
+    b[n++] = '\r';
+    b[n++] = '\n';
+  }
+  (void)drives_mkdir("D:\\SODOS");
+  if (file_save(TB_CFG, b, n) != 0) serial_puts("[visual] BARRA.CFG nao gravou\n");
+}
+
+/* nome curto: "D:\X\TELAS.EXE" -> "TELAS"; "#Command" -> "Command" */
+static void tb_nome(const char* key, char* out) {
+  const char* b = key;
+  int i, k = 0;
+  if (key[0] == '#') {
+    tb_cp(out, key + 1, 16);
+    return;
+  }
+  for (i = 0; key[i]; i++)
+    if (key[i] == '\\' || key[i] == '/' || key[i] == ':') b = key + i + 1;
+  while (b[k] && b[k] != '.' && k < 15) {
+    out[k] = b[k];
+    k++;
+  }
+  out[k] = 0;
+}
+
+static int tb_add(const char* key, int fixo) {
+  int i;
+  for (i = 0; i < tb_n; i++)
+    if (tb_eq(tb[i].key, key)) return i;
+  if (tb_n >= TB_MAX) return -1;
+  tb_cp(tb[tb_n].key, key, TB_KEY);
+  tb_nome(key, tb[tb_n].nome);
+  tb[tb_n].fixo = fixo;
+  tb[tb_n].n = 0;
+  tb[tb_n].foco = 0;
+  return tb_n++;
+}
+
+/* chave do programa de uma janela */
+static void tb_key_wm(const struct wm_win* w, char* key) {
+  const char* t = w->title;
+  if (w->kind == WM_KIND_MGR) t = "Gerenciador";
+  else if (w->kind == WM_KIND_NOTE) t = "Bloco de notas";
+  else if (w->kind == WM_KIND_CMD) t = "Command";
+  else if (w->kind == WM_KIND_DISP) t = "Configuracoes de tela";
+  else if (w->kind == WM_KIND_FONT) t = "Fontes";
+  key[0] = '#';
+  tb_cp(key + 1, t, TB_KEY - 1);
+}
+
+static void tb_key_gui(int g, char* key) {
+  int t;
+  for (t = 0; gtasks && t < TASK_MAX; t++)
+    if (gtasks[t].used && gtasks[t].gid == g && gtasks[t].path[0]) {
+      tb_cp(key, gtasks[t].path, TB_KEY);
+      return;
+    }
+  key[0] = '#';
+  tb_cp(key + 1, gwins[g].title, TB_KEY - 1);
+}
+
+/* fixados primeiro (na ordem do arquivo), depois os abertos */
+static void tb_monta(void) {
+  char key[TB_KEY];
+  int i, j;
+  if (!tb_fix_lido) tb_fix_load();
+  tb_n = 0;
+  for (i = 0; i < tb_nfix; i++) (void)tb_add(tb_fix[i], 1);
+  for (i = 0; c_wins && i < WM_MAX; i++) {
+    if (!c_wins[i].used || run_hidden(&c_wins[i])) continue;
+    tb_key_wm(&c_wins[i], key);
+    if ((j = tb_add(key, 0)) < 0) continue;
+    tb[j].n++;
+    if (gui_focus < 0 && c_focus && *c_focus == i) tb[j].foco = 1;
+  }
+  for (i = 0; gwins && i < GUI_MAX; i++) {
+    if (!gwins[i].open || gwins[i].panel) continue;
+    tb_key_gui(i, key);
+    if ((j = tb_add(key, 0)) < 0) continue;
+    tb[j].n++;
+    if (gui_focus == i) tb[j].foco = 1;
+  }
+}
+
+/* x do primeiro botao e lado do botao */
+static int tb_x0(int w, int scale) {
+  int lw = c_start_w > 0 ? c_start_w : 44, cw = FONT_W * scale;
+  if (ui_menu_pos == 1) return 10;
+  return ui_logo_x(w, lw) + lw + 14 + 5 * cw + 24;
+}
+
+static int tb_lado(int bar_h) { return bar_h - 12 > 16 ? bar_h - 12 : 16; }
+
+/* botao sob (x, y); -1 = nenhum */
+static int tb_em(int x, int y) {
+  int w = (int)gfx_w, h = (int)gfx_h, bh = c_bar_h, s, i, x0;
+  if (!c_wins || bh <= 0 || y < h - bh || y >= h) return -1;
+  tb_monta();
+  s = tb_lado(bh);
+  x0 = tb_x0(w, c_scale > 0 ? c_scale : 1);
+  for (i = 0; i < tb_n; i++) {
+    int bx = x0 + i * (s + 12);
+    if (x >= bx - 4 && x < bx + s + 4) return i;
+  }
+  return -1;
+}
+
+static void tb_icone(const struct tb_item* t, int x, int y, int s, int scale) {
+  static const uint32_t cores[6] = { 0x2F6FB0, 0x7A4FB0, 0x2E8B57, 0xB06A2F, 0xA8324A, 0x3A8C99 };
+  char l[3];
+  uint32_t hsh = 0;
+  int i, cw = FONT_W * scale, ch = (vga_bios_font_ok ? FONT_H : 8) * scale;
+  if (th_desk_icon(t->nome, x, y, s)) return;
+  for (i = 0; t->nome[i]; i++) hsh = hsh * 31u + (uint8_t)t->nome[i];
+  fill_round(x, y, s, s, s / 5, gui_col(cores[hsh % 6u]));
+  l[0] = t->nome[0] ? t->nome[0] : '?';
+  if (l[0] >= 'a' && l[0] <= 'z') l[0] = (char)(l[0] - 32);
+  l[1] = 0;
+  draw_text_t(x + (s - cw) / 2, y + (s - ch) / 2, l, 0xFFFFFFu, scale);
+}
+
+static void tb_desenha(int w, int h, int bar_h, int scale) {
+  int s = tb_lado(bar_h), x = tb_x0(w, scale), by = h - bar_h, i, lim = w - 320;
+  if (!c_wins) return;
+  tb_monta();
+  for (i = 0; i < tb_n && x + s < lim; i++, x += s + 12) {
+    struct tb_item* t = &tb[i];
+    int y = by + (bar_h - s) / 2 - 1;
+    if (t->foco) fill_round(x - 4, by + 3, s + 8, bar_h - 6, 6, gui_col(UI_BORDER));
+    if (t->n > 1) {   /* empilhadas: duas folhas atras */
+      if (t->n > 2) fill_round(x + 6, y - 6, s, s, s / 5, gui_col(UI_BORDER));
+      fill_round(x + 3, y - 3, s, s, s / 5, gui_col(UI_DIM));
+    }
+    tb_icone(t, x, y, s, scale);
+    if (t->n > 0) {
+      int lw = t->foco ? s / 2 : 6;
+      fill_round(x + (s - lw) / 2, h - 4, lw, 3, 1, gui_col(UI_ACCENT));
+    }
+  }
+}
+
+/* Clique num botao da barra. 1 = tratado. Esquerdo: abre o fixado fechado
+ * ou traz para a frente a proxima janela do programa. Direito (tb_direito):
+ * fixa ou desafixa. */
+static int tb_clique(int x, int y) {
+  int i = tb_em(x, y), k, prox = -1, prox_gui = 0, achou_foco = 0, prim = -1, prim_gui = 0;
+  char key[TB_KEY];
+  struct tb_item* t;
+  if (i < 0) return 0;
+  t = &tb[i];
+  if (tb_direito) {
+    for (k = 0; k < tb_nfix; k++)
+      if (tb_eq(tb_fix[k], t->key)) break;
+    if (k < tb_nfix) {
+      for (; k + 1 < tb_nfix; k++) tb_cp(tb_fix[k], tb_fix[k + 1], TB_KEY);
+      tb_nfix--;
+      app_status_set("removido da barra");
+    } else if (tb_nfix < TB_MAX) {
+      tb_cp(tb_fix[tb_nfix++], t->key, TB_KEY);
+      app_status_set("fixado na barra");
+    }
+    tb_fix_save();
+    win_api_dirty = 1;
+    return 1;
+  }
+  if (t->n == 0) {
+    if (t->key[0] != '#') wm_exec(c_wins, c_focus, c_big, t->key);
+    else if (tb_eq(t->key, "#Command")) wm_open_command(c_wins, c_focus, c_big);
+    else if (tb_eq(t->key, "#Bloco de notas")) wm_open_notepad(c_wins, c_focus, c_big);
+    else if (tb_eq(t->key, "#Gerenciador")) wm_open_mgr(c_wins, c_focus, c_big);
+    else if (tb_eq(t->key, "#Explorer")) wm_open_explorer(c_wins, c_focus, c_big);
+    else if (tb_eq(t->key, "#Navegador")) wm_open_browser(c_wins, c_focus, c_big);
+    else if (tb_eq(t->key, "#Configuracoes de tela")) wm_open_display(c_wins, c_focus, c_big);
+    else if (tb_eq(t->key, "#Fontes")) wm_open_fonts(c_wins, c_focus, c_big);
+    else app_status_set("nao sei abrir este atalho");
+    win_api_dirty = 1;
+    return 1;
+  }
+  /* a janela seguinte do programa, depois da que esta na frente */
+  for (k = 0; k < WM_MAX + GUI_MAX; k++) {
+    int g = k >= WM_MAX, ix = g ? k - WM_MAX : k, eh_foco;
+    if (g) {
+      if (!gwins || !gwins[ix].open || gwins[ix].panel) continue;
+      tb_key_gui(ix, key);
+      eh_foco = gui_focus == ix;
+    } else {
+      if (!c_wins[ix].used || run_hidden(&c_wins[ix])) continue;
+      tb_key_wm(&c_wins[ix], key);
+      eh_foco = gui_focus < 0 && c_focus && *c_focus == ix;
+    }
+    if (!tb_eq(key, t->key)) continue;
+    if (prim < 0) {
+      prim = ix;
+      prim_gui = g;
+    }
+    if (achou_foco && prox < 0) {
+      prox = ix;
+      prox_gui = g;
+    }
+    if (eh_foco) achou_foco = 1;
+  }
+  if (prox < 0) {
+    prox = prim;
+    prox_gui = prim_gui;
+  }
+  if (prox < 0) return 1;
+  if (prox_gui) {
+    gwins[prox].z = ++zseq;
+    gui_focus = prox;
+    gui_stole = 1;
+  } else {
+    wm_raise(&c_wins[prox]);
+    if (c_focus) *c_focus = prox;
+  }
+  win_api_dirty = 1;
+  return 1;
+}
+
+/* Barra de tarefas: logo "S" (abre o menu), marca, programas e data/hora. */
 static void draw_taskbar(int w, int h, int bar_h, int ch, int scale, int start_w) {
   static const char* mon[12] = {"JAN", "FEV", "MAR", "ABR", "MAI", "JUN",
                                 "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"};
@@ -8816,6 +9231,7 @@ static void draw_taskbar(int w, int h, int bar_h, int ch, int scale, int start_w
       draw_text_t(x, ty, dat, gui_col(UI_DIM), scale);
     }
   }
+  tb_desenha(w, h, bar_h, scale);
 }
 
 static void chrome_paint_over(void) {
@@ -9064,6 +9480,7 @@ static int chrome_on_click(int x, int y) {
     *c_tela = 0;
     return 1;
   }
+  if (!*chrome_menu && tb_clique(x, y)) return 1;
   if (*chrome_menu) {
     *chrome_menu = 0;
     *c_cfg = 0;
@@ -9936,6 +10353,10 @@ static int win_wm_run(void) {
           }
         }
         left = packet[0] & 1;
+        if (!left && prev_left && desk_press >= 0 && !desk_arr) {
+          desk_soltou = desk_press;   /* clique simples: abre como antes */
+          desk_press = -1;
+        }
         if (left && gwins && g_rs >= 0 && g_rs < GUI_MAX && gwins[g_rs].open) {
           rs_apply((int)mx, (int)my, 200, gwins[g_rs].title_h + 60, w, h - bar_h, &g_rs_x,
                    &g_rs_y, &g_rs_w, &g_rs_h);
@@ -9989,7 +10410,22 @@ static int win_wm_run(void) {
               need_draw = 1;
             }
           }
-        } else if (left && !prev_left) {
+        } else if (left && prev_left && desk_press >= 0 && desk_press < desk_n) {
+          int dx = (int)mx - desk_press_mx, dy = (int)my - desk_press_my;
+          if (!desk_arr && (dx > 6 || dx < -6 || dy > 6 || dy < -6)) desk_arr = 1;
+          if (desk_arr) {
+            int nx = (int)mx - desk_press_ox, ny = (int)my - desk_press_oy;
+            if (nx < 0) nx = 0;
+            if (ny < 0) ny = 0;
+            if (nx > (int)w - icon) nx = (int)w - icon;
+            if (ny > (int)h - bar_h - icon - ch - 6) ny = (int)h - bar_h - icon - ch - 6;
+            if (nx != desk_drag_x || ny != desk_drag_y) {
+              desk_drag_x = nx;
+              desk_drag_y = ny;
+              need_draw = 1;
+            }
+          }
+        } else if ((left && !prev_left) || desk_soltou >= 0) {
           int handled = 0;
           int icons_on;
           if (desk_ren >= 0) {
@@ -10084,6 +10520,9 @@ static int win_wm_run(void) {
             menu_cfg = 0;
             menu_tela = 0;
             note_file_menu = 0;
+            handled = 1;
+            need_draw = 1;
+          } else if (!menu_open && left && tb_clique((int)mx, (int)my)) {
             handled = 1;
             need_draw = 1;
           } else if (menu_open) {
@@ -10198,8 +10637,27 @@ static int win_wm_run(void) {
             wm_open_mgr(wins, &focus, big);
             handled = 1;
             need_draw = 1;
-          } else if (icons_on &&
+          } else if (icons_on && desk_soltou < 0 &&
                      (desk_i = desk_hit((int)mx, (int)my, icon, ch, scale, w, h, bar_h)) >= 0) {
+            int ix = 0, iy = 0;
+            menu_open = 0;
+            menu_cfg = 0;
+            menu_tela = 0;
+            desk_mark_item(desk_i);
+            (void)desk_place(desk_i, icon, ch, scale, w, h, bar_h, &ix, &iy);
+            desk_press = desk_i;
+            desk_press_mx = (int)mx;
+            desk_press_my = (int)my;
+            desk_press_ox = (int)mx - ix;
+            desk_press_oy = (int)my - iy;
+            desk_drag_x = ix;
+            desk_drag_y = iy;
+            desk_arr = 0;
+            handled = 1;
+            need_draw = 1;
+          } else if (icons_on && desk_soltou >= 0 && desk_soltou < desk_n &&
+                     (desk_i = desk_soltou) >= 0) {
+            desk_soltou = -1;
             menu_open = 0;
             menu_cfg = 0;
             menu_tela = 0;
@@ -10461,6 +10919,13 @@ static int win_wm_run(void) {
           (void)handled;
         }
         if (!left) {
+          if (desk_press >= 0 && desk_press < desk_n && desk_arr) {
+            desk_pos_set(desk_press, desk_drag_x, desk_drag_y);
+            need_draw = 1;
+          }
+          desk_press = -1;
+          desk_arr = 0;
+          desk_soltou = -1;
           if (gwins && g_rs >= 0 && g_rs < GUI_MAX && gwins[g_rs].open) {
             struct gui_win* rg = &gwins[g_rs];
             if (g_rs_x != rg->ox || g_rs_y != rg->oy || g_rs_w != rg->cw ||
@@ -10511,7 +10976,12 @@ static int win_wm_run(void) {
                       (int)my - (gwins[g_rcap].oy + gwins[g_rcap].title_h), 2);
             g_rcap = -1;
           }
-          if (right && !prev_right && !note_dlg) {
+          if (right && !prev_right && !note_dlg && !menu_open && tb_em((int)mx, (int)my) >= 0) {
+            tb_direito = 1;
+            (void)tb_clique((int)mx, (int)my);
+            tb_direito = 0;
+            need_draw = 1;
+          } else if (right && !prev_right && !note_dlg) {
             int t, on = 0;
             if (wm_pt((int)mx, (int)my, 0, h - bar_h, w, bar_h)) on = 1;
             if (menu_open) on = 1;

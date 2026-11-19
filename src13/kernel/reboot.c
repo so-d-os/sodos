@@ -120,6 +120,9 @@ void kbd_watch(uint8_t sc) {
     if (!kw_raw && (kw_armed || !win_screen_size(0, 0))) kw_break = 1;
     return;
   }
+  /* Ctrl+F1: troca de tela pelo mundo; se o mundo estiver parado, o
+   * guardiao (ps2in.c) usa o aviso para destravar ou reiniciar. */
+  if (key == 0x3B && !up && !ext && kw_ctrl) kbd_emergency_note();
   /* 0x53: Delete (E0 53) ou o Del do teclado numerico. */
   if (key == 0x53 && !up && kw_ctrl && kw_alt) {
     serial_puts("[reboot] Ctrl+Alt+Del\n");

@@ -13,30 +13,53 @@
 #include "wine_int.h"
 #include "winrt.h"
 
-/* ---------- HSTRING ---------- */
+/* ---------- HSTRING ----------
+ * Layout do Windows (o mesmo do HSTRING_HEADER e do windows-rs, que monta os
+ * seus sem chamar a combase): flags, tamanho, 8 bytes reservados, ponteiro
+ * para o texto em +16 e, nas alocadas, a contagem de referencias em +24 com
+ * o texto logo depois. O windows-rs libera as nossas com HeapFree e conta as
+ * referencias ele mesmo; nos aceitamos as dele pelo mesmo layout. */
 struct hstring {
-  DWORD magic;
+  DWORD flags;   /* 1 = referencia (WindowsCreateStringReference): nada a liberar */
   DWORD len;
+  DWORD magic;   /* reservado no Windows; aqui marca as nossas */
+  DWORD pad;
   wchar16* buf;
+  volatile int32_t count;
+  wchar16 data[1];
 };
 #define HS_MAGIC 0x52545348u
+#define HS_REF 1u
+
+static int hs_ok(const struct hstring* h) {
+  if (!wptr_ok(h) || (uintptr_t)h <= 0x100000 || ((uintptr_t)h & 7)) return 0;
+  if (h->magic == HS_MAGIC) return 1;
+  /* de fora (windows-rs): referencia, ou alocada com o texto logo depois */
+  if (h->len > 0x1000000u || !wptr_ok(h->buf)) return 0;
+  if (h->flags == HS_REF) return 1;
+  return h->flags == 0 && h->buf == (const wchar16*)((const uint8_t*)h + 28) && h->count > 0;
+}
 
 long WINAPI wWindowsCreateString(const wchar16* src, DWORD len, void** out) {
   struct hstring* h;
   if (!out) return E_POINTER;
   *out = 0;
   if (!len) return S_OK; /* HSTRING nulo = string vazia */
-  h = (struct hstring*)wzalloc(sizeof(*h) + ((size_t)len + 1) * 2);
+  if (!src) return E_POINTER;
+  h = (struct hstring*)wzalloc(28 + ((size_t)len + 1) * 2);
   if (!h) return E_OUTOFMEMORY;
+  h->flags = 0;
   h->magic = HS_MAGIC;
   h->len = len;
-  h->buf = (wchar16*)(h + 1);
+  h->buf = (wchar16*)((uint8_t*)h + 28);
+  h->count = 1;
   memcpy(h->buf, src, (size_t)len * 2);
   *out = h;
   return S_OK;
 }
 static WINAPI long WindowsDeleteString(struct hstring* h) {
-  if (h && h->magic == HS_MAGIC) {
+  if (!h || !hs_ok(h) || (h->flags & HS_REF)) return S_OK;
+  if (__sync_sub_and_fetch(&h->count, 1) == 0) {
     h->magic = 0;
     k_free(h);
   }
@@ -45,23 +68,87 @@ static WINAPI long WindowsDeleteString(struct hstring* h) {
 const wchar16* WINAPI wWindowsGetStringRawBuffer(void* hv, DWORD* len) {
   struct hstring* h = (struct hstring*)hv;
   static const wchar16 empty[1] = {0};
-  if (!h || h->magic != HS_MAGIC) {
+  if (!h || !hs_ok(h)) {
     if (len) *len = 0;
     return empty;
   }
   if (len) *len = h->len;
   return h->buf;
 }
-static WINAPI DWORD WindowsGetStringLen(struct hstring* h) { return h && h->magic == HS_MAGIC ? h->len : 0; }
+static WINAPI DWORD WindowsGetStringLen(struct hstring* h) { return h && hs_ok(h) ? h->len : 0; }
 static WINAPI long WindowsDuplicateString(struct hstring* h, void** out) {
   DWORD len = 0;
-  const wchar16* b = wWindowsGetStringRawBuffer(h, &len);
+  const wchar16* b;
+  if (!out) return E_POINTER;
+  if (h && hs_ok(h) && !(h->flags & HS_REF)) { /* alocada: so mais uma referencia */
+    __sync_add_and_fetch(&h->count, 1);
+    *out = h;
+    return S_OK;
+  }
+  b = wWindowsGetStringRawBuffer(h, &len);
   return wWindowsCreateString(b, len, out);
 }
 
+/* "fast-pass string": o texto fica com o chamador, o cabecalho (24 bytes) tambem */
+static WINAPI long WindowsCreateStringReference(const wchar16* src, DWORD len, void* hdr, void** out) {
+  struct hstring* h = (struct hstring*)hdr;
+  if (!out || !hdr) return E_POINTER;
+  *out = 0;
+  if (!len) return S_OK;
+  if (!src) return E_POINTER;
+  h->flags = HS_REF;
+  h->len = len;
+  h->magic = HS_MAGIC;
+  h->pad = 0;
+  h->buf = (wchar16*)src;
+  *out = h;
+  return S_OK;
+}
+static WINAPI BOOL WindowsIsStringEmpty(struct hstring* h) { return WindowsGetStringLen(h) == 0; }
+static WINAPI long WindowsCompareStringOrdinal(struct hstring* a, struct hstring* b, int* res) {
+  DWORD la = 0, lb = 0, i;
+  const wchar16* x = wWindowsGetStringRawBuffer(a, &la);
+  const wchar16* y = wWindowsGetStringRawBuffer(b, &lb);
+  int r = 0;
+  if (!res) return E_POINTER;
+  for (i = 0; i < la && i < lb && !r; i++) r = x[i] < y[i] ? -1 : x[i] > y[i] ? 1 : 0;
+  if (!r) r = la < lb ? -1 : la > lb ? 1 : 0;
+  *res = r;
+  return S_OK;
+}
+static WINAPI long WindowsConcatString(struct hstring* a, struct hstring* b, void** out) {
+  DWORD la = 0, lb = 0;
+  const wchar16* x = wWindowsGetStringRawBuffer(a, &la);
+  const wchar16* y = wWindowsGetStringRawBuffer(b, &lb);
+  wchar16* t;
+  long r;
+  if (!out) return E_POINTER;
+  t = (wchar16*)wzalloc(((size_t)la + lb + 1) * 2);
+  if (!t) return E_OUTOFMEMORY;
+  memcpy(t, x, (size_t)la * 2);
+  memcpy(t + la, y, (size_t)lb * 2);
+  r = wWindowsCreateString(t, la + lb, out);
+  k_free(t);
+  return r;
+}
+static WINAPI long WindowsSubstring(struct hstring* h, DWORD start, void** out) {
+  DWORD len = 0;
+  const wchar16* b = wWindowsGetStringRawBuffer(h, &len);
+  if (start > len) return (long)0x8000000B; /* E_BOUNDS */
+  return wWindowsCreateString(b + start, len - start, out);
+}
+static WINAPI long WindowsSubstringWithSpecifiedLength(struct hstring* h, DWORD start, DWORD n, void** out) {
+  DWORD len = 0;
+  const wchar16* b = wWindowsGetStringRawBuffer(h, &len);
+  if (start > len || n > len - start) return (long)0x8000000B;
+  return wWindowsCreateString(b + start, n, out);
+}
+
 char* whstring8(void* h) { return wdup16to8(wWindowsGetStringRawBuffer(h, 0)); }
+int wmem_readable(const void* p, size_t n); /* vm.c */
 int whstring_is(void* h) {
-  return h && (uintptr_t)h > 0x100000 && !((uintptr_t)h & 7) && ((struct hstring*)h)->magic == HS_MAGIC;
+  if (!wmem_readable(h, 32)) return 0;
+  return h && hs_ok((const struct hstring*)h);
 }
 long whstring_from8(const char* s, void** out) {
   wchar16* w = wdup8to16(s ? s : "");
@@ -227,6 +314,12 @@ const struct wine_sym winrt_syms[] = {{"WindowsCreateString", (void*)wWindowsCre
                                       {"WindowsGetStringRawBuffer", (void*)wWindowsGetStringRawBuffer},
                                       S(WindowsGetStringLen),
                                       S(WindowsDuplicateString),
+                                      S(WindowsCreateStringReference),
+                                      S(WindowsIsStringEmpty),
+                                      S(WindowsCompareStringOrdinal),
+                                      S(WindowsConcatString),
+                                      S(WindowsSubstring),
+                                      S(WindowsSubstringWithSpecifiedLength),
                                       S(RoGetActivationFactory),
                                       S(RoActivateInstance),
                                       S(RoGetErrorReportingFlags),

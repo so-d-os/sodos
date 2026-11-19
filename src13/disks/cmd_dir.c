@@ -31,31 +31,79 @@ static void page_out(char c) {
   shell_set_out(page_out);
 }
 
-/* dir [unidade:][pasta\][padrao] [/s] [/w] [/d] */
+static void dir_usage(void) {
+  puts_k("Uso: dir [pasta\\][*.ext] [/a[:]atr] [/o[:]ordem] [/b] [/s] [/w] [/p]\n");
+  puts_k("  /ad  so as pastas (o mesmo que /d)\n");
+  puts_k("  /a-d so os arquivos\n");
+  puts_k("  /o   ordem: n nome, s tamanho, e extensao, d data,\n");
+  puts_k("       g pastas antes; - inverte a letra seguinte\n");
+  puts_k("       /on  /os  /o-s (maiores antes)  /o-d (novos antes)\n");
+  puts_k("       /o sozinho = /ogn\n");
+  puts_k("  /b   so os nomes (com /s, o caminho inteiro)\n");
+  puts_k("  /s   inclui as subpastas\n");
+  puts_k("  /w   lista larga, em linhas\n");
+  puts_k("  /p   para a cada tela cheia\n");
+  puts_k("  * e ? valem no nome: dir *.exe   dir ???.txt\n");
+}
+
+static char up(char c) {
+  return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+}
+
+/* dir [unidade:][pasta\][padrao] [/a..] [/o..] [/b] [/s] [/w] [/d] [/p]
+ * Letras juntas valem (/sb, /s/b); /a e /o levam o resto ate a proxima /. */
 int cmd_dir(int argc, char** argv) {
+  static char order[16];
   const char* spec = "";
   int flags = 0;
   int paged = 0;
   int i, j;
+  order[0] = 0;
   for (i = 1; i < argc; i++) {
-    if (argv[i][0] != '/') {
-      spec = argv[i];
+    const char* a = argv[i];
+    if (a[0] != '/') {
+      spec = a;
       continue;
     }
-    for (j = 1; argv[i][j]; j++) {
-      char c = argv[i][j];
+    for (j = 1; a[j]; j++) {
+      char c = up(a[j]);
       if (c == '/') continue;
-      if (c == 's' || c == 'S') flags |= DIR_SUB;
-      else if (c == 'w' || c == 'W') flags |= DIR_WIDE;
-      else if (c == 'd' || c == 'D') flags |= DIR_DIRS;
-      else if (c == 'p' || c == 'P') paged = 1;
+      if (c == 'A') {
+        /* /a sozinho = tudo (aqui nao ha oculto nem sistema) */
+        flags &= ~(DIR_DIRS | DIR_FILES);
+        if (a[j + 1] == ':') j++;
+        while (a[j + 1] && a[j + 1] != '/') {
+          int neg = a[j + 1] == '-';
+          if (neg) j++;
+          if (up(a[j + 1]) != 'D') {
+            puts_k("dir: so os atributos D e -D (/ad pastas, /a-d arquivos)\n");
+            return 1;
+          }
+          j++;
+          flags = (flags & ~(DIR_DIRS | DIR_FILES)) | (neg ? DIR_FILES : DIR_DIRS);
+        }
+      } else if (c == 'O') {
+        int k = 0;
+        if (a[j + 1] == ':') j++;
+        while (a[j + 1] && a[j + 1] != '/') {
+          char o = up(a[++j]);
+          int bad = o != '-' && o != 'N' && o != 'S' && o != 'E' && o != 'D' && o != 'G';
+          if (o == '-' && (!a[j + 1] || a[j + 1] == '/' || a[j + 1] == '-')) bad = 1;
+          if (bad || k >= (int)sizeof(order) - 1) {
+            dir_usage();
+            return 1;
+          }
+          order[k++] = o;
+        }
+        if (k == 0) order[k++] = 'G', order[k++] = 'N';
+        order[k] = 0;
+      } else if (c == 'B') flags |= DIR_BARE;
+      else if (c == 'S') flags |= DIR_SUB;
+      else if (c == 'W') flags |= DIR_WIDE;
+      else if (c == 'D') flags = (flags & ~DIR_FILES) | DIR_DIRS;
+      else if (c == 'P') paged = 1;
       else {
-        puts_k("Uso: dir [pasta\\][*.ext] [/s] [/w] [/d] [/p]\n");
-        puts_k("  /s  inclui as subpastas\n");
-        puts_k("  /w  lista larga, em linhas\n");
-        puts_k("  /d  so as pastas\n");
-        puts_k("  /p  para a cada tela cheia\n");
-        puts_k("  * e ? valem no nome: dir *.exe   dir ???.txt\n");
+        dir_usage();
         return 1;
       }
     }
@@ -66,11 +114,11 @@ int cmd_dir(int argc, char** argv) {
     page_lines = 1;   /* a linha do comando */
     page_col = page_quit = 0;
     shell_set_out(page_out);
-    drives_dir(spec, flags);
+    drives_dir(spec, flags, order);
     shell_set_out(page_prev);
     return 0;
   }
-  drives_dir(spec, flags);
+  drives_dir(spec, flags, order);
   return 0;
 }
 

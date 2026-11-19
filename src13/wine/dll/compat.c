@@ -78,7 +78,31 @@ void* builtin_ordinal(const char* dll, unsigned ord) {
   wlower(n, dll, (int)sizeof(n));
   {
     void* f = uimisc_ordinal(n, ord);
+    const char* nm;
     if (f) return f;
+    /* tabela ordinal -> nome (ordtab.c): qualquer funcao que o WINE ja tenha */
+    nm = ordinal_name(n, ord);
+    f = nm ? builtin_lookup(nm) : 0;
+    if (f) return f;
+  }
+  if (strncmp(n, "ws2_32", 6) == 0 || strncmp(n, "wsock32", 7) == 0) {
+    /* ordinais classicos do Winsock -> nomes (as que faltam viram stub) */
+    static const char* const ws[] = {0, "accept", "bind", "closesocket", "connect", "getpeername", "getsockname",
+                                     "getsockopt", "htonl", "htons", "ioctlsocket", "inet_addr", "inet_ntoa",
+                                     "listen", "ntohl", "ntohs", "recv", "recvfrom", "select", "send", "sendto",
+                                     "setsockopt", "shutdown", "socket"};
+    const char* nm = 0;
+    if (ord < sizeof(ws) / sizeof(ws[0])) nm = ws[ord];
+    else if (ord == 51) nm = "gethostbyaddr";
+    else if (ord == 52) nm = "gethostbyname";
+    else if (ord == 55) nm = "getservbyname";
+    else if (ord == 57) nm = "gethostname";
+    else if (ord == 111) nm = "WSAGetLastError";
+    else if (ord == 112) nm = "WSASetLastError";
+    else if (ord == 115) nm = "WSAStartup";
+    else if (ord == 116) nm = "WSACleanup";
+    else if (ord == 151) nm = "__WSAFDIsSet";
+    return nm ? builtin_lookup(nm) : 0;
   }
   if (strncmp(n, "shlwapi", 7) == 0) {
     for (i = 0; i < sizeof(shlwapi_ord) / sizeof(shlwapi_ord[0]); i++)
@@ -86,6 +110,10 @@ void* builtin_ordinal(const char* dll, unsigned ord) {
     return 0;
   }
   if (strncmp(n, "oleaut32", 8) != 0) return 0;
+  {
+    void* f = safearray_ordinal(ord);
+    if (f) return f;
+  }
   for (i = 0; i < sizeof(oleaut_ord) / sizeof(oleaut_ord[0]); i++)
     if (oleaut_ord[i].ord == ord) return oleaut_ord[i].fn;
   return 0;

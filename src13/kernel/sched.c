@@ -1,5 +1,6 @@
 #include "sched.h"
 #include "kthread.h"
+int fs_held_by_me(void); /* kexports.c */
 
 #define SCHED_JOBS 8
 
@@ -45,6 +46,11 @@ void sched_yield(void) {
   }
   if (in_yield) return;
   kt_bkl_breathe();
+  /* Tarefa do WIN no meio de uma operacao de disco (dona da trava do FS):
+   * nao cede a vez. O laco do WIN, retomado aqui, podia pedir um arquivo e
+   * esperar a trava de uma tarefa que so ele faria andar (travava o mouse e
+   * a tela por 20 s). As threads esperam no futex. */
+  if (fs_held_by_me()) return;
   /* Antes de in_yield: outro programa, retomado daqui, tambem precisa ceder. */
   if (gui_coop_pause()) return;
   in_yield = 1;

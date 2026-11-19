@@ -871,11 +871,14 @@ static struct mm_hdr* find_fit(struct arena* a, uint32_t need) {
   int b, tries;
   for (tries = 0; tries < 2; tries++) {
     int bad = 0;
+    uint32_t holder = 0, badx = 0;
     for (b = bin_of(need); b < MM_NBIN && !bad; b++) {
-      uint32_t x;
-      for (x = a->bin[b]; x; x = fb(x)->next) {
+      uint32_t x, px = 0;
+      for (x = a->bin[b]; x; px = x, x = fb(x)->next) {
         if (!link_ok(a, x)) {
           bad = 1;
+          holder = px;
+          badx = x;
           break;
         }
         if (blk_at(x)->size >= need) return blk_at(x);
@@ -883,6 +886,68 @@ static struct mm_hdr* find_fit(struct arena* a, uint32_t need) {
     }
     if (!bad) return 0;
     serial_puts("[mm] lista de livres corrompida: refazendo\n");
+    /* Quem estragou: o bloco livre cujo elo ficou ruim (escrita depois do
+     * free) ou o bloco ocupado logo antes dele (escrita alem do fim). */
+    serial_puts("[mm]   elo ruim ");
+    serial_hex32(badx);
+    if (holder) {
+      struct mm_hdr* hh = blk_at(holder);
+      struct mm_hdr* pv = prev_blk(a, hh);
+      const uint32_t* w = (const uint32_t*)(uintptr_t)(holder + (uint32_t)sizeof(struct mm_hdr));
+      serial_puts(" no livre ");
+      serial_hex32(holder);
+      serial_puts(" tam ");
+      serial_hex32(hh->size);
+      serial_puts(" dados ");
+      serial_hex32(w[0]);
+      serial_puts(" ");
+      serial_hex32(w[1]);
+      serial_puts(" ");
+      serial_hex32(w[2]);
+      serial_puts(" ");
+      serial_hex32(w[3]);
+      if (pv && range_ok(a, pv)) {
+        serial_puts(" | antes: bloco ");
+        serial_hex32((uint32_t)(uintptr_t)pv);
+        serial_puts(" tam ");
+        serial_hex32(pv->size);
+        serial_puts(" dono ");
+        serial_hex32(pv->owner);
+        serial_puts(pv->free ? " livre" : " ocupado");
+      }
+    } else {
+      serial_puts(" (cabeca da lista)");
+    }
+    /* cabecalho em x e o bloco que fisicamente cobre x-1 (andando a arena
+     * desde o inicio: o prev de x pode estar estragado) */
+    if (badx >= a->start && badx < a->end) {
+      const uint32_t* hw = (const uint32_t*)(uintptr_t)badx;
+      struct mm_hdr* h = blk_at(a->start);
+      struct mm_hdr* last = 0;
+      serial_puts(" | em x: ");
+      serial_hex32(hw[0]);
+      serial_puts(" ");
+      serial_hex32(hw[1]);
+      serial_puts(" ");
+      serial_hex32(hw[2]);
+      serial_puts(" ");
+      serial_hex32(hw[3]);
+      while (range_ok(a, h) && (uint32_t)(uintptr_t)h < badx) {
+        last = h;
+        h = blk_at((uint32_t)(uintptr_t)h + h->size);
+      }
+      if (last) {
+        serial_puts(" | bloco antes ");
+        serial_hex32((uint32_t)(uintptr_t)last);
+        serial_puts(" tam ");
+        serial_hex32(last->size);
+        serial_puts(" dono ");
+        serial_hex32(last->owner);
+        serial_puts(last->free ? " livre" : " ocupado");
+        serial_puts((uint32_t)(uintptr_t)last + last->size == badx ? " (encostado)" : " (NAO encosta: x no meio)");
+      }
+    }
+    serial_puts("\n");
     arena_rebuild(a);
   }
   return 0;
@@ -1280,5 +1345,63 @@ void mm_alias_undo(void) {
     *alias_pdpt_e = alias_pdpt_old;
     alias_pdpt_e = 0;
   }
+  alias_flush();
+}
+
+/* ---- Pagina 0 sem mapeamento enquanto roda programa do Windows ----
+ * No Windows os primeiros 64 KB nao existem: ponteiro NULL falha na hora. Aqui
+ * o endereco 0 e RAM (tabela de interrupcoes da BIOS) e um NULL lido ou
+ * escrito por engano vira lixo ou estraga memoria. Com o guarda ligado, os
+ * primeiros 4 KB ficam fora do mapa (a pagina de 2 MB/1 GB que os contem vira
+ * tabela de 4 KB) e o acesso vira falta, entregue ao programa. O kernel so le
+ * essa area durante o boot (EBDA em smp.c). */
+static uint64_t null_pt[512] __attribute__((aligned(4096)));
+static uint64_t null_pd[512] __attribute__((aligned(4096)));
+static uint64_t null_pdpt_old, null_pd_old, null_pt_old;
+static uint64_t* null_pt_e;
+static int null_on, null_split_pdpt, null_split_pd;
+
+void mm_null_guard(int on) {
+  uint64_t cr3, *pml4, *pdpt, *pd;
+  uint32_t i;
+  if (on == null_on) return;
+  __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+  pml4 = (uint64_t*)(uintptr_t)(cr3 & PG_ADDR);
+  if (!(pml4[0] & 1u)) return;
+  pdpt = (uint64_t*)(uintptr_t)(pml4[0] & PG_ADDR);
+  if (on) {
+    if (!(pdpt[0] & 1u)) return;
+    null_split_pdpt = null_split_pd = 0;
+    null_pt_e = 0;
+    if (pdpt[0] & 0x80u) { /* 1 GB -> 512 x 2 MB */
+      uint64_t e = pdpt[0], fl = (e & 0x11Fu) | (e & 0x1000u) | (e & PG_NX) | 0x80u;
+      for (i = 0; i < 512; i++) null_pd[i] = ((e & 0x000FFFFFC0000000ULL) + ((uint64_t)i << 21)) | fl;
+      null_pdpt_old = e;
+      pdpt[0] = (uint64_t)(uintptr_t)null_pd | (e & 7u);
+      null_split_pdpt = 1;
+    }
+    pd = (uint64_t*)(uintptr_t)(pdpt[0] & PG_ADDR);
+    if (pd[0] & 0x80u) { /* 2 MB -> 512 x 4 KB, a primeira ausente */
+      uint64_t e = pd[0], fl = (e & 0x11Fu) | ((e & 0x1000u) ? 0x80u : 0) | (e & PG_NX);
+      for (i = 0; i < 512; i++) null_pt[i] = ((e & 0x000FFFFFFFE00000ULL) + ((uint64_t)i << 12)) | fl;
+      null_pt[0] = 0;
+      null_pd_old = e;
+      pd[0] = (uint64_t)(uintptr_t)null_pt | (e & 7u);
+      null_split_pd = 1;
+    } else if (pd[0] & 1u) { /* ja e tabela de 4 KB */
+      uint64_t* pt = (uint64_t*)(uintptr_t)(pd[0] & PG_ADDR);
+      null_pt_e = &pt[0];
+      null_pt_old = pt[0];
+      pt[0] = 0;
+    }
+  } else {
+    pd = (uint64_t*)(uintptr_t)(pdpt[0] & PG_ADDR);
+    if (null_pt_e) *null_pt_e = null_pt_old;
+    if (null_split_pd) pd[0] = null_pd_old;
+    if (null_split_pdpt) pdpt[0] = null_pdpt_old;
+    null_pt_e = 0;
+    null_split_pd = null_split_pdpt = 0;
+  }
+  null_on = on;
   alias_flush();
 }

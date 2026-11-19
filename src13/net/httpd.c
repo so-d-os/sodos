@@ -2,6 +2,7 @@
  * GET /exec?cmd=...   POST /exec com o comando no corpo
  * GET /mouse          POST /mouse  x=&y=&click=1
  * POST /click         mesmo que o mouse com clique */
+#include "linkext.h"
 #include "httpd.h"
 #include "net.h"
 #include "shell.h"
@@ -500,7 +501,7 @@ static void handle(char* req) {
   }
   if (eq(path, "/win/launch")) {
     /* Abre um programa como janela do WIN (o mesmo pedido de k_win_launch). */
-    char lp[64];
+    char lp[LINKEXT_PATH_MAX];
     lp[0] = 0;
     if (!form_get(q, "path", lp, (int)sizeof(lp))) form_get(body, "path", lp, (int)sizeof(lp));
     if (lp[0] && win_launch(lp) == 0) reply(200, "OK", "ok\n", 3, head);

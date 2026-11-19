@@ -180,6 +180,7 @@ void wfile_flush(struct wobj* f) {
 }
 
 static char* sdup(const char* s);
+static int ram_delete(const char* path);
 
 void wfile_close(struct wobj* f) {
   if (f->type == OBJ_FILE && f->ram) {
@@ -213,6 +214,14 @@ void wfile_close(struct wobj* f) {
     }
   }
   wfile_flush(f);
+  if (f->type == OBJ_FILE && (f->u2 & 1) && f->path) { /* FILE_DISPOSITION: apaga ao fechar */
+    if (f->is_dir) {
+      k_rmdir(f->path);
+    } else if (!ram_delete(f->path)) {
+      k_fdelete(f->path);
+    }
+    if (wine_debug >= 2) wlog("apagado ao fechar: ", f->path);
+  }
   if (f->data) k_free(f->data);
   if (f->path) k_free(f->path);
   if (f->p2) k_free(f->p2);
@@ -247,10 +256,18 @@ static HANDLE open_file(const char* name, DWORD access, DWORD disp, DWORD flags)
   struct wobj* f;
   uint32_t size = 0;
   int st, want_write = (access & 0x40000000u) || (access & 0x10000000u) || (access & 6u);
+  if (name[0] == 92 && name[1] == 92 && name[2] == 46 && name[3] == 92 && (name[4] | 32) == 112 &&
+      (name[5] | 32) == 105 && (name[6] | 32) == 112 && (name[7] | 32) == 101 && name[8] == 92) {
+    wchar16* w = wdup8to16(name); /* cliente de named pipe */
+    HANDLE h = w ? wpipe_open(w, flags) : INVALID_HANDLE_VALUE;
+    k_free(w);
+    return h;
+  }
   if (wstreq(name, "CONOUT$") || wstreq(name, "CON")) return H_STDOUT;
   if (wstreq(name, "CONIN$")) return H_STDIN;
   if (wstreq(name, "NUL") || wstreq(name, "\\\\.\\NUL")) {
     f = wobj_new(OBJ_MISC);
+    if (f) f->u1 = 0x4C554E; /* "NUL": dispositivo de caractere */
     return f ? wh_new(f) : INVALID_HANDLE_VALUE;
   }
   wpath(name, path, (int)sizeof(path));
@@ -326,7 +343,10 @@ static HANDLE open_file(const char* name, DWORD access, DWORD disp, DWORD flags)
   f->append = (access & 4u) && !(access & 0x40000000u) && !(access & 2u);
   if (f->writable) {
     if (st && disp != 2 && disp != 5 && size) {
-      if (!grow(f, size) || k_fload(path, (char*)f->data, (int)size + 1) < 0) {
+      /* +1: o k_fload grava um 0 depois do ultimo byte. Com grow(f, size) um
+       * arquivo de 8192 bytes (cache/LevelDB do Chromium) ganhava um buffer
+       * de 8192 e o 0 caia no cabecalho do bloco seguinte do heap do kernel */
+      if (!grow(f, (uint64_t)size + 1) || k_fload(path, (char*)f->data, (int)size + 1) < 0) {
         /* k_fload poe um 0 no fim: pede size+1 */
         if (f->data) k_free(f->data);
         f->data = (uint8_t*)k_malloc(size + 1);
@@ -397,6 +417,8 @@ static WINAPI BOOL ReadFile(HANDLE h, void* buf, DWORD n, DWORD* done, struct ov
   }
   f = wh_get(h, 0);
   if (f && f->type == OBJ_SOCKET) return wsock_read(f, buf, n, done, ov);
+  if (f && f->type == OBJ_PIPE) return wpipe_read(f, buf, n, done, ov);
+  if (f && f->type == OBJ_MISC && f->u1 == 0x4C554E) return 1; /* NUL: fim de arquivo */
   if (!f || f->type != OBJ_FILE || f->is_dir) {
     wset_lasterr(ERROR_INVALID_HANDLE);
     return 0;
@@ -441,6 +463,7 @@ static WINAPI BOOL WriteFile(HANDLE h, const void* buf, DWORD n, DWORD* done, st
   }
   f = wh_get(h, 0);
   if (f && f->type == OBJ_SOCKET) return wsock_write(f, buf, n, done, ov);
+  if (f && f->type == OBJ_PIPE) return wpipe_write(f, buf, n, done, ov);
   if (f && f->type == OBJ_MISC) {
     if (done) *done = n;
     return 1;
@@ -555,6 +578,7 @@ static WINAPI BOOL SetEndOfFile(HANDLE h) {
 }
 static WINAPI BOOL FlushFileBuffers(HANDLE h) {
   struct wobj* f = wh_get(h, OBJ_FILE);
+  if (!f && wpipe_flush(h) >= 0) return 1;
   if (f) wfile_flush(f);
   return 1;
 }
@@ -568,6 +592,8 @@ static WINAPI DWORD GetFileType(HANDLE h) {
   }
   if (f->type == OBJ_FILE) return 1; /* DISK */
   if (f->type == OBJ_SOCKET) return 3; /* PIPE */
+  if (f->type == OBJ_PIPE) return 3;
+  if (f->type == OBJ_MISC && f->u1 == 0x4C554E) return 2; /* NUL: CHAR */
   return 0;
 }
 static WINAPI BOOL LockFileEx(HANDLE h, DWORD f, DWORD r, DWORD lo, DWORD hi, void* ov) {
@@ -644,7 +670,12 @@ static WINAPI BOOL GetFileInformationByHandle(HANDLE h, struct by_handle_info* d
 }
 static WINAPI BOOL GetFileInformationByHandleEx(HANDLE h, int cls, void* buf, DWORD len) {
   struct wobj* f = wh_get(h, OBJ_FILE);
+  int pr = wpipe_fileinfo(h, cls, buf, len);
+  if (pr >= 0) return pr;
   if (!f) {
+    struct wobj* any = wh_get(h, 0);
+    wlogx("GetFileInformationByHandleEx: handle invalido ", (uint64_t)(uintptr_t)h);
+    wlogx("  tipo no slot (0 = vazio) ", any ? (uint64_t)any->type + 1 : 0);
     wset_lasterr(ERROR_INVALID_HANDLE);
     return 0;
   }
@@ -1129,6 +1160,76 @@ static WINAPI DWORD GetFinalPathNameByHandleW(HANDLE h, wchar16* buf, DWORD n, D
 }
 
 #define S(n) {#n, (void*)n}
+
+/* ---------- NtSetInformationFile: o que o libuv (Node) usa ----------
+ * unlink = abrir com DELETE + FileDisposition(Ex) + fechar; ftruncate =
+ * FileEndOfFile; rename por handle = FileRename(Ex). Devolve NTSTATUS. */
+#define STATUS_NOT_SUPPORTED_ ((long)0xC00000BB)
+long wfile_setinfo(HANDLE h, int cls, const void* buf, DWORD len) {
+  struct wobj* f = wh_get(h, OBJ_FILE);
+  const uint8_t* b = (const uint8_t*)buf;
+  if (!f) return (long)0xC0000008; /* STATUS_INVALID_HANDLE */
+  switch (cls) {
+    case 4: /* FileBasicInformation: tempos/atributos (o FAT daqui nao guarda) */
+    case 19: /* FileAllocationInformation */
+    case 14: /* FilePositionInformation */
+      if (cls == 14 && len >= 8) f->pos = *(const uint64_t*)b;
+      return 0;
+    case 13: /* FileDispositionInformation: BOOLEAN DeleteFile */
+      if (len < 1) return (long)0xC0000004;
+      if (b[0]) f->u2 |= 1; else f->u2 &= ~1ull;
+      return 0;
+    case 64: /* FileDispositionInformationEx: flags (1 = DELETE) */
+      if (len < 4) return (long)0xC0000004;
+      if (*(const DWORD*)b & 1) f->u2 |= 1; else f->u2 &= ~1ull;
+      return 0;
+    case 20: { /* FileEndOfFileInformation */
+      uint64_t n, keep = f->pos;
+      if (len < 8) return (long)0xC0000004;
+      n = *(const uint64_t*)b;
+      if (!f->writable) return (long)0xC0000022; /* ACCESS_DENIED */
+      f->pos = n;
+      if (!SetEndOfFile(h)) {
+        f->pos = keep;
+        return (long)0xC000007F; /* DISK_FULL */
+      }
+      f->pos = keep;
+      return 0;
+    }
+    case 10: /* FileRenameInformation: {BOOLEAN Replace; HANDLE Root; ULONG Len; WCHAR Name[]} */
+    case 65: { /* FileRenameInformationEx: Flags (1 = REPLACE_IF_EXISTS) */
+      DWORD nl, fl;
+      wchar16 name[300];
+      char to[300];
+      if (len < 20) return (long)0xC0000004;
+      nl = *(const DWORD*)(b + 16) / 2;
+      if (nl >= 299 || !f->path) return (long)0xC000000D; /* INVALID_PARAMETER */
+      memcpy(name, b + 20, nl * 2);
+      name[nl] = 0;
+      fl = cls == 10 ? (b[0] ? 1u : 0u) : (*(const DWORD*)b & 1u);
+      wfile_flush(f);
+      wpath16(name, to, (int)sizeof(to));
+      {
+        wchar16* from = wdup8to16(f->path);
+        BOOL ok = from && MoveFileExW(from, name, fl & 1u);
+        k_free(from);
+        if (!ok) return wget_lasterr() == ERROR_ALREADY_EXISTS ? (long)0xC0000035 : (long)0xC0000022;
+      }
+      {
+        char* np = sdup(to);
+        if (np) {
+          k_free(f->path);
+          f->path = np;
+        }
+      }
+      if (wine_debug >= 2) wlog("renomeado por handle: ", to);
+      return 0;
+    }
+  }
+  if (wine_debug) wlogx("NtSetInformationFile: classe nao suportada ", (uint64_t)cls);
+  return (long)0xC0000003; /* STATUS_INVALID_INFO_CLASS */
+}
+
 const struct wine_sym file_syms[] = {
     S(CreateFileA), S(CreateFileW), S(ReadFile), S(WriteFile), S(WriteConsoleA), S(WriteConsoleW),
     S(SetFilePointerEx), S(SetFilePointer), S(GetFileSizeEx), S(GetFileSize), S(SetEndOfFile),

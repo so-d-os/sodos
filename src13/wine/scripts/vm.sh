@@ -37,7 +37,8 @@ case "$1" in
     done
     DISP="-display none"
     [ -n "$GUI" ] && DISP=""
-    setsid qemu-system-x86_64 -accel kvm -cpu host -m 8192 -smp 4 -usb -device usb-tablet -vga std $DISP \
+    # QEMU_EXTRA="-s": gdb do QEMU na porta 1234 (watchpoints de hardware)
+    setsid qemu-system-x86_64 -accel kvm -cpu host -m 8192 -smp 4 -usb -device usb-tablet -vga std $DISP $QEMU_EXTRA \
       -monitor "unix:$MON,server,nowait" -serial "file:$V/serial.log" \
       -netdev user,id=n0,hostfwd=tcp::$PORT-:8797 -device ne2k_pci,netdev=n0 -boot order=c \
       -drive format=raw,file="$V/os.img",if=ide,index=0 \
@@ -53,7 +54,7 @@ case "$1" in
     echo "vm: pronta na porta $PORT ($V)"
     ;;
   cmd) curl -s -m ${TIMEOUT:-120} --data-binary "$2" "http://127.0.0.1:$PORT/exec" ;;
-  launch) curl -s -m 10 -G --data-urlencode "path=$2" "http://127.0.0.1:$PORT/win/launch"; echo ;;
+  launch) curl -s -m 10 --data-urlencode "path=$2" "http://127.0.0.1:$PORT/win/launch"; echo ;;
   keys)
     printf '%s' "$2" | python3 -c '
 import sys

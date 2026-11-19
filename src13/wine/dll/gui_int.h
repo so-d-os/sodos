@@ -107,11 +107,12 @@ struct surf {
   int w, h;
   int rgba;
   int bottom_up;
+  int foreign;   /* px e de uma secao (CreateDIBSection com hSection): nao solta */
 };
 
 #define DC_MAGIC 0x43445757u  /* "WWDC" */
 #define GDI_MAGIC 0x44475757u /* "WWGD" */
-enum { G_BRUSH = 1, G_PEN, G_BITMAP, G_FONT };
+enum { G_BRUSH = 1, G_PEN, G_BITMAP, G_FONT, G_RGN };
 struct wgdi {
   DWORD magic;
   int kind;
@@ -121,6 +122,7 @@ struct wgdi {
   int bold;         /* fonte */
   int height;       /* fonte: altura pedida (px) */
   struct surf s;    /* bitmap */
+  int rl, rt, rr, rb; /* regiao (so retangulo: o que o Chromium/Skia usa) */
 };
 
 struct wwin;
@@ -155,6 +157,7 @@ struct wclass {
   uintptr_t bg_sys;       /* (HBRUSH)(COLOR_x + 1) */
   int extra;              /* cbWndExtra */
   int kind;
+  uint16_t atom;          /* devolvido pelo RegisterClass (MAKEINTATOM) */
 };
 
 #define WEXTRA 128

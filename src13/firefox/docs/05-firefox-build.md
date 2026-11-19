@@ -997,6 +997,28 @@ manda `/D/` para a unidade do .EXE quando `D:\USER` nao existe e la existe; o
 EXPLORER abre .EXE pelo WIN (`k_win_launch`) em vez de `k_exec` dentro da
 propria tarefa.
 
+#### Pasta de trabalho: FIREFOX_WORKFOLDER
+
+Perfil, cache e temporarios vao para a pasta do ambiente do sistema
+`FIREFOX_WORKFOLDER`, posta no `AUTOEXEC.BAT`:
+
+```bat
+SET FIREFOX_WORKFOLDER=D:\USER\DEFAULT
+```
+
+Na partida o port (`sodos_default_env`, `sodos_linux_abi.c`) le a variavel
+por `k_getenv`, cria a pasta (todos os niveis) e `<pasta>\TEMP` se faltarem e
+poe `HOME=/D/USER/DEFAULT` e `TMPDIR=/D/USER/DEFAULT/TEMP`. O Firefox cria o
+resto dentro: `.mozilla\firefox\<perfil>` e `.cache\mozilla\firefox\<perfil>`
+(cache2). Aceita `D:\PASTA`, `D:/PASTA` ou `/D/PASTA`. `FIREFOX_WORKSPACE`
+e sinonimo (usado quando nao ha `FIREFOX_WORKFOLDER`).
+
+Ordem: `FIREFOX_WORKFOLDER` > `HOME`/`TMPDIR` do `ENV.TXT` > ramdisk `Z:`
+(`Z:\USER\DEFAULT` e `Z:\TEMP` existindo) > `D:\USER\DEFAULT` e `D:\TEMP`.
+Com o perfil no disco nada e apagado na partida; o marcador `SODOSRUN.TXT`
+(que apaga o perfil de uma execucao interrompida) so vale com o HOME no Z:.
+Os downloads seguem em `browser.download.dir` (`prefs/sodos.js`).
+
 #### Mouse e teclado lentos no QEMU: LFB uncached
 
 Medido com `WIN_INLAT_LOG 1` (`video/visual.c`): o tick de 1 ms marca quando

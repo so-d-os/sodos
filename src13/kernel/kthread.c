@@ -78,19 +78,22 @@ struct task {
   uint64_t teb;             /* TEB do Windows (WINE.DLL); 0 = nao e thread Windows */
 };
 
-/* self e curr nos offsets 0 e 8: lidos com um mov %gs:N (atomico frente a
+/* self e curr nos offsets 0 e 0x18: lidos com um mov %gs:N (atomico frente a
  * preempcao, como o "current" do Linux).
  *
  * Thread do Windows (task.teb != 0, WINE.DLL): o codigo dela le o TEB direto
- * pelo gs (gs:0x30, gs:0x58, e o Go ate gs:0x1480+n), entao enquanto ela roda
- * a base do GS e o TEB, tambem dentro do kernel. Para o kernel continuar
- * achando a CPU e a tarefa, TEB+0 (ExceptionList, sem uso em x64) recebe a
- * struct cpu e TEB+8 a task a cada troca (gs_load). Sem thread Windows nada
- * disso roda: o GS fica sempre na struct cpu. */
+ * pelo gs (gs:8 StackBase, gs:0x10 StackLimit, gs:0x30, gs:0x58, e o Go ate
+ * gs:0x1480+n), entao enquanto ela roda a base do GS e o TEB, tambem dentro
+ * do kernel. Para o kernel continuar achando a CPU e a tarefa, TEB+0
+ * (ExceptionList, sem uso em x64) recebe a struct cpu e TEB+0x18
+ * (SubSystemTib, sem uso em x64) a task a cada troca (gs_load). TEB+8 e +0x10
+ * ficam com os limites da pilha (o V8 confere o rsp contra o StackBase).
+ * Sem thread Windows nada disso roda: o GS fica sempre na struct cpu. */
 struct cpu {
   struct cpu* self;
-  struct task* volatile curr;
+  uint64_t unused8;         /* no TEB: StackBase */
   uint64_t gs_now;          /* base do GS carregada nesta CPU */
+  struct task* volatile curr; /* offset 0x18 */
   int index;
   volatile int online;
   struct spin lock;
@@ -157,7 +160,7 @@ static inline struct cpu* this_cpu(void) {
 static inline struct task* cur(void) {
   struct task* t;
   if (!kt_up) return &world;
-  __asm__ volatile ("mov %%gs:8, %0" : "=r"(t));
+  __asm__ volatile ("mov %%gs:0x18, %0" : "=r"(t));
   return t;
 }
 
@@ -171,7 +174,7 @@ static inline void gs_load(struct cpu* c, struct task* t) {
   if (t->teb) {
     uint64_t* tb = (uint64_t*)(uintptr_t)t->teb;
     tb[0] = (uint64_t)(uintptr_t)c;
-    tb[1] = (uint64_t)(uintptr_t)t;
+    tb[3] = (uint64_t)(uintptr_t)t; /* TEB+0x18 */
     v = t->teb;
   }
   if (c->gs_now != v) {
@@ -705,7 +708,9 @@ static int thread_wait(struct task* t, volatile int* addr, int val, int timeout_
   kt_schedule();
   irq_restore(fl);
   if (t->killed) kt_die(t);
-  rc = t->fw_woken ? 0 : E_TIMEDOUT;
+  /* sem prazo nao ha "tempo esgotado": uma volta sem wake e espuria e quem
+   * chamou confere a palavra de novo (semantica de futex) */
+  rc = t->fw_woken ? 0 : (timeout_ms < 0 ? 0 : E_TIMEDOUT);
   bkl_take(t, depth);
   return rc;
 }
@@ -894,6 +899,12 @@ static struct task* find_tid(int tid) {
   for (i = 0; i < KT_MAX; i++)
     if (kts[i].state != T_FREE && kts[i].tid == tid) return &kts[i];
   return 0;
+}
+
+/* 1 se a thread tid existe e nao terminou (trava do FS: dona morta). */
+int kt_thread_alive(int tid) {
+  struct task* t = find_tid(tid);
+  return t && t->state != T_DEAD;
 }
 
 static struct cpu* pick_cpu(uint32_t mask) {

@@ -15,7 +15,7 @@
  * pid dele e somem no fim, como num programa SOX.
  *
  * Enquanto uma thread do Windows roda, a base do GS e o TEB dela (kthread.c,
- * k_win_teb); TEB+0 e TEB+8 guardam a CPU e a tarefa para o kernel.
+ * k_win_teb); TEB+0 e TEB+0x18 guardam a CPU e a tarefa para o kernel.
  */
 #pragma once
 #include <stdint.h>

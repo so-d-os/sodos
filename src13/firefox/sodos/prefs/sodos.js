@@ -73,7 +73,8 @@ pref("browser.chrome.site_icons", false);
 pref("browser.pagethumbnails.capturing_disabled", true);
 pref("browser.safebrowsing.malware.enabled", false);
 pref("browser.safebrowsing.phishing.enabled", false);
-// Perfil e cache ficam no Z: (ramdisk, some no reboot). Downloads vao para o
+// Perfil e cache ficam na pasta do SET FIREFOX_WORKFOLDER (AUTOEXEC.BAT) ou,
+// sem ele, no Z: (ramdisk, some no reboot). Downloads vao para o
 // disco (/D/ e a unidade do .EXE quando nao ha D:) para nao se perderem.
 pref("browser.download.folderList", 2);
 pref("browser.download.dir", "/D/USER/DEFAULT/DOWNLOADS");

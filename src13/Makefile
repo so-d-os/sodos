@@ -146,7 +146,7 @@ DISKS_CMD_O = $(DISKS_CMD_C:.c=.o)
 
 CMD_O = $(SHELL_CMD_O) $(DISKS_CMD_O)
 
-kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c video/gpu.c video/wfont.c video/prtscr.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/ps2in.c kernel/smp.c kernel/reboot.c kernel/xhci.c kernel/nvme.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c fs/fsdrv.c kernel/env.c kernel/linkext.c kernel/wine.c kernel/bootpak.c kernel/mm.c net/net.c net/httpd.c net/png.c net/wpa.c net/rtw89.c net/wifi.c net/r8125.c kernel/module.c kernel/elf.c kernel/sched.c kernel/kthread.c kernel/kexports.c kernel/keymap.c kernel/clip.c kernel/vt.c kernel/version.c $(SHELL_CMD_C) $(DISKS_CMD_C) kernel/ap_blob.o shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
+kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c video/gpu.c video/wfont.c video/prtscr.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/ps2in.c kernel/smp.c kernel/reboot.c kernel/xhci.c kernel/nvme.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c fs/fsdrv.c kernel/env.c kernel/linkext.c kernel/wine.c kernel/vmem.c kernel/bootpak.c kernel/mm.c net/net.c net/httpd.c net/png.c net/wpa.c net/rtw89.c net/wifi.c net/r8125.c kernel/module.c kernel/elf.c kernel/sched.c kernel/kthread.c kernel/kexports.c kernel/keymap.c kernel/clip.c kernel/vt.c kernel/version.c $(SHELL_CMD_C) $(DISKS_CMD_C) kernel/ap_blob.o shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
 	@[ -f kernel/version.h ] || sh tools/mkversion.sh
 	$(CC) $(CFLAGS) -c kernel/version.c -o kernel/version.o
 	$(CC) $(CFLAGS) -c kernel/kernel.c -o kernel/kernel.o
@@ -175,6 +175,7 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(CC) $(CFLAGS) -c kernel/env.c -o kernel/env.o
 	$(CC) $(CFLAGS) -c kernel/linkext.c -o kernel/linkext.o
 	$(CC) $(CFLAGS) -c kernel/wine.c -o kernel/wine.o
+	$(CC) $(CFLAGS) -c kernel/vmem.c -o kernel/vmem.o
 	$(CC) $(CFLAGS) -c kernel/bootpak.c -o kernel/bootpak.o
 	$(CC) $(CFLAGS) -c fs/partition.c -o fs/partition.o
 	$(CC) $(CFLAGS) -c fs/fat_format.c -o fs/fat_format.o
@@ -236,11 +237,11 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(AS) -f elf64 kernel/irq_stubs.asm -o kernel/irq_stubs.o
 	$(AS) -f elf64 kernel/modrun.asm -o kernel/modrun.o
 	$(AS) -f elf64 kernel/kernel_entry.asm -o kernel/kernel_entry.o
-	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/wine.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o net/r8125.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o kernel/version.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/wine.o kernel/vmem.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o net/r8125.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o kernel/version.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 # Mesmo kernel de kernel.elf, com o stub Multiboot2 na frente. O GRUB carrega este ELF.
 kernel_multiboot.elf: kernel.elf kernel/multiboot_header.o kernel/efistub.o kernel/linker_multiboot.ld
-	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/efistub.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/wine.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o net/r8125.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o kernel/version.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/efistub.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/wine.o kernel/vmem.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o net/r8125.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o kernel/version.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 
 kernel.bin: kernel.elf
@@ -443,6 +444,12 @@ test-amdsmc:
 	/tmp/sodos-sdmasim firmware/amdgpu/polaris10_k_smc.bin firmware/amdgpu/polaris10_sdma.bin
 	gcc -O2 -Wall -Wno-unused-function -Wno-unused-variable -Wno-type-limits -DAMD_TELA2 -Ivideo drivers/amdgop/smcsim.c -o /tmp/sodos-dualsim
 	/tmp/sodos-dualsim firmware/amdgpu/polaris10_k_smc.bin firmware/amdgpu/polaris10_sdma.bin $(wildcard $(RX570_ROM))
+
+# QEMU com o SODOS do PC como D:: o E: (SODOSHD) copiado para uma imagem
+# FAT32 (~/sodos-run2/e.img); so o que mudou e copiado de novo. O E: nao e
+# alterado. RESYNC=1 refaz a imagem. Detalhes em tools/run2.sh.
+run2: os.img disk2.img
+	bash tools/run2.sh "$(QEMU)"
 
 # Placa virtio-gpu (docs/GPU.md): o WIN usa D:\SODOS\DRV\VIRTGPU.DLL.
 # Sem o DLL, a mesma placa responde como Bochs VBE e tudo segue pela CPU.

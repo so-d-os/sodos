@@ -66,7 +66,7 @@ O Wine (desde a 5.x) tem duas metades:
 | W2 | DLLs PE do Wine (`ucrtbase`, `msvcrt`, `kernelbase`) no lugar das embutidas | | |
 | W3b | Controles, varias janelas, texto do GDI em bitmap, dialogos (`MessageBox` de verdade), ListView/Toolbar/StatusBar/Rebar, menus guardados | instalador grafico do WinRAR + `WinRAR.exe` (ver 04-winrar.md) | feito em 2026-11-18 (falta desenhar menus e icones) |
 | W1c | SEH por tabela (`RtlVirtualUnwind`, `__C_specific_handler`), `throw` do C++ | EXEs MSVC/MinGW com excecoes | |
-| W4 | Kernel: paginas por processo, bases fixas | EXEs sem `.reloc`, 32 bits (WoW64), instaladores Squirrel/NSIS | |
+| W4 | Kernel: memoria virtual (reserva so de enderecos, commit sob demanda, protecao por pagina) em `kernel/vmem.c`; bases fixas | `VMTEST.EXE` (64 GB reservados, falha em pagina sem acesso tratada); `Claude.exe` passa da reserva do V8 | feito em 2026-11-18 (sem paginas por processo nem WoW64) |
 | W5 | O que um app Electron/Chromium pede (GPU, sandbox, IPC, COM) | Claude Desktop instalado | |
 
 Pendencias de seguranca: verificador de X.509 (raizes + RSA/ECDSA) e

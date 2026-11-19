@@ -9,6 +9,12 @@ void sys_reboot(void) __attribute__((noreturn));
  * prefixos 0xE0 e as solturas. Ctrl+Alt+Del chama sys_reboot(). */
 void kbd_watch(uint8_t sc);
 
+/* Ctrl+F1 visto (ps2in.c): o guardiao age se o mundo estiver parado. */
+void kbd_emergency_note(void);
+/* Thread do guardiao (CPUs 1+): teclado USB, Ctrl+Alt+Del e Ctrl+F1 mesmo
+ * com o mundo travado. Chamado uma vez depois do smp_init. */
+void guard_start(void);
+
 /* 1 se houve Ctrl+C ou Ctrl+Break desde a ultima chamada (e limpa o aviso).
  * No WIN o aviso nao e registrado: la Ctrl+C e tecla comum. */
 int kbd_break_take(void);

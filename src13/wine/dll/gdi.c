@@ -29,11 +29,11 @@ DWORD sys_color(int i) {
 
 struct wgdi* gdi_of(HANDLE h) {
   struct wgdi* o = (struct wgdi*)h;
-  return o && ((uintptr_t)o > 0x10000) && o->magic == GDI_MAGIC ? o : 0;
+  return wptr_ok(o) && o->magic == GDI_MAGIC ? o : 0;
 }
 struct wdc* dc_of(HANDLE h) {
   struct wdc* d = (struct wdc*)h;
-  return d && ((uintptr_t)d > 0x10000) && d->magic == DC_MAGIC ? d : 0;
+  return wptr_ok(d) && d->magic == DC_MAGIC ? d : 0;
 }
 
 /* Cor de um pincel; aceita (HBRUSH)(COLOR_x + 1). */
@@ -373,7 +373,7 @@ HANDLE WINAPI wSelectObject(HANDLE dc, HANDLE obj) {
 static WINAPI BOOL DeleteObject(HANDLE obj) {
   struct wgdi* o = gdi_of(obj);
   if (!o || o->stock) return o != 0;
-  if (o->s.px) k_free(o->s.px);
+  if (o->s.px && !o->s.foreign) k_free(o->s.px);
   o->magic = 0;
   k_free(o);
   return 1;
@@ -501,6 +501,150 @@ static WINAPI int SelectClipRgn(HANDLE dc, HANDLE rgn) {
   return 2;
 }
 
+
+/* ---------- regioes (retangulares) e transformacao do mundo ----------
+ * O Skia (InitializeDC) liga GM_ADVANCED e poe a identidade; o Chromium
+ * recorta com regioes retangulares. Regiao aqui e so o retangulo. */
+#define NULLREGION 1
+#define SIMPLEREGION 2
+static int rgn_kind(const struct wgdi* r) { return r->rr > r->rl && r->rb > r->rt ? SIMPLEREGION : NULLREGION; }
+static WINAPI HANDLE CreateRectRgn(int l, int t, int r, int b) {
+  struct wgdi* o = obj_new(G_RGN);
+  if (!o) return 0;
+  o->rl = l < r ? l : r;
+  o->rr = l < r ? r : l;
+  o->rt = t < b ? t : b;
+  o->rb = t < b ? b : t;
+  return o;
+}
+static WINAPI HANDLE CreateRectRgnIndirect(const int32_t* r) { return r ? CreateRectRgn(r[0], r[1], r[2], r[3]) : 0; }
+static WINAPI BOOL SetRectRgn(HANDLE h, int l, int t, int r, int b) {
+  struct wgdi* o = gdi_of(h);
+  if (!o || o->kind != G_RGN) return 0;
+  o->rl = l; o->rt = t; o->rr = r; o->rb = b;
+  return 1;
+}
+static WINAPI int GetRgnBox(HANDLE h, int32_t* r) {
+  struct wgdi* o = gdi_of(h);
+  if (!o || o->kind != G_RGN || !r) return 0;
+  r[0] = o->rl; r[1] = o->rt; r[2] = o->rr; r[3] = o->rb;
+  return rgn_kind(o);
+}
+static WINAPI int CombineRgn(HANDLE dst, HANDLE a, HANDLE b, int mode) {
+  struct wgdi* d = gdi_of(dst);
+  struct wgdi* x = gdi_of(a);
+  struct wgdi* y = gdi_of(b);
+  int l, t, r, bt;
+  if (!d || !x || d->kind != G_RGN || x->kind != G_RGN) return 0;
+  l = x->rl; t = x->rt; r = x->rr; bt = x->rb;
+  if (mode != 5 && y && y->kind == G_RGN) { /* 5 = RGN_COPY */
+    if (mode == 1) { /* RGN_AND */
+      if (y->rl > l) l = y->rl;
+      if (y->rt > t) t = y->rt;
+      if (y->rr < r) r = y->rr;
+      if (y->rb < bt) bt = y->rb;
+    } else if (mode == 2 || mode == 3) { /* RGN_OR / RGN_XOR: caixa que cobre os dois */
+      if (rgn_kind(y) == SIMPLEREGION) {
+        if (rgn_kind(x) == NULLREGION) {
+          l = y->rl; t = y->rt; r = y->rr; bt = y->rb;
+        } else {
+          if (y->rl < l) l = y->rl;
+          if (y->rt < t) t = y->rt;
+          if (y->rr > r) r = y->rr;
+          if (y->rb > bt) bt = y->rb;
+        }
+      }
+    } /* 4 = RGN_DIFF: fica a (aproximacao) */
+  }
+  d->rl = l; d->rt = t; d->rr = r > l ? r : l; d->rb = bt > t ? bt : t;
+  return rgn_kind(d);
+}
+static WINAPI BOOL EqualRgn(HANDLE a, HANDLE b) {
+  struct wgdi* x = gdi_of(a);
+  struct wgdi* y = gdi_of(b);
+  return x && y && x->rl == y->rl && x->rt == y->rt && x->rr == y->rr && x->rb == y->rb;
+}
+static WINAPI int ExtSelectClipRgn(HANDLE dc, HANDLE rgn, int mode) {
+  (void)mode;
+  return SelectClipRgn(dc, rgn);
+}
+static WINAPI int GetClipBox(HANDLE dc, int32_t* r) {
+  struct wdc* d = dc_of(dc);
+  if (!d || !r) return 0;
+  if (d->bitmap) {
+    r[0] = 0; r[1] = 0; r[2] = d->bitmap->s.w; r[3] = d->bitmap->s.h;
+  } else if (d->win) {
+    r[0] = 0; r[1] = 0; r[2] = d->clip.right - d->clip.left; r[3] = d->clip.bottom - d->clip.top;
+  } else {
+    r[0] = r[1] = 0; r[2] = r[3] = 1;
+  }
+  return SIMPLEREGION;
+}
+static WINAPI int GetClipRgn(HANDLE dc, HANDLE rgn) {
+  (void)dc;
+  (void)rgn;
+  return 0; /* sem regiao de recorte propria */
+}
+static WINAPI int SetGraphicsMode(HANDLE dc, int mode) {
+  (void)dc;
+  (void)mode;
+  return 1; /* GM_COMPATIBLE era o anterior */
+}
+static WINAPI BOOL SetWorldTransform(HANDLE dc, const float* x) {
+  (void)dc;
+  (void)x;
+  return 1; /* so a identidade e usada (Skia) */
+}
+static WINAPI BOOL ModifyWorldTransform(HANDLE dc, const float* x, DWORD mode) {
+  (void)dc; (void)x; (void)mode;
+  return 1;
+}
+static WINAPI BOOL GetWorldTransform(HANDLE dc, float* x) {
+  (void)dc;
+  if (!x) return 0;
+  x[0] = 1; x[1] = 0; x[2] = 0; x[3] = 1; x[4] = 0; x[5] = 0;
+  return 1;
+}
+/* GetDIBits/SetDIBits: so 32 bpp, de cima para baixo conforme biHeight */
+static WINAPI int GetDIBits(HANDLE dc, HANDLE bmp, DWORD start, DWORD lines, void* bits, uint8_t* bmi, DWORD use) {
+  struct wgdi* b = gdi_of(bmp);
+  DWORD y;
+  int h;
+  (void)dc; (void)use;
+  if (!b || b->kind != G_BITMAP || !bmi) return 0;
+  if (!bits) { /* so o cabecalho */
+    *(int32_t*)(bmi + 4) = b->s.w;
+    *(int32_t*)(bmi + 8) = b->s.bottom_up ? b->s.h : -b->s.h;
+    *(uint16_t*)(bmi + 12) = 1;
+    *(uint16_t*)(bmi + 14) = 32;
+    *(DWORD*)(bmi + 16) = 0;
+    *(DWORD*)(bmi + 20) = (DWORD)(b->s.w * b->s.h * 4);
+    return b->s.h;
+  }
+  h = *(const int32_t*)(bmi + 8);
+  for (y = 0; y < lines && (int)(start + y) < b->s.h; y++) {
+    int sy = h < 0 ? (int)(start + y) : b->s.h - 1 - (int)(start + y); /* linha pedida, de cima */
+    memcpy((uint8_t*)bits + (size_t)y * (size_t)b->s.w * 4u, surf_row(&b->s, sy), (size_t)b->s.w * 4u);
+  }
+  return (int)y;
+}
+static WINAPI int SetDIBits(HANDLE dc, HANDLE bmp, DWORD start, DWORD lines, const void* bits, const uint8_t* bmi,
+                            DWORD use) {
+  struct wgdi* b = gdi_of(bmp);
+  DWORD y;
+  int h, w;
+  (void)dc; (void)use;
+  if (!b || b->kind != G_BITMAP || !bmi || !bits || *(const uint16_t*)(bmi + 14) != 32) return 0;
+  h = *(const int32_t*)(bmi + 8);
+  w = *(const int32_t*)(bmi + 4) < b->s.w ? *(const int32_t*)(bmi + 4) : b->s.w;
+  for (y = 0; y < lines && (int)(start + y) < b->s.h; y++) {
+    int sy = h < 0 ? (int)(start + y) : b->s.h - 1 - (int)(start + y);
+    memcpy(surf_row(&b->s, sy), (const uint8_t*)bits + (size_t)y * (size_t)(*(const int32_t*)(bmi + 4)) * 4u,
+           (size_t)w * 4u);
+  }
+  return (int)y;
+}
+
 /* ---------- desenho ---------- */
 static WINAPI BOOL Rectangle(HANDLE dc, int l, int t, int r, int b) {
   struct wdc* d = dc_of(dc);
@@ -588,8 +732,19 @@ static WINAPI BOOL StretchBlt(HANDLE ddc, int dx, int dy, int dw, int dh, HANDLE
   surf_blit(d, dx + dd->ox, dy + dd->oy, dw, dh, s, sx + sd->ox, sy + sd->oy, sw, sh, &clip);
   return 1;
 }
+/* WINEDEBUG=2: desenho que vai para uma janela (1o e depois 1 a cada 200) */
+static void blit_note(const char* what, HANDLE dc, int w, int h) {
+  static volatile int n;
+  struct wdc* d = dc_of(dc);
+  int k;
+  if (wine_debug < 2 || !d || !d->win) return;
+  k = __sync_fetch_and_add(&n, 1);
+  if (k % 200) return;
+  wlogx(what, (uint64_t)(uint32_t)w << 32 | (uint32_t)h);
+}
 static WINAPI BOOL BitBlt(HANDLE ddc, int dx, int dy, int w, int h, HANDLE sdc, int sx, int sy, DWORD rop) {
   struct wdc* sd = dc_of(sdc);
+  blit_note("BitBlt na janela (larg<<32|alt) ", ddc, w, h);
   if (!sd) return PatBlt(ddc, dx, dy, w, h, rop);
   return StretchBlt(ddc, dx, dy, w, h, sdc, sx, sy, w, h, rop);
 }
@@ -645,11 +800,31 @@ static WINAPI HANDLE CreateDIBSection(HANDLE dc, const uint8_t* bmi, DWORD usage
   struct wgdi* b = obj_new(G_BITMAP);
   int w = *(const int32_t*)(bmi + 4), h = *(const int32_t*)(bmi + 8);
   int bpp = *(const uint16_t*)(bmi + 14);
-  (void)dc; (void)usage; (void)sec; (void)off;
+  (void)dc; (void)usage;
   if (!b || bpp != 32 || w <= 0 || !h) {
     if (wine_debug) wlogx("CreateDIBSection: formato nao suportado, bpp ", (uint64_t)bpp);
     if (bits) *bits = 0;
     return 0;
+  }
+  if (sec) {
+    /* pixels dentro da secao (memoria compartilhada): o compositor do
+     * Chromium desenha la e o BitBlt daqui le o mesmo lugar */
+    uint8_t* wsection_ptr(HANDLE sec, uint64_t off, uint64_t need); /* map.c */
+    int ah = h < 0 ? -h : h;
+    uint8_t* px = wsection_ptr(sec, off, (uint64_t)w * (uint64_t)ah * 4u);
+    if (!px) {
+      if (wine_debug) wlogx("CreateDIBSection: secao invalida ou pequena ", (uint64_t)(uintptr_t)sec);
+      if (bits) *bits = 0;
+      return 0;
+    }
+    b->s.px = px;
+    b->s.w = w;
+    b->s.h = ah;
+    b->s.rgba = 0;
+    b->s.foreign = 1;
+    b->s.bottom_up = h > 0;
+    if (bits) *bits = px;
+    return b;
   }
   if (!surf_alloc(&b->s, w, h < 0 ? -h : h, 0)) return 0;
   b->s.bottom_up = h > 0;
@@ -676,6 +851,7 @@ static WINAPI int SetDIBitsToDevice(HANDLE dc, int dx, int dy, DWORD w, DWORD h,
   struct surf* ds;
   struct rect clip;
   (void)start;
+  blit_note("SetDIBitsToDevice na janela ", dc, (int)w, (int)h);
   (void)use;
   if (!d || !(ds = dc_surf(d))) return 0;
   b = bitmap_from_dib(bmi, (const uint8_t*)bits);
@@ -692,6 +868,7 @@ static WINAPI int StretchDIBits(HANDLE dc, int dx, int dy, int dw, int dh, int s
   struct surf* ds;
   struct rect clip;
   (void)use;
+  blit_note("StretchDIBits na janela ", dc, dw, dh);
   (void)rop;
   if (!d || !(ds = dc_surf(d))) return 0;
   b = bitmap_from_dib(bmi, (const uint8_t*)bits);
@@ -829,6 +1006,9 @@ static WINAPI void GdipFree(void* p) {
 
 #define S(n) {#n, (void*)n}
 const struct wine_sym gdi_syms[] = {
+    S(CreateRectRgn), S(CreateRectRgnIndirect), S(SetRectRgn), S(GetRgnBox), S(CombineRgn), S(EqualRgn),
+    S(ExtSelectClipRgn), S(GetClipBox), S(GetClipRgn), S(SetGraphicsMode), S(SetWorldTransform),
+    S(ModifyWorldTransform), S(GetWorldTransform), S(GetDIBits), S(SetDIBits), {"GdiAlphaBlend", (void*)AlphaBlend},
     S(GetDC), S(GetWindowDC), S(ReleaseDC), S(CreateCompatibleDC), S(DeleteDC), S(SaveDC), S(RestoreDC),
     S(CreateSolidBrush), S(CreateBrushIndirect), S(GetSysColorBrush), S(GetSysColor), S(CreatePen),
     S(CreateFontIndirectW), S(CreateFontW), {"GetStockObject", (void*)wGetStockObject},

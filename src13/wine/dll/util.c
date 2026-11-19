@@ -3,11 +3,48 @@
 #include <string.h>
 #include "wine_int.h"
 
+/* Uma linha numa chamada so (com varios processos as linhas se misturavam);
+ * fora do processo de cima o pid entra no prefixo: "[wine 260] ". O TEB so
+ * vale depois do k_win_teb: confere o ponteiro para si mesmo (NT_TIB.Self). */
 void wlog(const char* a, const char* b) {
-  k_dbg("[wine] ", 7);
-  if (a) k_dbg(a, (int)strlen(a));
-  if (b) k_dbg(b, (int)strlen(b));
-  k_dbg("\n", 1);
+  char line[2048];
+  int n = 0, k;
+  uint8_t* teb = wteb();
+  const char* pre = "[wine";
+  while (*pre) line[n++] = *pre++;
+  if (teb && *(uint8_t**)(teb + 0x30) == teb) {
+    unsigned v = (unsigned)*(uint64_t*)(teb + TEB_PID);
+    if (v && v != 256) {
+      char t[12];
+      k = 0;
+      do {
+        t[k++] = (char)('0' + v % 10);
+        v /= 10;
+      } while (v);
+      line[n++] = ' ';
+      while (k) line[n++] = t[--k];
+    }
+    if (wine_debug >= 2) { /* thread: " t144" (hexa, como nas esperas longas) */
+      unsigned tid = (unsigned)*(uint64_t*)(teb + TEB_TID);
+      static const char hx[] = "0123456789abcdef";
+      int sh, started = 0;
+      line[n++] = ' ';
+      line[n++] = 't';
+      for (sh = 28; sh >= 0; sh -= 4) {
+        int d = (int)((tid >> sh) & 15);
+        if (d || started || sh == 0) {
+          line[n++] = hx[d];
+          started = 1;
+        }
+      }
+    }
+  }
+  line[n++] = ']';
+  line[n++] = ' ';
+  for (k = 0; a && a[k] && n < (int)sizeof(line) - 2; k++) line[n++] = a[k];
+  for (k = 0; b && b[k] && n < (int)sizeof(line) - 2; k++) line[n++] = b[k];
+  line[n++] = '\n';
+  k_dbg(line, n);
 }
 
 void wlogx(const char* a, uint64_t v) {
@@ -49,6 +86,13 @@ static void cunlock(struct wproc* p) { __sync_lock_release(&p->clk); }
  * tarefa principal escreve (wcon_flush), na mesma ordem. */
 void wcon_write(const char* s, size_t n) {
   struct wproc* p = wp();
+  if (wine_debug >= 2 && n) { /* copia na serial: a saida de um processo que cai cedo se perde */
+    char line[240];
+    size_t k = n < sizeof(line) - 1 ? n : sizeof(line) - 1, i;
+    for (i = 0; i < k; i++) line[i] = (s[i] == 10 || s[i] == 13) ? ' ' : s[i];
+    line[k] = 0;
+    wlog("saida: ", line);
+  }
   if (!wthread()) {
     wcon_flush();
     con_raw(s, n);
@@ -274,6 +318,77 @@ wchar16* wdup8to16(const char* s) {
   d = (wchar16*)wzalloc(((size_t)n + 1) * 2);
   if (d) wutf8_to_16(s, -1, d, n);
   return d;
+}
+
+/* WINEDEBUG=2: espera que ja passou de 5 s (uma linha so: varias threads escrevem) */
+static char* put_hex(char* o, uint64_t v) {
+  static const char hx[] = "0123456789abcdef";
+  int k, started = 0;
+  *o++ = '0';
+  *o++ = 'x';
+  for (k = 60; k >= 0; k -= 4) {
+    int d = (int)((v >> k) & 15);
+    if (d || started || k == 0) {
+      *o++ = hx[d];
+      started = 1;
+    }
+  }
+  return o;
+}
+void wwait_note(const char* what, void* caller, uint64_t waited_ms) {
+  struct wmod* m = pe_from_addr((uint64_t)(uintptr_t)caller);
+  struct wobj* t = wthread();
+  char line[200], *o = line;
+  const char* s;
+  for (s = what; *s && o < line + 60; s++) *o++ = *s;
+  for (s = " thread "; *s; s++) *o++ = *s;
+  o = put_hex(o, t ? t->tid : 0);
+  for (s = " valor "; *s; s++) *o++ = *s;
+  o = put_hex(o, waited_ms);
+  for (s = " de "; *s; s++) *o++ = *s;
+  if (m) {
+    for (s = m->name; *s && o < line + 150; s++) *o++ = *s;
+    *o++ = '+';
+    o = put_hex(o, (uint64_t)(uintptr_t)caller - (uint64_t)(uintptr_t)m->base);
+  } else {
+    o = put_hex(o, (uint64_t)(uintptr_t)caller);
+  }
+  *o = 0;
+  wlog("espera longa: ", line);
+}
+
+/* WINEDEBUG=2: enderecos de retorno (modulo+rva) achados na pilha, numa linha */
+void wstack_note(const char* what, const uint64_t* sp) {
+  char line[600], *o = line;
+  const char* s;
+  int i, shown = 0;
+  for (s = what; *s && o < line + 40; s++) *o++ = *s;
+  extern const void* wine_driver(void);
+  uint64_t wd = (uint64_t)(uintptr_t)wine_driver;
+  /* so ate o topo da pilha (TEB.StackBase): acima dele, com a pilha em
+   * memoria virtual, nao ha pagina e a leitura derrubava o processo */
+  uint64_t top = *(uint64_t*)(wteb() + TEB_STACKBASE);
+  int lim = 2048;
+  if (top > (uint64_t)(uintptr_t)sp && (top - (uint64_t)(uintptr_t)sp) / 8 < (uint64_t)lim)
+    lim = (int)((top - (uint64_t)(uintptr_t)sp) / 8);
+  for (i = 0; i < lim && shown < 40 && o < line + 560; i++) {
+    struct wmod* m = pe_from_addr(sp[i]);
+    if (!m || !m->base) {
+      /* dentro do WINE.DLL: "W" + deslocamento a partir de wine_driver */
+      if (sp[i] > wd - 0x10000 && sp[i] < wd + 0x100000 && wine_debug >= 3) {
+        *o++ = ' ';
+        *o++ = 'W';
+        o = put_hex(o, sp[i] - wd);
+        shown++;
+      }
+      continue;
+    }
+    *o++ = ' ';
+    o = put_hex(o, sp[i] - (uint64_t)(uintptr_t)m->base);
+    shown++;
+  }
+  *o = 0;
+  wlog("pilha: ", line);
 }
 
 void WINAPI wine_unimplemented(const char* what) {

@@ -15,8 +15,18 @@
 #include <so.h>
 #include <string.h>
 #include "wine_int.h"
+struct inh_spec;
+static struct wobj** inh_snapshot(struct wproc* pp, const struct inh_spec* spec);
+static void inh_drop(struct wobj** t);
+const HANDLE* wattr_handles(const void* list, DWORD* count); /* procmisc.c */
+/* o que o filho herda, decidido no CreateProcess (spawn passa adiante) */
+struct inh_spec {
+  int mode; /* 0 = nada, 1 = lista, 2 = tudo */
+  const HANDLE* list;
+  DWORD count;
+};
 
-static HANDLE spawn(const char* cmdline, DWORD* err) {
+static HANDLE spawn(const char* cmdline, DWORD* err, const struct inh_spec* spec) {
   struct wproc* p = wp();
   struct wobj* o;
   HANDLE h;
@@ -31,6 +41,7 @@ static HANDLE spawn(const char* cmdline, DWORD* err) {
   }
   memcpy(c, cmdline, n);
   o->refs = 1; /* a tarefa principal tambem usa o objeto */
+  o->u2 = wnew_pid(); /* pid do filho, como o Windows devolve no CreateProcess */
   h = wh_new(o);
   /* um pedido por vez */
   while (__sync_lock_test_and_set(&p->spawn_req, 1)) {
@@ -42,6 +53,8 @@ static HANDLE spawn(const char* cmdline, DWORD* err) {
   }
   p->spawn_obj = o;
   p->spawn_cmd = c;
+  /* ja aqui: o Chromium fecha handles do filho logo que o CreateProcess volta */
+  p->spawn_inh = spec && spec->mode ? inh_snapshot(p, spec) : 0;
   __sync_lock_test_and_set(&p->spawn_req, 2);
   k_futex_wake(&p->exit_req, -1);
   wlog("processo filho: ", cmdline);
@@ -270,6 +283,311 @@ static int explorer_target(int argc, char** argv, char* out, int max) {
   return 0;
 }
 
+/* ---------- processos filhos em paralelo ----------
+ * O WIN roda cada programa como tarefa propria (k_win_launch_arg). A linha de
+ * comando completa fica nesta tabela (o WIN so carrega um argumento curto):
+ * o filho comeca com "--wine-spawn=N", acha o registro N, troca pelo que o
+ * pai pediu e herda os handles do pai nos mesmos numeros. Na saida, grava o
+ * codigo no objeto de processo do pai e o acorda. Sem WIN no ar (ou com a
+ * fila cheia por muito tempo), o filho roda aninhado como antes. */
+#define SPAWN_MAX 16
+struct spawnrec {
+  volatile int used;
+  int id;
+  char* cmdline;            /* do pai */
+  struct wobj* obj;         /* objeto de processo no pai */
+  struct wproc* parent;     /* 0 quando o pai ja saiu */
+  struct wproc* child;
+  DWORD pid;                /* pid do filho, ja dado no CreateProcess */
+  volatile int claimed;
+  struct wobj** inh;        /* handles herdados, copiados no CreateProcess */
+};
+
+/* O Chromium fecha no pai, logo depois do CreateProcess, handles que so o
+ * filho usa (o pipe do crashpad). Como o filho so os pega depois de carregar,
+ * a lista e tirada ja no CreateProcess, com uma referencia em cada objeto. */
+static struct wobj** inh_snapshot(struct wproc* pp, const struct inh_spec* spec) {
+  struct wobj** t = (struct wobj**)k_malloc_shared(WHANDLE_MAX * sizeof(struct wobj*));
+  int i;
+  if (!t) return 0;
+  memset(t, 0, WHANDLE_MAX * sizeof(struct wobj*));
+  wlock();
+  if (spec->mode == 1) {
+    /* PROC_THREAD_ATTRIBUTE_HANDLE_LIST: so os handles da lista (o Windows
+     * exige isso do Chromium; herdar tudo dividia ~1000 objetos e o filho
+     * soltava memoria do pai: o heap do kernel corrompia) */
+    DWORD k;
+    for (k = 0; k < spec->count; k++) {
+      uintptr_t v = (uintptr_t)spec->list[k];
+      if (v >= 0x200 && !(v & 3) && (v - 0x200) / 4 < WHANDLE_MAX) {
+        i = (int)((v - 0x200) / 4);
+        t[i] = pp->handles[i];
+      }
+    }
+  } else {
+    for (i = 1; i < WHANDLE_MAX; i++) t[i] = pp->handles[i];
+  }
+  for (i = 1; i < WHANDLE_MAX; i++)
+    if (t[i]) t[i]->refs++;
+  wunlock();
+  return t;
+}
+static void inh_drop(struct wobj** t) {
+  int i;
+  if (!t) return;
+  for (i = 1; i < WHANDLE_MAX; i++)
+    if (t[i]) wobj_unref(t[i]);
+  k_free_shared(t);
+}
+static struct spawnrec spawns[SPAWN_MAX];
+static volatile int spawn_lock, spawn_seq, pid_seq;
+
+static void sp_lock(void) {
+  while (__sync_lock_test_and_set(&spawn_lock, 1)) k_thread_yield();
+}
+static void sp_unlock(void) { __sync_lock_release(&spawn_lock); }
+
+DWORD wnew_pid(void) { return 0x100u + 4u * (DWORD)__sync_fetch_and_add(&pid_seq, 1); }
+
+static int split_args(char* s, char** argv, int max);
+static int wine_wants_async(void);
+
+int wspawn_claim(int* argc, char*** argv) {
+  /* do processo (o WINE.DLL e um so para todos: estatico aqui fazia o
+   * segundo filho trocar o argv do primeiro) */
+  char* line;
+  char** av;
+  struct wproc* p = wp();
+  struct spawnrec* r = 0;
+  const char* a;
+  int id = 0, i, n;
+  if (*argc < 2 || strncmp((*argv)[1], "--wine-spawn=", 13) != 0) return 0;
+  for (a = (*argv)[1] + 13; *a >= '0' && *a <= '9'; a++) id = id * 10 + (*a - '0');
+  sp_lock();
+  for (i = 0; i < SPAWN_MAX; i++)
+    if (spawns[i].used && spawns[i].id == id && !spawns[i].claimed) {
+      r = &spawns[i];
+      r->claimed = 1;
+      r->child = p;
+      break;
+    }
+  line = r && r->parent ? (char*)k_malloc((unsigned)strlen(r->cmdline) + 1) : 0;
+  if (line) strcpy(line, r->cmdline);
+  sp_unlock();
+  if (!r || !r->parent) {
+    wlog("processo filho sem registro do pai (o pai desistiu): ", (*argv)[1]);
+    return -1;
+  }
+  p->spawn_rec = r;
+  p->pid = r->pid; /* o pid que o pai ja recebeu */
+  *(uint64_t*)(p->teb + TEB_PID) = p->pid;
+  /* heranca: os handles do pai, nos mesmos numeros (o Chromium passa numeros
+   * de handle na linha de comando) */
+  {
+    struct wobj** t = r->inh;
+    r->inh = 0;
+    if (t) {
+      wlock();
+      for (i = 1; i < WHANDLE_MAX; i++)
+        if (t[i] && !p->handles[i]) { /* a referencia ja foi tomada */
+          p->handles[i] = t[i];
+          t[i] = 0;
+        }
+      wunlock();
+      {
+        int got = 0, miss = 0;
+        for (i = 1; i < WHANDLE_MAX; i++) {
+          if (t[i]) miss++;
+          else if (p->handles[i]) got++;
+        }
+        wlogx("heranca: handles no filho ", (uint64_t)got);
+        wlogx("heranca: slots ja ocupados ", (uint64_t)miss);
+      }
+      inh_drop(t); /* o que nao coube */
+    }
+  }
+  av = (char**)k_malloc(256 * sizeof(char*));
+  if (!line || !av) {
+    wlog("processo filho: sem memoria para a linha de comando", 0);
+    return -1;
+  }
+  n = split_args(line, av, 255);
+  av[n] = 0;
+  /* argv[0] do pai pode ser so o nome; o caminho real fica o que o WIN abriu */
+  if (n > 0) av[0] = (*argv)[0];
+  *argc = n;
+  *argv = av;
+  wlog("processo filho em paralelo: ", r->cmdline);
+  return 1;
+}
+
+/* DuplicateHandle para um filho nosso (obj.c): o objeto entra na tabela do
+ * filho (ou na lista que ele copia ao comecar), num numero alto para nao
+ * colidir com os que ele mesmo abre. Devolve o numero no filho; 0 = nao e
+ * filho deste processo. */
+HANDLE wdup_to_child(struct wobj* proc, struct wobj* o) {
+  struct spawnrec* r = 0;
+  int i, slot = -1;
+  sp_lock();
+  for (i = 0; i < SPAWN_MAX; i++)
+    if (spawns[i].used && spawns[i].obj == proc) {
+      r = &spawns[i];
+      break;
+    }
+  if (!r) {
+    sp_unlock();
+    return 0;
+  }
+  wlock();
+  if (r->child) { /* ja rodando: direto na tabela dele */
+    for (i = WHANDLE_MAX - 1; i > WHANDLE_MAX / 2; i--)
+      if (!r->child->handles[i]) {
+        r->child->handles[i] = o;
+        slot = i;
+        break;
+      }
+  } else {
+    if (!r->inh) {
+      r->inh = (struct wobj**)k_malloc_shared(WHANDLE_MAX * sizeof(struct wobj*));
+      if (r->inh) memset(r->inh, 0, WHANDLE_MAX * sizeof(struct wobj*));
+    }
+    if (r->inh)
+      for (i = WHANDLE_MAX - 1; i > WHANDLE_MAX / 2; i--)
+        if (!r->inh[i]) {
+          r->inh[i] = o;
+          slot = i;
+          break;
+        }
+  }
+  if (slot >= 0) o->refs++;
+  wunlock();
+  sp_unlock();
+  return slot >= 0 ? (HANDLE)(uintptr_t)(0x200u + (unsigned)slot * 4u) : 0;
+}
+
+/* DuplicateHandle(processo filho, h, este processo): o broker do Mojo puxa os
+ * handles que um filho manda (o filho nao consegue abrir o pai). Devolve o
+ * objeto com uma referencia a mais (para a tabela de quem pede); close tira
+ * o handle da tabela do filho (DUPLICATE_CLOSE_SOURCE). 0 = nao achou. */
+struct wobj* wdup_from_child(struct wobj* proc, HANDLE h, int close) {
+  struct spawnrec* r = 0;
+  struct wobj* o = 0;
+  uintptr_t v = (uintptr_t)h;
+  int i, slot;
+  if (v < 0x200u || (v & 3) || (v - 0x200u) / 4 >= WHANDLE_MAX) return 0;
+  slot = (int)((v - 0x200u) / 4);
+  sp_lock();
+  for (i = 0; i < SPAWN_MAX; i++)
+    if (spawns[i].used && spawns[i].obj == proc) {
+      r = &spawns[i];
+      break;
+    }
+  if (!r) {
+    sp_unlock();
+    return 0;
+  }
+  wlock();
+  if (r->child) {
+    o = r->child->handles[slot];
+    if (o && close) r->child->handles[slot] = 0; /* a referencia passa para quem pede */
+    else if (o) o->refs++;
+  } else if (r->inh) {
+    o = r->inh[slot];
+    if (o && close) r->inh[slot] = 0;
+    else if (o) o->refs++;
+  }
+  wunlock();
+  sp_unlock();
+  return o;
+}
+
+void wspawn_exit(int code) {
+  struct wproc* p = wp();
+  struct spawnrec* r = p->spawn_rec;
+  int i;
+  sp_lock();
+  if (r) {
+    struct wproc* pp = r->parent;
+    if (pp) {
+      r->obj->exit_code = (DWORD)code;
+      r->obj->exited = 1;
+      k_futex_wake(&wine_gen, -1); /* quem espera o processo no pai */
+    }
+    r->used = 0;
+    p->spawn_rec = 0;
+  }
+  /* filhos deste processo ficam orfaos (o objeto do pai vai embora) */
+  for (i = 0; i < SPAWN_MAX; i++)
+    if (spawns[i].used && spawns[i].parent == p) {
+      spawns[i].parent = 0;
+      if (!spawns[i].claimed) {
+        inh_drop(spawns[i].inh);
+        spawns[i].inh = 0;
+        spawns[i].used = 0;
+      }
+    }
+  sp_unlock();
+}
+
+/* Pede ao WIN para abrir o filho. 1 = iniciado em paralelo, 0 = nao deu. */
+int k_win_launch_arg(const char* exe, const char* arg);
+static int spawn_async(struct wproc* p, struct wobj* o, const char* path, const char* cmd) {
+  struct spawnrec* r = 0;
+  char arg[32];
+  int i, id;
+  uint64_t t0 = wnow_ms();
+  sp_lock();
+  for (i = 0; i < SPAWN_MAX; i++)
+    if (!spawns[i].used) {
+      r = &spawns[i];
+      break;
+    }
+  if (!r) {
+    sp_unlock();
+    return 0;
+  }
+  id = __sync_add_and_fetch(&spawn_seq, 1);
+  memset(r, 0, sizeof(*r));
+  r->used = 1;
+  r->id = id;
+  r->cmdline = (char*)cmd;
+  r->obj = o;
+  r->parent = p;
+  r->pid = (DWORD)o->u2;
+  sp_unlock();
+  r->inh = p->spawn_inh;
+  p->spawn_inh = 0;
+  if (r->inh) {
+    int c = 0;
+    for (i = 1; i < WHANDLE_MAX; i++)
+      if (r->inh[i]) c++;
+    wlogx("heranca: handles do pai copiados ", (uint64_t)c);
+  }
+  strcpy(arg, "--wine-spawn=");
+  {
+    char t[12];
+    int k = 0, j = (int)strlen(arg), v = id;
+    do {
+      t[k++] = (char)('0' + v % 10);
+      v /= 10;
+    } while (v);
+    while (k) arg[j++] = t[--k];
+    arg[j] = 0;
+  }
+  while (k_win_launch_arg(path, arg) != 0) {
+    if (wnow_ms() - t0 > 3000) { /* WIN fora do ar ou fila presa */
+      sp_lock();
+      inh_drop(r->inh);
+      r->inh = 0;
+      r->used = 0;
+      sp_unlock();
+      return 0;
+    }
+    k_futex_wait(&p->exit_req, 0, 20);
+  }
+  return 1;
+}
+
 /* Na tarefa principal do processo (main.c). */
 void wspawn_world_service(void) {
   struct wproc* p = wp();
@@ -281,6 +599,8 @@ void wspawn_world_service(void) {
   if (p->spawn_req != 2) return;
   o = p->spawn_obj;
   cmd = p->spawn_cmd;
+  char* whole = (char*)k_malloc((unsigned)strlen(cmd) + 1); /* split_args corta cmd */
+  if (whole) strcpy(whole, cmd);
   argc = split_args(cmd, argv, 31);
   if (argc < 1) {
     rc = -1;
@@ -301,6 +621,11 @@ void wspawn_world_service(void) {
     }
     if (!path[0]) {
       rc = 0;
+    } else if (whole && wine_wants_async() && spawn_async(p, o, path, whole)) {
+      /* roda em paralelo: o filho grava o codigo e acorda o pai ao sair */
+      wlog("processo filho iniciado em paralelo: ", path);
+      __sync_lock_release(&p->spawn_req);
+      return; /* cmd fica com o registro ate o filho copiar */
     } else {
       /* o k_exec recebe o argv com ponteiros de 4 bytes (ABI antiga) */
       for (i = 0; i < argc; i++) argv32[i] = (unsigned)(uintptr_t)argv[i];
@@ -313,13 +638,22 @@ void wspawn_world_service(void) {
     }
   }
   wlogx("processo filho terminou, codigo ", (uint32_t)rc);
+  inh_drop(p->spawn_inh);
+  p->spawn_inh = 0;
   k_free(cmd);
+  k_free(whole);
   wlock();
   o->exit_code = (DWORD)rc;
   o->exited = 1;
   wunlock();
   __sync_lock_release(&p->spawn_req);
   wsignal();
+}
+
+/* SET WINE_SPAWN=0 volta ao filho aninhado (o pai espera ele terminar) */
+static int wine_wants_async(void) {
+  char v[4];
+  return !(k_getenv("WINE_SPAWN", v, (int)sizeof(v)) > 0 && v[0] == '0');
 }
 
 static void append_quoted(char* out, size_t max, const char* s) {
@@ -338,22 +672,43 @@ struct process_info {
 };
 static WINAPI BOOL CreateProcessW(const wchar16* app, wchar16* cmd, void* pa, void* ta, BOOL inh, DWORD fl,
                                   void* env, const wchar16* dir, void* si, struct process_info* pi) {
-  char line[1024];
+  /* ate 32 K, o limite do Windows (o renderer do Chromium passa de 1 K e os
+   * handles do Mojo vem no fim da linha) */
+  enum { LINE_MAX_ = 32768 };
+  char* line = (char*)k_malloc(LINE_MAX_);
   char* a = app ? wdup16to8(app) : 0;
   char* c = cmd ? wdup16to8(cmd) : 0;
   DWORD err = 0;
   HANDLE h;
-  (void)pa; (void)ta; (void)inh; (void)fl; (void)env; (void)dir; (void)si;
+  struct inh_spec spec;
+  (void)pa; (void)ta; (void)env; (void)dir;
+  /* heranca: bInheritHandles=FALSE nada; STARTUPINFOEX com HANDLE_LIST so a
+   * lista; sem lista, tudo (nao guardamos a marca HANDLE_FLAG_INHERIT) */
+  spec.mode = inh ? 2 : 0;
+  spec.list = 0;
+  spec.count = 0;
+  if (inh && (fl & 0x80000u) && si) { /* EXTENDED_STARTUPINFO_PRESENT */
+    const void* al = *(void* const*)((const uint8_t*)si + 104); /* lpAttributeList */
+    spec.list = wattr_handles(al, &spec.count);
+    if (spec.list) spec.mode = 1;
+  }
+  if (!line) {
+    k_free(a);
+    k_free(c);
+    wset_lasterr(ERROR_NOT_ENOUGH_MEMORY);
+    return 0;
+  }
   line[0] = 0;
   if (c) {
-    strncpy(line, c, sizeof(line) - 1);
-    line[sizeof(line) - 1] = 0;
+    strncpy(line, c, LINE_MAX_ - 1);
+    line[LINE_MAX_ - 1] = 0;
   } else if (a) {
-    append_quoted(line, sizeof(line), a);
+    append_quoted(line, LINE_MAX_, a);
   }
   k_free(a);
   k_free(c);
-  h = line[0] ? spawn(line, &err) : 0;
+  h = line[0] ? spawn(line, &err, &spec) : 0;
+  k_free(line);
   if (!h) {
     wset_lasterr(err ? err : ERROR_FILE_NOT_FOUND);
     return 0;
@@ -362,10 +717,23 @@ static WINAPI BOOL CreateProcessW(const wchar16* app, wchar16* cmd, void* pa, vo
     struct wobj* t = wobj_new(OBJ_PROCESS);
     pi->process = h;
     pi->thread = t ? wh_new(t) : 0;
-    pi->pid = 0x200;
-    pi->tid = 0x204;
+    struct wobj* po = wh_get(h, OBJ_PROCESS);
+    pi->pid = po && po->u2 ? (DWORD)po->u2 : 0x200;
+    pi->tid = pi->pid + 4;
   }
   return 1;
+}
+
+static WINAPI BOOL CreateProcessA(const char* app, char* cmd, void* pa, void* ta, BOOL inh, DWORD fl, void* env,
+                                  const char* dir, void* si, struct process_info* pi) {
+  wchar16* a = app ? wdup8to16(app) : 0;
+  wchar16* c = cmd ? wdup8to16(cmd) : 0;
+  wchar16* d = dir ? wdup8to16(dir) : 0;
+  BOOL r = CreateProcessW(a, c, pa, ta, inh, fl, env, d, si, pi);
+  k_free(a);
+  k_free(c);
+  k_free(d);
+  return r;
 }
 
 struct shexinfo {
@@ -402,7 +770,7 @@ static WINAPI BOOL ShellExecuteExW(struct shexinfo* i) {
         strncat(line, " ", sizeof(line) - strlen(line) - 1);
         strncat(line, par, sizeof(line) - strlen(line) - 1);
       }
-      h = spawn(line, &err);
+      h = spawn(line, &err, 0); /* ShellExecute: nada herdado */
     } else {
       wlog("ShellExecute: nao e um programa (ignorado): ", f);
       err = ERROR_FILE_NOT_FOUND;
@@ -442,4 +810,4 @@ static WINAPI BOOL TerminateProcess_child(HANDLE h, DWORD code) {
 }
 
 #define S(n) {#n, (void*)n}
-const struct wine_sym proc_syms[] = {S(CreateProcessW), S(ShellExecuteExW), S(ShellExecuteW), {0, 0}};
+const struct wine_sym proc_syms[] = {S(CreateProcessW), S(CreateProcessA), S(ShellExecuteExW), S(ShellExecuteW), {0, 0}};

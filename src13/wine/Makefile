@@ -19,10 +19,10 @@ CFLAGS = -m64 -O2 -fno-strict-aliasing -fno-tree-loop-distribute-patterns -ffree
   -fno-pic -fno-pie -fno-stack-protector -mno-red-zone -mcmodel=large -mstackrealign \
   -fno-asynchronous-unwind-tables -nostdinc -isystem $(CC_DIR)/include -Wall -Wno-unused-function
 
-SRC = main pe k32 crt util vm obj exc file sys tables net reg misc crypt winrt pkg zip proc sig compat user gdi ctl dlg text wfont shell uimisc comctl
+SRC = main pe k32 crt util vm obj exc file sys tables net reg misc crypt winrt pkg zip proc sig compat user gdi ctl dlg text wfont shell uimisc comctl procmisc sec map safearray ordtab ttf dwrite nt pipe fill
 OBJ = $(patsubst %,$(B)/%.o,$(SRC))
 
-TESTS = HELLOW MSGBOXW WRT KUSER EXPLTEST
+TESTS = HELLOW MSGBOXW WRT KUSER EXPLTEST VMTEST MAPTEST DWTEST FETCH SPAWNTEST PIPETEST
 TEST_EXE = $(patsubst %,$(B)/tests/%.EXE,$(TESTS))
 
 all: $(B)/WINE.DLL tests
@@ -74,3 +74,27 @@ $(B)/tests/KUSER.EXE: tests/kuser.c | $(B)/tests
 $(B)/tests/EXPLTEST.EXE: tests/explorer.c | $(B)/tests
 	$(ZIG) cc -target x86_64-windows-gnu -O2 $< -o $@
 	rm -f $(B)/tests/EXPLTEST.pdb
+
+$(B)/tests/VMTEST.EXE: tests/vmtest.c | $(B)/tests
+	$(ZIG) cc -target x86_64-windows-gnu -O2 $< -o $@
+	rm -f $(B)/tests/VMTEST.pdb
+
+$(B)/tests/MAPTEST.EXE: tests/maptest.c | $(B)/tests
+	$(ZIG) cc -target x86_64-windows-gnu -O2 $< -o $@
+	rm -f $(B)/tests/MAPTEST.pdb
+
+$(B)/tests/DWTEST.EXE: tests/dwtest.c | $(B)/tests
+	$(ZIG) cc -target x86_64-windows-gnu -O2 $< -o $@ -ldwrite
+	rm -f $(B)/tests/DWTEST.pdb
+
+$(B)/tests/FETCH.EXE: tests/fetch.c | $(B)/tests
+	$(ZIG) cc -target x86_64-windows-gnu -O2 $< -o $@ -lws2_32
+	rm -f $(B)/tests/FETCH.pdb
+
+$(B)/tests/SPAWNTEST.EXE: tests/spawntest.c | $(B)/tests
+	$(ZIG) cc -target x86_64-windows-gnu -O2 $< -o $@
+	rm -f $(B)/tests/SPAWNTEST.pdb
+
+$(B)/tests/PIPETEST.EXE: tests/pipetest.c | $(B)/tests
+	$(ZIG) cc -target x86_64-windows-gnu -O2 $< -o $@
+	rm -f $(B)/tests/PIPETEST.pdb

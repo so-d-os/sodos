@@ -39,32 +39,54 @@ __asm__(
 
 uint64_t wnow_ms(void) { return k_ms(); }
 
-/* ---------- trava do processo ---------- */
+/* ---------- trava do WINE ----------
+ * Uma so para todos os processos do Windows: objetos (eventos, portas IOCP,
+ * pipes) sao vistos por varios processos ao mesmo tempo. */
+/* Trava global do WINE.DLL (todos os processos). 0 livre, 1 presa, 2 presa
+ * com alguem dormindo. Gira um pouco e depois dorme no futex: com os 4
+ * processos do Chromium a versao que so girava (com yield) ocupava 3 CPUs
+ * esperando a trava e deixava o dono sem vez. */
+static volatile int wine_lock;
 void wlock(void) {
-  struct wproc* p = wp();
-  int spin = 0;
-  while (__sync_lock_test_and_set(&p->lock, 1)) {
-    if (++spin > 200) {
-      k_thread_yield();
-      spin = 0;
-    } else {
-      __asm__ volatile("pause");
-    }
+  int c, spin;
+  for (spin = 0; spin < 100; spin++) {
+    if (__sync_val_compare_and_swap(&wine_lock, 0, 1) == 0) return;
+    __asm__ volatile("pause");
+  }
+  c = __sync_lock_test_and_set(&wine_lock, 2);
+  while (c != 0) {
+    k_futex_wait(&wine_lock, 2, 10);
+    c = __sync_lock_test_and_set(&wine_lock, 2);
   }
 }
-void wunlock(void) { __sync_lock_release(&wp()->lock); }
+void wunlock(void) {
+  if (__sync_fetch_and_sub(&wine_lock, 1) != 1) { /* era 2: alguem dorme */
+    wine_lock = 0;
+    __sync_synchronize();
+    k_futex_wake(&wine_lock, 1);
+  }
+}
 
+volatile int wine_gen;
 void wsignal(void) {
-  struct wproc* p = wp();
-  __sync_fetch_and_add(&p->gen, 1);
-  k_futex_wake(&p->gen, -1);
+  __sync_fetch_and_add(&wine_gen, 1);
+  k_futex_wake(&wine_gen, -1);
 }
 
 /* ---------- handles ---------- */
 #define H_BASE 0x200u
+/* Objetos em memoria sem dono: um handle herdado pode viver no filho depois
+ * que o pai sai (o kernel solta a memoria de um processo quando ele termina).
+ * k_free solta os dois tipos. */
 struct wobj* wobj_new(int type) {
-  struct wobj* o = (struct wobj*)wzalloc(sizeof(*o));
+  struct wobj* o = (struct wobj*)k_malloc_shared((uint32_t)sizeof(*o));
+  if (!o) {
+    unsigned total = 0, freeb = 0;
+    k_meminfo(&total, &freeb);
+    wlogx("wobj_new: sem memoria; livre (KB) ", (uint64_t)(freeb >> 10));
+  }
   if (o) {
+    memset(o, 0, sizeof(*o));
     o->type = type;
     o->refs = 0;
   }
@@ -100,6 +122,7 @@ struct wobj* wh_get(HANDLE h, int type) {
 
 void wfile_close(struct wobj* o);   /* file.c */
 void wsock_close(struct wobj* o);   /* net.c */
+void wsection_close(struct wobj* o); /* map.c */
 
 int wh_close(HANDLE h) {
   struct wproc* p = wp();
@@ -113,18 +136,27 @@ int wh_close(HANDLE h) {
     return 0;
   }
   p->handles[(v - H_BASE) / 4] = 0;
+  wunlock();
+  wobj_unref(o);
+  return 1;
+}
+
+/* Solta uma referencia; a ultima fecha o objeto. */
+void wobj_unref(struct wobj* o) {
+  wlock();
   if (--o->refs > 0) o = 0;
   wunlock();
   if (o) {
     if (o->type == OBJ_FILE || o->type == OBJ_FIND) wfile_close(o);
     if (o->type == OBJ_SOCKET) wsock_close(o);
+    if (o->type == OBJ_SECTION) wsection_close(o);
+    if (o->type == OBJ_PIPE) wpipe_close(o);
     /* threads ficam: a propria thread ainda usa o objeto */
     if (o->type != OBJ_THREAD) {
       if (o->q) k_free(o->q);
       k_free(o);
     }
   }
-  return 1;
 }
 
 static WINAPI BOOL CloseHandle(HANDLE h) {
@@ -137,22 +169,102 @@ static WINAPI BOOL CloseHandle(HANDLE h) {
   return 1;
 }
 
+/* Handle real do proprio processo (OpenProcess do proprio pid, DuplicateHandle
+ * de GetCurrentProcess()): no Windows nao e o pseudo-handle -1, e o Chromium
+ * confere isso (CHECK no ScopedHandle). Nunca sinaliza, STILL_ACTIVE. */
+#define SELF_MARK 0x464C4553u /* "SELF" */
+HANDLE wh_self_process(void) {
+  struct wobj* o = wobj_new(OBJ_PROCESS);
+  HANDLE h;
+  if (!o) return 0;
+  o->u1 = SELF_MARK;
+  h = wh_new(o);
+  if (!h) k_free(o);
+  return h;
+}
+int wh_is_self(HANDLE h) {
+  struct wobj* o;
+  if (h == (HANDLE)(intptr_t)-1) return 1;
+  o = wh_get(h, OBJ_PROCESS);
+  return o && o->u1 == SELF_MARK;
+}
+
 static WINAPI BOOL DuplicateHandle(HANDLE sp, HANDLE h, HANDLE dp, HANDLE* out, DWORD acc, BOOL inh, DWORD opt) {
-  struct wobj* o = wh_get(h, 0);
+  struct wobj* o;
   uintptr_t v = (uintptr_t)h;
-  (void)sp;
-  (void)dp;
-  (void)acc;
+  if (sp && sp != (HANDLE)(intptr_t)-1 && !wh_is_self(sp) && wh_get(sp, OBJ_PROCESS)) {
+    /* de outro processo (um filho) para este: o handle e da tabela dele */
+    struct wobj* wdup_from_child(struct wobj* proc, HANDLE h, int close); /* proc.c */
+    struct wobj* got = wdup_from_child(wh_get(sp, OBJ_PROCESS), h, opt & 1);
+    if (wine_debug >= 2) wlogx("DuplicateHandle de outro processo: handle ", (uint64_t)v);
+    if (!got) {
+      wset_lasterr(ERROR_INVALID_HANDLE);
+      return 0;
+    }
+    if (dp && dp != (HANDLE)(intptr_t)-1 && !wh_is_self(dp)) { /* de um filho para outro: nao */
+      wobj_unref(got);
+      wset_lasterr(ERROR_INVALID_HANDLE);
+      return 0;
+    }
+    if (!out) {
+      wobj_unref(got);
+      return 1;
+    }
+    {
+      HANDLE nh = wh_new(got); /* wh_new soma uma referencia: tira a que veio */
+      wobj_unref(got);
+      if (!nh) return 0;
+      *out = nh;
+    }
+    return 1;
+  }
+  o = wh_get(h, 0);
+  if (o && dp && dp != (HANDLE)(intptr_t)-1 && !wh_is_self(dp)) {
+    /* para outro processo: so os filhos que este processo abriu */
+    HANDLE wdup_to_child(struct wobj* proc, struct wobj* o); /* proc.c */
+    struct wobj* po = wh_get(dp, OBJ_PROCESS);
+    HANDLE got = po ? wdup_to_child(po, o) : 0;
+    if (wine_debug >= 2) {
+      wlogx("DuplicateHandle para outro processo: handle ", (uint64_t)v);
+      wlogx("  no outro processo vira ", (uint64_t)(uintptr_t)got);
+    }
+    if (!got) {
+      wset_lasterr(ERROR_INVALID_HANDLE);
+      return 0;
+    }
+    if (out) *out = got;
+    if (opt & 1) wh_close(h); /* DUPLICATE_CLOSE_SOURCE */
+    return 1;
+  }
   (void)inh;
   if (!o) {
-    if (v == 0x10 || v == 0x14 || v == 0x18 || h == (HANDLE)(intptr_t)-1) {
+    if (h == (HANDLE)(intptr_t)-1) { /* GetCurrentProcess() -> handle real */
+      if (out) *out = wh_self_process();
+      return !out || *out != 0;
+    }
+    if (h == (HANDLE)(intptr_t)-2 && wthread()) { /* GetCurrentThread() -> handle real */
+      if (out) *out = wh_new(wthread());
+      return !out || *out != 0;
+    }
+    if (v == 0x10 || v == 0x14 || v == 0x18) {
       if (out) *out = h;
       return 1;
     }
     wset_lasterr(ERROR_INVALID_HANDLE);
     return 0;
   }
-  if (out) *out = wh_new(o);
+  if (o->type == OBJ_SECTION && (o->u1 & 1) && !(opt & 2) && (acc & 2)) {
+    /* de somente leitura nao se tira escrita (o Chromium testa isso) */
+    wset_lasterr(5); /* ERROR_ACCESS_DENIED */
+    return 0;
+  }
+  if (o->type == OBJ_SECTION && out) {
+    /* sem DUPLICATE_SAME_ACCESS e sem FILE_MAP_WRITE: copia somente leitura */
+    HANDLE wsection_dup(struct wobj* o, int readonly); /* map.c */
+    *out = wsection_dup(o, !(opt & 2) && !(acc & 2));
+  } else if (out) {
+    *out = wh_new(o);
+  }
   if (opt & 1) wh_close(h); /* DUPLICATE_CLOSE_SOURCE */
   return 1;
 }
@@ -209,16 +321,19 @@ static void park_if_exiting(void) {
   if (p->exit_req && wthread()) k_thread_exit(0);
 }
 
+static void* wait_caller; /* so para o registro de espera longa */
 DWORD wwait(int n, struct wobj** objs, int all, DWORD timeout_ms) {
   struct wproc* p = wp();
   uintptr_t me = (uintptr_t)wteb();
   uint64_t t0 = wnow_ms();
+  int noted = 0;
+  void* caller = wait_caller;
   for (;;) {
     int g, i, ready = 0, first = -1;
     uint64_t now = wnow_ms(), next = ~0ull;
     int64_t w = -1;
     wlock();
-    g = p->gen;
+    g = wine_gen;
     for (i = 0; i < n; i++) {
       if (obj_ready(objs[i], me, 0, now)) {
         ready++;
@@ -250,7 +365,17 @@ DWORD wwait(int n, struct wobj** objs, int all, DWORD timeout_ms) {
       if (w < 0 || tw < w) w = tw;
     }
     if (w > 0x3FFFFFFF) w = 0x3FFFFFFF;
-    k_futex_wait(&p->gen, g, w < 0 ? -1 : (int)(w ? w : 1));
+    if (wine_debug >= 2) {
+      if (!noted && now - t0 > 5000) {
+        noted = 1;
+        wwait_note(objs[0]->type == OBJ_EVENT ? "evento" : objs[0]->type == OBJ_THREAD ? "thread"
+                   : objs[0]->type == OBJ_PROCESS ? "processo" : "objeto", caller, now - t0);
+        if (objs[0]->type == OBJ_EVENT && objs[0]->u2) wwait_note("  evento criado em", (void*)(uintptr_t)objs[0]->u2, 0);
+        wstack_note("  pilha da espera:", (const uint64_t*)__builtin_frame_address(0));
+      }
+      if (w < 0 || w > 5000) w = 5000;
+    }
+    k_futex_wait(&wine_gen, g, w < 0 ? -1 : (int)(w ? w : 1));
   }
 }
 
@@ -258,6 +383,7 @@ static WINAPI DWORD WaitForMultipleObjectsEx(DWORD n, const HANDLE* hs, BOOL all
   struct wobj* objs[64];
   DWORD i;
   (void)alert;
+  if (wine_debug >= 2) wait_caller = __builtin_return_address(0);
   if (n > 64 || !n) {
     wset_lasterr(ERROR_INVALID_PARAMETER);
     return WAIT_FAILED;
@@ -315,7 +441,16 @@ static WINAPI BOOL WaitOnAddress(volatile void* addr, void* cmp, size_t size, DW
   for (;;) {
     if (memcmp((const void*)addr, cmp, size) != 0) return 1;
     if (size == 4) {
-      int r = k_futex_wait((volatile int*)addr, *(int*)cmp, ms == INFINITE ? -1 : (int)ms);
+      int r;
+      if (wine_debug >= 2 && ms == INFINITE) {
+        r = k_futex_wait((volatile int*)addr, *(int*)cmp, 5000);
+        if (r == -110 && memcmp((const void*)addr, cmp, size) == 0) {
+          wwait_note("WaitOnAddress", __builtin_return_address(0), wnow_ms() - t0);
+          continue;
+        }
+        return 1;
+      }
+      r = k_futex_wait((volatile int*)addr, *(int*)cmp, ms == INFINITE ? -1 : (int)ms);
       if (r == -110) {
         wset_lasterr(1460); /* ERROR_TIMEOUT */
         return 0;
@@ -346,9 +481,14 @@ static WINAPI HANDLE CreateEventA(void* sa, BOOL manual, BOOL initial, const cha
   return new_event(manual, initial);
 }
 static WINAPI HANDLE CreateEventW(void* sa, BOOL manual, BOOL initial, const wchar16* name) {
+  HANDLE h;
+  struct wobj* o;
   (void)sa;
   (void)name;
-  return new_event(manual, initial);
+  h = new_event(manual, initial);
+  o = h ? wh_get(h, OBJ_EVENT) : 0;
+  if (o) o->u2 = (uint64_t)(uintptr_t)__builtin_return_address(0); /* quem criou (log de espera longa) */
+  return h;
 }
 static WINAPI HANDLE CreateEventExW(void* sa, const wchar16* name, DWORD fl, DWORD acc) {
   (void)sa;
@@ -495,11 +635,13 @@ static WINAPI BOOL CancelWaitableTimer(HANDLE h) {
 }
 
 /* ---------- portas de conclusao ---------- */
+void* k_malloc_shared(uint32_t n);
 int wiocp_post(struct wobj* port, DWORD bytes, uintptr_t key, void* ov) {
   wlock();
   if (port->qn == port->qcap) {
     int ncap = port->qcap ? port->qcap * 2 : 32, i;
-    struct iocp_ent* nq = (struct iocp_ent*)k_malloc((unsigned)(sizeof(*nq) * (size_t)ncap));
+    /* memoria sem dono: quem posta pode ser outro processo (pipes) */
+    struct iocp_ent* nq = (struct iocp_ent*)k_malloc_shared((unsigned)(sizeof(*nq) * (size_t)ncap));
     if (!nq) {
       wunlock();
       return 0;
@@ -546,15 +688,20 @@ static WINAPI HANDLE CreateIoCompletionPort(HANDLE file, HANDLE existing, uintpt
     }
     f->p1 = port;
     f->u1 = key;
+    if (wine_debug >= 2 && f->type == OBJ_PIPE) wlogx("pipe ligado a porta ", (uint64_t)(uintptr_t)port);
   }
   return existing;
 }
 static WINAPI BOOL PostQueuedCompletionStatus(HANDLE h, DWORD bytes, uintptr_t key, void* ov) {
   struct wobj* port = wh_get(h, OBJ_IOCP);
+  static volatile int nlog;
   if (!port) {
+    if (wine_debug) wlogx("PostQueuedCompletionStatus: handle invalido ", (uint64_t)(uintptr_t)h);
     wset_lasterr(ERROR_INVALID_HANDLE);
     return 0;
   }
+  if (wine_debug >= 2 && wp()->net && __sync_add_and_fetch(&nlog, 1) < 400)
+    wlogx("porta: post (porta) ", (uint64_t)(uintptr_t)port);
   return wiocp_post(port, bytes, key, ov);
 }
 struct ov_entry {
@@ -568,6 +715,8 @@ static WINAPI BOOL GetQueuedCompletionStatusEx(HANDLE h, struct ov_entry* ents, 
   struct wproc* p = wp();
   struct wobj* port = wh_get(h, OBJ_IOCP);
   uint64_t t0 = wnow_ms();
+  int noted = 0;
+  void* caller = __builtin_return_address(0);
   (void)alert;
   if (!port) {
     wset_lasterr(ERROR_INVALID_HANDLE);
@@ -579,7 +728,7 @@ static WINAPI BOOL GetQueuedCompletionStatusEx(HANDLE h, struct ov_entry* ents, 
     int64_t w = -1;
     if (p->net) wnet_poll();
     wlock();
-    g = p->gen;
+    g = wine_gen;
     while (port->qn > 0 && n < max) {
       struct iocp_ent* e = &port->q[port->qhead];
       ents[n].key = e->key;
@@ -592,6 +741,7 @@ static WINAPI BOOL GetQueuedCompletionStatusEx(HANDLE h, struct ov_entry* ents, 
     }
     wunlock();
     if (n) {
+      if (wine_debug >= 2) wlogx("porta: retirou de ", (uint64_t)(uintptr_t)port);
       *got = n;
       return 1;
     }
@@ -607,7 +757,12 @@ static WINAPI BOOL GetQueuedCompletionStatusEx(HANDLE h, struct ov_entry* ents, 
     }
     /* com soquetes abertos, reconfere a rede a cada poucos ms */
     if (p->net && (w < 0 || w > 5)) w = 5;
-    k_futex_wait(&p->gen, g, w < 0 ? -1 : (int)(w ? w : 1));
+    if (wine_debug >= 2 && !noted && wnow_ms() - t0 > 5000) {
+      noted = 1;
+      wwait_note("porta de conclusao", caller, wnow_ms() - t0);
+    }
+    if (wine_debug >= 2 && (w < 0 || w > 5000)) w = 5000;
+    k_futex_wait(&wine_gen, g, w < 0 ? -1 : (int)(w ? w : 1));
   }
 }
 static WINAPI BOOL GetQueuedCompletionStatus(HANDLE h, DWORD* bytes, uintptr_t* key, void** ov, DWORD ms) {
@@ -632,17 +787,28 @@ static void thread_finish(struct wobj* t, DWORD code) {
   wsignal();
 }
 
+/* Tudo o que e codigo do Windows roda na pilha do Windows: callbacks de TLS e
+ * DllMain(THREAD_ATTACH/DETACH) tambem. Na pilha do kernel (64 KB) o __chkstk
+ * deles le o StackLimit do TEB (a pilha do Windows, em outro lugar) e "sonda"
+ * toda a memoria entre as duas, zerando um byte por pagina (codigo do WINE.DLL
+ * inclusive). */
+static WINAPI uint64_t thread_body(void* arg) {
+  struct wobj* t = (struct wobj*)arg;
+  uint64_t rc;
+  /* a thread principal recebe DLL_PROCESS_ATTACH nos callbacks de TLS do EXE */
+  if (t->manual) pe_call_tls_callbacks(wp()->exe, 1);
+  else pe_thread_notify(2); /* DLL_THREAD_ATTACH */
+  rc = ((DWORD(WINAPI*)(void*))t->start)(t->param);
+  pe_thread_notify(3);
+  return rc;
+}
 static int thread_tramp(void* arg) {
   struct wobj* t = (struct wobj*)arg;
   uint64_t rc;
   k_win_teb(t->teb);
   while (t->suspend > 0) k_futex_wait(&t->suspend, t->suspend, 50);
   pe_tls_attach_all(t->teb);
-  /* a thread principal recebe DLL_PROCESS_ATTACH nos callbacks de TLS do EXE */
-  if (t->manual) pe_call_tls_callbacks(wp()->exe, 1);
-  else pe_thread_notify(2); /* DLL_THREAD_ATTACH */
-  rc = wine_call_on_stack(t->start, t->param, t->stack->base + t->stack->size - 64);
-  pe_thread_notify(3);
+  rc = wine_call_on_stack((void*)thread_body, t, t->stack->base + t->stack->size - 64);
   thread_finish(t, (DWORD)rc);
   return (int)rc;
 }
@@ -655,17 +821,26 @@ static struct wobj* thread_new(void* start, void* param, size_t stack, int suspe
   if (!t || !teb || !tlsarr) return 0;
   if (!stack) stack = p->exe && p->exe->stack_reserve ? p->exe->stack_reserve : 0x100000;
   if (stack < 0x40000) stack = 0x40000;
-  t->stack = vm_reserve(stack, VM_STACK, 2);
-  if (!t->stack) return 0;
+  /* commitado: 1 MB nas threads de trabalho (o padrao do Windows), tudo na
+   * principal (o JS do renderer roda nela) */
+  {
+    size_t commit = is_main ? stack : (stack > 0x100000 ? 0x100000 : stack);
+    struct vmreg* vm_stack_alloc(size_t reserve, size_t commit); /* vm.c */
+    t->stack = vm_stack_alloc(stack, commit);
+    if (!t->stack) return 0;
+    t->stack_commit = commit;
+  }
   memset(teb, 0, TEB_SIZE);
   wlock();
   t->tid = p->next_tid;
   p->next_tid += 4;
   wunlock();
-  *(uint64_t*)(teb + TEB_STACKLIMIT) = (uint64_t)(uintptr_t)t->stack->base;
-  *(uint64_t*)(teb + TEB_DEALLOC) = (uint64_t)(uintptr_t)t->stack->base;
+  *(uint64_t*)(teb + TEB_STACKBASE) = (uint64_t)(uintptr_t)(t->stack->base + t->stack->size);
+  /* a thread so ve a parte commitada (o resto da reserva nao tem paginas) */
+  *(uint64_t*)(teb + TEB_STACKLIMIT) = (uint64_t)(uintptr_t)(t->stack->base + t->stack->size - t->stack_commit);
+  *(uint64_t*)(teb + TEB_DEALLOC) = (uint64_t)(uintptr_t)(t->stack->base + t->stack->size - t->stack_commit);
   *(uint64_t*)(teb + TEB_SELF) = (uint64_t)(uintptr_t)teb;
-  *(uint64_t*)(teb + TEB_PID) = 0x100;
+  *(uint64_t*)(teb + TEB_PID) = p->pid;
   *(uint64_t*)(teb + TEB_TID) = t->tid;
   *(uint64_t*)(teb + TEB_TLSPTR) = (uint64_t)(uintptr_t)tlsarr;
   *(uint64_t*)(teb + TEB_PEB) = (uint64_t)(uintptr_t)p;

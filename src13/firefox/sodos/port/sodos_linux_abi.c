@@ -1002,20 +1002,127 @@ static void z_rmtree(const char* path, int depth) {
  * partida, a execucao anterior nao terminou (Ctrl+Backspace, Sair, queda) e o
  * perfil ficou pela metade: com ele o Firefox abre em "Nova aba" e nao carrega
  * nada (o mesmo do make firefox-profile-reset). No ramdisk o perfil e
- * descartavel: apaga e comeca outro. */
-#define Z_RUN_MARK "Z:\\USER\\DEFAULT\\SODOSRUN.TXT"
-static void z_run_unmark(void) { k_fdelete(Z_RUN_MARK); }
+ * descartavel: apaga e comeca outro. No disco (FIREFOX_WORKFOLDER, D:) nada
+ * e apagado. */
+static char z_home[280]; /* HOME em Z:\... (sem a barra final) */
+static char z_mark[300];
+static void z_run_unmark(void) { k_fdelete(z_mark); }
 
 static void z_profile_check(void) {
   const char* home = getenv("HOME");
+  char sub[300];
+  int i;
   if (!home || strncmp(home, "/Z/", 3) != 0) return;
-  if (k_fsize(Z_RUN_MARK) >= 0) {
-    z_rmtree("Z:\\USER\\DEFAULT\\.mozilla", 0);
-    z_rmtree("Z:\\USER\\DEFAULT\\.cache", 0);
+  /* "/Z/USER/DEFAULT" -> "Z:\USER\DEFAULT" */
+  z_home[0] = 'Z';
+  z_home[1] = ':';
+  for (i = 2; home[i] && i < (int)sizeof z_home - 1; i++) z_home[i] = home[i] == '/' ? '\\' : home[i];
+  while (i > 3 && z_home[i - 1] == '\\') i--;
+  z_home[i] = 0;
+  snprintf(z_mark, sizeof z_mark, "%s%sSODOSRUN.TXT", z_home, z_home[i - 1] == '\\' ? "" : "\\");
+  if (k_fsize(z_mark) >= 0) {
+    snprintf(sub, sizeof sub, "%s\\.mozilla", z_home);
+    z_rmtree(sub, 0);
+    snprintf(sub, sizeof sub, "%s\\.cache", z_home);
+    z_rmtree(sub, 0);
     fprintf(stderr, "[sodos] perfil no Z: de execucao interrompida apagado\n");
   }
-  k_fsave(Z_RUN_MARK, "1", 1);
+  k_fsave(z_mark, "1", 1);
   atexit(z_run_unmark);
+}
+
+/* FIREFOX_WORKFOLDER: pasta de trabalho do Firefox, do ambiente do sistema
+ * (SET no AUTOEXEC.BAT), por exemplo
+ *   SET FIREFOX_WORKFOLDER=D:\USER\DEFAULT
+ * Vira o HOME (perfil em .mozilla, cache em .cache) e o TMPDIR (<pasta>\TEMP).
+ * A pasta e o TEMP sao criados aqui se faltarem; o Firefox cria os dele
+ * dentro. Vale mais que o HOME/TMPDIR do ENV.TXT e que o ramdisk Z:.
+ * FIREFOX_WORKSPACE serve de sinonimo (vale se nao houver o WORKFOLDER).
+ * Aceita "D:\PASTA", "D:/PASTA" ou "/D/PASTA". 1 se ficou valendo. */
+int k_getenv(const char* name, char* out, int max);
+int k_mkdir(const char* path);
+static int ff_workfolder(void) {
+  char v[264], dos[280], px[280], t[300];
+  uint64_t ze[16]; /* espaco para um k_dirent (44 bytes no so.h) */
+  struct k_dirent* zp = (struct k_dirent*)ze;
+  const char* p;
+  char* s;
+  char drv;
+  const char* var = "FIREFOX_WORKFOLDER";
+  int n, i;
+  n = k_getenv(var, v, (int)sizeof v);
+  if (n <= 0) {
+    var = "FIREFOX_WORKSPACE";
+    n = k_getenv(var, v, (int)sizeof v);
+  }
+  if (n <= 0) return 0;
+  if (n >= (int)sizeof v) {
+    fprintf(stderr, "[sodos] %s longo demais, ignorado\n", var);
+    return 0;
+  }
+  /* sem espacos/aspas nas pontas (SET X="D:\A B") */
+  s = v;
+  while (*s == ' ' || *s == '"') s++;
+  n = (int)strlen(s);
+  while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '"')) s[--n] = 0;
+  drv = 0;
+  p = s;
+  if (((s[0] | 32) >= 'a' && (s[0] | 32) <= 'z') && s[1] == ':') {
+    drv = s[0];
+    p = s + 2;
+  } else if (s[0] == '/' && ((s[1] | 32) >= 'a' && (s[1] | 32) <= 'z') && (s[2] == '/' || s[2] == 0)) {
+    drv = s[1];
+    p = s + 2;
+  }
+  if (!drv) {
+    fprintf(stderr, "[sodos] %s=%s: use unidade e pasta (D:\\USER\\DEFAULT)\n", var, s);
+    return 0;
+  }
+  if (drv >= 'a' && drv <= 'z') drv = (char)(drv - 32);
+  /* dos = "D:\A\B", px = "/D/A/B"; cria cada nivel no caminho */
+  dos[0] = drv;
+  dos[1] = ':';
+  px[0] = '/';
+  px[1] = drv;
+  i = 2;
+  for (;;) {
+    while (*p == '\\' || *p == '/') p++;
+    if (!*p) break;
+    if (i + 2 >= (int)sizeof dos - 8) {
+      fprintf(stderr, "[sodos] %s longo demais, ignorado\n", var);
+      return 0;
+    }
+    dos[i] = '\\';
+    px[i] = '/';
+    i++;
+    while (*p && *p != '\\' && *p != '/' && i < (int)sizeof dos - 8) {
+      dos[i] = *p;
+      px[i] = *p;
+      i++;
+      p++;
+    }
+    dos[i] = 0;
+    k_mkdir(dos);
+  }
+  dos[i] = 0;
+  px[i] = 0;
+  /* a raiz da unidade e "D:\" para o k_dir */
+  snprintf(t, sizeof t, "%s%s", dos, i == 2 ? "\\" : "");
+  if (k_dir(t, zp, 1) < 0) {
+    fprintf(stderr, "[sodos] %s: nao consegui criar %s\n", var, t);
+    return 0;
+  }
+  setenv("HOME", px, 1);
+  snprintf(t, sizeof t, "%s\\TEMP", dos);
+  k_mkdir(t);
+  if (k_dir(t, zp, 1) >= 0) {
+    snprintf(t, sizeof t, "%s/TEMP", px);
+    setenv("TMPDIR", t, 1);
+  } else {
+    setenv("TMPDIR", px, 1);
+  }
+  fprintf(stderr, "[sodos] %s: perfil e cache em %s\n", var, i == 2 ? "raiz" : dos);
+  return 1;
 }
 int k_exe_drive(void);
 __attribute__((constructor(102))) static void sodos_default_env(void) {
@@ -1047,8 +1154,11 @@ __attribute__((constructor(102))) static void sodos_default_env(void) {
       while (*p == '\n' || *p == '\r') p++;
     }
   }
-  /* Z: e o ramdisk do kernel (FAT16 na RAM, vazio a cada boot): perfil,
-   * SQLite e cache ficam la, sem gravar no disco nem no pendrive.
+  /* SET FIREFOX_WORKFOLDER=D:\... no AUTOEXEC.BAT: perfil, cache e TEMP
+   * nessa pasta (ff_workfolder); passa na frente do ENV.TXT e do Z:. */
+  ff_workfolder();
+  /* Sem ele, Z: e o ramdisk do kernel (FAT16 na RAM, vazio a cada boot):
+   * perfil, SQLite e cache ficam la, sem gravar no disco nem no pendrive.
    * HOME=/D/USER/DEFAULT no ENV.TXT volta ao perfil no disco. */
   {
     /* espaco para um k_dirent (44 bytes no so.h) */

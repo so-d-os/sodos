@@ -12,6 +12,7 @@
 #include "module_priv.h"
 #include "isr.h"
 #include "env.h"
+#include "vmem.h"
 #include "wine.h"
 
 void* kexport_find(const char* name);
@@ -621,6 +622,7 @@ static void exec_release(uint32_t pid, int id) {
   kexp_release_pid(pid);
   unload(id);
   elf_release_pid(pid);
+  vmem_release_pid(pid);          /* memoria virtual do Windows (sem reservas: so um if) */
   ufree_owner(pid);
   hm_free_owner(pid);
   isr_fault_release(pid);

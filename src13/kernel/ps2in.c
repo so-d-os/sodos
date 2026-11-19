@@ -123,8 +123,91 @@ void ps2in_inject(uint8_t b) {
   irq_restore(f);
 }
 
+/* ---------- guardiao ----------
+ * O teclado (o USB sempre, o PS/2 fora da IRQ1) so e lido quando o mundo
+ * chama ps2in_pump. Com o mundo travado nenhuma tecla chegava, nem
+ * Ctrl+Alt+Del. Uma thread do kernel (fora da CPU0) olha a hora do ultimo
+ * pump; parado ha 1,5 s, ela mesma bombeia o teclado USB (Ctrl+Alt+Del
+ * reinicia pelo kbd_watch). Ctrl+F1 com o mundo parado: solta a trava do
+ * sistema de arquivos; se o mundo nao voltar em 3 s, reinicia. */
+static volatile uint64_t pump_ms;          /* ultimo ps2in_pump do mundo */
+static volatile uint64_t emerg_ms;         /* ultimo Ctrl+F1 */
+void fs_force_release(void);               /* kexports.c */
+int kt_thread_create(int (*fn)(void*), void* arg, uint32_t stack_size, uint32_t mask);
+int kt_futex_wait(volatile int* addr, int val, int timeout_ms);
+int kt_online_count(void);
+
+void kbd_emergency_note(void) {
+  uint64_t t = irq_ticks();
+  emerg_ms = t ? t : 1;
+}
+
+/* Tecla parada na fila (ninguem lendo) ha quanto tempo? 0 = fila vazia. */
+static uint64_t kq_wait_ms(uint64_t now) {
+  uint32_t h = kq.head, t = kq.tail;
+  uint32_t at;
+  if (h == t) return 0;
+  at = kq.t[t % PQ];
+  return now > at ? now - at : 0;
+}
+
+static int guard_main(void* arg) {
+  static volatile int z;
+  uint64_t first = 0;   /* primeiro Ctrl+F1 tratado com o mundo parado */
+  uint64_t seen = 0;    /* ultimo Ctrl+F1 ja olhado */
+  int noted = 0;
+  (void)arg;
+  for (;;) {
+    uint64_t now;
+    int stuck;
+    kt_futex_wait(&z, 0, 50);
+    /* o teclado USB anda mesmo se o mundo nao chama o pump: Ctrl+Alt+Del
+     * reinicia pelo kbd_watch; o pump tem trava propria e respeita o driver
+     * ocupado */
+    now = irq_ticks();
+    if (now - pump_ms > 1000u) xhci_kbd_pump(); /* o mundo nao esta lendo: nao disputa com ele */
+    stuck = kq_wait_ms(now) > 1500u;
+    if (!stuck) {
+      noted = 0;
+      first = 0;
+      seen = emerg_ms;
+      continue;
+    }
+    if (!noted) {
+      noted = 1;
+      serial_puts("[guarda] teclas sem leitor ha 1,5 s: o mundo parou (Ctrl+F1 destrava, 2x reinicia; Ctrl+Alt+Del reinicia)\n");
+    }
+    if (emerg_ms && emerg_ms != seen) {
+      seen = emerg_ms;
+      if (!first) {
+        first = now;
+        serial_puts("[guarda] Ctrl+F1 com o mundo parado: soltando a trava do disco\n");
+        fs_force_release();
+      } else if (now - first > 3000u) {
+        serial_puts("[guarda] segundo Ctrl+F1 e o mundo segue parado: reiniciando\n");
+        sys_reboot();
+      }
+    }
+  }
+  return 0;
+}
+
+void guard_start(void) {
+  static int started;
+  int tid;
+  if (started || kt_online_count() < 2) return;
+  started = 1;
+  pump_ms = irq_ticks();
+  tid = kt_thread_create(guard_main, 0, 16384, ~1u); /* longe da CPU0 (o mundo) */
+  serial_puts(tid > 0 ? "[guarda] ligado\n" : "[guarda] nao foi possivel criar a thread\n");
+}
+
 void ps2in_pump(void) {
   uint64_t f;
+  {
+    uint64_t t = irq_ticks();
+    pump_ms = t ? t : 1;
+  }
   /* Teclado USB primeiro, fora do cli: ele pode esperar comandos do xHCI. */
   xhci_kbd_pump();
   if (ps2_raw_depth) return;

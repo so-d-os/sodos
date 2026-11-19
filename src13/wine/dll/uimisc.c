@@ -263,7 +263,7 @@ struct menuitem_info {
 
 static struct wmenu* menu_of(HANDLE h) {
   struct wmenu* m = (struct wmenu*)h;
-  return (m && (uintptr_t)m > 0x10000 && m->magic == MENU_MAGIC) ? m : 0;
+  return (wptr_ok(m) && m->magic == MENU_MAGIC) ? m : 0;
 }
 static struct wmenu* menu_new(void) {
   struct wmenu* m = (struct wmenu*)wzalloc(sizeof(*m));
@@ -977,7 +977,7 @@ struct imagelist {
 };
 static struct imagelist* il_of(HANDLE h) {
   struct imagelist* l = (struct imagelist*)h;
-  return (l && (uintptr_t)l > 0x10000 && l->magic == IL_MAGIC) ? l : 0;
+  return (wptr_ok(l) && l->magic == IL_MAGIC) ? l : 0;
 }
 static WINAPI HANDLE ImageList_Create(int cx, int cy, DWORD fl, int init, int grow) {
   struct imagelist* l = (struct imagelist*)wzalloc(sizeof(*l));
@@ -1417,8 +1417,116 @@ static WINAPI long CoSetProxyBlanket(void* p, DWORD a, DWORD b, void* c, DWORD d
   return 0;
 }
 
+
+/* ---------- o que o Claude.exe (Chromium) pediu depois do W4 ---------- */
+static WINAPI DWORD FormatMessageA(DWORD fl, const void* src, DWORD id, DWORD lang, char* buf, DWORD n, void* args) {
+  char txt[64];
+  int i = 0, k = 0;
+  char num[12];
+  DWORD v = id, len;
+  const char* pre = "Erro do Windows ";
+  (void)src; (void)lang; (void)args;
+  wlogx("FormatMessageA do erro ", id);
+  for (; pre[k]; k++) txt[i++] = pre[k];
+  k = 0;
+  do {
+    num[k++] = (char)('0' + v % 10);
+    v /= 10;
+  } while (v);
+  while (k) txt[i++] = num[--k];
+  txt[i++] = '.';
+  txt[i] = 0;
+  len = (DWORD)i;
+  if (fl & 0x100) { /* FORMAT_MESSAGE_ALLOCATE_BUFFER (LocalFree solta) */
+    typedef void*(WINAPI * la_fn)(DWORD, size_t);
+    la_fn la = (la_fn)builtin_lookup("LocalAlloc");
+    char* out = la ? (char*)la(0, len + 1) : 0;
+    if (!out) return 0;
+    memcpy(out, txt, len + 1);
+    *(char**)buf = out;
+    return len;
+  }
+  if (!buf || len + 1 > n) {
+    wset_lasterr(ERROR_INSUFFICIENT_BUFFER);
+    return 0;
+  }
+  memcpy(buf, txt, len + 1);
+  return len;
+}
+static int wname_is(const wchar16* a, const char* b) {
+  if (!a) return 0;
+  for (; *a && *b; a++, b++) {
+    wchar16 x = *a, y = (wchar16)*b;
+    if (x >= 'A' && x <= 'Z') x += 32;
+    if (y >= 'A' && y <= 'Z') y += 32;
+    if (x != y) return 0;
+  }
+  return !*a && !*b;
+}
+static WINAPI DWORD LocaleNameToLCID(const wchar16* name, DWORD fl) {
+  (void)fl;
+  if (!name || !*name || wname_is(name, "en-US") || wname_is(name, "en")) return 0x409;
+  if (wname_is(name, "pt-BR")) return 0x416;
+  return 0x409;
+}
+static WINAPI int LCIDToLocaleName(DWORD lcid, wchar16* out, int n, DWORD fl) {
+  static const wchar16 en[] = {'e', 'n', '-', 'U', 'S', 0};
+  static const wchar16 pt[] = {'p', 't', '-', 'B', 'R', 0};
+  const wchar16* s = lcid == 0x416 ? pt : en;
+  (void)fl;
+  if (!out || n <= 0) return 6;
+  if (n < 6) {
+    wset_lasterr(ERROR_INSUFFICIENT_BUFFER);
+    return 0;
+  }
+  memcpy(out, s, 12);
+  return 6;
+}
+static WINAPI BOOL IsValidLocaleName(const wchar16* name) {
+  return wname_is(name, "en-US") || wname_is(name, "en") || wname_is(name, "pt-BR") || (name && !*name);
+}
+typedef BOOL(WINAPI* locenum_fn)(wchar16*, DWORD, intptr_t);
+static WINAPI BOOL EnumSystemLocalesEx(locenum_fn fn, DWORD fl, intptr_t lp, void* res) {
+  wchar16 en[] = {'e', 'n', '-', 'U', 'S', 0};
+  (void)fl;
+  (void)res;
+  if (fn) fn(en, 2 /* LOCALE_SPECIFICDATA */, lp);
+  return 1;
+}
+/* uma thread por item (o pool do Windows reaproveita threads; o efeito e o mesmo) */
+static WINAPI BOOL QueueUserWorkItem(void* fn, void* ctx, DWORD fl) {
+  typedef HANDLE(WINAPI * ct_fn)(void*, size_t, void*, void*, DWORD, DWORD*);
+  typedef BOOL(WINAPI * ch_fn)(HANDLE);
+  ct_fn ct = (ct_fn)builtin_lookup("CreateThread");
+  ch_fn ch = (ch_fn)builtin_lookup("CloseHandle");
+  HANDLE h;
+  (void)fl;
+  if (!ct || !fn) return 0;
+  h = ct(0, 0, fn, ctx, 0, 0);
+  if (!h) return 0;
+  if (ch) ch(h);
+  return 1;
+}
+static WINAPI long NtQueryInformationFile(HANDLE h, void* iosb, void* buf, DWORD len, int cls) {
+  (void)h; (void)iosb; (void)buf; (void)len;
+  wlogx("NtQueryInformationFile: classe ainda nao suportada ", (uint32_t)cls);
+  return (long)0xC0000003; /* STATUS_INVALID_INFO_CLASS */
+}
+static WINAPI long NtDeviceIoControlFile(HANDLE h, HANDLE ev, void* apc, void* ctx, void* iosb, DWORD code,
+                                         void* in, DWORD nin, void* out, DWORD nout) {
+  (void)h; (void)ev; (void)apc; (void)ctx; (void)iosb; (void)code; (void)in; (void)nin; (void)out; (void)nout;
+  return (long)0xC00000BB; /* STATUS_NOT_SUPPORTED */
+}
+
+static WINAPI long LoadRegTypeLib(const void* guid, uint16_t maj, uint16_t min, DWORD lcid, void** out);
+static WINAPI long LoadTypeLib(const wchar16* file, void** out);
+static WINAPI long LoadTypeLibEx(const wchar16* file, int kind, void** out);
+static WINAPI long RegisterTypeLib(void* tl, const wchar16* path, const wchar16* help);
 #define S(n) {#n, (void*)n}
 const struct wine_sym uimisc_syms[] = {
+    S(LoadRegTypeLib), S(LoadTypeLib), S(LoadTypeLibEx), S(RegisterTypeLib),
+    S(FormatMessageA), S(LocaleNameToLCID), S(LCIDToLocaleName), S(IsValidLocaleName),
+    S(EnumSystemLocalesEx), S(NtDeviceIoControlFile), S(NtQueryInformationFile), S(QueueUserWorkItem),
     S(RegisterWindowMessageW), S(RegisterWindowMessageA), S(RegisterClipboardFormatW), S(SetPropW), S(GetPropW),
     S(RemovePropW), S(SetWindowSubclass), S(RemoveWindowSubclass), S(GetWindowSubclass), S(DefSubclassProc),
     S(CreateMenu), S(CreatePopupMenu), S(DestroyMenu), S(AppendMenuW), S(InsertMenuW), S(InsertMenuItemW),
@@ -1461,6 +1569,45 @@ const struct wine_sym uimisc_syms[] = {
     S(EndUpdateResourceW), S(EnumResourceNamesW), S(EnumResourceLanguagesW), S(DebugBreak),
     S(FreeLibraryAndExitThread), S(CoSetProxyBlanket), {0, 0}};
 
+
+/* ---------- uxtheme por ordinal: modo escuro (sem nome publico) ----------
+ * 104 RefreshImmersiveColorPolicyState, 132 ShouldAppsUseDarkMode,
+ * 133 AllowDarkModeForWindow, 135 SetPreferredAppMode, 136 FlushMenuThemes,
+ * 137 IsDarkModeAllowedForWindow, 138 ShouldSystemUseDarkMode,
+ * 139 IsDarkModeAllowedForApp. O SODOS desenha claro: tudo "nao". */
+static WINAPI void ux_void(void) {}
+static WINAPI BOOL ux_false(void) { return 0; }
+static WINAPI BOOL ux_allow_dark(HANDLE w, BOOL on) {
+  (void)w;
+  (void)on;
+  return 0;
+}
+static WINAPI int ux_preferred_mode(int mode) {
+  (void)mode;
+  return 0; /* modo anterior: Default */
+}
+
+/* ---------- oleaut32: bibliotecas de tipos nao registradas ---------- */
+#define TYPE_E_LIBNOTREGISTERED ((long)0x8002801D)
+static WINAPI long LoadRegTypeLib(const void* guid, uint16_t maj, uint16_t min, DWORD lcid, void** out) {
+  (void)guid; (void)maj; (void)min; (void)lcid;
+  if (out) *out = 0;
+  return TYPE_E_LIBNOTREGISTERED;
+}
+static WINAPI long LoadTypeLib(const wchar16* file, void** out) {
+  (void)file;
+  if (out) *out = 0;
+  return TYPE_E_LIBNOTREGISTERED;
+}
+static WINAPI long LoadTypeLibEx(const wchar16* file, int kind, void** out) {
+  (void)kind;
+  return LoadTypeLib(file, out);
+}
+static WINAPI long RegisterTypeLib(void* tl, const wchar16* path, const wchar16* help) {
+  (void)tl; (void)path; (void)help;
+  return 0;
+}
+
 /* ordinais: comctl32 e shell32 */
 void* uimisc_ordinal(const char* dll, unsigned ord) {
   if (strncmp(dll, "comctl32", 8) == 0) switch (ord) {
@@ -1473,6 +1620,18 @@ void* uimisc_ordinal(const char* dll, unsigned ord) {
       case 17: return 0; /* InitCommonControls: ja por nome */
     }
   if (strncmp(dll, "shell32", 7) == 0 && ord == 100) return (void*)SHRestricted;
+  if (strncmp(dll, "uxtheme", 7) == 0) switch (ord) {
+      case 104: case 136: return (void*)ux_void;
+      case 132: case 137: case 138: case 139: return (void*)ux_false;
+      case 133: return (void*)ux_allow_dark;
+      case 135: return (void*)ux_preferred_mode;
+    }
+  if (strncmp(dll, "oleaut32", 8) == 0) switch (ord) {
+      case 161: return (void*)LoadTypeLib;
+      case 162: return (void*)LoadRegTypeLib;
+      case 163: return (void*)RegisterTypeLib;
+      case 183: return (void*)LoadTypeLibEx;
+    }
   if (strncmp(dll, "shlwapi", 7) == 0 && ord == 219) return (void*)QISearch;
   return 0;
 }

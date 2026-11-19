@@ -22,7 +22,7 @@ typedef void* HANDLE;
 
 /* ---------- TEB / PEB (layout x64 do Windows, so os campos usados) ---------- */
 #define TEB_SIZE 0x2000u
-#define TEB_STACKBASE 0x08    /* do kernel: struct task (kthread.c) */
+#define TEB_STACKBASE 0x08    /* topo da pilha (o kernel usa TEB+0 e TEB+0x18) */
 #define TEB_STACKLIMIT 0x10
 #define TEB_SELF 0x30
 #define TEB_PID 0x40
@@ -98,6 +98,7 @@ struct vmreg {
   size_t size;
   void* raw;                    /* bloco do kernel */
   int high;                     /* 1 = k_hmalloc */
+  int virt;                     /* 1 = memoria virtual do kernel (k_vm_*) */
   int kind;
   uint8_t* commit;              /* 1 bit por pagina; 0 = tudo commitado */
 };
@@ -115,7 +116,7 @@ struct ramfile {
 
 /* ---------- objetos (obj.c) ---------- */
 enum { OBJ_NONE, OBJ_EVENT, OBJ_THREAD, OBJ_MUTEX, OBJ_SEM, OBJ_TIMER, OBJ_IOCP, OBJ_FILE, OBJ_FIND,
-       OBJ_KEY, OBJ_SOCKET, OBJ_MISC, OBJ_PROCESS };
+       OBJ_KEY, OBJ_SOCKET, OBJ_MISC, OBJ_PROCESS, OBJ_SECTION, OBJ_PIPE };
 
 struct iocp_ent {
   DWORD bytes;
@@ -128,6 +129,7 @@ struct wobj {
   int refs;
   /* evento / semaforo / mutex / timer */
   int manual, signaled;
+  int skip_ok;              /* FILE_SKIP_COMPLETION_PORT_ON_SUCCESS (pipes) */
   int count, max;
   uintptr_t owner;
   uint64_t due;                 /* timer: k_ms de disparo (64 bits) */
@@ -140,6 +142,7 @@ struct wobj {
   DWORD tid;
   uint8_t* teb;
   struct vmreg* stack;
+  size_t stack_commit;      /* parte da pilha com paginas (o topo) */
   void* start;
   void* param;
   volatile int suspend;
@@ -165,6 +168,9 @@ struct wobj {
 
 struct wproc {
   uint8_t peb[PEB_SIZE];        /* TEM de ser o primeiro campo */
+  DWORD pid;                    /* pid do Windows (unico entre os processos do WINE) */
+  struct spawnrec* spawn_rec;   /* processo filho iniciado em paralelo (proc.c) */
+  void* dwrite;                 /* estado do DirectWrite deste processo (dwrite.c) */
   uint8_t* teb;                 /* thread principal */
   struct wmod* mods;
   struct wmod* exe;
@@ -213,6 +219,7 @@ struct wproc {
   /* processo filho pedido a tarefa principal (proc.c) */
   volatile int spawn_req;
   char* spawn_cmd;
+  struct wobj** spawn_inh;      /* handles herdados, tirados no CreateProcess */
   struct wobj* spawn_obj;
 };
 
@@ -248,7 +255,30 @@ const uint8_t* pe_find_resource(struct wmod* m, uintptr_t type, uintptr_t name, 
 
 /* ---------- tabelas embutidas ---------- */
 extern const struct wine_sym k32_syms[], crt_syms[], vm_syms[], obj_syms[], exc_syms[], file_syms[],
-    sys_syms[], gui_syms[], reg_syms[], net_syms[], misc_syms[], crypt_syms[], winrt_syms[], proc_syms[], sig_syms[], compat_syms[], gdi_syms[], dlg_syms[], shell_syms[], uimisc_syms[];
+    sys_syms[], gui_syms[], reg_syms[], net_syms[], misc_syms[], crypt_syms[], winrt_syms[], proc_syms[], sig_syms[], compat_syms[], gdi_syms[], dlg_syms[], shell_syms[], uimisc_syms[], procmisc_syms[], sec_syms[], map_syms[], safearray_syms[], dwrite_syms[], nt_syms[], pipe_syms[], fill_syms[];
+/* pipe.c */
+HANDLE wpipe_open(const wchar16* name, DWORD flags);
+int wpipe_read(struct wobj* o, void* buf, DWORD len, DWORD* done, void* ov);
+int wpipe_write(struct wobj* o, const void* buf, DWORD len, DWORD* done, void* ov);
+void wpipe_close(struct wobj* o);
+int wpipe_flush(HANDLE h); /* -1 = nao e pipe */
+int wpipe_fileinfo(HANDLE h, int cls, void* buf, DWORD len);
+void wobj_unref(struct wobj* o); /* obj.c */
+/* Handle que e ponteiro (GDI, menu, HSTRING...): so le o "magic" se o
+ * endereco pode ser nosso. O Chromium passa valores invalidos de proposito
+ * (ou por engano) e o Windows so devolve erro; aqui o 0xfffffffc00000000 de
+ * um ponteiro limpo do V8 derrubava o processo dentro do WINE.DLL. */
+static inline int wptr_ok(const void* p) {
+  uintptr_t v = (uintptr_t)p;
+  return v >= 0x10000 && v < 0x0000800000000000ull && !(v & 3);
+}
+void* k_malloc_shared(uint32_t n); /* memoria sem dono, vista por todos os processos */
+void k_free_shared(void* p);
+void* k_hmalloc(unsigned long long n, unsigned long long align); /* RAM acima de 4 GB (cota SET HIMEM) */
+void k_hfree(void* p);
+int wpipe_cancel(struct wobj* o, void* ov);
+void* safearray_ordinal(unsigned ord); /* safearray.c */
+const char* ordinal_name(const char* dll, unsigned ord); /* ordtab.c */
 void* uimisc_ordinal(const char* dll, unsigned ord); /* uimisc.c */
 int builtin_known(const char* lname);              /* nome sem .dll */
 void* builtin_lookup(const char* name);
@@ -265,6 +295,13 @@ void wlock(void);
 void wunlock(void);
 void wsignal(void);                                /* gen++ e acorda as esperas */
 HANDLE wh_new(struct wobj* o);
+HANDLE wh_self_process(void); /* obj.c: handle real do proprio processo */
+int wh_is_self(HANDLE h);
+/* proc.c: processos filhos em paralelo (tarefa do WIN) */
+int wspawn_claim(int* argc, char*** argv);   /* no inicio do filho */
+void wspawn_exit(int code);                   /* na saida de qualquer processo */
+DWORD wnew_pid(void);
+void wimg_cache_proc(int delta); /* pe.c */
 struct wobj* wh_get(HANDLE h, int type);           /* type 0 = qualquer */
 struct wobj* wobj_new(int type);
 int wh_close(HANDLE h);
@@ -310,3 +347,8 @@ void WINAPI wine_unimplemented(const char* what);
 void* wine_make_stub(const char* dll, const char* name);
 /* 1 = registra na serial cada GetProcAddress/import que faltou (SET WINEDEBUG=1). */
 extern int wine_debug;
+/* geracao global: objetos (eventos, processos, pipes) sao vistos por varios
+ * processos do WINE; quem espera dorme aqui e confere o seu objeto ao acordar */
+extern volatile int wine_gen;
+void wwait_note(const char* what, void* caller, uint64_t waited_ms); /* util.c */
+void wstack_note(const char* what, const uint64_t* sp);

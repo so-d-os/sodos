@@ -18,9 +18,16 @@
 
 
 /* ---------- processo / modulos ---------- */
-static WINAPI __attribute__((noreturn)) void ExitProcess(DWORD code) { wexit((int)code); }
+static WINAPI __attribute__((noreturn)) void ExitProcess(DWORD code) {
+  if (wine_debug >= 2) {
+    uint64_t here;
+    wwait_note("ExitProcess", __builtin_return_address(0), code);
+    wstack_note("ExitProcess", &here);
+  }
+  wexit((int)code);
+}
 static WINAPI BOOL TerminateProcess(HANDLE h, DWORD code) {
-  if (h == H_PROCESS) wexit((int)code);
+  if (wh_is_self(h)) wexit((int)code);
   return 0;
 }
 static WINAPI HANDLE GetCurrentProcess(void) { return H_PROCESS; }
@@ -100,11 +107,107 @@ static WINAPI BOOL FreeLibrary(HANDLE h) {
   (void)h;
   return 1; /* descarrega tudo no fim do processo */
 }
+/* Nt e Zw que a ntdll daqui nao tem: o programa recebe uma funcao que responde
+ * STATUS_NOT_IMPLEMENTED (como uma ntdll mais antiga), em vez de NULL. O
+ * Chromium confere dezenas delas no inicio e para no primeiro NULL. */
+static WINAPI long nt_notimpl(const char* name) {
+  wlog("ntdll sem implementacao (STATUS_NOT_IMPLEMENTED): ", name);
+  return (long)0xC0000002;
+}
+/* kernel32/user32/advapi32/gdi32: o que falta devolve 0 (FALSE/NULL) com
+ * ERROR_CALL_NOT_IMPLEMENTED, como uma versao antiga do Windows sem a funcao */
+static WINAPI uintptr_t api_notimpl(const char* name) {
+  wlog("API sem implementacao (devolve 0): ", name);
+  wset_lasterr(120); /* ERROR_CALL_NOT_IMPLEMENTED */
+  return 0;
+}
+static void* gen_stub(const char* name, void* target) {
+  /* 48 B9 imm64  mov rcx, nome ; 48 B8 imm64  mov rax, alvo ; FF E0  jmp rax */
+  size_t n = strlen(name);
+  uint8_t* p = (uint8_t*)k_malloc((unsigned)(24 + n + 1));
+  uint64_t v;
+  if (!p) return 0;
+  memcpy(p + 24, name, n + 1);
+  p[0] = 0x48;
+  p[1] = 0xB9;
+  v = (uint64_t)(uintptr_t)(p + 24);
+  memcpy(p + 2, &v, 8);
+  p[10] = 0x48;
+  p[11] = 0xB8;
+  v = (uint64_t)(uintptr_t)target;
+  memcpy(p + 12, &v, 8);
+  p[20] = 0xFF;
+  p[21] = 0xE0;
+  return p;
+}
+/* funcoes que o programa usa "se existir" e cuja ausencia ele sabe tratar:
+ * ficam ausentes (NULL), senao o "devolve 0" vira um ponteiro NULL usado */
+static int keep_absent(const char* n) {
+  static const char* const absent[] = {"VirtualAlloc2", "VirtualAlloc2FromApp", "MapViewOfFile3",
+                                       "MapViewOfFile3FromApp", "UnmapViewOfFile2", "MapViewOfFileNuma2", 0};
+  int i;
+  for (i = 0; absent[i]; i++)
+    if (strcmp(n, absent[i]) == 0) return 1;
+  return 0;
+}
+static int api_dll(const char* m) {
+  return strncmp(m, "kernel32", 8) == 0 || strncmp(m, "kernelbase", 10) == 0 || strncmp(m, "user32", 6) == 0 ||
+         strncmp(m, "advapi32", 8) == 0 || strncmp(m, "gdi32", 5) == 0;
+}
+
+/* Nt* opcionais: quem pede trata NULL (o Go 1.25 so usa os "wait completion
+ * packets" se existirem; com o stub ele parava em "NtCreateWaitCompletionPacket
+ * failed") */
+static int nt_absent(const char* n) {
+  static const char* const absent[] = {"NtCreateWaitCompletionPacket", "NtAssociateWaitCompletionPacket",
+                                       "NtCancelWaitCompletionPacket", 0};
+  int i;
+  for (i = 0; absent[i]; i++)
+    if (strcmp(n, absent[i]) == 0) return 1;
+  return 0;
+}
+
+static void* nt_stub(const char* name) {
+  /* 48 B9 imm64  mov rcx, nome ; 48 B8 imm64  mov rax, nt_notimpl ; FF E0  jmp rax */
+  size_t n = strlen(name);
+  uint8_t* p = (uint8_t*)k_malloc((unsigned)(24 + n + 1));
+  uint64_t v;
+  if (!p) return 0;
+  memcpy(p + 24, name, n + 1);
+  p[0] = 0x48;
+  p[1] = 0xB9;
+  v = (uint64_t)(uintptr_t)(p + 24);
+  memcpy(p + 2, &v, 8);
+  p[10] = 0x48;
+  p[11] = 0xB8;
+  v = (uint64_t)(uintptr_t)nt_notimpl;
+  memcpy(p + 12, &v, 8);
+  p[20] = 0xFF;
+  p[21] = 0xE0;
+  return p;
+}
+
 static WINAPI void* GetProcAddress(HANDLE h, const char* name) {
   struct wmod* m = pe_from_handle(h);
   void* f = m ? pe_getproc(m, name) : 0;
+  if (!f && m && (uintptr_t)name > 0xFFFF && strncmp(m->name, "ntdll", 5) == 0 &&
+      ((name[0] == 'N' && name[1] == 't') || (name[0] == 'Z' && name[1] == 'w')) && name[2] >= 'A' &&
+      name[2] <= 'Z' && !nt_absent(name)) {
+    f = nt_stub(name);
+    if (f && wine_debug) wlog("GetProcAddress: Nt* sem implementacao (responde NOT_IMPLEMENTED): ", name);
+  }
+  if (!f && m && (uintptr_t)name > 0xFFFF && api_dll(m->name) && !keep_absent(name)) {
+    f = gen_stub(name, (void*)api_notimpl);
+    if (f && wine_debug) wlog("GetProcAddress: sem implementacao (devolve 0): ", name);
+  }
   if (!f) {
     if (wine_debug && (uintptr_t)name > 0xFFFF) wlog("GetProcAddress: falta ", name);
+    if ((uintptr_t)name <= 0xFFFF) {
+      wlog("GetProcAddress por ordinal falhou, modulo ", m ? m->name : "(handle desconhecido)");
+      wlogx("  ordinal ", (uint64_t)(uintptr_t)name);
+    } else if (!m) {
+      wlog("GetProcAddress em handle desconhecido: ", name);
+    }
     wset_lasterr(ERROR_PROC_NOT_FOUND);
   }
   return f;
@@ -246,9 +349,28 @@ static WINAPI void EnterCriticalSection(struct critsec* c) {
     c->recursion++;
     return;
   }
-  while (__sync_val_compare_and_swap(&c->lock, 0, 1) != 0) {
-    __sync_val_compare_and_swap(&c->lock, 1, 2);
-    k_futex_wait(&c->lock, 2, -1);
+  /* mutex de futex: 0 livre, 1 travado, 2 travado com alguem esperando.
+   * Quem acorda pega com 2 (pode haver outro esperando), senao o Leave nao
+   * acorda ninguem e a outra thread dorme para sempre. */
+  {
+    int v = __sync_val_compare_and_swap(&c->lock, 0, 1);
+    if (v != 0) {
+      if (v != 2) v = __sync_lock_test_and_set(&c->lock, 2);
+      uint64_t t0 = wnow_ms();
+      int noted = 0;
+      while (v != 0) {
+        if (wine_debug >= 2) {
+          k_futex_wait(&c->lock, 2, 5000);
+          if (!noted && wnow_ms() - t0 > 5000) {
+            noted = 1;
+            wwait_note("secao critica", __builtin_return_address(0), wnow_ms() - t0);
+          }
+        } else {
+          k_futex_wait(&c->lock, 2, -1);
+        }
+        v = __sync_lock_test_and_set(&c->lock, 2);
+      }
+    }
   }
   c->owner = me;
   c->recursion = 1;
@@ -259,10 +381,77 @@ static WINAPI void LeaveCriticalSection(struct critsec* c) {
   if (__sync_lock_test_and_set(&c->lock, 0) == 2) k_futex_wake(&c->lock, 1);
 }
 static WINAPI void InitializeSRWLock(void** l) { *l = 0; }
-static WINAPI void AcquireSRWLockExclusive(void** l) {
-  while (__sync_val_compare_and_swap((volatile intptr_t*)l, 0, 1) != 0) k_thread_yield();
+/* SRW: -1 = escritor, n > 0 = n leitores, 0 = livre. Espera girando com
+ * yield (as secoes sao curtas). */
+/* WINEDEBUG=2: quem tem cada SRW exclusivo (thread e endereco de retorno),
+ * para achar o dono quando alguem gira mais de 5 s. Tabela pequena por
+ * hash do endereco; colisao so perde a informacao. */
+#define SRW_TRACK 512
+static struct {
+  void* lock;
+  DWORD tid;
+  void* caller;
+} srw_owner[SRW_TRACK];
+static unsigned srw_slot(void* l) { return (unsigned)(((uintptr_t)l >> 3) * 2654435761u) % SRW_TRACK; }
+void wsrw_note(void* l, void* caller) {
+  struct wobj* t;
+  unsigned i;
+  if (wine_debug < 2) return;
+  t = wthread();
+  i = srw_slot(l);
+  srw_owner[i].lock = l;
+  srw_owner[i].tid = t ? t->tid : 0;
+  srw_owner[i].caller = caller;
 }
-static WINAPI void ReleaseSRWLockExclusive(void** l) { __sync_lock_release((volatile intptr_t*)l); }
+void wsrw_report(void* l, void* caller) {
+  unsigned i = srw_slot(l);
+  wwait_note("SRW exclusivo", caller, 5000);
+  wstack_note("SRW exclusivo, pilha de quem espera:", (const uint64_t*)__builtin_frame_address(0));
+  wlogx("  trava ", (uint64_t)(uintptr_t)l);
+  wlogx("  valor ", (uint64_t)*(volatile intptr_t*)l);
+  if (srw_owner[i].lock == l) {
+    wlogx("  dono: thread ", srw_owner[i].tid);
+    wwait_note("  dono pegou em", srw_owner[i].caller, 0);
+  }
+}
+/* Quem espera dorme no futex da propria trava (os 32 bits baixos) em vez de
+ * girar: com varias threads disputando a trava do PartitionAlloc, girar com
+ * yield deixava o dono sem CPU e a thread principal esperava minutos.
+ * srw_waiters conta quem dorme, para a liberacao so acordar se preciso. */
+volatile int srw_waiters;
+void wsrw_wait(volatile intptr_t* v, intptr_t seen) {
+  __sync_fetch_and_add(&srw_waiters, 1);
+  if (*v == seen) k_futex_wait((volatile int*)v, (int)seen, 2); /* 2 ms: sem perder acordar */
+  __sync_fetch_and_sub(&srw_waiters, 1);
+}
+void wsrw_wake(volatile intptr_t* v) {
+  if (srw_waiters) k_futex_wake((volatile int*)v, -1);
+}
+static WINAPI void AcquireSRWLockExclusive(void** l) {
+  volatile intptr_t* v = (volatile intptr_t*)l;
+  if (__sync_val_compare_and_swap(v, 0, -1) != 0) {
+    uint64_t t0 = wnow_ms();
+    int noted = 0, spins = 0;
+    for (;;) {
+      intptr_t cur = *v;
+      if (cur == 0 && __sync_val_compare_and_swap(v, 0, -1) == 0) break;
+      if (wine_debug >= 2 && !noted && wnow_ms() - t0 > 5000) {
+        noted = 1;
+        wsrw_report(l, __builtin_return_address(0));
+      }
+      if (++spins < 64) {
+        __builtin_ia32_pause();
+        continue;
+      }
+      wsrw_wait(v, cur);
+    }
+  }
+  wsrw_note(l, __builtin_return_address(0));
+}
+static WINAPI void ReleaseSRWLockExclusive(void** l) {
+  __sync_lock_release((volatile intptr_t*)l);
+  wsrw_wake((volatile intptr_t*)l);
+}
 
 /* TLS do Windows: TEB->TlsSlots[64]. */
 static WINAPI DWORD TlsAlloc(void) {
@@ -624,7 +813,10 @@ static WINAPI wchar16* lstrcpynW(wchar16* d, const wchar16* s, int n) {
   d[i] = 0;
   return d;
 }
+/* NULL vale como menor que qualquer texto, como no Windows (o Chromium
+ * compara titulos/classes que podem ser NULL; aqui derrubava o processo) */
 static WINAPI int lstrcmpiW(const wchar16* a, const wchar16* b) {
+  if (!a || !b) return a == b ? 0 : (!a ? -1 : 1);
   for (;; a++, b++) {
     wchar16 x = *a, y = *b;
     if (x >= 'a' && x <= 'z') x = (wchar16)(x - 32);
@@ -634,6 +826,7 @@ static WINAPI int lstrcmpiW(const wchar16* a, const wchar16* b) {
   }
 }
 static WINAPI int lstrcmpW(const wchar16* a, const wchar16* b) {
+  if (!a || !b) return a == b ? 0 : (!a ? -1 : 1);
   for (;; a++, b++) {
     if (*a != *b) return *a < *b ? -1 : 1;
     if (!*a) return 0;
@@ -648,6 +841,7 @@ static WINAPI DWORD FlsAlloc(void* cb) {
   return TlsAlloc();
 }
 static WINAPI void* FlsGetValue(DWORD i) { return TlsGetValue(i); }
+static WINAPI void* FlsGetValue2(DWORD i) { return TlsGetValue(i); }
 static WINAPI BOOL FlsSetValue(DWORD i, void* v) { return TlsSetValue(i, v); }
 static WINAPI BOOL FlsFree(DWORD i) { return TlsFree(i); }
 static WINAPI uint64_t EncodePointer(uint64_t p) { return p; }
@@ -677,7 +871,7 @@ const struct wine_sym k32_syms[] = {
     S(GetStartupInfoW), S(GetSystemInfo), S(GetNativeSystemInfo), S(IsProcessorFeaturePresent),
     S(IsDebuggerPresent),  S(GetVersion), S(GetACP), S(GetOEMCP), S(IsValidCodePage),
     S(MultiByteToWideChar), S(FormatMessageW), S(lstrcpyW), S(lstrcatW), S(lstrcpynW), S(lstrcmpiW), S(lstrcmpW), S(WideCharToMultiByte), S(lstrlenA), S(lstrlenW),
-     S(InitializeSListHead), S(FlsAlloc), S(FlsGetValue), S(FlsSetValue),
+     S(InitializeSListHead), S(FlsAlloc), S(FlsGetValue), S(FlsGetValue2), S(FlsSetValue),
     S(FlsFree), S(EncodePointer), S(DecodePointer),
     {0, 0}};
 

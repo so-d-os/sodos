@@ -142,7 +142,7 @@ static struct wclass* class_find(struct wgui* g, const wchar16* name) {
   struct wclass* c;
   if ((uintptr_t)name < 0x10000) {
     for (c = g->classes; c; c = c->next)
-      if ((uintptr_t)c->name == (uintptr_t)name) return c;
+      if ((uintptr_t)c->name == (uintptr_t)name || (c->atom && c->atom == (uintptr_t)name)) return c;
     return 0;
   }
   for (c = g->classes; c; c = c->next)
@@ -203,10 +203,11 @@ static uint16_t class_register(const wchar16* name, wndproc_fn proc, HANDLE bg, 
   c->extra = extra;
   c->kind = CK_APP;
   wlock();
+  c->atom = ++atom_seq;
   c->next = g->classes;
   g->classes = c;
   wunlock();
-  return ++atom_seq;
+  return c->atom;
 }
 static WINAPI uint16_t RegisterClassExW(const struct wndclassexw* wc) {
   return class_register(wc->name, wc->proc, wc->bg, wc->wnd_extra);
@@ -342,7 +343,7 @@ static int world_request(struct wgui* g, int req) {
   struct wproc* p = wp();
   g->req_done = 0;
   g->req = req;
-  __sync_fetch_and_add(&p->gen, 1);
+  __sync_fetch_and_add(&wine_gen, 1);
   k_futex_wake(&p->exit_req, -1);
   while (!g->req_done && !p->exit_req) k_futex_wait(&g->req_done, 0, 20);
   return g->req_rc;
@@ -576,7 +577,10 @@ struct wwin* win_create(DWORD ex, const wchar16* cls, const wchar16* title, DWOR
     const wchar16* cls;
     DWORD ex;
   } cs;
-  if (!g || !cls) return 0;
+  if (!g || !cls) {
+    wlogx(!g ? "CreateWindow: sem GUI nesta thread, classe " : "CreateWindow: sem classe ", (uintptr_t)cls);
+    return 0;
+  }
   c = class_find(g, cls);
   if (!c) c = class_builtin(g, cls);
   if (!c) {
@@ -586,6 +590,7 @@ struct wwin* win_create(DWORD ex, const wchar16* cls, const wchar16* title, DWOR
       n8[k] = 0;
       wlog("CreateWindow: classe desconhecida ", n8);
     }
+    if (wine_debug && (uintptr_t)cls < 0x10000) wlogx("CreateWindow: atomo de classe desconhecido ", (uintptr_t)cls);
     wset_lasterr(1407); /* ERROR_CANNOT_FIND_WND_CLASS */
     return 0;
   }
@@ -637,6 +642,8 @@ struct wwin* win_create(DWORD ex, const wchar16* cls, const wchar16* title, DWOR
     w->owner = parent;
     w->z = ++g->zseq;
     if (!surf_alloc(&w->s, w->w, w->h, 1)) {
+      wlogx("CreateWindow: sem memoria para a superficie, largura ", (uint64_t)(uint32_t)w->w);
+      wlogx("  altura ", (uint64_t)(uint32_t)w->h);
       k_free(w);
       return 0;
     }
@@ -664,6 +671,7 @@ struct wwin* win_create(DWORD ex, const wchar16* cls, const wchar16* title, DWOR
     wlog("CreateWindow ", t8);
   }
   if (!wsend(w, WM_NCCREATE, 0, (intptr_t)&cs) || wsend(w, WM_CREATE, 0, (intptr_t)&cs) == -1) {
+    if (wine_debug) wlogx("CreateWindow: o programa recusou no WM_NCCREATE/WM_CREATE, estilo ", style);
     win_destroy(w);
     return 0;
   }
@@ -1436,11 +1444,11 @@ BOOL WINAPI wGetMessageW(struct msg* m, HANDLE h, DWORD lo, DWORD hi) {
   if (!g) return -1;
   for (;;) {
     uint64_t until, now;
-    int gen = p->gen;
+    int gen = wine_gen;
     if (next_message(g, m, h, 1, &until)) return m->message != WM_QUIT;
     now = wnow_ms();
     if (p->exit_req) k_thread_exit(0);
-    k_futex_wait(&p->gen, gen, until > now ? (int)(until - now) : 1);
+    k_futex_wait(&wine_gen, gen, until > now ? (int)(until - now) : 1);
   }
 }
 static WINAPI BOOL PeekMessageW(struct msg* m, HANDLE h, DWORD lo, DWORD hi, DWORD remove) {
@@ -1453,13 +1461,12 @@ static WINAPI BOOL PeekMessageW(struct msg* m, HANDLE h, DWORD lo, DWORD hi, DWO
 }
 static WINAPI BOOL WaitMessage(void) {
   struct wgui* g = gui_get();
-  struct wproc* p = wp();
   struct msg m;
   uint64_t until, now;
-  int gen = p->gen;
+  int gen = wine_gen;
   if (!g || next_message(g, &m, 0, 0, &until)) return 1;
   now = wnow_ms();
-  k_futex_wait(&p->gen, gen, until > now ? (int)(until - now) : 1);
+  k_futex_wait(&wine_gen, gen, until > now ? (int)(until - now) : 1);
   return 1;
 }
 static WINAPI BOOL TranslateMessage(const struct msg* m) {
@@ -1527,7 +1534,7 @@ static WINAPI DWORD MsgWaitForMultipleObjectsEx(DWORD n, const HANDLE* hs, DWORD
   for (;;) {
     struct msg m;
     uint64_t until;
-    int gen = p->gen;
+    int gen = wine_gen;
     DWORD i;
     for (i = 0; i < n; i++) {
       struct wobj* o = wh_get(hs[i], 0);
@@ -1536,7 +1543,7 @@ static WINAPI DWORD MsgWaitForMultipleObjectsEx(DWORD n, const HANDLE* hs, DWORD
     if (g && next_message(g, &m, 0, 0, &until)) return n;
     if (ms != INFINITE && wnow_ms() - t0 >= ms) return WAIT_TIMEOUT;
     if (p->exit_req) k_thread_exit(0);
-    k_futex_wait(&p->gen, gen, 10);
+    k_futex_wait(&wine_gen, gen, 10);
   }
 }
 static WINAPI DWORD MsgWaitForMultipleObjects(DWORD n, const HANDLE* hs, BOOL all, DWORD ms, DWORD mask) {
@@ -1712,6 +1719,17 @@ static WINAPI DWORD GetDpiForWindow(HANDLE h) {
   return 96;
 }
 static WINAPI BOOL SetProcessDPIAware(void) { return 1; }
+/* filtro de mensagens entre niveis de integridade (UIPI): nao ha niveis aqui */
+static WINAPI BOOL ChangeWindowMessageFilterEx(void* w, DWORD msg, DWORD act, void* st) {
+  (void)w; (void)msg; (void)act;
+  if (st) ((DWORD*)st)[1] = 0; /* CHANGEFILTERSTRUCT.ExtStatus = MSGFLTINFO_NONE */
+  return 1;
+}
+static WINAPI DWORD GetCaretBlinkTime(void) { return 530; } /* padrao do Windows, ms */
+static WINAPI BOOL ChangeWindowMessageFilter(DWORD msg, DWORD act) {
+  (void)msg; (void)act;
+  return 1;
+}
 static WINAPI BOOL SetProcessDpiAwarenessContext(HANDLE c) {
   (void)c;
   return 1;
@@ -1928,7 +1946,7 @@ const struct wine_sym gui_syms[] = {
     S(SendMessageW), S(SendMessageTimeoutW), S(SendNotifyMessageW), S(CallWindowProcW),
     S(MsgWaitForMultipleObjectsEx), S(MsgWaitForMultipleObjects), S(GetQueueStatus), S(BeginPaint), S(EndPaint),
     {"DefWindowProcW", (void*)wDefWindowProcW}, S(SetTimer), S(KillTimer), S(GetSystemMetrics),
-    S(GetSystemMetricsForDpi), S(GetDpiForSystem), S(GetDpiForWindow), S(SetProcessDPIAware),
+    S(GetSystemMetricsForDpi), S(GetDpiForSystem), S(GetDpiForWindow), S(SetProcessDPIAware), S(ChangeWindowMessageFilterEx), S(ChangeWindowMessageFilter), S(GetCaretBlinkTime),
     S(SetProcessDpiAwarenessContext), S(SetProcessDpiAwareness), S(AdjustWindowRectEx), S(AdjustWindowRect),
     S(SystemParametersInfoW), S(LoadCursorW), S(LoadIconW), S(LoadImageW), S(DestroyIcon), S(CopyImage),
     S(DrawIconEx), S(DrawIcon), S(SetCursor), S(GetCursorPos), S(ShowCursor), S(GetKeyState), S(GetAsyncKeyState),

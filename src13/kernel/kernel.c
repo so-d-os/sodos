@@ -2097,6 +2097,7 @@ void kmain(const struct BootInfo* bi) {
                  : "Teclado USB nao encontrado (so o PS/2, se houver).\n");
   }
   smp_init();
+  guard_start();   /* reboot.h: teclado e emergencia mesmo com o mundo travado */
   irq0_probe(" pos-smp");
   httpd_start(8797);
   update_cursor();
@@ -2152,6 +2153,7 @@ void kmain(const struct BootInfo* bi) {
   drives_automount();
   drives_mount_ramdisk();
   bootpak_install();   /* pacote de boot (SODOS.PAK) -> Z:\SODOS\DRV */
+  drives_automount();  /* disco 1 em FAT32 (make run2): so agora ha o FAT32.DLL */
   drives_mount_nvme(); /* PC real: particao SODOSHD do SSD vira D: (precisa do FAT32.DLL) */
   keyb_load_cfg();
   net_demo();

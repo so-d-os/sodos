@@ -578,6 +578,30 @@ static WINAPI size_t ms_wcslen(const wchar16* s) { return wstrlen16(s); }
 static WINAPI int ms_atoi(const char* s) { return atoi(s); }
 static WINAPI long ms_strtol(const char* s, char** e, int b) { return (long)strtol(s, e, b); }
 static WINAPI unsigned long ms_strtoul(const char* s, char** e, int b) { return (unsigned long)strtoul(s, e, b); }
+/* 64 bits (long do Windows tem 32: os de 64 sao os "ll" e _strtoi64) */
+static WINAPI unsigned long long ms_strtoull(const char* s, char** e, int b) {
+  unsigned long long v = 0;
+  const char* p = s;
+  int neg = 0, any = 0;
+  while (*p == ' ' || *p == '	') p++;
+  if (*p == '-' || *p == '+') neg = *p++ == '-';
+  if ((b == 0 || b == 16) && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+    p += 2;
+    b = 16;
+  } else if (b == 0) {
+    b = p[0] == '0' ? 8 : 10;
+  }
+  for (;; p++) {
+    int d = *p >= '0' && *p <= '9' ? *p - '0' : *p >= 'a' && *p <= 'z' ? *p - 'a' + 10
+          : *p >= 'A' && *p <= 'Z' ? *p - 'A' + 10 : 99;
+    if (d >= b) break;
+    v = v * (unsigned)b + (unsigned)d;
+    any = 1;
+  }
+  if (e) *e = (char*)(any ? p : s);
+  return neg ? (unsigned long long)(-(long long)v) : v;
+}
+static WINAPI long long ms_strtoll(const char* s, char** e, int b) { return (long long)ms_strtoull(s, e, b); }
 static WINAPI double ms_strtod(const char* s, char** e) { return strtod(s, e); }
 static WINAPI double ms_atof(const char* s) { return strtod(s, 0); }
 static WINAPI int ms_toupper(int c) { return (c >= 'a' && c <= 'z') ? c - 32 : c; }
@@ -705,7 +729,7 @@ const struct wine_sym crt_syms[] = {
     /* string */
     M(strlen), M(strnlen), M(strcmp), M(strncmp), M(strcpy), M(strncpy), M(strcat), M(strchr),
     M(strrchr), M(strstr), {"_strdup", (void*)ms_strdup}, M(strdup), M(memcpy), M(memmove), M(memset),
-    M(memcmp), M(memchr), M(wcslen), M(atoi), M(strtol), M(strtoul), M(strtod), M(atof), M(toupper),
+    M(memcmp), M(memchr), M(wcslen), M(atoi), M(strtol), M(strtoul), M(strtoull), M(strtoll), {"_strtoui64", (void*)ms_strtoull}, {"_strtoi64", (void*)ms_strtoll}, M(strtod), M(atof), M(toupper),
     M(tolower), M(isdigit), M(isspace), M(isalpha), M(getenv), M(qsort),
     /* math / tempo */
     M(frexp), M(sqrt), M(floor), M(ceil), M(fabs), M(pow), S(__daylight), S(__timezone), S(__tzname),

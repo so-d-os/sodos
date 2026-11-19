@@ -24,6 +24,8 @@
 #include "nvme.h"
 #include "reboot.h"
 #include "wine.h"
+#include "vmem.h"
+#include "irq.h"
 
 void mod_exit(int code);
 void shell_read_line(char* buf, int max);
@@ -177,14 +179,97 @@ static void k_clear(void) {
   clear_screen();
 }
 
-/* ---------- arquivos ---------- */
-static int k_fsize(const char* path) { return file_size(path); }
-static int k_fload(const char* path, char* buf, int max) { return file_load(path, buf, max); }
+/* ---------- arquivos ----------
+ * Dono do sistema de arquivos. O fat.c tem um estado so (unidade, FAT,
+ * pasta carregada) e cede a CPU no meio de leituras e gravacoes longas (para
+ * o desktop respirar): o yield de uma tarefa do WIN passa a vez a outro
+ * programa e o de uma thread solta o BKL. Com varios processos gravando ao
+ * mesmo tempo (Claude Desktop: navegador, rede, renderer) um entrava no meio
+ * do outro e o FAT do disco corrompia. Quem chega com o dono ocupado cede a
+ * vez ate ele sair; o dono pode reentrar. Tudo isto corre sob o BKL. */
+int gui_task_cur(void); /* visual.c */
+static int fs_owner, fs_depth;
+static volatile int fs_gen; /* futex: muda a cada saida do dono */
+static int fs_me(void) {
+  if (kt_in_thread()) return 0x100000 + kt_thread_self();
+  return 0x1000 + gui_task_cur() + 1;
+}
+/* A trava nunca prende o sistema: dona que morreu (thread encerrada a forca
+ * no fim do programa, no meio de uma leitura) ou que nao solta em 20 s perde
+ * a trava. Antes disso, um Firefox reaberto travava o mundo (e o teclado). */
+#define FS_STEAL_MS 20000u
+static void fs_steal(const char* why) {
+  serial_puts("[fs] trava do sistema de arquivos retomada: ");
+  serial_puts(why);
+  serial_puts(" dono=");
+  serial_hex32((uint32_t)fs_owner);
+  serial_puts("\n");
+  fs_owner = 0;
+  fs_depth = 0;
+  fs_gen++;
+  kt_futex_wake(&fs_gen, -1);
+}
+/* 1 se quem chama segura a trava do FS (sched.c: a tarefa nao cede a vez). */
+int fs_held_by_me(void) { return fs_depth > 0 && fs_owner == fs_me(); }
+/* Ctrl+F1 com o mundo parado (ps2in.c, guardiao): solta a trava a forca. */
+void fs_force_release(void) {
+  if (fs_depth) fs_steal("tecla de emergencia");
+}
+static void fs_enter(void) {
+  int me = fs_me();
+  uint64_t t0 = irq_ticks();
+  while (fs_depth && fs_owner != me) {
+    if (fs_owner >= 0x100000 && !kt_thread_alive(fs_owner - 0x100000)) {
+      fs_steal("dona morta");
+      break;
+    }
+    if (irq_ticks() - t0 > FS_STEAL_MS) {
+      fs_steal("20 s sem soltar");
+      break;
+    }
+    /* thread: dorme no futex (solta o BKL de verdade); girando com yield as
+     * threads esperando tomavam o BKL o tempo todo e o dono (uma tarefa do
+     * WIN, que precisa do mundo) nao voltava: tudo parava */
+    if (kt_in_thread()) kt_futex_wait(&fs_gen, fs_gen, 5);
+    else sched_yield();
+  }
+  fs_owner = me;
+  fs_depth++;
+}
+static void fs_leave(void) {
+  if (fs_owner != fs_me()) return; /* a trava foi retomada de quem chama */
+  if (fs_depth > 0 && --fs_depth == 0) {
+    fs_owner = 0;
+    fs_gen++;
+    kt_futex_wake(&fs_gen, -1);
+  }
+}
+static int k_fsize(const char* path) {
+  int rc;
+  fs_enter();
+  rc = file_size(path);
+  fs_leave();
+  return rc;
+}
+static int k_fload(const char* path, char* buf, int max) {
+  int rc;
+  fs_enter();
+  rc = file_load(path, buf, max);
+  fs_leave();
+  return rc;
+}
 static int k_fread(const char* path, uint32_t offset, char* buf, int len) {
-  return file_read_at(path, offset, buf, len);
+  int rc;
+  fs_enter();
+  rc = file_read_at(path, offset, buf, len);
+  fs_leave();
+  return rc;
 }
 static int k_fsave(const char* path, const char* data, int size) {
-  int rc = file_save(path, data, size);
+  int rc;
+  fs_enter();
+  rc = file_save(path, data, size);
+  fs_leave();
   win_desk_touch(path);
   return rc;
 }
@@ -210,7 +295,11 @@ static int k_flist(int letter, char* out, int max) {
 }
 
 static int k_dirlist(const char* path, char* out, int max) {
-  return file_list(path, out, max);
+  int rc;
+  fs_enter();
+  rc = file_list(path, out, max);
+  fs_leave();
+  return rc;
 }
 
 static void k_pwd(char* out, int max) { drives_pwd(out, max); }
@@ -222,31 +311,47 @@ static int k_chdir(const char* path) {
 
 /* Itens de uma pasta com tamanho e data (struct dir_item = k_dirent). */
 static int k_dir(const char* path, struct dir_item* out, int max) {
+  int rc;
   if (!path || !out || max <= 0) return -1;
-  return drives_items(path, out, max);
+  fs_enter();
+  rc = drives_items(path, out, max);
+  fs_leave();
+  return rc;
 }
 
 /* Apaga arquivo (aceita * e ?). 0 ou quantos; <0 erro (drives_del). */
 static int k_fdelete(const char* path) {
-  int rc = path ? drives_del(path) : -1;
+  int rc;
+  fs_enter();
+  rc = path ? drives_del(path) : -1;
+  fs_leave();
   win_desk_touch(path);
   return rc;
 }
 /* Renomeia sem copiar (drives_rename). <0: ver drives.h; -5/-6 = copiar. */
 static int k_frename(const char* from, const char* to) {
-  int rc = drives_rename(from, to);
+  int rc;
+  fs_enter();
+  rc = drives_rename(from, to);
+  fs_leave();
   win_desk_touch(from);
   win_desk_touch(to);
   return rc;
 }
 /* Mudou algo em ...\DESKTOP: win_desk_touch faz o desktop reler os icones. */
 static int k_mkdir(const char* path) {
-  int rc = path ? drives_mkdir(path) : -1;
+  int rc;
+  fs_enter();
+  rc = path ? drives_mkdir(path) : -1;
+  fs_leave();
   win_desk_touch(path);
   return rc;
 }
 static int k_rmdir(const char* path) {
-  int rc = path ? drives_rmdir(path) : -1;
+  int rc;
+  fs_enter();
+  rc = path ? drives_rmdir(path) : -1;
+  fs_leave();
   win_desk_touch(path);
   return rc;
 }
@@ -424,6 +529,10 @@ void kx_puts(const char* s) { k_puts(s); }
 static void* k_malloc(uint32_t n) { return umalloc(n); }
 static void* k_malloc_aligned(uint32_t n, uint32_t align) { return umalloc_aligned(n, align); }
 static void k_free(void* p) { ufree(p); }
+/* Memoria sem dono (do kernel): sobrevive ao processo que pediu. Para o que
+ * dois processos dividem (pipes do WINE.DLL); quem pediu tem de soltar. */
+static void* k_malloc_shared(uint32_t n) { return umalloc_owned(n, 0); }
+static void k_free_shared(void* p) { ufree(p); }
 /* RAM acima de 4 GB (so programas de 64 bits enxergam). Teto: SET HIMEM. */
 static void* k_hmalloc(uint64_t n, uint64_t align) { return hm_user_alloc(n, align, um_owner()); }
 static void k_hfree(void* p) { hm_user_free(p); }
@@ -453,10 +562,21 @@ static void k_net_addr(uint32_t* ip, uint32_t* mask, uint32_t* gw, uint32_t* dns
   net_get_addr(ip, mask, gw, dns);
 }
 /* TEB do Windows da thread corrente (WINE.DLL): vira a base do GS dela
- * (TEB+0 e TEB+8 ficam com o kernel, ver kthread.c). 0 desliga. */
+ * (TEB+0 e TEB+0x18 ficam com o kernel, ver kthread.c). 0 desliga. */
 static void k_win_teb(void* teb) { kt_win_teb_set((uint64_t)(uintptr_t)teb); }
 /* Memoria num endereco baixo fixo para a imagem de um EXE sem relocacoes. */
 static void* k_win_lowmem(uint32_t addr, uint32_t size) { return wine_low_alloc(addr, size); }
+/* Memoria virtual dos programas do Windows (kernel/vmem.c). */
+static uint64_t k_vm_reserve(uint64_t size, uint64_t align, uint64_t at) {
+  return at ? vmem_reserve_at(at, size, um_owner()) : vmem_reserve(size, align, um_owner());
+}
+static int k_vm_commit(uint64_t va, uint64_t size, int prot) { return vmem_commit(va, size, prot); }
+static int k_vm_decommit(uint64_t va, uint64_t size) { return vmem_decommit(va, size); }
+static int k_vm_release(uint64_t va) { return vmem_release(va); }
+static int k_vm_protect(uint64_t va, uint64_t size, int prot, int* old) { return vmem_protect(va, size, prot, old); }
+static int k_vm_query(uint64_t va, struct vmem_info* out) { return vmem_query(va, out); }
+static int k_vm_owns(uint64_t va) { return vmem_owns(va); }
+static int k_vm_alias(uint64_t va, uint64_t phys, uint64_t size, int prot) { return vmem_alias(va, phys, size, prot); }
 static void* k_realloc(void* p, uint32_t n) { return urealloc(p, n); }
 static uint32_t k_msize(void* p) { return usize(p); }
 static int k_date(void);
@@ -805,6 +925,11 @@ static int k_win_bg(uint32_t rgb) { return win_bg_set(rgb); }
 static int k_win_key(int ch) { return win_api_key(ch); }
 
 static int k_win_launch(const char* path) { return kt_in_thread() ? -1 : win_launch(path); }
+/* Programa com um argumento, como tarefa do WIN (roda em paralelo com quem pediu).
+ * -1: o WIN nao esta no ar ou ja ha um pedido na fila (tente de novo). */
+static int k_win_launch_arg(const char* exe, const char* arg) {
+  return kt_in_thread() ? -1 : win_launch_arg(exe, arg);
+}
 
 /* Abrir um arquivo pelo programa associado (LINKEXT.DLL). 0 = abriu; 1 = sem
  * associacao ou LINKEXT desligado (o programa segue com o padrao dele). */
@@ -1241,6 +1366,14 @@ static const struct kexp table[] = {
   EXP(k_net_addr),
   EXP_NOLOCK(k_win_teb),
   EXP(k_win_lowmem),
+  EXP(k_vm_reserve),
+  EXP(k_vm_commit),
+  EXP(k_vm_decommit),
+  EXP(k_vm_release),
+  EXP(k_vm_protect),
+  EXP(k_vm_query),
+  EXP(k_vm_owns),
+  EXP(k_vm_alias),
   EXP(k_fault_entry),
   EXP(k_free),
   EXP(k_realloc),
@@ -1303,6 +1436,9 @@ static const struct kexp table[] = {
   EXP(k_win_wallpaper),
   EXP(k_win_key),
   EXP(k_win_launch),
+  EXP(k_win_launch_arg),
+  EXP(k_malloc_shared),
+  EXP(k_free_shared),
   EXP(k_clip_set),
   EXP(k_clip_get),
   EXP(k_ui_menu_pos),

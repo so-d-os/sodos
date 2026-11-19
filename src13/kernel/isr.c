@@ -395,10 +395,14 @@ static uint64_t fault_target(const isr_frame_t* f) {
   uint64_t v = f->int_no;
   int i;
   if (!pid || crash_depth) return 0;
-  if (v != 0 && v != 6 && v != 13 && v != 14 && v != 16 && v != 17 && v != 19) return 0;
+  if (v != 0 && v != 3 && v != 6 && v != 13 && v != 14 && v != 16 && v != 17 && v != 19) return 0;
+  /* int3 so vai para programas do Windows (EXCEPTION_BREAKPOINT); a libc nao
+   * tem SIGTRAP e os programas do SODOS seguem como antes */
+  if (v == 3 && !kt_win_teb_get()) return 0;
   /* Falta dentro do kernel (num k_* chamado pelo programa): tela de sempre. */
   if (f->eip >= KERNEL_LOAD && f->eip < (uint64_t)(uintptr_t)__bss_end) return 0;
-  if (f->eip < 0x100000) return 0;
+  /* rip baixo: so programa do Windows (chamada por ponteiro NULL vira excecao dele) */
+  if (f->eip < 0x100000 && !kt_win_teb_get()) return 0;
   /* A entrada roda logo abaixo do frame: a pilha tem que existir ali. */
   if (!mapped((uint64_t)(uintptr_t)f - 0x4000) || !mapped(f->esp_dummy)) return 0;
   for (i = 0; i < FAULT_MAX; i++)
