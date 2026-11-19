@@ -995,6 +995,7 @@ static int k_win_shot(int x, int y, int w, int h, void* rgba) {
 static int k_win_activate(int id) { return kt_in_thread() ? -1 : win_activate_api(id); }
 static int k_alttab(int* tabs) { return alttab_api(tabs); }
 static int k_win_size(int* w, int* h) { return win_screen_size(w, h) ? 0 : -1; }
+static int k_win_primary(int* w, int* h) { return win_primary_size(w, h) ? 0 : -1; }
 static int k_gui_panel(const char* title, int x, int y, int w, int h) {
   return kt_in_thread() ? -1 : gui_panel_open(title, x, y, w, h);
 }
@@ -1447,6 +1448,7 @@ static const struct kexp table[] = {
   EXP(k_ui_theme),
   EXP(k_gui_dock),
   EXP(k_gui_open_pct),
+  EXP(k_win_primary),
   EXP(k_thread_create),
   EXP(k_thread_join),
   EXP(k_thread_detach),

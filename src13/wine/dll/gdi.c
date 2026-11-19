@@ -480,7 +480,7 @@ static WINAPI BOOL SetBrushOrgEx(HANDLE dc, int x, int y, struct point* old) {
 static WINAPI int GetDeviceCaps(HANDLE dc, int i) {
   int sw = 0, sh = 0;
   (void)dc;
-  k_win_size(&sw, &sh);
+  { int k_win_primary(int* w, int* h); if (k_win_primary(&sw, &sh) != 0) k_win_size(&sw, &sh); }
   switch (i) {
     case 8: return sw > 0 ? sw : 1024;  /* HORZRES */
     case 10: return sh > 0 ? sh : 768;  /* VERTRES */

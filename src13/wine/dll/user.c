@@ -355,7 +355,7 @@ void wgui_world_service(void) {
   if (!g || !g->req) return;
   if (g->req == 1) {
     int sw = 0, sh = 0, rc, wpc, hpc;
-    k_win_size(&sw, &sh);
+    if (k_win_primary(&sw, &sh) != 0) k_win_size(&sw, &sh); /* % da tela principal (o WIN abre nela) */
     if (sw <= 0 || sh <= 0) {
       sw = 1024;
       sh = 768;
@@ -1686,16 +1686,24 @@ static WINAPI BOOL KillTimer(HANDLE h, uintptr_t id) {
 }
 
 /* ---------- metricas e miudezas ---------- */
+int k_win_primary(int* w, int* h);
 static WINAPI int GetSystemMetrics(int i) {
-  int sw = 0, sh = 0;
+  int sw = 0, sh = 0, pw = 0, ph = 0;
   k_win_size(&sw, &sh);
   if (sw <= 0) {
     sw = 1024;
     sh = 768;
   }
+  /* como no Windows: SCREEN = monitor principal, VIRTUALSCREEN = todos */
+  if (k_win_primary(&pw, &ph) != 0 || pw <= 0) {
+    pw = sw;
+    ph = sh;
+  }
   switch (i) {
-    case 0: case 16: case 78: return sw;
-    case 1: case 17: case 79: return sh;
+    case 0: case 16: return pw;
+    case 1: case 17: return ph;
+    case 78: return sw;
+    case 79: return sh;
     case 2: case 3: return 17;      /* CXVSCROLL, CYHSCROLL */
     case 4: return 23;              /* CYCAPTION */
     case 5: case 6: return 1;       /* CXBORDER */

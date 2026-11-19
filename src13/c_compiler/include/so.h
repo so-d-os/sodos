@@ -369,6 +369,8 @@ int k_win_shot(int x, int y, int w, int h, void* rgba);
 int k_win_activate(int id);
 int k_alttab(int* tabs);
 int k_win_size(int* w, int* h);
+/* Tela principal (a primeira da tela estendida). */
+int k_win_primary(int* w, int* h);
 int k_gui_panel(const char* title, int x, int y, int w, int h);
 /* Abre o arquivo com o programa associado a extensao (LINKEXT.DLL, SET
  * LINKEXT=1). 0 = abriu; 1 = sem associacao ou LINKEXT desligado. */

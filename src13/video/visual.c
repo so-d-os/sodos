@@ -2272,6 +2272,15 @@ int win_screen_size(int* w, int* h) {
   return 1;
 }
 
+/* Tela principal (a primeira, com a tela estendida): o que o Windows chama de
+ * SM_CXSCREEN. Programas do Windows dimensionam e centralizam a janela por ela;
+ * com 3840 o Claude (Electron) nao abria janela no PC de duas telas. */
+int win_primary_size(int* w, int* h) {
+  if (!win_screen_size(w, h)) return 0;
+  if (gfx_wide && gfx_wide_x2 && w) *w = (int)gfx_wide_x2;
+  return 1;
+}
+
 /* vga_bios_font e a fonte em uso: a saida do modo grafico e o fbcon leem dela. */
 const uint8_t* vga_font_glyph(int ch) {
   return vga_bios_font_ok ? &vga_bios_font[ch * 32] : font8x16_cp850[ch];

@@ -74,6 +74,8 @@ void mouse_api(int x, int y, int click);
 void mouse_api_pos(int* x, int* y);
 /* 1 se o WIN (ou o modo grafico) esta na tela. */
 int win_screen_size(int* w, int* h);
+/* Tela principal (a primeira da tela estendida): SM_CXSCREEN do WINE. */
+int win_primary_size(int* w, int* h);
 /* Alt+Tab (WINTAB.EXE): janelas da frente para tras, tiradas ao apertar. */
 struct k_win_info {
   int id;          /* para win_activate_api */
