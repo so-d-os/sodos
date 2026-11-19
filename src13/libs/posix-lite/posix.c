@@ -352,7 +352,20 @@ __export int mkdir(const char* path, mode_t mode) {
     return -1;
   }
   if (r < 0) {
-    errno = EACCES;
+    /* errno como no POSIX: ENOENT se falta a pasta-mae, EEXIST se ja ha um
+     * arquivo com o nome. O FAT16 do kernel cria as maes sozinho, o FAT32.DLL
+     * nao: o Firefox so cria os ancestrais (.mozilla) com ENOENT e, com
+     * EACCES, desistia do perfil num D: em FAT32. */
+    char par[PATH_MAX];
+    int n = (int)strlen(full);
+    while (n > 0 && full[n - 1] == '\\') n--;
+    while (n > 0 && full[n - 1] != '\\') n--;
+    while (n > 0 && full[n - 1] == '\\') n--;
+    memcpy(par, full, (size_t)n);
+    par[n] = 0;
+    if (n > 0 && !path_is_dir(par)) errno = ENOENT;
+    else if (k_fsize(full) >= 0) errno = EEXIST;
+    else errno = EACCES;
     return -1;
   }
   return 0;

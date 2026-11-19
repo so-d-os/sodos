@@ -1019,6 +1019,14 @@ Com o perfil no disco nada e apagado na partida; o marcador `SODOSRUN.TXT`
 (que apaga o perfil de uma execucao interrompida) so vale com o HOME no Z:.
 Os downloads seguem em `browser.download.dir` (`prefs/sodos.js`).
 
+No D: em FAT32 (PC real, `FAT32.DLL`) o perfil nao era criado ("Your Firefox
+profile cannot be loaded"): o Firefox faz `mkdir(HOME/.mozilla/firefox)` e so
+cria o `.mozilla` antes se o erro for `ENOENT`. O `fat_mkdir` do FAT16 cria as
+pastas-mae sozinho, o `FAT32.DLL` nao, e o `mkdir` da posix-lite devolvia
+`EACCES` para qualquer falha. Agora devolve `ENOENT` quando falta a pasta-mae
+(e `EEXIST` se ha um arquivo com o nome). Para testar como no PC, use um disco
+FAT32 no QEMU (copia do `~/sodos-run2/e.img` do `make run2`).
+
 #### Mouse e teclado lentos no QEMU: LFB uncached
 
 Medido com `WIN_INLAT_LOG 1` (`video/visual.c`): o tick de 1 ms marca quando
