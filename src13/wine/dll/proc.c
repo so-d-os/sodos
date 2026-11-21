@@ -14,6 +14,7 @@
  */
 #include <so.h>
 #include <string.h>
+#include <stdio.h>
 #include "wine_int.h"
 struct inh_spec;
 static struct wobj** inh_snapshot(struct wproc* pp, const struct inh_spec* spec);
@@ -655,12 +656,81 @@ static int spawn_async(struct wproc* p, struct wobj* o, const char* path, const 
   return 1;
 }
 
+/* ---------- programa do SODOS chamado por um programa do Windows ----------
+ * O Claude Desktop procura git.exe no PATH (D:\WINE\BIN) e roda com pipes
+ * no stdin/stdout. Se o arquivo e um programa do SODOS (SOX: o GIT.EXE do
+ * SODOS copiado como D:\WINE\BIN\git.exe), roda aqui na tarefa principal
+ * com k_exec_capture, na pasta pedida, e a saida vai inteira para o handle
+ * de stdout do filho; o codigo de saida vira o do processo. Antes ia para o
+ * WIN com "--wine-spawn=N" no lugar dos argumentos (WSL.EXE saia com 1). */
+int k_exec_capture(const char* path, int argc, char** argv, char* out, int max, int* len);
+static int is_sodos_exe(const char* path) {
+  uint32_t m = 0;
+  if (k_fread(path, 0, (char*)&m, 4) != 4) return 0;
+  return m == 0x31584F53u || m == 0x32584F53u; /* SOX1 / SOX2 */
+}
+static struct wobj* spawn_std_obj(struct wproc* p, int i) {
+  uintptr_t v = (uintptr_t)p->spawn_std[i];
+  if (!v) return 0;
+  if (p->spawn_inh && v >= 0x200 && !(v & 3) && (v - 0x200) / 4 < WHANDLE_MAX)
+    return p->spawn_inh[(v - 0x200) / 4];
+  return wh_get((HANDLE)v, 0);
+}
+static int run_sodos_child(struct wproc* p, const char* path, int argc, char** argv) {
+  char old[300];
+  char* out;
+  const int max = 4 << 20;
+  int len = 0, rc;
+  struct wobj* so = spawn_std_obj(p, 1);
+  k_pwd(old, (int)sizeof(old));
+  if (p->spawn_dir && p->spawn_dir[0]) k_chdir(p->spawn_dir);
+  else if (p->cwd[0]) k_chdir(p->cwd);
+  out = (char*)k_malloc((unsigned)max);
+  if (!out) return 1;
+  argv[0] = (char*)path;
+  {
+    /* o Claude Desktop passa ~20 "-c chave=valor" antes do comando do git e o
+     * SODOS so leva 31 argumentos a um programa (o comando ficava de fora e
+     * o git mostrava a ajuda): as configuracoes de uma vez so saem daqui */
+    int k = 1, j, opts = 1;
+    for (j = 1; j < argc; j++) {
+      if (opts && strcmp(argv[j], "-c") == 0 && j + 1 < argc) {
+        j++;
+        continue;
+      }
+      if (argv[j][0] != '-') opts = 0; /* depois do comando: tudo fica */
+      argv[k++] = argv[j];
+    }
+    argc = k;
+    if (argc > 31) argc = 31;
+  }
+  rc = k_exec_capture(path, argc, argv, out, max, &len);
+  k_chdir(old);
+  if (len < 0) len = -len;
+  if (rc <= -1000 && rc >= -1004) {
+    wlog("programa do SODOS nao rodou: ", k_last_error());
+    rc = 1;
+  }
+  if (wine_debug) {
+    char b[24];
+    snprintf(b, sizeof(b), "%d bytes, codigo %d", len, rc);
+    wlog("programa do SODOS (saida no pipe): ", b);
+  }
+  if (len > 0) {
+    DWORD done = 0;
+    if (so && so->type == OBJ_PIPE) wpipe_write(so, out, (DWORD)len, &done, 0);
+    else if (!so) wcon_write(out, (DWORD)len);
+  }
+  k_free(out);
+  return rc;
+}
+
 /* Na tarefa principal do processo (main.c). */
 void wspawn_world_service(void) {
   struct wproc* p = wp();
   struct wobj* o;
   char* cmd;
-  char* argv[32];
+  char* argv[128];
   unsigned argv32[32];
   int argc, i, rc;
   if (p->spawn_req != 2) return;
@@ -668,7 +738,7 @@ void wspawn_world_service(void) {
   cmd = p->spawn_cmd;
   char* whole = (char*)k_malloc((unsigned)strlen(cmd) + 1); /* split_args corta cmd */
   if (whole) strcpy(whole, cmd);
-  argc = split_args(cmd, argv, 31);
+  argc = split_args(cmd, argv, 127);
   if (argc < 1) {
     rc = -1;
   } else {
@@ -688,6 +758,9 @@ void wspawn_world_service(void) {
     }
     if (!path[0]) {
       rc = 0;
+    } else if (is_sodos_exe(path)) {
+      wlog("processo filho do SODOS: ", whole ? whole : path);
+      rc = run_sodos_child(p, path, argc, argv);
     } else if (whole && wine_wants_async() && spawn_async(p, o, path, whole)) {
       /* roda em paralelo: o filho grava o codigo e acorda o pai ao sair */
       wlog("processo filho iniciado em paralelo: ", path);
@@ -695,6 +768,7 @@ void wspawn_world_service(void) {
       return; /* cmd fica com o registro ate o filho copiar */
     } else {
       /* o k_exec recebe o argv com ponteiros de 4 bytes (ABI antiga) */
+      if (argc > 31) argc = 31;
       for (i = 0; i < argc; i++) argv32[i] = (unsigned)(uintptr_t)argv[i];
       argv32[0] = (unsigned)(uintptr_t)path;
       rc = k_exec(path, argc, (char**)argv32);
@@ -769,7 +843,22 @@ static WINAPI BOOL CreateProcessW(const wchar16* app, wchar16* cmd, void* pa, vo
     return 0;
   }
   line[0] = 0;
-  if (c) {
+  if (c && a && a[0]) {
+    /* lpApplicationName + linha: o programa e o do nome (o Node/libuv acha
+     * "git" no PATH e passa D:\WINE\BIN\git.exe aqui, com "git" na linha);
+     * a linha fica com o caminho no lugar do argv[0] */
+    const char* rest = c;
+    while (*rest == ' ' || *rest == '\t') rest++;
+    if (*rest == '"') {
+      rest++;
+      while (*rest && *rest != '"') rest++;
+      if (*rest) rest++;
+    } else {
+      while (*rest && *rest != ' ' && *rest != '\t') rest++;
+    }
+    append_quoted(line, LINE_MAX_, a);
+    strncat(line, rest, LINE_MAX_ - strlen(line) - 1);
+  } else if (c) {
     strncpy(line, c, LINE_MAX_ - 1);
     line[LINE_MAX_ - 1] = 0;
   } else if (a) {

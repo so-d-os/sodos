@@ -834,6 +834,10 @@ static WINAPI BOOL GetOverlappedResult(HANDLE h, struct overlapped* ov, DWORD* b
 static WINAPI BOOL CancelIoEx(HANDLE h, struct overlapped* ov) {
   struct wobj* o = wh_get(h, OBJ_SOCKET);
   {
+    struct wobj* fo = wh_get(h, OBJ_FILE);
+    if (fo && fo->watch_ov && (!ov || fo->watch_ov == (void*)ov) && wdir_watch_cancel(fo)) return 1;
+  }
+  {
     struct wobj* po = wh_get(h, OBJ_PIPE);
     if (po) {
       if (wpipe_cancel(po, ov)) return 1;

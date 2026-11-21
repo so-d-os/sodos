@@ -633,6 +633,11 @@ disk-files: $(DISK)
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/IMGBIG.DLL ::/SODOS/IMGBIG.DLL
 	@if ! mdir -i $(DISK)@@512 ::/SODOS/DRV >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS/DRV; fi
 	@for f in c_compiler/out/DRV/*.DLL; do [ -f "$$f" ] && mcopy -o -i $(DISK)@@512 "$$f" ::/SODOS/DRV/ || true; done
+	@# git.exe para os programas do Windows (Claude Desktop procura no PATH:
+	@# D:\WINE\BIN); e o GIT.EXE do SODOS, rodado pelo WINE.DLL com a saida no pipe
+	@if ! mdir -i $(DISK)@@512 ::/WINE >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/WINE; fi
+	@if ! mdir -i $(DISK)@@512 ::/WINE/BIN >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/WINE/BIN; fi
+	@mcopy -o -i $(DISK)@@512 c_compiler/out/GIT.EXE ::/WINE/BIN/GIT.EXE
 	@# Firmware das placas (firmware/README.txt): o AMDSMC.DLL le \SODOS\FW\P10KSMC.BIN.
 	@if ! mdir -i $(DISK)@@512 ::/SODOS/FW >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS/FW; fi
 	@mcopy -o -i $(DISK)@@512 firmware/amdgpu/polaris10_k_smc.bin ::/SODOS/FW/P10KSMC.BIN

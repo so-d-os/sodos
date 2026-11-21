@@ -323,6 +323,7 @@ static char* sdup(const char* s);
 static int ram_delete(const char* path);
 
 void wfile_close(struct wobj* f) {
+  if (f->type == OBJ_FILE && f->watch_ov) wdir_watch_cancel(f); /* vigia de pasta: cancelado */
   if (f->type == OBJ_FILE && f->ram) {
     /* leitura de arquivo em RAM: os dados sao da ramfile */
     ram_lock();

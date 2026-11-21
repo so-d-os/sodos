@@ -224,3 +224,33 @@ int zinflate(const unsigned char* src, int slen, unsigned char* dst, int dlen, i
   if (used) *used = 2 + b.i + 4;
   return nout;
 }
+
+/* zlib com blocos "stored" (BTYPE=00): os objetos soltos do .git ficam
+ * legiveis por qualquer git sem precisar de um compressor aqui. */
+int zstore(const unsigned char* src, int slen, unsigned char* dst) {
+  unsigned a = 1, b = 0;
+  int i, o = 0, p = 0;
+  dst[o++] = 0x78;
+  dst[o++] = 0x01;
+  do {
+    int n = slen - p > 65535 ? 65535 : slen - p;
+    int last = p + n >= slen;
+    dst[o++] = (unsigned char)(last ? 1 : 0);
+    dst[o++] = (unsigned char)(n & 0xFF);
+    dst[o++] = (unsigned char)(n >> 8);
+    dst[o++] = (unsigned char)(~n & 0xFF);
+    dst[o++] = (unsigned char)((~n >> 8) & 0xFF);
+    memcpy(dst + o, src + p, (size_t)n);
+    o += n;
+    p += n;
+  } while (p < slen);
+  for (i = 0; i < slen; i++) {
+    a = (a + src[i]) % 65521u;
+    b = (b + a) % 65521u;
+  }
+  dst[o++] = (unsigned char)(b >> 8);
+  dst[o++] = (unsigned char)b;
+  dst[o++] = (unsigned char)(a >> 8);
+  dst[o++] = (unsigned char)a;
+  return o;
+}

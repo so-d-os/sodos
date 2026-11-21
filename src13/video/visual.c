@@ -4894,6 +4894,9 @@ static int gui_ix;
 static int gui_allowed;
 static int gui_painting;
 static int task_cur = -1;
+/* tarefa do WIN rodando agora (-1 = o proprio desktop ou fora do WIN): a
+ * captura de saida do kernel (k_exec_capture) fica presa a ela */
+int win_task_current(void) { return task_cur; }
 /* Tarefa do WIN em execucao (-1 = o laco do WIN / o mundo). kexports.c usa
  * para saber quem esta dentro do sistema de arquivos. */
 int gui_task_cur(void) { return task_cur; }

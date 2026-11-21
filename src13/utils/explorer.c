@@ -15,6 +15,13 @@
  *     campo vazio sobe uma pasta; Esc limpa o filtro (vazio: fecha)
  *   - linha ".." no topo da lista (fora da raiz) sobe uma pasta
  *   - clique no cabecalho Nome/Tamanho/Data ordena (de novo inverte)
+ *
+ * Modo selecionar pasta (o dialogo "Escolher pasta" dos programas do Windows
+ * no WINE e de quem quiser): EXPLORER "/PICK|saida|pasta inicial|titulo"
+ * (um argumento so, campos separados por |) ou EXPLORER /PICK saida [pasta].
+ * So pastas na lista; botoes Selecionar / Nova pasta / Cancelar. Grava em
+ * saida "OK <pasta>\n" (a pasta marcada na lista, senao a aberta) ou
+ * "CANCEL\n" (Cancelar, Esc, fechar a janela).
  */
 #include <stdio.h>
 #include <string.h>
@@ -74,6 +81,11 @@ static const wg_theme_t* th;
 /* 1 = "visao de pasta" (EXPLORER /P caminho, clique numa pasta do desktop):
  * so a lista e o endereco no topo; o titulo da janela e o caminho */
 static int g_folder;
+/* modo selecionar pasta: g_pick_out = arquivo de resposta */
+static int g_pick;
+static int g_pick_done;
+static char g_pick_out[PATHMAX];
+static char g_pick_title[80];
 
 /* menu de contexto (botao direito) */
 #define CTX_OPEN   1
@@ -527,6 +539,13 @@ static void load_dir(const char* p) {
   if (g_n < 0) {
     g_n = 0;
     set_status("erro ao listar a pasta");
+  }
+  if (g_pick) {
+    /* selecionar pasta: os arquivos nao entram na lista */
+    int k = 0;
+    for (i = 0; i < g_n; i++)
+      if (g_ent[i].dir) g_ent[k++] = g_ent[i];
+    g_n = k;
   }
   for (i = 0; i < g_n; i++) g_idx[i] = i;
   sort_entries();
@@ -1332,6 +1351,68 @@ static int drive_lines(char* out, int max, int* offsets, int maxoff) {
   return n;
 }
 
+/* ----------------------------------------------- modo selecionar pasta */
+/* Pasta que o botao Selecionar devolve: a marcada na lista, senao a aberta.
+ * Sem a barra do fim (menos na raiz "D:\\"). */
+static void pick_target(char* out, int max) {
+  struct k_dirent* e = sel_ent();
+  int l;
+  copy_str(out, g_path, max);
+  if (e && e->dir) cat_str(out, e->name, max);
+  l = (int)strlen(out);
+  if (l > 3 && out[l - 1] == '\\') out[l - 1] = 0;
+}
+
+static void pick_answer(int ok) {
+  char b[PATHMAX + 8];
+  if (!g_pick || g_pick_done) return;
+  g_pick_done = 1;
+  if (ok) {
+    char t[PATHMAX];
+    pick_target(t, PATHMAX);
+    snprintf(b, sizeof(b), "OK %s\n", t);
+  } else {
+    copy_str(b, "CANCEL\n", (int)sizeof(b));
+  }
+  if (g_pick_out[0]) k_fsave(g_pick_out, b, (int)strlen(b));
+}
+
+/* "/PICK|saida|inicial|titulo" ou /PICK saida [inicial]. 1 se e o modo. */
+static int pick_args(int argc, char** argv, char* init, int imax) {
+  const char* a = argc > 1 ? argv[1] : 0;
+  init[0] = 0;
+  if (!a || (a[0] != '/' && a[0] != '-') || up_c(a[1]) != 'P' || up_c(a[2]) != 'I' ||
+      up_c(a[3]) != 'C' || up_c(a[4]) != 'K')
+    return 0;
+  if (a[5] == '|') {
+    const char* f[3] = {0, 0, 0};
+    char* dst[3];
+    int max[3], i = 0, k;
+    dst[0] = g_pick_out;
+    max[0] = PATHMAX;
+    dst[1] = init;
+    max[1] = imax;
+    dst[2] = g_pick_title;
+    max[2] = (int)sizeof(g_pick_title);
+    a += 6;
+    for (k = 0; k < 3; k++) {
+      i = 0;
+      f[k] = a;
+      while (*a && *a != '|') {
+        if (i < max[k] - 1) dst[k][i++] = *a;
+        a++;
+      }
+      dst[k][i] = 0;
+      if (*a == '|') a++;
+    }
+    (void)f;
+  } else {
+    if (argc > 2 && argv[2]) copy_str(g_pick_out, argv[2], PATHMAX);
+    if (argc > 3 && argv[3]) copy_str(init, argv[3], imax);
+  }
+  return 1;
+}
+
 int main(int argc, char** argv) {
   gui_event_t ev;
   int sw, sh, ch, run = 1;
@@ -1343,12 +1424,16 @@ int main(int argc, char** argv) {
   int doff[26];
   int ndrv;
   char lastpath[PATHMAX];
+  char pick_init[PATHMAX];
 
-  if (argc > 2 && argv[1] && (argv[1][0] == '/' || argv[1][0] == '-') &&
+  g_pick = pick_args(argc, argv, pick_init, PATHMAX);
+  if (!g_pick && argc > 2 && argv[1] && (argv[1][0] == '/' || argv[1][0] == '-') &&
       (argv[1][1] == 'P' || argv[1][1] == 'p') && argv[2] && argv[2][0])
     g_folder = 1;
   /* dois tercos da largura e metade da altura da tela */
-  if (gui_open_pct("Explorer", 67, 50) != 0) {
+  if (gui_open_pct(g_pick ? (g_pick_title[0] ? g_pick_title : "Selecionar pasta") : "Explorer",
+                   g_pick ? 60 : 67, g_pick ? 60 : 50) != 0) {
+    pick_answer(0);
     printf("EXPLORER: nao abriu a janela\n");
     return 1;
   }
@@ -1366,7 +1451,15 @@ int main(int argc, char** argv) {
     root[3] = 0;
     copy_str(g_path, root, PATHMAX);
   }
-  if (g_folder) {
+  if (g_pick) {
+    /* pasta inicial que nao existe: a mais proxima acima que existe */
+    if (pick_init[0]) {
+      char t[PATHMAX];
+      path_resolve(pick_init, t);
+      while ((int)strlen(t) > 3 && !dir_exists(t)) path_parent(t);
+      if (dir_exists(t)) copy_str(g_path, t, PATHMAX);
+    }
+  } else if (g_folder) {
     path_resolve(argv[2], g_path);
     gui_title(g_path);
   } else if (argc > 1 && argv[1] && argv[1][0]) {
@@ -1469,14 +1562,16 @@ int main(int argc, char** argv) {
     wg_group(lx, ly, lw, 108, "Atalhos");
     {
       static const char* al[] = {"D:\\", "D:\\SODOS", "D:\\USER", "C:\\"};
+      static const char* alp[] = {"D:\\", "D:\\REPO", "D:\\SRC", "D:\\WINE\\USERS\\SODOS"};
+      const char* const* atl = g_pick ? alp : al;
       for (i = 0; i < 4; i++) {
         int iy = ly + 26 + i * 20;
         if (g_mx > lx + 10 && g_mx < lx + lw - 10 && g_my >= iy &&
             g_my < iy + 18 && g_down) {
-          go(al[i], 1);
+          go(atl[i], 1);
           g_down = 0;
         }
-        gui_text(lx + 14, iy + 1, al[i], -1, th->text, th->panel,
+        gui_text(lx + 14, iy + 1, atl[i], -1, th->text, th->panel,
                  GUI_TEXT_NOBG);
       }
     }
@@ -1497,7 +1592,7 @@ int main(int argc, char** argv) {
     {
       /* "Nome: [campo ..........] [Abrir] [Nova pasta] [Excluir]"; janela
        * estreita encolhe os botoes e deixa o campo com 140 px no minimo */
-      static const int bw0[3] = {80, 104, 84};
+      static const int bw0[3] = {96, 104, 92};
       int bws[3], k, gap = 6, tot = 0, ex, ew, nlw, avail;
       nlw = wg_text_w("Nome:") + 8;
       for (k = 0; k < 3; k++) tot += bw0[k] + gap;
@@ -1513,18 +1608,29 @@ int main(int argc, char** argv) {
       if (!g_name.len) {
         /* dica no campo vazio */
         gui_text_fit(ex + 12, by + 1 + (26 - ch) / 2,
-                     "digite para filtrar (*.EXE)  .. sobe  Enter abre", ew - 20,
+                     g_pick ? "digite para filtrar  .. sobe  Enter entra na pasta"
+                            : "digite para filtrar (*.EXE)  .. sobe  Enter abre", ew - 20,
                      wg_modern() ? th->text_dis : 0x909090, th->field_bg, GUI_TEXT_NOBG);
       }
       bx = ex + ew + gap;
-      if (wg_button(&id_open, bx, by, bws[0], 28, "Abrir", g_nv > 0 || g_name.len > 0)) {
+      if (g_pick) {
+        if (wg_button(&id_open, bx, by, bws[0], 28, "Selecionar", 1)) {
+          pick_answer(1);
+          run = 0;
+        }
+      } else if (wg_button(&id_open, bx, by, bws[0], 28, "Abrir", g_nv > 0 || g_name.len > 0)) {
         name_enter();
         wg_focus_set(&id_name);
       }
       bx += bws[0] + gap;
       if (wg_button(&id_newdir, bx, by, bws[1], 28, "Nova pasta", 1)) make_dir();
       bx += bws[1] + gap;
-      if (wg_button(&id_del, bx, by, bws[2], 28, "Excluir", sel_ent() != 0)) g_ask_del = 1;
+      if (g_pick) {
+        if (wg_button(&id_del, bx, by, bws[2], 28, "Cancelar", 1)) {
+          pick_answer(0);
+          run = 0;
+        }
+      } else if (wg_button(&id_del, bx, by, bws[2], 28, "Excluir", sel_ent() != 0)) g_ask_del = 1;
     }
 
     /* -------------------------------------------------------- status bar */
@@ -1545,6 +1651,11 @@ int main(int argc, char** argv) {
       else
         snprintf(st, sizeof(st), "%d pasta(s), %d arquivo(s), %u KB", nd, nf,
                  (tot + 1023u) / 1024u);
+    }
+    if (g_pick) {
+      char t[PATHMAX];
+      pick_target(t, PATHMAX);
+      snprintf(st, sizeof(st), "Selecionar: %s", t);
     }
     wg_status(0, sh - (ch + 26), sw, g_status, st);
 
@@ -1661,6 +1772,7 @@ int main(int argc, char** argv) {
     if (g_top > g_nv - rows) g_top = g_nv - rows;
     if (g_top < 0) g_top = 0;
   }
+  pick_answer(0); /* fechou a janela ou Esc: cancelado */
   gui_close();
   return 0;
 }

@@ -93,15 +93,62 @@ static WINAPI int WSANSPIoctl(HANDLE h, DWORD code, void* in, DWORD nin, void* o
 }
 
 /* ---------- arquivos ---------- */
-/* Sem aviso de mudanca de pasta: o FilePathWatcher do Chromium desiste. */
+/* Vigia de pasta (fs.watch do Node, FilePathWatcher do Chromium). Ainda sem
+ * aviso de mudanca: o pedido com OVERLAPPED fica pendente para sempre (como
+ * numa pasta que nada muda) e so termina cancelado, no CancelIo ou no
+ * CloseHandle, com STATUS_CANCELLED na porta de conclusao. Antes devolvia
+ * ERROR_INVALID_FUNCTION e o caminho de erro do libuv derrubava o Claude
+ * Desktop ao vigiar .git\refs de um repositorio (escrita no endereco 8).
+ * Sem OVERLAPPED (esperaria para sempre) continua recusando. */
+struct ov_rdc {
+  uintptr_t internal, internal_high;
+  DWORD off, off_high;
+  HANDLE event;
+};
+int wiocp_post(struct wobj* port, DWORD bytes, uintptr_t key, void* ov);
+int wdir_watch_cancel(struct wobj* f) {
+  struct ov_rdc* ov;
+  uintptr_t evh;
+  if (!f) return 0;
+  wlock();
+  ov = (struct ov_rdc*)f->watch_ov;
+  f->watch_ov = 0;
+  wunlock();
+  if (!ov) return 0;
+  ov->internal = 0xC0000120u; /* STATUS_CANCELLED */
+  ov->internal_high = 0;
+  evh = (uintptr_t)ov->event;
+  if (f->p1 && !(evh & 1)) wiocp_post((struct wobj*)f->p1, 0, (uintptr_t)f->u1, ov);
+  if (evh & ~(uintptr_t)1) {
+    typedef BOOL(WINAPI * se_fn)(HANDLE);
+    se_fn se = (se_fn)builtin_lookup("SetEvent");
+    if (se) se((HANDLE)(evh & ~(uintptr_t)1));
+  }
+  wsignal_global();
+  return 1;
+}
 static WINAPI BOOL ReadDirectoryChangesW(HANDLE h, void* buf, DWORD len, BOOL sub, DWORD filter, DWORD* got,
-                                         void* ov, void* comp) {
-  static volatile unsigned said;
-  (void)h; (void)buf; (void)len; (void)sub; (void)filter; (void)ov; (void)comp;
-  if ((__sync_add_and_fetch(&said, 1) % 50u) == 1) wlogx("ReadDirectoryChangesW (sem suporte), chamadas ", said);
+                                         void* ovp, void* comp) {
+  struct wobj* f = wh_get(h, OBJ_FILE);
+  struct ov_rdc* ov = (struct ov_rdc*)ovp;
+  (void)buf; (void)len; (void)sub; (void)filter;
   if (got) *got = 0;
-  wset_lasterr(1); /* ERROR_INVALID_FUNCTION */
-  return 0;
+  if (!f || !f->is_dir) {
+    wset_lasterr(6); /* ERROR_INVALID_HANDLE */
+    return 0;
+  }
+  if (!ov || comp) {
+    wset_lasterr(1); /* ERROR_INVALID_FUNCTION: sem aviso sincrono */
+    return 0;
+  }
+  ov->internal = 0x103; /* STATUS_PENDING */
+  ov->internal_high = 0;
+  wlock();
+  f->watch_ov = ov;
+  wunlock();
+  if (wine_debug >= 2) wlog("ReadDirectoryChangesW: vigia pendente em ", f->path ? f->path : "?");
+  wset_lasterr(997); /* ERROR_IO_PENDING */
+  return 1;
 }
 static WINAPI BOOL CancelSynchronousIo(HANDLE t) {
   (void)t;

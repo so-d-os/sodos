@@ -19,10 +19,10 @@ CFLAGS = -m64 -O2 -fno-strict-aliasing -fno-tree-loop-distribute-patterns -ffree
   -fno-pic -fno-pie -fno-stack-protector -mno-red-zone -mcmodel=large -mstackrealign \
   -fno-asynchronous-unwind-tables -nostdinc -isystem $(CC_DIR)/include -Wall -Wno-unused-function
 
-SRC = main pe k32 crt util vm obj exc file sys tables net reg misc crypt winrt pkg zip proc sig compat user gdi ctl dlg text wfont shell uimisc comctl procmisc sec map safearray ordtab ttf dwrite nt pipe fill profsave
+SRC = main pe k32 crt util vm obj exc file sys tables net reg misc crypt winrt pkg zip proc sig compat user gdi ctl dlg text wfont shell uimisc comctl procmisc sec map safearray ordtab ttf dwrite nt pipe fill profsave picker
 OBJ = $(patsubst %,$(B)/%.o,$(SRC))
 
-TESTS = HELLOW MSGBOXW WRT KUSER EXPLTEST VMTEST MAPTEST DWTEST FETCH SPAWNTEST PIPETEST
+TESTS = HELLOW MSGBOXW WRT KUSER EXPLTEST VMTEST MAPTEST DWTEST FETCH SPAWNTEST PIPETEST GITTEST
 TEST_EXE = $(patsubst %,$(B)/tests/%.EXE,$(TESTS))
 
 all: $(B)/WINE.DLL tests
@@ -49,6 +49,10 @@ $(B)/WINE.DLL: $(OBJ) $(LIBC64_OBJ) $(LINK64) $(KIMP)
 	cp $@ $(CC_DIR)/out/DRV/WINE.DLL
 
 tests: $(TEST_EXE)
+
+$(B)/tests/GITTEST.EXE: tests/gittest.c | $(B)/tests
+	$(ZIG) cc -target x86_64-windows-gnu -O2 $< -o $@ -lole32 -lshell32 -luuid
+	rm -f $(B)/tests/GITTEST.pdb
 
 $(B)/tests/HELLOW.EXE: tests/hello.c | $(B)/tests
 	$(ZIG) cc -target x86_64-windows-gnu -O2 $< -o $@

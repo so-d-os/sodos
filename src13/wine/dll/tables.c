@@ -22,7 +22,7 @@ static const char* const known[] = {
     "wsock32", "dbghelp", "tdh", "fwpuclnt", 0};
 
 /* sec_syms primeiro: substitui os stubs antigos de seguranca (sys, shell, compat) */
-static const struct wine_sym* const tables[] = {sec_syms, map_syms, nt_syms, pipe_syms, k32_syms, vm_syms,  obj_syms, exc_syms, file_syms,
+static const struct wine_sym* const tables[] = {picker_syms, sec_syms, map_syms, nt_syms, pipe_syms, k32_syms, vm_syms,  obj_syms, exc_syms, file_syms,
                                                 crt_syms, sys_syms, reg_syms, net_syms, gui_syms, misc_syms, crypt_syms, winrt_syms, proc_syms, sig_syms, compat_syms, gdi_syms, dlg_syms, shell_syms, uimisc_syms, procmisc_syms, safearray_syms, dwrite_syms, fill_syms, 0};
 
 static int starts(const char* s, const char* p) {

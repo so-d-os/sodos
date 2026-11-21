@@ -2,25 +2,38 @@
  *   git clone https://github.com/dono/projeto [pasta]
  *   git pull [pasta]       busca o commit novo e atualiza os arquivos
  *   git status [pasta]     o que mudou (staged, nao staged, nao rastreado)
- *   git add -u | -A | arquivo...   prepara o proximo commit (_GIT\INDEX.TXT)
- *   git commit [-a] -m mensagem    grava o commit em _GIT\OBJ
+ *   git add -u | -A | arquivo...   prepara o proximo commit
+ *   git commit [-a] -m mensagem    grava o commit (objetos soltos em .git\objects)
  *   git push               manda os commits locais (precisa de token)
- *   git diff [--cached] [arquivo...]
- *   git log [pasta]        os commits locais e o do clone/pull
- *   git config [--global] chave [valor]
+ *   git diff [--cached] [--numstat|--name-only|--name-status] [HEAD] [arquivo...]
+ *   git log [--oneline|--format=...] [-n N]
+ *   git config [--global] [--get] chave [valor]
+ *   consulta: rev-parse, branch, symbolic-ref, remote, worktree list, ls-files
  * O clone e raso (so o ultimo commit). Arquivos com nome que nao cabe em
- * 8.3 ganham um nome curto (LEIAME~1.MD); a lista fica em _GIT\NAMES.TXT.
+ * 8.3 ganham um nome curto (LEIAME~1.MD); a lista fica em .git\sodos\NAMES.TXT.
  *
- * _GIT\STATE.TXT  url, ref, commit (o HEAD local) e remote (o ultimo do servidor)
- * _GIT\NAMES.TXT  arquivos do HEAD: curto TAB longo TAB sha TAB modo
- * _GIT\INDEX.TXT  mesmo formato, o que vai no proximo commit (sem ele = NAMES)
- * _GIT\COMMIT.TXT o commit do clone/pull; _GIT\HEAD.PCK o pack dele (diff)
- * _GIT\OBJ\*.OBJ  objetos criados aqui ("blob 12\0dados", sem zlib)
- * _GIT\CONFIG.TXT e X:\GITCONF.TXT (X = disco do GIT.EXE): chave=valor */
+ * Repositorio no formato padrao, em .git:
+ *   HEAD, config, refs\heads\<ramo>, refs\remotes\origin\<ramo>, logs\HEAD
+ *   objects\pack\pack-<sha>.pack + .idx   o pack do clone/pull
+ *   objects\xx\<38 hexa>                  objetos criados aqui (zlib)
+ *   index                                 DIRC v2 do que vai no commit
+ * e o que e so do git do SODOS em .git\sodos:
+ *   STATE.TXT  url, ref, commit (o HEAD local) e remote (o ultimo do servidor)
+ *   NAMES.TXT  arquivos do HEAD: curto TAB longo TAB sha TAB modo
+ *   INDEX.TXT  mesmo formato, o que vai no proximo commit (sem ele = NAMES)
+ *   COMMIT.TXT o commit do clone/pull; PACK.TXT o caminho do pack
+ *   CONFIG.TXT e X:\GITCONF.TXT (X = disco do GIT.EXE): chave=valor
+ * Repositorios antigos (_GIT) passam para .git sozinhos no primeiro comando. */
 #include "git.h"
 
-#define GITDIR "_GIT"
-#define PATHMAX 160
+/* O repositorio fica em .git, como em qualquer git: HEAD, config, refs,
+ * logs, objects (pack do clone com .idx e objetos soltos com zlib) e index.
+ * O que e so do git do SODOS (estado, lista de nomes 8.3, o que vai no
+ * commit) fica em .git\sodos. Repositorios antigos (_GIT) sao migrados
+ * sozinhos no primeiro comando. */
+#define GITDIR ".git\\sodos"
+#define OLDDIR "_GIT"
+#define PATHMAX 260
 
 static char err[320];
 
@@ -330,6 +343,19 @@ static int used_has(char (*used)[13], int n, const char* s) {
   return 0;
 }
 
+/* Nome que o FAT com nomes longos aceita como esta: sem \ / : * ? " < > |,
+ * sem controle, ate 200 caracteres, sem terminar em ponto ou espaco. */
+static int long_ok(const char* n) {
+  int l = (int)strlen(n), i;
+  if (!l || l > 200 || n[l - 1] == '.' || n[l - 1] == ' ') return 0;
+  if (strcmp(n, ".") == 0 || strcmp(n, "..") == 0) return 0;
+  for (i = 0; i < l; i++) {
+    unsigned char c = (unsigned char)n[i];
+    if (c < 32 || strchr("\\/:*?\"<>|", c)) return 0;
+  }
+  return 1;
+}
+
 /* Nome curto unico na pasta: README.MD fica; README.pt-BR.md vira README~1.MD. */
 static void make83(const char* name, char (*used)[13], int nused, char* out) {
   char base[16], ext[4];
@@ -551,8 +577,8 @@ static void put_file(struct co* c, const char* dosrel, const char* lng, const un
   c->files++;
   sha_hex(sha, hex);
   path_join(full, c->root, dosrel);
-  /* o kernel aceita ate ~60 caracteres depois de "D:" e 8 pastas */
-  if ((int)strlen(full) - 2 > 60 || depth_of(full) > 8) {
+  /* caminho do FAT: ate 259 caracteres (DRV_PATH do kernel) */
+  if ((int)strlen(full) > 250 || depth_of(full) > 40) {
     if (c->skipped < 8) printf("  caminho longo demais, pulado: %s\n", lng);
     c->skipped++;
     names_line(c, "*", lng, sha, mode);
@@ -624,10 +650,18 @@ static int checkout_tree(struct co* c, const unsigned char* tsha, const char* do
       names_line(c, "*", lng, sha, mode);
       continue;
     }
-    make83(name, used, nused, short83);
-    strcpy(used[nused++], short83);
-    if (dosrel[0]) sprintf(dos, "%s\\%s", dosrel, short83);
-    else strcpy(dos, short83);
+    /* o nome de verdade (o FAT do SODOS tem nomes longos); 8.3 so para nome
+     * que o FAT nao aceita */
+    if (long_ok(name)) {
+      strcpy(short83, "");
+      if (dosrel[0]) snprintf(dos, sizeof(dos), "%s\\%s", dosrel, name);
+      else snprintf(dos, sizeof(dos), "%s", name);
+    } else {
+      make83(name, used, nused, short83);
+      strcpy(used[nused++], short83);
+      if (dosrel[0]) sprintf(dos, "%s\\%s", dosrel, short83);
+      else strcpy(dos, short83);
+    }
     if (strcmp(mode, "40000") == 0) {
       if (checkout_tree(c, sha, dos, lng) != 0) {
         free(tree);
@@ -682,6 +716,92 @@ static int state_write(const char* root, const struct remote* r, const unsigned 
   return k_fsave(path, text, (int)strlen(text));
 }
 
+/* .git com as pastas de um repositorio padrao, mais .git\sodos */
+static void dotgit_dirs(const char* root) {
+  static const char* sub[] = {"", "\\sodos", "\\objects", "\\objects\\pack", "\\objects\\info", "\\refs",
+                              "\\refs\\heads", "\\refs\\tags", "\\refs\\remotes", "\\refs\\remotes\\origin",
+                              "\\logs", "\\info"};
+  char d[PATHMAX + 40];
+  int i;
+  for (i = 0; i < (int)(sizeof(sub) / sizeof(sub[0])); i++) {
+    sprintf(d, "%s\\.git%s", root, sub[i]);
+    if (!is_dir(d)) k_mkdir(d);
+  }
+}
+
+static int obj_write(const char* root, int type, const void* data, int len, unsigned char* sha);
+
+/* _GIT (formato antigo do git do SODOS) -> .git. 0 ok. */
+static int migrate_old(const char* root) {
+  static const char* keep[] = {"STATE.TXT", "NAMES.TXT", "INDEX.TXT", "COMMIT.TXT", "CONFIG.TXT"};
+  char from[PATHMAX + 40], to[PATHMAX + 40];
+  int i, n, len;
+  char* t;
+  struct k_dirent* ents;
+  printf("git: passando %s\\%s para %s\\.git (formato padrao)\n", root, OLDDIR, root);
+  dotgit_dirs(root);
+  for (i = 0; i < 5; i++) {
+    sprintf(from, "%s\\%s\\%s", root, OLDDIR, keep[i]);
+    t = load_file(from, &len);
+    if (!t) continue;
+    git_file(root, keep[i], to);
+    if (k_fsave(to, t, len) != 0) {
+      free(t);
+      sprintf(err, "nao gravou %s", to);
+      return -1;
+    }
+    free(t);
+  }
+  /* o pack do clone vira .git\objects\pack\pack-<sha>.pack + .idx */
+  sprintf(from, "%s\\%s\\HEAD.PCK", root, OLDDIR);
+  t = load_file(from, &len);
+  if (t && len > 32 && pack_load((unsigned char*)t, len, err) >= 0) {
+    char rel[120], phex[41];
+    sha_hex((unsigned char*)t + len - 20, phex);
+    sprintf(rel, ".git\\objects\\pack\\pack-%s.pack", phex);
+    sprintf(to, "%s\\%s", root, rel);
+    if (k_fsave(to, t, len) == 0) {
+      strcpy(to + strlen(to) - 5, ".idx");
+      pack_write_idx(to);
+      strcat(rel, "\n");
+      git_file(root, "PACK.TXT", to);
+      k_fsave(to, rel, (int)strlen(rel));
+      k_fdelete(from);
+    }
+    pack_free();
+  }
+  free(t);
+  /* objetos locais: _GIT\OBJ\*.OBJ ("tipo tam\0dados") viram objetos soltos */
+  ents = (struct k_dirent*)malloc(sizeof(struct k_dirent) * 1024);
+  sprintf(from, "%s\\%s\\OBJ", root, OLDDIR);
+  n = ents ? k_dir(from, ents, 1024) : -1;
+  for (i = 0; i < n; i++) {
+    char* z;
+    unsigned char sha[20];
+    int type;
+    if (ents[i].dir) continue;
+    sprintf(to, "%s\\%s", from, ents[i].name);
+    t = load_file(to, &len);
+    if (!t) continue;
+    z = (char*)memchr(t, 0, (size_t)len);
+    type = strncmp(t, "commit ", 7) == 0 ? OBJ_COMMIT : strncmp(t, "tree ", 5) == 0 ? OBJ_TREE : OBJ_BLOB;
+    if (z && obj_write(root, type, z + 1, len - (int)(z + 1 - t), sha) == 0) k_fdelete(to);
+    free(t);
+  }
+  free(ents);
+  k_rmdir(from);
+  for (i = 0; i < 5; i++) {
+    sprintf(from, "%s\\%s\\%s", root, OLDDIR, keep[i]);
+    k_fdelete(from);
+  }
+  sprintf(from, "%s\\%s", root, OLDDIR);
+  if (k_rmdir(from) != 0) printf("git: %s ficou (tem outros arquivos); pode apagar\n", from);
+  /* o .git de fachada da versao anterior */
+  sprintf(from, "%s\\.git\\SODOS.TXT", root);
+  k_fdelete(from);
+  return 0;
+}
+
 /* Acha a pasta do repositorio: arg, ou a atual e as de cima. */
 static int find_root(const char* arg, char* root) {
   char path[PATHMAX];
@@ -697,6 +817,13 @@ static int find_root(const char* arg, char* root) {
   for (;;) {
     int n = (int)strlen(root);
     while (n > 3 && root[n - 1] == '\\') root[--n] = 0;
+    sprintf(path, "%s%s%s\\STATE.TXT", root, n > 3 ? "\\" : "", OLDDIR);
+    if (k_fsize(path) >= 0) {
+      char r2[PATHMAX];
+      strcpy(r2, root);
+      if (n == 3) r2[2] = 0;
+      if (migrate_old(r2) != 0) printf("git: migracao falhou: %s\n", err);
+    }
     sprintf(path, "%s%s%s\\STATE.TXT", root, n > 3 ? "\\" : "", GITDIR);
     if (k_fsize(path) >= 0) {
       if (n == 3) root[2] = 0;   /* "D:" para juntar com "\\_GIT" */
@@ -706,7 +833,7 @@ static int find_root(const char* arg, char* root) {
     while (n > 3 && root[n - 1] != '\\') n--;
     root[n > 3 ? n - 1 : 3] = 0;
   }
-  sprintf(err, "nao e uma pasta de git (sem %s\\STATE.TXT)", GITDIR);
+  sprintf(err, "nao e uma pasta de git do SODOS (sem .git\\sodos\\STATE.TXT)");
   return -1;
 }
 
@@ -725,7 +852,26 @@ static const char* type_str(int t) {
 static void obj_path(const char* root, const unsigned char* sha, char* out) {
   char hex[41];
   sha_hex(sha, hex);
-  sprintf(out, "%s\\%s\\OBJ\\%.8s.OBJ", root, GITDIR, hex);
+  sprintf(out, "%s\\.git\\objects\\%.2s\\%s", root, hex, hex + 2);
+}
+
+/* "tipo tamanho\0dados" de um objeto solto (zlib): malloc, *n = tamanho */
+static unsigned char* loose_inflate(const unsigned char* z, int zn, int* n) {
+  int cap = zn * 4 + 4096, used;
+  while (cap <= 256 << 20) {
+    unsigned char* b = (unsigned char*)malloc((size_t)cap + 1);
+    int r;
+    if (!b) return 0;
+    r = zinflate(z, zn, b, cap, &used);
+    if (r >= 0 && r < cap) {
+      b[r] = 0;
+      *n = r;
+      return b;
+    }
+    free(b);
+    cap *= 4;
+  }
+  return 0;
 }
 
 static int obj_exists(const char* root, const unsigned char* sha) {
@@ -744,8 +890,14 @@ static unsigned char* obj_read(const char* root, const unsigned char* sha, int* 
   int n;
   unsigned char* out;
   obj_path(root, sha, path);
-  b = load_file(path, &n);
-  if (!b) return 0;
+  {
+    int zn;
+    char* zb = load_file(path, &zn);
+    if (!zb) return 0;
+    b = (char*)loose_inflate((unsigned char*)zb, zn, &n);
+    free(zb);
+    if (!b) return 0;
+  }
   sha1_init(&c);
   sha1_update(&c, b, n);
   sha1_final(&c, now);
@@ -779,8 +931,14 @@ static int obj_write(const char* root, int type, const void* data, int len, unsi
       return 0;
     }
   }
-  sprintf(hdr, "%s\\%s\\OBJ", root, GITDIR);
-  k_mkdir(hdr);
+  {
+    /* .git\objects\xx (as pastas de cima ja existem: dotgit_dirs) */
+    char d[PATHMAX];
+    int k = (int)(strrchr(path, '\\') - path);
+    memcpy(d, path, (size_t)k);
+    d[k] = 0;
+    k_mkdir(d);
+  }
   hn = sprintf(hdr, "%s %d", type_str(type), len) + 1;
   b = (char*)malloc((size_t)(hn + len) + 1);
   if (!b) {
@@ -789,7 +947,18 @@ static int obj_write(const char* root, int type, const void* data, int len, unsi
   }
   memcpy(b, hdr, (size_t)hn);
   memcpy(b + hn, data, (size_t)len);
-  r = k_fsave(path, b, hn + len);
+  {
+    int zl = hn + len;
+    unsigned char* z = (unsigned char*)malloc((size_t)(zl + 16 + 5 * (zl / 65535 + 1)));
+    if (!z) {
+      free(b);
+      sprintf(err, "sem memoria");
+      return -1;
+    }
+    zl = zstore((unsigned char*)b, hn + len, z);
+    r = k_fsave(path, (const char*)z, zl);
+    free(z);
+  }
   free(b);
   if (r != 0) {
     sprintf(err, "nao gravou %s", path);
@@ -799,6 +968,7 @@ static int obj_write(const char* root, int type, const void* data, int len, unsi
 }
 
 /* pack do clone/pull, carregado so quando precisa (diff) */
+static int quiet_pack; /* saida de maquina (--numstat, -z): sem "lendo ..." */
 static char* headpack;
 static int headpack_state;
 
@@ -809,10 +979,24 @@ static unsigned char* headpack_get(const char* root, const unsigned char* sha, i
     char path[PATHMAX];
     int n;
     headpack_state = -1;
-    git_file(root, "HEAD.PCK", path);
+    /* o pack do clone/pull: o caminho em .git\sodos\PACK.TXT (o pack fica
+     * em .git\objects\pack); repositorio antigo: HEAD.PCK */
+    {
+      char* t;
+      git_file(root, "PACK.TXT", path);
+      t = load_file(path, &n);
+      if (t) {
+        char* nl = strchr(t, '\n');
+        if (nl) *nl = 0;
+        sprintf(path, "%s\\%s", root, t);
+        free(t);
+      } else {
+        git_file(root, "HEAD.PCK", path);
+      }
+    }
     headpack = load_file(path, &n);
     if (headpack) {
-      printf("lendo %s\n", path);
+      if (!quiet_pack) printf("lendo %s\n", path);
       if (pack_load((unsigned char*)headpack, n, err) >= 0) headpack_state = 1;
       else printf("aviso: %s\n", err);
     }
@@ -1053,6 +1237,7 @@ static int fetch_checkout(const char* root, struct remote* r, int keep) {
   char path[PATHMAX], hex[41];
   struct co c;
   unsigned t0 = k_ms();
+  dotgit_dirs(root);
   if (get_pack(r, &resp, &pack, &plen) != 0) return -1;
   printf("  pack de %d KB\n", plen / 1024);
   if (pack_load(pack, plen, err) < 0) {
@@ -1076,10 +1261,39 @@ static int fetch_checkout(const char* root, struct remote* r, int keep) {
     pack_free();
     return -1;
   }
+  /* o pack fica em .git\objects\pack, com o .idx, como o de qualquer git
+   * (e o diff le dele); o anterior (pull) sai */
+  {
+    char rel[120], phex[41], old[PATHMAX];
+    int on;
+    char* ot;
+    dotgit_dirs(root);
+    git_file(root, "PACK.TXT", path);
+    ot = load_file(path, &on);
+    if (ot) {
+      char* nl = strchr(ot, '\n');
+      if (nl) *nl = 0;
+      sprintf(old, "%s\\%s", root, ot);
+      k_fdelete(old);
+      on = (int)strlen(old);
+      if (on > 5) {
+        strcpy(old + on - 5, ".idx");
+        k_fdelete(old);
+      }
+      free(ot);
+    }
+    sha_hex(pack + plen - 20, phex);
+    sprintf(rel, ".git\\objects\\pack\\pack-%s.pack", phex);
+    sprintf(old, "%s\\%s", root, rel);
+    if (k_fsave(old, (const char*)pack, plen) != 0) printf("aviso: nao gravou %s\n", old);
+    strcpy(old + strlen(old) - 5, ".idx");
+    if (pack_write_idx(old) != 0) printf("aviso: nao gravou %s\n", old);
+    strcat(rel, "\n");
+    k_fsave(path, rel, (int)strlen(rel));
+    git_file(root, "HEAD.PCK", path);
+    if (k_fsize(path) >= 0) k_fdelete(path);
+  }
   pack_free();
-  /* o pack fica guardado para o diff */
-  git_file(root, "HEAD.PCK", path);
-  if (k_fsave(path, (const char*)pack, plen) != 0) printf("aviso: nao gravou %s\n", path);
   free(resp);
   /* o que saiu do repositorio sai da pasta, se nao foi mudado aqui */
   for (i = 0; i < olds.n && !keep; i++) {
@@ -1103,8 +1317,6 @@ static int fetch_checkout(const char* root, struct remote* r, int keep) {
       printf("  o que estava staged (git add) foi descartado; rode git add de novo\n");
       k_fdelete(path);
     }
-    sprintf(path, "%s\\%s\\OBJ\\*.OBJ", root, GITDIR);
-    k_fdelete(path);
   }
   state_write(root, r, r->head, r->head);
   if (keep) return 0;
@@ -1317,18 +1529,17 @@ static void long_for(struct list* idx, const char* rel, int lower, char* out) {
     if (out[0]) strcat(out, "/");
     q = out + strlen(out);
     strcat(out, comp[i]);
-    /* NOVO.TXT (como o FAT guarda) vira novo.txt; Novo.txt fica como foi digitado */
-    if (!lower) {
+    /* NOVO.TXT (8.3 todo maiusculo, como o FAT antigo guardava) vira
+     * novo.txt; nome longo ou com minusculas fica como esta no disco */
+    {
       const char* c;
-      lower = 1;
+      int has_low = 0;
       for (c = comp[i]; *c; c++)
-        if (*c >= 'a' && *c <= 'z') lower = 0;
-      if (lower)
+        if (*c >= 'a' && *c <= 'z') has_low = 1;
+      if (!has_low && is83(comp[i]))
         for (; *q; q++) *q = (char)lowc((unsigned char)*q);
-      lower = 0;
-    } else {
-      for (; *q; q++) *q = (char)lowc((unsigned char)*q);
     }
+    (void)lower;
   }
 }
 
@@ -1440,13 +1651,26 @@ static int scan_untracked(struct addst* a, const char* rel, untracked_cb cb) {
   if (rel[0]) path_join(path, a->root, rel);
   else if (!a->root[2]) sprintf(path, "%s\\", a->root);   /* "D:" -> "D:\" */
   else strcpy(path, a->root);
-  buf = (char*)malloc(256 * 1024);
-  n = k_dirlist(path, buf, 256 * 1024 - 1);
-  if (n < 0) {
-    free(buf);
-    return 0;
+  /* k_dir_long: o nome longo inteiro (o k_dirlist dava o apelido 8.3 dos
+   * nomes com mais de 31 letras e eles pareciam nao rastreados) */
+  {
+    struct k_direntl* ents = (struct k_direntl*)malloc(sizeof(struct k_direntl) * 1024);
+    int ne = ents ? k_dir_long(path, ents, 1024) : -1, ei, o = 0;
+    if (ne < 0) {
+      free(ents);
+      return 0;
+    }
+    buf = (char*)malloc((size_t)ne * 260 + 2);
+    if (!buf) {
+      free(ents);
+      return 0;
+    }
+    for (ei = 0; ei < ne; ei++)
+      o += sprintf(buf + o, "%s%s\n", ents[ei].name, ents[ei].dir ? "\\" : "");
+    buf[o] = 0;
+    free(ents);
   }
-  buf[n] = 0;
+  (void)n;
   for (p = buf; *p;) {
     char* nl = strchr(p, '\n');
     char sub[PATHMAX * 2];
@@ -1458,7 +1682,7 @@ static int scan_untracked(struct addst* a, const char* rel, untracked_cb cb) {
       p[--l] = 0;
       dir = 1;
     }
-    if (l && strcmp(p, ".") != 0 && strcmp(p, "..") != 0 && !(!rel[0] && ci_cmp(p, GITDIR) == 0)) {
+    if (l && strcmp(p, ".") != 0 && strcmp(p, "..") != 0 && !(!rel[0] && (ci_cmp(p, GITDIR) == 0 || ci_cmp(p, ".git") == 0))) {
       if (rel[0]) sprintf(sub, "%s\\%s", rel, p);
       else strcpy(sub, p);
       if (dir) total += scan_untracked(a, sub, cb);
@@ -1479,10 +1703,29 @@ static int scan_untracked(struct addst* a, const char* rel, untracked_cb cb) {
 
 static int cb_add_new(struct addst* a, const char* rel) { return add_new(a, rel, 1); }
 
+/* git status --porcelain / -s: formato de maquina (o Claude Desktop le) */
+static int g_porc;   /* 1 = porcelain v1 / -s, 2 = porcelain v2 */
+static char g_sterm = '\n';
 static int cb_print(struct addst* a, const char* rel) {
   (void)a;
-  printf("  %s\n", rel);
+  if (g_porc == 2) printf("? %s%c", rel, g_sterm);
+  else if (g_porc) printf("?? %s%c", rel, g_sterm);
+  else printf("  %s\n", rel);
   return 0;
+}
+/* uma linha do status de maquina: v1 "XY nome", v2 "1 XY N... modos shas nome" */
+static void porc_line(char x, char y, const struct nent* e, const struct nent* h) {
+  char hh[41], hi[41];
+  if (g_porc != 2) {
+    printf("%c%c %s%c", x, y, e ? e->lng : h->lng, g_sterm);
+    return;
+  }
+  sha_hex(h ? h->sha : e->sha, hh);
+  sha_hex(e ? e->sha : h->sha, hi);
+  if (!h) strcpy(hh, "0000000000000000000000000000000000000000");
+  printf("1 %c%c N... %s %s %s %s %s %s%c", x, y, h ? (h->mode[0] ? h->mode : "100644") : "000000",
+         e ? (e->mode[0] ? e->mode : "100644") : "000000", y == 'D' ? "000000" : (e ? (e->mode[0] ? e->mode : "100644") : "000000"),
+         hh, hi, e ? e->lng : h->lng, g_sterm);
 }
 
 /* -u: todos os rastreados; prefix limita a uma pasta */
@@ -1580,22 +1823,54 @@ static int count_ahead(const char* root, const unsigned char* cur, const unsigne
   return n;
 }
 
+static const char* branch_of(const struct remote* r) {
+  return strncmp(r->ref, "refs/heads/", 11) == 0 ? r->ref + 11 : (r->ref[0] ? r->ref : "main");
+}
+
+/* git status [--porcelain[=v1]|-s|--short] [-b|--branch] [-u..] [--] [pasta] */
 static int cmd_status(int argc, char** argv) {
   char root[PATHMAX], full[PATHMAX + 40], hex[41];
   struct remote r;
   struct list head, idx;
   struct addst a;
   unsigned char cur[20], base[20], now[20];
-  int i, staged = 0, unstaged = 0, ahead, nun;
-  if (find_root(argc > 2 ? argv[2] : 0, root) != 0) {
-    printf("%s\n", err);
-    return 1;
+  int i, staged = 0, unstaged = 0, ahead, nun, br = 0;
+  const char* where = 0;
+  g_porc = 0;
+  g_sterm = '\n';
+  for (i = 2; i < argc; i++) {
+    const char* o = argv[i];
+    if (strcmp(o, "--porcelain=v2") == 0 || strcmp(o, "--porcelain=2") == 0) g_porc = 2;
+    else if (strncmp(o, "--porcelain", 11) == 0 || strcmp(o, "-s") == 0 || strcmp(o, "--short") == 0) g_porc = 1;
+    else if (strcmp(o, "-z") == 0) g_sterm = 0;
+    else if (strcmp(o, "-b") == 0 || strcmp(o, "--branch") == 0) br = 1;
+    else if (strcmp(o, "-sb") == 0 || strcmp(o, "-bs") == 0) g_porc = br = 1;
+    else if (o[0] == '-') continue; /* -uall, -z, --ignore-submodules... */
+    else if (!where) where = o;
+  }
+  if (find_root(where, root) != 0) {
+    printf("fatal: %s\n", err);
+    return 128;
   }
   state_read(root, &r, cur, base);
   sha_hex(cur, hex);
-  printf("No ramo %s, commit %.12s\n", r.ref, hex);
   ahead = count_ahead(root, cur, base);
-  if (ahead) printf("%d commit(s) local(is) para mandar (git push)\n", ahead);
+  if (g_porc == 2) {
+    if (br) {
+      printf("# branch.oid %s%c", hex, g_sterm);
+      printf("# branch.head %s%c", branch_of(&r), g_sterm);
+      printf("# branch.upstream origin/%s%c", branch_of(&r), g_sterm);
+      printf("# branch.ab +%d -0%c", ahead, g_sterm);
+    }
+  } else if (g_porc) {
+    if (br) {
+      if (ahead) printf("## %s...origin/%s [ahead %d]%c", branch_of(&r), branch_of(&r), ahead, g_sterm);
+      else printf("## %s...origin/%s%c", branch_of(&r), branch_of(&r), g_sterm);
+    }
+  } else {
+    printf("No ramo %s, commit %.12s\n", r.ref, hex);
+    if (ahead) printf("%d commit(s) local(is) para mandar (git push)\n", ahead);
+  }
   list_load(root, "NAMES.TXT", &head);
   index_load(root, &idx);
   /* index x HEAD */
@@ -1605,12 +1880,22 @@ static int cmd_status(int argc, char** argv) {
     if (e->gone) continue;
     h = list_find(&head, e->lng);
     if (!h || memcmp(h->sha, e->sha, 20) != 0 || strcmp(h->mode, e->mode) != 0) {
+      if (g_porc) {
+        staged++;
+        porc_line(h ? 'M' : 'A', g_porc == 2 ? '.' : ' ', e, h);
+        continue;
+      }
       if (!staged++) printf("Para o commit (staged):\n");
       printf("  %s %s\n", h ? "modificado:" : "novo:      ", e->lng);
     }
   }
   for (i = 0; i < head.n; i++)
     if (!list_find(&idx, head.e[i].lng)) {
+      if (g_porc) {
+        staged++;
+        porc_line('D', g_porc == 2 ? '.' : ' ', 0, &head.e[i]);
+        continue;
+      }
       if (!staged++) printf("Para o commit (staged):\n");
       printf("  apagado:    %s\n", head.e[i].lng);
     }
@@ -1623,6 +1908,11 @@ static int cmd_status(int argc, char** argv) {
     if (file_sha(full, now) != 0) what = "apagado:   ";
     else if (memcmp(now, e->sha, 20) != 0) what = "modificado:";
     if (what) {
+      if (g_porc) {
+        unstaged++;
+        porc_line(g_porc == 2 ? '.' : ' ', what[0] == 'a' ? 'D' : 'M', e, list_find(&head, e->lng));
+        continue;
+      }
       if (!unstaged++) printf("Fora do commit (git add -u para incluir):\n");
       printf("  %s %s\n", what, e->lng);
     }
@@ -1633,10 +1923,10 @@ static int cmd_status(int argc, char** argv) {
   bydos_build(&a);
   nun = scan_untracked(&a, "", 0);
   if (nun > 0) {
-    printf("Nao rastreados (git add arquivo, ou git add -A):\n");
+    if (!g_porc) printf("Nao rastreados (git add arquivo, ou git add -A):\n");
     scan_untracked(&a, "", cb_print);
   }
-  if (!staged && !unstaged && nun <= 0) printf("nada mudou (%d arquivos)\n", idx.n);
+  if (!g_porc && !staged && !unstaged && nun <= 0) printf("nada mudou (%d arquivos)\n", idx.n);
   return 0;
 }
 
@@ -1813,12 +2103,45 @@ static int is_binary(const unsigned char* s, int n) {
   return 0;
 }
 
+static int not_repo(void);
+/* git diff --numstat / --name-only / --name-status / --stat: so o resumo
+ * (o Claude Desktop pede --numstat HEAD para a lista de arquivos mudados) */
+static int g_dmode; /* 0 diff, 1 numstat, 2 name-only, 3 name-status, 4 stat */
+static char g_dterm = '\n';
+
 /* diff unificado de dois textos; 3 linhas de contexto */
 static void diff_text(const char* name, const char* oldt, int on, const char* newt, int nn, int isnew, int isdel) {
   struct line* A;
   struct line* B;
   struct op* ops;
   int N, M, no, i, oa = 0, ob = 0;
+  if (g_dmode) {
+    int add = 0, del = 0, bin = is_binary((const unsigned char*)oldt, on) || is_binary((const unsigned char*)newt, nn);
+    if (g_dmode == 2) {
+      printf("%s%c", name, g_dterm);
+      return;
+    }
+    if (g_dmode == 3) {
+      printf("%c\t%s%c", isnew ? 'A' : isdel ? 'D' : 'M', name, g_dterm);
+      return;
+    }
+    if (!bin) {
+      N = split_lines(oldt, on, &A);
+      M = split_lines(newt, nn, &B);
+      no = diff_ops(A, N, B, M, &ops);
+      for (i = 0; i < no; i++) {
+        if (ops[i].t < 0) del++;
+        else if (ops[i].t > 0) add++;
+      }
+      free(ops);
+      free(A);
+      free(B);
+    }
+    if (g_dmode == 4) printf(" %s | %d %s\n", name, add + del, bin ? "Bin" : "");
+    else if (bin) printf("-\t-\t%s%c", name, g_dterm);
+    else printf("%d\t%d\t%s%c", add, del, name, g_dterm);
+    return;
+  }
   printf("diff --git a/%s b/%s\n", name, name);
   if (isnew) printf("arquivo novo\n");
   if (isdel) printf("arquivo apagado\n");
@@ -1893,13 +2216,22 @@ static int cmd_diff(int argc, char** argv) {
   char root[PATHMAX], full[PATHMAX + 40];
   struct list head, idx;
   char* files[64];
-  int nf = 0, cached = 0, i, shown = 0;
-  if (find_root(0, root) != 0) {
-    printf("%s\n", err);
-    return 1;
-  }
+  int nf = 0, cached = 0, i, shown = 0, vs_head = 0, after_dd = 0;
+  if (find_root(0, root) != 0) return not_repo();
+  g_dmode = 0;
+  g_dterm = '\n';
+  quiet_pack = pack_quiet = 0;
   for (i = 2; i < argc; i++) {
-    if (strcmp(argv[i], "--cached") == 0 || strcmp(argv[i], "--staged") == 0) cached = 1;
+    const char* o = argv[i];
+    if (!after_dd && (strcmp(o, "--cached") == 0 || strcmp(o, "--staged") == 0)) cached = 1;
+    else if (!after_dd && strcmp(o, "--numstat") == 0) g_dmode = 1;
+    else if (!after_dd && strcmp(o, "--name-only") == 0) g_dmode = 2;
+    else if (!after_dd && strcmp(o, "--name-status") == 0) g_dmode = 3;
+    else if (!after_dd && (strcmp(o, "--stat") == 0 || strcmp(o, "--shortstat") == 0)) g_dmode = 4;
+    else if (!after_dd && strcmp(o, "-z") == 0) g_dterm = 0;
+    else if (!after_dd && strcmp(o, "--") == 0) after_dd = 1;
+    else if (!after_dd && o[0] == '-') continue; /* --no-textconv, --submodule=short... */
+    else if (!after_dd && (strcmp(o, "HEAD") == 0 || strcmp(o, "@") == 0)) vs_head = 1;
     else if (nf < 64) {
       char rel[PATHMAX * 2];
       if (rel_path(root, argv[i], rel) != 0) {
@@ -1909,9 +2241,10 @@ static int cmd_diff(int argc, char** argv) {
       files[nf++] = xstrdup(rel);
     }
   }
+  if (g_dmode) quiet_pack = pack_quiet = 1; /* saida de maquina: sem "lendo ..." */
   list_load(root, "NAMES.TXT", &head);
   index_load(root, &idx);
-  if (cached) {
+  if (cached || vs_head) {
     /* index x HEAD */
     for (i = 0; i < idx.n; i++) {
       struct nent* e = &idx.e[i];
@@ -1948,9 +2281,9 @@ static int cmd_diff(int argc, char** argv) {
       shown++;
       free(o);
     }
-    return 0;
+    if (!vs_head) return 0;
   }
-  /* disco x index */
+  /* disco x index (com HEAD: depois do index x HEAD acima) */
   for (i = 0; i < idx.n; i++) {
     struct nent* e = &idx.e[i];
     unsigned char now[20];
@@ -1969,7 +2302,7 @@ static int cmd_diff(int argc, char** argv) {
     }
     o = blob_get(root, e->sha, &ol);
     if (!o) {
-      printf("%s mudou, mas o conteudo antigo nao esta aqui (sem _GIT\\HEAD.PCK; faca o clone de novo)\n", e->lng);
+      printf("%s mudou, mas o conteudo antigo nao esta aqui (sem o pack em .git\\objects\\pack; faca o clone de novo)\n", e->lng);
       free(nw);
       continue;
     }
@@ -2272,7 +2605,7 @@ static int build_pack(const char* root, struct oset* o, struct sbuf* s) {
     if (!d) {
       char hex[41];
       sha_hex(o->sha[i], hex);
-      sprintf(err, "objeto %s sumiu de _GIT\\OBJ", hex);
+      sprintf(err, "objeto %s sumiu de .git\\objects", hex);
       return -1;
     }
     size = (unsigned)len;
@@ -2352,7 +2685,7 @@ static int cmd_push(int argc, char** argv) {
     char* t = (char*)obj_read(root, c, &type, &l);
     if (!t || type != OBJ_COMMIT || commit_parse(t, tree, parent) != 0) {
       sha_hex(c, hex);
-      printf("commit %s nao esta em _GIT\\OBJ\n", hex);
+      printf("commit %s nao esta em .git\\objects\n", hex);
       free(t);
       return 1;
     }
@@ -2524,12 +2857,32 @@ static int cmd_config(int argc, char** argv) {
   char root[PATHMAX], path[PATHMAX], val[300];
   struct sbuf v;
   const char* key;
-  int i = 2, global = 0, have_root;
-  if (i < argc && strcmp(argv[i], "--global") == 0) {
-    global = 1;
-    i++;
+  int i = 2, global = 0, have_root, get = 0;
+  for (; i < argc && argv[i][0] == '-'; i++) {
+    if (strcmp(argv[i], "--global") == 0) global = 1;
+    else if (strcmp(argv[i], "--get") == 0) get = 1;
+    else if (strcmp(argv[i], "--list") == 0 || strcmp(argv[i], "-l") == 0) break;
+    /* --local, --includes, --null, --type=...: ignorados */
   }
   have_root = find_root(0, root) == 0;
+  if (i < argc && have_root && (get || i + 1 >= argc)) {
+    /* chaves que o git de verdade tem e aqui saem do STATE.TXT */
+    struct remote r;
+    unsigned char c[20], b[20];
+    state_read(root, &r, c, b);
+    if (strcmp(argv[i], "remote.origin.url") == 0) {
+      printf("%s\n", r.url);
+      return 0;
+    }
+    if (strncmp(argv[i], "branch.", 7) == 0 && strstr(argv[i], ".remote")) {
+      printf("origin\n");
+      return 0;
+    }
+    if (strncmp(argv[i], "branch.", 7) == 0 && strstr(argv[i], ".merge")) {
+      printf("refs/heads/%s\n", branch_of(&r));
+      return 0;
+    }
+  }
   if (!global && !have_root) global = 1;
   if (i >= argc || strcmp(argv[i], "--list") == 0 || strcmp(argv[i], "-l") == 0) {
     int len;
@@ -2568,6 +2921,456 @@ static int cmd_config(int argc, char** argv) {
   return 0;
 }
 
+/* ---------- .git de fachada ----------
+ * Programas que leem o repositorio direto do disco (o Claude Code le
+ * .git\HEAD, .git\logs\HEAD e .git\config para saber o ramo e o remoto)
+ * nao conhecem o _GIT. Depois de cada comando o GIT.EXE deixa um .git
+ * minimo coerente com o _GIT\STATE.TXT: HEAD, refs, config e logs. Os
+ * objetos continuam so no _GIT (o .git\SODOS.TXT explica). So grava o que
+ * mudou. */
+static void put_if_diff(const char* path, const char* text) {
+  int len = 0, n = (int)strlen(text);
+  char* old = load_file(path, &len);
+  if (!old || len != n || memcmp(old, text, (size_t)n) != 0) k_fsave(path, text, n);
+  free(old);
+}
+
+/* .git\index (DIRC versao 2) a partir do que vai no proximo commit: os
+ * caminhos longos com /, o sha e o modo; tempos zerados (outro git
+ * confere o conteudo). So grava se mudou. */
+static int ix_cmp(const void* a, const void* b) {
+  return strcmp((*(struct nent* const*)a)->lng, (*(struct nent* const*)b)->lng);
+}
+static void write_index(const char* root) {
+  struct list idx;
+  struct nent** v;
+  struct sbuf o;
+  char path[PATHMAX + 40];
+  unsigned char hdr[12], sum[20];
+  sha1_ctx c;
+  int i, n = 0;
+  index_load(root, &idx);
+  v = (struct nent**)malloc(sizeof(*v) * (size_t)(idx.n ? idx.n : 1));
+  if (!v) return;
+  for (i = 0; i < idx.n; i++)
+    if (!idx.e[i].gone) v[n++] = &idx.e[i];
+  qsort(v, (size_t)n, sizeof(*v), ix_cmp);
+  memset(&o, 0, sizeof(o));
+  memcpy(hdr, "DIRC", 4);
+  hdr[4] = hdr[5] = hdr[6] = 0;
+  hdr[7] = 2;
+  hdr[8] = (unsigned char)(n >> 24);
+  hdr[9] = (unsigned char)(n >> 16);
+  hdr[10] = (unsigned char)(n >> 8);
+  hdr[11] = (unsigned char)n;
+  sb_add(&o, (const char*)hdr, 12);
+  for (i = 0; i < n; i++) {
+    unsigned char e[62];
+    struct nent* x = v[i];
+    unsigned mode = strcmp(x->mode, "100755") == 0 ? 0x81EDu : strcmp(x->mode, "120000") == 0 ? 0xA000u : 0x81A4u;
+    int sz, nl = (int)strlen(x->lng), pad, k;
+    char full[PATHMAX + 40];
+    path_join(full, root, x->dos);
+    sz = k_fsize(full);
+    if (sz < 0) sz = 0;
+    memset(e, 0, sizeof(e));
+    e[24] = (unsigned char)(mode >> 24);
+    e[25] = (unsigned char)(mode >> 16);
+    e[26] = (unsigned char)(mode >> 8);
+    e[27] = (unsigned char)mode;
+    e[36] = (unsigned char)(sz >> 24);
+    e[37] = (unsigned char)(sz >> 16);
+    e[38] = (unsigned char)(sz >> 8);
+    e[39] = (unsigned char)sz;
+    memcpy(e + 40, x->sha, 20);
+    e[60] = (unsigned char)((nl > 0xFFF ? 0xFFF : nl) >> 8);
+    e[61] = (unsigned char)(nl > 0xFFF ? 0xFF : nl);
+    sb_add(&o, (const char*)e, 62);
+    for (k = 0; k < nl; k++) sb_byte(&o, x->lng[k] == '\\' ? '/' : x->lng[k]);
+    pad = 8 - ((62 + nl) % 8);
+    for (k = 0; k < pad; k++) sb_byte(&o, 0);
+  }
+  sha1_init(&c);
+  sha1_update(&c, o.p, o.len);
+  sha1_final(&c, sum);
+  sb_add(&o, (const char*)sum, 20);
+  sprintf(path, "%s\\.git\\index", root);
+  {
+    int len = 0;
+    char* old = load_file(path, &len);
+    if (!old || len != o.len || memcmp(old, o.p, (size_t)len) != 0) k_fsave(path, o.p, o.len);
+    free(old);
+  }
+  free(o.p);
+  free(v);
+}
+
+static void sync_dotgit(const char* root) {
+  char d[PATHMAX + 40], f[PATHMAX + 200], t[1200], hex[41], bhex[41];
+  struct remote r;
+  unsigned char cur[20], base[20];
+  const char* b;
+  if (state_read(root, &r, cur, base) != 0) return;
+  b = branch_of(&r);
+  sha_hex(cur, hex);
+  sha_hex(base, bhex);
+  sprintf(d, "%s\\.git", root);
+  dotgit_dirs(root);
+  sprintf(f, "%s\\HEAD", d);
+  sprintf(t, "ref: refs/heads/%s\n", b);
+  put_if_diff(f, t);
+  sprintf(f, "%s\\refs\\heads\\%s", d, b);
+  sprintf(t, "%s\n", hex);
+  put_if_diff(f, t);
+  sprintf(f, "%s\\refs\\remotes\\origin\\%s", d, b);
+  sprintf(t, "%s\n", bhex);
+  put_if_diff(f, t);
+  sprintf(f, "%s\\config", d);
+  sprintf(t,
+          "[core]\n\trepositoryformatversion = 0\n\tfilemode = false\n\tbare = false\n"
+          "[remote \"origin\"]\n\turl = %s\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
+          "[branch \"%s\"]\n\tremote = origin\n\tmerge = refs/heads/%s\n",
+          r.url, b, b);
+  put_if_diff(f, t);
+  sprintf(f, "%s\\logs\\HEAD", d);
+  sprintf(t, "0000000000000000000000000000000000000000 %s SODOS <sodos@localhost> 0 +0000\tgit do SODOS\n", hex);
+  put_if_diff(f, t);
+  /* clone raso: o commit do clone/pull nao tem os pais aqui. Sem o
+   * .git\shallow outro git acha o repositorio quebrado (fsck, log, status) */
+  {
+    int cl;
+    char* ct;
+    git_file(root, "COMMIT.TXT", f);
+    ct = load_file(f, &cl);
+    if (ct) {
+      unsigned char cs[20];
+      char chex[41];
+      git_hash("commit", (unsigned char*)ct, cl, cs);
+      sha_hex(cs, chex);
+      sprintf(f, "%s\\shallow", d);
+      sprintf(t, "%s\n", chex);
+      put_if_diff(f, t);
+      free(ct);
+    }
+  }
+  sprintf(f, "%s\\description", d);
+  put_if_diff(f, "Repositorio do git do SODOS (GIT.EXE); dados proprios em .git\\sodos.\n");
+  write_index(root);
+}
+
+/* ---------- comandos de consulta (o Claude Desktop / Claude Code usam) ----------
+ * A saida imita a do git de verdade (Git for Windows: caminhos com /), para
+ * quem le a saida por programa. Fora de um repositorio: "fatal: ..." e 128. */
+
+/* "D:\\REPO\\X" -> "D:/REPO/X" */
+static void print_slash(const char* p) {
+  for (; *p; p++) putchar(*p == '\\' ? '/' : *p);
+  putchar('\n');
+}
+
+static int not_repo(void) {
+  printf("fatal: not a git repository (or any of the parent directories): .git\n");
+  return 128;
+}
+
+static int cmd_rev_parse(int argc, char** argv) {
+  char root[PATHMAX], hex[41];
+  struct remote r;
+  unsigned char cur[20], base[20];
+  int i, have = find_root(0, root) == 0, abbrev = 0, shortn = 0, verify = 0, rc = 0;
+  if (have) state_read(root, &r, cur, base);
+  for (i = 2; i < argc; i++) {
+    const char* o = argv[i];
+    if (strcmp(o, "--is-inside-work-tree") == 0) {
+      if (!have) return not_repo();
+      printf("true\n");
+    } else if (strcmp(o, "--is-inside-git-dir") == 0 || strcmp(o, "--is-bare-repository") == 0 ||
+               strcmp(o, "--is-shallow-repository") == 0) {
+      if (!have) return not_repo();
+      printf(strcmp(o, "--is-shallow-repository") == 0 ? "true\n" : "false\n");
+    } else if (strcmp(o, "--show-toplevel") == 0) {
+      if (!have) return not_repo();
+      if (strlen(root) == 2) strcat(root, "\\");
+      print_slash(root);
+    } else if (strcmp(o, "--git-dir") == 0 || strcmp(o, "--git-common-dir") == 0 ||
+               strcmp(o, "--absolute-git-dir") == 0) {
+      char g[PATHMAX + 8];
+      if (!have) return not_repo();
+      sprintf(g, "%s\\.git", root);
+      sync_dotgit(root);
+      print_slash(g);
+    } else if (strcmp(o, "--show-prefix") == 0 || strcmp(o, "--show-cdup") == 0) {
+      if (!have) return not_repo();
+      printf("\n");
+    } else if (strcmp(o, "--abbrev-ref") == 0) {
+      abbrev = 1;
+    } else if (strncmp(o, "--short", 7) == 0) {
+      shortn = o[7] == '=' ? atoi(o + 8) : 7;
+    } else if (strcmp(o, "--verify") == 0 || strcmp(o, "-q") == 0 || strcmp(o, "--quiet") == 0) {
+      verify = 1;
+    } else if (strcmp(o, "--symbolic-full-name") == 0) {
+      abbrev = 2;
+    } else if (o[0] != '-') {
+      /* HEAD, HEAD^{commit}, @, o nome do ramo, origin/ramo */
+      int is_head = strncmp(o, "HEAD", 4) == 0 || strcmp(o, "@") == 0 ||
+                    (have && (strcmp(o, branch_of(&r)) == 0 || strcmp(o, r.ref) == 0));
+      int is_up = have && strncmp(o, "origin/", 7) == 0 && strcmp(o + 7, branch_of(&r)) == 0;
+      if (!have) return not_repo();
+      if (strstr(o, "@{u}") || strstr(o, "@{upstream}")) {
+        if (abbrev) printf("origin/%s\n", branch_of(&r));
+        else {
+          sha_hex(base, hex);
+          printf("%s\n", hex);
+        }
+        continue;
+      }
+      if (!is_head && !is_up) {
+        if (!verify) printf("%s\n", o);
+        printf("fatal: ambiguous argument '%s': unknown revision\n", o);
+        rc = 128;
+        continue;
+      }
+      if (abbrev == 1) printf("%s\n", is_up ? o : branch_of(&r));
+      else if (abbrev == 2) printf("refs/heads/%s\n", branch_of(&r));
+      else {
+        sha_hex(is_up ? base : cur, hex);
+        if (shortn > 0 && shortn < 40) hex[shortn] = 0;
+        printf("%s\n", hex);
+      }
+    }
+  }
+  return rc;
+}
+
+static int cmd_branch(int argc, char** argv) {
+  char root[PATHMAX];
+  struct remote r;
+  unsigned char cur[20], base[20];
+  int i, all = 0;
+  if (find_root(0, root) != 0) return not_repo();
+  state_read(root, &r, cur, base);
+  for (i = 2; i < argc; i++) {
+    if (strcmp(argv[i], "--show-current") == 0) {
+      printf("%s\n", branch_of(&r));
+      return 0;
+    }
+    if (strcmp(argv[i], "-a") == 0 || strcmp(argv[i], "--all") == 0 || strcmp(argv[i], "-r") == 0) all = 1;
+    else if (argv[i][0] != '-' && strcmp(argv[i], "--list") != 0) {
+      printf("fatal: o git do SODOS nao cria ramos (so o ramo do clone: %s)\n", branch_of(&r));
+      return 128;
+    }
+  }
+  printf("* %s\n", branch_of(&r));
+  if (all) printf("  remotes/origin/%s\n", branch_of(&r));
+  return 0;
+}
+
+static int cmd_symbolic_ref(int argc, char** argv) {
+  char root[PATHMAX];
+  struct remote r;
+  unsigned char cur[20], base[20];
+  int i, sh = 0;
+  if (find_root(0, root) != 0) return not_repo();
+  state_read(root, &r, cur, base);
+  for (i = 2; i < argc; i++)
+    if (strcmp(argv[i], "--short") == 0) sh = 1;
+  if (sh) printf("%s\n", branch_of(&r));
+  else printf("refs/heads/%s\n", branch_of(&r));
+  return 0;
+}
+
+static int cmd_remote(int argc, char** argv) {
+  char root[PATHMAX];
+  struct remote r;
+  unsigned char cur[20], base[20];
+  if (find_root(0, root) != 0) return not_repo();
+  state_read(root, &r, cur, base);
+  if (argc > 2 && strcmp(argv[2], "-v") == 0) {
+    printf("origin\t%s (fetch)\norigin\t%s (push)\n", r.url, r.url);
+    return 0;
+  }
+  if (argc > 3 && strcmp(argv[2], "get-url") == 0) {
+    if (strcmp(argv[argc - 1], "origin") != 0) {
+      printf("error: No such remote '%s'\n", argv[argc - 1]);
+      return 2;
+    }
+    printf("%s\n", r.url);
+    return 0;
+  }
+  if (argc > 2 && strcmp(argv[2], "show") != 0) {
+    printf("fatal: o git do SODOS so tem o remoto origin (%s)\n", r.url);
+    return 128;
+  }
+  printf("origin\n");
+  return 0;
+}
+
+static int cmd_worktree(int argc, char** argv) {
+  char root[PATHMAX], hex[41];
+  struct remote r;
+  unsigned char cur[20], base[20];
+  int porc = argc > 3 && strcmp(argv[3], "--porcelain") == 0;
+  if (argc < 3 || strcmp(argv[2], "list") != 0) {
+    printf("fatal: o git do SODOS nao tem worktrees (so 'git worktree list')\n");
+    return 128;
+  }
+  if (find_root(0, root) != 0) return not_repo();
+  state_read(root, &r, cur, base);
+  sha_hex(cur, hex);
+  if (strlen(root) == 2) strcat(root, "\\");
+  if (porc) {
+    printf("worktree ");
+    print_slash(root);
+    printf("HEAD %s\nbranch refs/heads/%s\n\n", hex, branch_of(&r));
+  } else {
+    char* p;
+    for (p = root; *p; p++)
+      if (*p == '\\') *p = '/';
+    printf("%s  %.7s [%s]\n", root, hex, branch_of(&r));
+  }
+  return 0;
+}
+
+/* git ls-files [-v] [-z] [-s|--stage] [pathspec ignorada] */
+static int cmd_ls_files(int argc, char** argv) {
+  char root[PATHMAX], hx[41];
+  struct list idx;
+  int i, tag = 0, stage = 0;
+  char term = '\n';
+  for (i = 2; i < argc; i++) {
+    if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "-t") == 0) tag = 1;
+    else if (strcmp(argv[i], "-z") == 0) term = 0;
+    else if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--stage") == 0) stage = 1;
+  }
+  if (find_root(0, root) != 0) return not_repo();
+  index_load(root, &idx);
+  for (i = 0; i < idx.n; i++) {
+    if (idx.e[i].gone) continue;
+    if (tag) printf("H ");
+    if (stage) {
+      sha_hex(idx.e[i].sha, hx);
+      printf("%s %s 0\t", idx.e[i].mode[0] ? idx.e[i].mode : "100644", hx);
+    }
+    printf("%s%c", idx.e[i].lng, term);
+  }
+  return 0;
+}
+
+/* %H %h %s %an %ae %at %ct %aI %cI %n, mais texto */
+static void log_format(const char* fmt, const char* hex, char* t) {
+  char subj[300], an[120], ae[120];
+  long at = 0;
+  char* p;
+  int body = 0;
+  subj[0] = an[0] = ae[0] = 0;
+  for (p = t; *p;) {
+    char* nl = strchr(p, '\n');
+    if (nl) *nl = 0;
+    if (body) {
+      if (!subj[0]) {
+        strncpy(subj, p, sizeof(subj) - 1);
+        subj[sizeof(subj) - 1] = 0;
+      }
+    } else if (!*p) {
+      body = 1;
+    } else if (strncmp(p, "author ", 7) == 0) {
+      char* lt = strchr(p, '<');
+      char* gt = strchr(p, '>');
+      if (lt && gt && gt > lt) {
+        int n = (int)(lt - (p + 7));
+        while (n > 0 && p[7 + n - 1] == ' ') n--;
+        if (n > (int)sizeof(an) - 1) n = (int)sizeof(an) - 1;
+        memcpy(an, p + 7, (size_t)n);
+        an[n] = 0;
+        n = (int)(gt - lt - 1);
+        if (n > (int)sizeof(ae) - 1) n = (int)sizeof(ae) - 1;
+        memcpy(ae, lt + 1, (size_t)n);
+        ae[n] = 0;
+        at = atol(gt + 2);
+      }
+    }
+    if (!nl) break;
+    p = nl + 1;
+  }
+  for (; *fmt; fmt++) {
+    if (*fmt != '%') {
+      putchar(*fmt);
+      continue;
+    }
+    fmt++;
+    if (*fmt == 'H') printf("%s", hex);
+    else if (*fmt == 'h') printf("%.7s", hex);
+    else if (*fmt == 's') printf("%s", subj);
+    else if (*fmt == 'n') putchar('\n');
+    else if (*fmt == 'x' && fmt[1] && fmt[2]) { /* %x00: o byte em hexa */
+      char h[3];
+      h[0] = fmt[1];
+      h[1] = fmt[2];
+      h[2] = 0;
+      putchar((int)strtol(h, 0, 16));
+      fmt += 2;
+    } else if (*fmt == 'a' || *fmt == 'c') {
+      char k = fmt[1];
+      if (!k) break;
+      fmt++;
+      if (k == 'n') printf("%s", an);
+      else if (k == 'e') printf("%s", ae);
+      else if (k == 't') printf("%ld", at);
+      else if (k == 'I' || k == 'd' || k == 'D') {
+        int y, mo, d;
+        civil((int)(at / 86400), &y, &mo, &d);
+        printf("%04d-%02d-%02dT%02d:%02d:%02dZ", y, mo, d, (int)(at % 86400) / 3600, (int)(at % 3600) / 60,
+               (int)(at % 60));
+      } else if (k == 'r') printf("recentemente");
+    } else if (*fmt == '%') putchar('%');
+    else if (!*fmt) break;
+  }
+}
+
+/* git log --oneline | --format=... | --pretty=format:... [-n N | -N | --max-count=N] */
+static int cmd_log_fmt(int argc, char** argv) {
+  char root[PATHMAX], hex[41];
+  struct remote r;
+  unsigned char cur[20], base[20], tree[20], parent[20];
+  const char* fmt = 0;
+  int i, max = 1 << 30, n = 0;
+  for (i = 2; i < argc; i++) {
+    const char* o = argv[i];
+    if (strcmp(o, "--oneline") == 0) fmt = "%h %s";
+    else if (strncmp(o, "--format=", 9) == 0) fmt = o + 9;
+    else if (strncmp(o, "--pretty=format:", 16) == 0) fmt = o + 16;
+    else if (strncmp(o, "--pretty=tformat:", 17) == 0) fmt = o + 17;
+    else if (strcmp(o, "--pretty=oneline") == 0) fmt = "%H %s";
+    else if (strncmp(o, "--max-count=", 12) == 0) max = atoi(o + 12);
+    else if (strcmp(o, "-n") == 0 && i + 1 < argc) max = atoi(argv[++i]);
+    else if (o[0] == '-' && o[1] >= '0' && o[1] <= '9') max = atoi(o + 1);
+  }
+  if (find_root(0, root) != 0) return not_repo();
+  state_read(root, &r, cur, base);
+  while (n < max) {
+    int len;
+    char* t;
+    sha_hex(cur, hex);
+    t = commit_get(root, cur, &len);
+    if (!t) break;
+    commit_parse(t, tree, parent);
+    log_format(fmt, hex, t);
+    putchar('\n');
+    free(t);
+    n++;
+    if (sha_zero(parent)) break;
+    memcpy(cur, parent, 20);
+  }
+  return 0;
+}
+
+static int log_wants_fmt(int argc, char** argv) {
+  int i;
+  for (i = 2; i < argc; i++)
+    if (argv[i][0] == '-') return 1;
+  return 0;
+}
+
 static void usage(void) {
   printf("git do SODOS (clone raso)\n");
   printf("  git clone https://github.com/dono/projeto [pasta]\n");
@@ -2581,14 +3384,58 @@ static void usage(void) {
   printf("  git push                manda os commits (git config token ...)\n");
   printf("  git log [pasta]\n");
   printf("  git config [--global] chave [valor]   user.name, user.email, token, tz (-0300)\n");
-  printf("Nomes longos viram 8.3 (LEIAME~1.MD); veja _GIT\\NAMES.TXT.\n");
+  printf("Nomes longos viram 8.3 (LEIAME~1.MD); veja .git\\sodos\\NAMES.TXT.\n");
 }
 
+static int git_main(int argc, char** argv);
 int main(int argc, char** argv) {
+  char root[PATHMAX];
+  int rc = git_main(argc, argv);
+  /* depois do comando (clone, pull, commit...): o .git de fachada em dia */
+  if (find_root(0, root) == 0) sync_dotgit(root);
+  return rc;
+}
+
+static int git_main(int argc, char** argv) {
+  /* opcoes antes do comando: -C pasta, -c chave=valor, --no-pager... */
+  while (argc > 1 && argv[1][0] == '-') {
+    const char* o = argv[1];
+    int take = 1;
+    if (strcmp(o, "--version") == 0 || strcmp(o, "version") == 0) {
+      printf("git version 2.45.0.sodos\n");
+      return 0;
+    }
+    if (strcmp(o, "-C") == 0 && argc > 2) {
+      if (k_chdir(argv[2]) != 0) {
+        printf("fatal: cannot change to '%s': No such file or directory\n", argv[2]);
+        return 128;
+      }
+      take = 2;
+    } else if (strcmp(o, "-c") == 0 && argc > 2) {
+      take = 2;
+    } else if (strcmp(o, "--help") == 0 || strcmp(o, "-h") == 0) {
+      usage();
+      return 0;
+    }
+    /* --no-pager, --no-optional-locks, --literal-pathspecs, -P, --git-dir=...: ignorados */
+    argc -= take;
+    argv += take;
+  }
   if (argc < 2) {
     usage();
     return 1;
   }
+  if (strcmp(argv[1], "version") == 0) {
+    printf("git version 2.45.0.sodos\n");
+    return 0;
+  }
+  if (strcmp(argv[1], "rev-parse") == 0) return cmd_rev_parse(argc, argv);
+  if (strcmp(argv[1], "branch") == 0) return cmd_branch(argc, argv);
+  if (strcmp(argv[1], "symbolic-ref") == 0) return cmd_symbolic_ref(argc, argv);
+  if (strcmp(argv[1], "remote") == 0) return cmd_remote(argc, argv);
+  if (strcmp(argv[1], "worktree") == 0) return cmd_worktree(argc, argv);
+  if (strcmp(argv[1], "ls-files") == 0) return cmd_ls_files(argc, argv);
+  if (strcmp(argv[1], "log") == 0 && log_wants_fmt(argc, argv)) return cmd_log_fmt(argc, argv);
   if (strcmp(argv[1], "clone") == 0) return cmd_clone(argc, argv);
   if (strcmp(argv[1], "pull") == 0) return cmd_pull(argc, argv);
   if (strcmp(argv[1], "status") == 0) return cmd_status(argc, argv);
@@ -2598,6 +3445,6 @@ int main(int argc, char** argv) {
   if (strcmp(argv[1], "push") == 0) return cmd_push(argc, argv);
   if (strcmp(argv[1], "diff") == 0) return cmd_diff(argc, argv);
   if (strcmp(argv[1], "config") == 0) return cmd_config(argc, argv);
-  usage();
+  printf("git: '%s' is not a git command (git do SODOS). Veja 'git --help'.\n", argv[1]);
   return 1;
 }

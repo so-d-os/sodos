@@ -160,7 +160,9 @@ struct wobj {
   void* p1;
   void* p2;
   uint64_t u1, u2;
+  void* watch_ov;               /* pasta: ReadDirectoryChangesW pendente */
 };
+int wdir_watch_cancel(struct wobj* f); /* fill.c: 1 se havia vigia pendente */
 
 #define WHANDLE_MAX 4096 /* o renderer do Claude passa de 1000 (threads, secoes, eventos) */
 #define WATEXIT_MAX 64
@@ -265,7 +267,7 @@ const uint8_t* pe_find_resource(struct wmod* m, uintptr_t type, uintptr_t name, 
 
 /* ---------- tabelas embutidas ---------- */
 extern const struct wine_sym k32_syms[], crt_syms[], vm_syms[], obj_syms[], exc_syms[], file_syms[],
-    sys_syms[], gui_syms[], reg_syms[], net_syms[], misc_syms[], crypt_syms[], winrt_syms[], proc_syms[], sig_syms[], compat_syms[], gdi_syms[], dlg_syms[], shell_syms[], uimisc_syms[], procmisc_syms[], sec_syms[], map_syms[], safearray_syms[], dwrite_syms[], nt_syms[], pipe_syms[], fill_syms[];
+    sys_syms[], gui_syms[], reg_syms[], net_syms[], misc_syms[], crypt_syms[], winrt_syms[], proc_syms[], sig_syms[], compat_syms[], gdi_syms[], dlg_syms[], shell_syms[], uimisc_syms[], procmisc_syms[], sec_syms[], map_syms[], safearray_syms[], dwrite_syms[], nt_syms[], pipe_syms[], fill_syms[], picker_syms[];
 /* pipe.c */
 HANDLE wpipe_open(const wchar16* name, DWORD flags);
 int wpipe_read(struct wobj* o, void* buf, DWORD len, DWORD* done, void* ov);
@@ -378,6 +380,9 @@ void wsignal_obj(const void* o); /* mudou o estado de o */
 void wsignal_global(void);       /* so mensagens/pipes sincronos (esperas globais) */
 void wvm_note(uint64_t a); /* vm.c: estado da pagina (relatorio de excecao) */
 void wgui_proc_exit(void); /* user.c: HWNDs do processo saem do registro global */
+void wpick_world_service(void); /* picker.c: abre o Explorer no modo selecionar pasta */
+int wpick_folder(const char* title, const char* init, char* out, int max);
+int wpicker_create(const void* clsid, void** out); /* CLSID_FileOpenDialog */
 void wurl_world_service(void); /* proc.c: abre o navegador pedido por ShellExecute */
 void wwait_note(const char* what, void* caller, uint64_t waited_ms); /* util.c */
 void wstack_note(const char* what, const uint64_t* sp);

@@ -79,11 +79,54 @@ static WINAPI BOOL GetProductInfo(DWORD a, DWORD b, DWORD c, DWORD d, DWORD* typ
   *type = 0x30; /* PRODUCT_PROFESSIONAL */
   return 1;
 }
+/* O libuv (Node do Claude Desktop) le o resultado de cada leitura de pipe
+ * por aqui: STATUS_PIPE_BROKEN tem de virar ERROR_BROKEN_PIPE (= fim da
+ * saida do filho). Sem a tabela virava 317 e o Node via "read UNKNOWN" no
+ * fim de todo processo filho (git, claude.exe). */
 static WINAPI DWORD RtlNtStatusToDosError(long st) {
+  static const struct {
+    DWORD st, err;
+  } t[] = {
+      {0x00000103u, 997},  /* STATUS_PENDING -> ERROR_IO_PENDING */
+      {0x80000005u, 234},  /* BUFFER_OVERFLOW -> ERROR_MORE_DATA */
+      {0x80000006u, 18},   /* NO_MORE_FILES */
+      {0xC0000002u, 50},   /* NOT_IMPLEMENTED -> ERROR_NOT_SUPPORTED */
+      {0xC0000005u, 998},  /* ACCESS_VIOLATION -> ERROR_NOACCESS */
+      {0xC0000008u, 6},    /* INVALID_HANDLE */
+      {0xC000000Du, 87},   /* INVALID_PARAMETER */
+      {0xC000000Fu, 2},    /* NO_SUCH_FILE */
+      {0xC0000011u, 38},   /* END_OF_FILE -> ERROR_HANDLE_EOF */
+      {0xC0000017u, 8},    /* NO_MEMORY -> ERROR_NOT_ENOUGH_MEMORY */
+      {0xC0000022u, 5},    /* ACCESS_DENIED */
+      {0xC0000023u, 122},  /* BUFFER_TOO_SMALL -> ERROR_INSUFFICIENT_BUFFER */
+      {0xC0000033u, 123},  /* OBJECT_NAME_INVALID */
+      {0xC0000034u, 2},    /* OBJECT_NAME_NOT_FOUND -> ERROR_FILE_NOT_FOUND */
+      {0xC0000035u, 183},  /* OBJECT_NAME_COLLISION -> ERROR_ALREADY_EXISTS */
+      {0xC000003Au, 3},    /* OBJECT_PATH_NOT_FOUND */
+      {0xC0000043u, 32},   /* SHARING_VIOLATION */
+      {0xC0000101u, 145},  /* DIRECTORY_NOT_EMPTY */
+      {0xC0000103u, 267},  /* NOT_A_DIRECTORY -> ERROR_DIRECTORY */
+      {0xC0000120u, 995},  /* CANCELLED -> ERROR_OPERATION_ABORTED */
+      {0xC000014Bu, 109},  /* PIPE_BROKEN -> ERROR_BROKEN_PIPE */
+      {0xC000014Du, 536},  /* PIPE_LISTENING -> ERROR_PIPE_LISTENING */
+      {0xC00000B0u, 233},  /* PIPE_DISCONNECTED -> ERROR_PIPE_NOT_CONNECTED */
+      {0xC00000B1u, 232},  /* PIPE_CLOSING -> ERROR_NO_DATA */
+      {0xC00000ADu, 231},  /* INSTANCE_NOT_AVAILABLE -> ERROR_PIPE_BUSY */
+      {0xC00000AEu, 231},  /* PIPE_NOT_AVAILABLE -> ERROR_PIPE_BUSY */
+      {0xC00000BAu, 5},    /* FILE_IS_A_DIRECTORY */
+      {0xC00000BBu, 50},   /* NOT_SUPPORTED */
+      {0xC0000184u, 22},   /* INVALID_DEVICE_STATE -> ERROR_BAD_COMMAND */
+      {0xC0000236u, 1225}, /* CONNECTION_REFUSED */
+      {0xC000023Au, 1236}, /* CONNECTION_ABORTED */
+      {0xC000020Du, 64},   /* CONNECTION_RESET -> ERROR_NETNAME_DELETED */
+      {0xC00000B5u, 121},  /* IO_TIMEOUT -> ERROR_SEM_TIMEOUT */
+  };
+  size_t i;
   if (st == 0) return 0;
-  if ((DWORD)st == 0xC0000034u) return ERROR_FILE_NOT_FOUND;
-  if ((DWORD)st == 0xC0000022u) return ERROR_ACCESS_DENIED;
-  if ((DWORD)st == 0xC0000002u) return ERROR_NOT_SUPPORTED;
+  for (i = 0; i < sizeof(t) / sizeof(t[0]); i++)
+    if (t[i].st == (DWORD)st) return t[i].err;
+  /* HRESULT/erro do Win32 embrulhado (0xC007xxxx / 0x8007xxxx): o codigo */
+  if (((DWORD)st & 0x0FFF0000u) == 0x00070000u) return (DWORD)st & 0xFFFFu;
   return 317; /* ERROR_MR_MID_NOT_FOUND */
 }
 
@@ -364,6 +407,7 @@ static WINAPI long CoCreateInstance(const void* clsid, void* outer, DWORD ctx, c
   (void)iid;
   if (wine_debug) wlogx("CoCreateInstance: classe ", *(const DWORD*)clsid);
   *out = 0;
+  if (wpicker_create(clsid, out)) return 0;
   return (long)0x80040154; /* REGDB_E_CLASSNOTREG */
 }
 static WINAPI long RoInitialize(int type) {

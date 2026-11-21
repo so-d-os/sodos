@@ -22,6 +22,7 @@ struct comobj {
   com_handler handler;
   void* data;
   uintptr_t u[4];
+  int plain;   /* 1 = COM classico (sem IInspectable): slots 3-5 vao ao handler */
 };
 
 struct comobj* com_new(const char* name, com_handler h, void* data);

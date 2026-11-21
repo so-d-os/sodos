@@ -197,6 +197,15 @@ static long com_dispatch(struct comobj* self, int slot, uintptr_t* a) {
     int r = __sync_sub_and_fetch(&self->refs, 1);
     return r < 0 ? 0 : r; /* os objetos ficam ate o fim do processo */
   }
+  if (self->plain) {
+    /* IFileDialog, IShellItem...: o slot 3 e Show/BindToHandler, nao GetIids
+     * (lido como IInspectable, o SetFileTypes(1, ...) gravava no endereco 1) */
+    if (self->handler) {
+      long r = self->handler(self, slot, a);
+      if (r != E_NOTIMPL) return r;
+    }
+    goto unimpl;
+  }
   if (slot == 3) { /* GetIids(count, iids) */
     *(DWORD*)a[0] = 0;
     *(void**)a[1] = 0;
@@ -216,6 +225,7 @@ static long com_dispatch(struct comobj* self, int slot, uintptr_t* a) {
     long r = self->handler(self, slot, a);
     if (r != E_NOTIMPL) return r;
   }
+unimpl:
   {
     char t[120];
     int o = 0, i, n = slot;

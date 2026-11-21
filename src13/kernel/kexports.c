@@ -56,8 +56,21 @@ static int con_alheio(void) {
   return kt_in_thread() && kt_cur_pid() != mod_current_pid();
 }
 
+/* Captura (k_exec_capture/k_shell_capture) presa a uma tarefa do WIN: o WIN
+ * troca o con_hook a cada volta da tarefa (console_attach), entao um
+ * programa preemptado no meio da captura voltava escrevendo na janela e a
+ * saida sumia (git --version do Claude Desktop: 25 bytes numa vez, 0 na
+ * outra). -2 = nenhuma captura. */
+int win_task_current(void);
+static void cap_out(char c);
+static char* cap_buf;
+static int cap_task = -2;
 /* Cada chamada de console e um ponto de Ctrl+C (con_break_poll). */
 static void con_out(int c) {
+  if (cap_task != -2 && cap_buf && win_task_current() == cap_task) {
+    cap_out((char)c);
+    return;
+  }
   if (con_hook) con_hook((char)c);
   else putc((char)c);
 }
@@ -699,7 +712,6 @@ static int k_shell(char* line) {
 /* Como k_shell, mas a saida (comando interno ou .EXE) vai para out, com 0
  * no fim. *len recebe quantos bytes vieram; o que passar de max-1 e cortado
  * e *len fica negativo. Devolve o codigo do comando. */
-static char* cap_buf;
 static int cap_len, cap_max, cap_cut;
 
 static void cap_out(char c) {
@@ -710,13 +722,14 @@ static void cap_out(char c) {
 
 static int k_shell_capture(char* line, char* out, int max, int* len) {
   char* sbuf = cap_buf;
-  int slen = cap_len, smax = cap_max, scut = cap_cut;
+  int slen = cap_len, smax = cap_max, scut = cap_cut, stask = cap_task;
   void (*prev)(char) = shell_get_out();
   void (*hook)(char) = con_hook;
   int rc;
   if (len) *len = 0;
   if (kt_in_thread()) return -1;
   if (!out || max < 1) return k_shell(line);
+  cap_task = win_task_current();
   cap_buf = out;
   cap_len = 0;
   cap_max = max;
@@ -728,6 +741,7 @@ static int k_shell_capture(char* line, char* out, int max, int* len) {
   con_hook = hook;
   out[cap_len] = 0;
   if (len) *len = cap_cut ? -cap_len : cap_len;
+  cap_task = stask;
   cap_buf = sbuf;
   cap_len = slen;
   cap_max = smax;
@@ -752,6 +766,44 @@ static int k_exec(const char* path, int argc, char** argv) {
   }
   wide[n] = 0;
   return mod_exec(full, n, wide);
+}
+/* Como k_exec (argv com ponteiros de 8 bytes), mas a saida do programa vai
+ * para out, como no k_shell_capture: o WINE roda o GIT.EXE do SODOS para o
+ * Claude Desktop e entrega a saida no pipe do processo do Windows. Sem o
+ * limite de 255 caracteres da linha do k_shell e sem as regras de aspas do
+ * shell (cada argumento vai como veio). */
+static int k_exec_capture(const char* path, int argc, char** argv, char* out, int max, int* len) {
+  char* sbuf = cap_buf;
+  int slen = cap_len, smax = cap_max, scut = cap_cut, stask = cap_task;
+  void (*prev)(char) = shell_get_out();
+  void (*hook)(char) = con_hook;
+  char full[DRV_PATH];
+  char* wide[32];
+  int rc, n, i;
+  if (len) *len = 0;
+  if (kt_in_thread() || !out || max < 1) return MOD_ERR_DEPTH;
+  if (mod_find_exe(path, full, sizeof(full)) != 0) return MOD_ERR_NOTFOUND;
+  n = argc < 0 ? 0 : (argc > 31 ? 31 : argc);
+  for (i = 0; i < n; i++) wide[i] = argv && argv[i] ? argv[i] : "";
+  wide[n] = 0;
+  cap_task = win_task_current();
+  cap_buf = out;
+  cap_len = 0;
+  cap_max = max;
+  cap_cut = 0;
+  con_hook = 0;
+  shell_set_out(cap_out);
+  rc = mod_exec(full, n, wide);
+  shell_set_out(prev);
+  con_hook = hook;
+  out[cap_len] = 0;
+  if (len) *len = cap_cut ? -cap_len : cap_len;
+  cap_task = stask;
+  cap_buf = sbuf;
+  cap_len = slen;
+  cap_max = smax;
+  cap_cut = scut;
+  return rc;
 }
 static const char* k_last_error(void) { return mod_last_error(); }
 static int k_dll_load(const char* name) { return mod_dll_load(name); }
@@ -1621,6 +1673,7 @@ static const struct kexp table[] = {
   EXP(k_alttab),
   EXP(k_win_size),
   EXP(k_gui_panel),
+  EXP(k_exec_capture),
 };
 
 #define NEXP (sizeof(table) / sizeof(table[0]))

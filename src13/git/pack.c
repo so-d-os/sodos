@@ -18,6 +18,7 @@ struct pobj {
   unsigned char ref[20];
 };
 
+int pack_quiet; /* 1 = sem progresso no stdout (saida de maquina) */
 static unsigned char* pk;
 static int pklen;
 static struct pobj* obj;
@@ -295,7 +296,7 @@ int pack_load(unsigned char* data, int len, char* err) {
       free(tmp);
     }
     p += used;
-    if ((i & 255) == 0) printf("\r  indexando %d/%d", i, nobj);
+    if ((i & 255) == 0 && !pack_quiet) printf("\r  indexando %d/%d", i, nobj);
   }
   /* 2) deltas; REF espera a base ter sha */
   do {
@@ -329,10 +330,10 @@ int pack_load(unsigned char* data, int len, char* err) {
       git_hash(type_name(o->rtype), b, n, o->sha);
       o->hashed = 1;
       done++;
-      if ((i & 255) == 0) printf("\r  deltas %d/%d   ", i, nobj);
+      if ((i & 255) == 0 && !pack_quiet) printf("\r  deltas %d/%d   ", i, nobj);
     }
   } while (pending && done);
-  printf("\r  %d objetos ok          \n", nobj);
+  if (!pack_quiet) printf("\r  %d objetos ok          \n", nobj);
   if (pending) {
     sprintf(err, "%d deltas sem base no pack", pending);
     return -1;
@@ -350,6 +351,72 @@ unsigned char* pack_get(const unsigned char* sha, int* type, int* size) {
   if (!b) return 0;
   *type = obj[i].rtype;
   return b;
+}
+
+/* ---------- indice .idx (versao 2) do pack carregado ----------
+ * Para o pack ficar em .git\objects\pack como o de qualquer git: fanout,
+ * shas ordenados, crc32 de cada objeto como esta no pack, offsets, sha do
+ * pack e sha do proprio idx. */
+static unsigned crc_tab[256];
+static unsigned crc32_buf(const unsigned char* p, int n) {
+  unsigned c = 0xFFFFFFFFu;
+  int i;
+  if (!crc_tab[1]) {
+    unsigned k, b;
+    for (k = 0; k < 256; k++) {
+      unsigned v = k;
+      for (b = 0; b < 8; b++) v = (v & 1) ? 0xEDB88320u ^ (v >> 1) : v >> 1;
+      crc_tab[k] = v;
+    }
+  }
+  for (i = 0; i < n; i++) c = crc_tab[(c ^ p[i]) & 0xFFu] ^ (c >> 8);
+  return c ^ 0xFFFFFFFFu;
+}
+static void put_be32(unsigned char* p, unsigned v) {
+  p[0] = (unsigned char)(v >> 24);
+  p[1] = (unsigned char)(v >> 16);
+  p[2] = (unsigned char)(v >> 8);
+  p[3] = (unsigned char)v;
+}
+static int by_off_next(int i) {
+  /* objetos estao no pack na ordem do indice i: o proximo comeca em obj[i+1] */
+  return i + 1 < nobj ? obj[i + 1].off : pklen - 20;
+}
+int pack_write_idx(const char* path) {
+  int n = nobj, i, sz, r;
+  unsigned char* b;
+  unsigned char* q;
+  sha1_ctx c;
+  unsigned fan[256];
+  if (!obj || !pk) return -1;
+  sz = 8 + 256 * 4 + n * (20 + 4 + 4) + 40;
+  b = (unsigned char*)malloc((size_t)sz);
+  if (!b) return -1;
+  memset(fan, 0, sizeof(fan));
+  for (i = 0; i < n; i++) {
+    unsigned k;
+    for (k = obj[by_sha[i]].sha[0]; k < 256; k++) fan[k]++;
+  }
+  q = b;
+  q[0] = 0xFF; q[1] = 't'; q[2] = 'O'; q[3] = 'c';
+  put_be32(q + 4, 2);
+  q += 8;
+  for (i = 0; i < 256; i++, q += 4) put_be32(q, fan[i]);
+  for (i = 0; i < n; i++, q += 20) memcpy(q, obj[by_sha[i]].sha, 20);
+  for (i = 0; i < n; i++, q += 4) {
+    int k = by_sha[i];
+    put_be32(q, crc32_buf(pk + obj[k].off, by_off_next(k) - obj[k].off));
+  }
+  for (i = 0; i < n; i++, q += 4) put_be32(q, (unsigned)obj[by_sha[i]].off);
+  memcpy(q, pk + pklen - 20, 20);
+  q += 20;
+  sha1_init(&c);
+  sha1_update(&c, b, (int)(q - b));
+  sha1_final(&c, q);
+  q += 20;
+  r = k_fsave(path, (const char*)b, (int)(q - b));
+  free(b);
+  return r;
 }
 
 void pack_free(void) {

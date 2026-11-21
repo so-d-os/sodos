@@ -31,6 +31,9 @@ int hex_sha(const char* hex, unsigned char* sha);           /* 0 ok */
 /* ---------- zinf.c ---------- */
 /* Fluxo zlib inteiro. Devolve os bytes gerados ou -1; *used = bytes lidos. */
 int zinflate(const unsigned char* src, int slen, unsigned char* dst, int dlen, int* used);
+/* zlib "guardado" (sem compressao, valido para qualquer zlib): dst precisa
+ * de slen + 6 + 5 * (slen / 65535 + 1) bytes. Devolve o tamanho. */
+int zstore(const unsigned char* src, int slen, unsigned char* dst);
 
 /* ---------- http.c ---------- */
 /* GET (body = 0) ou POST para https://... Segue redirecionamentos.
@@ -52,5 +55,8 @@ int pack_load(unsigned char* data, int len, char* err);
 /* Objeto pelo sha. O ponteiro vale ate a proxima chamada. 0 se nao tem. */
 unsigned char* pack_get(const unsigned char* sha, int* type, int* size);
 void pack_free(void);
+/* Grava o .idx (versao 2) do pack carregado em path. 0 ok. */
+int pack_write_idx(const char* path);
+extern int pack_quiet;
 
 #endif

@@ -233,6 +233,7 @@ static int start(int argc, char** argv) {
     wcon_flush();           /* console das threads */
     wspawn_world_service(); /* processo filho: k_exec so daqui */
     wurl_world_service();   /* ShellExecute de URL: o navegador (proc.c) */
+    wpick_world_service();  /* Escolher pasta: o Explorer (picker.c) */
     if (!is_child) wprof_save(0); /* login etc. para o proximo boot, a cada minuto */
     k_futex_wait(&p->exit_req, 0, 20);
   }
