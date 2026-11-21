@@ -165,12 +165,12 @@ void fundo(void) {
 
 /* Como o menu do MC: abas na barra ciano, a ativa em preto. */
 void menu_topo(int aba) {
-  static const char* abas[4] = { " Processos ", " Mapa ", " Video ", " CPU " };
+  static const char* abas[5] = { " Processos ", " Mapa ", " Video ", " CPU ", " Temp " };
   char buf[32];
   int c = 7, i, t;
   linha(0, 0, COLS, ' ', C_MENU);
   texto(0, 1, "TOP", COR(CIANO, BRANCO));
-  for (i = 0; i < 4; i++) {
+  for (i = 0; i < 5; i++) {
     int cor = i == aba ? C_MENUSEL : C_MENU;
     texto(0, c, abas[i], cor);
     poe(0, c + 1, (unsigned char)abas[i][1], i == aba ? COR(PRETO, AMARELO) : C_MENUHOT);
@@ -184,7 +184,7 @@ void menu_topo(int aba) {
   {
     unsigned s = k_ms() / 1000;
     sprintf(buf, "ligado %u:%02u:%02u", s / 3600, s / 60 % 60, s % 60);
-    texto(0, COLS - 34, buf, C_MENU);
+    texto(0, COLS - 31, buf, C_MENU);
   }
 }
 

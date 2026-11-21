@@ -526,6 +526,20 @@ void kt_bkl_enter(void) {
   bkl_take(t, 1);
 }
 
+/* Para codigo do kernel que roda numa kthread (thermal.c, prof_saver do
+ * cmd_smp.c): pega o BKL sem olhar o quadro do bkl_thunk_common. O
+ * kt_bkl_enter le [rbp] e [rbp+8] supondo que veio de um programa; numa
+ * funcao do kernel compilada com -O2 o rbp e um registrador qualquer e a
+ * leitura dava #PF (CRASH.LOG de 2026-11-21: CR2=0x5A, rbp=0x52). */
+void kt_bkl_enter_kernel(void) {
+  struct task* t = cur();
+  if (bkl_owner == t) {
+    t->bkl_depth++;
+    return;
+  }
+  bkl_take(t, 1);
+}
+
 uint64_t kt_bkl_leave(void) {
   struct task* t = cur();
   if (bkl_owner != t) return 0;

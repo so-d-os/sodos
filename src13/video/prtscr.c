@@ -1,4 +1,4 @@
-/* prtscr.c - Tecla PrintScreen no WIN: a tela inteira vira PNG em
+/* prtscr.c - Tecla PrintScreen (WIN e telas de texto): a tela vira PNG em
  * Z:\SAVE\SCREENSHOT\printscreen-AAAAMMDD-HHMMSS.png (Z: e o ramdisk).
  *
  * O nome tem 31 caracteres: cabe inteiro no k_dirent dos programas (o
@@ -9,6 +9,9 @@
  * Depois do Z: (que some no boot) vai uma copia para D:\TEMP, para nao ter
  * que copiar a mao. SET PRTSCRCOPY=pasta troca o destino; SET PRTSCRCOPY=0
  * desliga.
+ *
+ * Nas telas de texto (Ctrl+F1..F12) o PNG e desenhado das celulas 80x25
+ * (vga_text) com a fonte atual e a paleta VGA: 640x400, 8x16 por letra.
  */
 #include <stdint.h>
 #include "prtscr.h"
@@ -18,6 +21,8 @@
 #include "serial.h"
 #include "kexports.h"
 #include "env.h"
+#include "fbcon.h"
+#include "visual.h"
 
 int win_screen_size(int* w, int* h);
 int win_screen_bgr(int y, uint8_t* dst, int max);
@@ -86,13 +91,9 @@ static void shot_copy(const char* zpath, const uint8_t* png, int len) {
   serial_puts(rc == 0 ? " ok\n" : " ERRO ao gravar\n");
 }
 
-int prtscr_save(char* out_path, int max) {
-  int w = 0, h = 0, y, x, n, len = 0, date, t, tries, rc;
-  uint8_t* row;
-  uint8_t* rgb;
-  uint8_t* png;
-  char path[80];
-  if (!win_screen_size(&w, &h) || w < 1 || h < 1) return -1;
+/* Nome livre em Z:\SAVE\SCREENSHOT. 0 = ok; -2 sem Z:. */
+static int shot_path(char* path) {
+  int date, t, tries;
   if (!drives_is_mounted('Z')) {
     serial_puts("[prtscr] sem Z:\n");
     return -2;
@@ -108,6 +109,43 @@ int prtscr_save(char* out_path, int max) {
     t = next_sec(t);
     shot_name(path, date, t);
   }
+  return 0;
+}
+
+/* rgb (w*h*3) -> PNG em path e copia em D:\TEMP. Libera rgb. */
+static int shot_store(const char* path, uint8_t* rgb, int w, int h, char* out_path, int max) {
+  int len = 0, rc, x;
+  uint8_t* png = png_encode_rgb(rgb, w, h, w * 3, SHOT_LEVEL, &len);
+  ufree(rgb);
+  if (!png) {
+    serial_puts("[prtscr] PNG falhou\n");
+    return -3;
+  }
+  rc = file_save(path, (const char*)png, len);
+  serial_puts("[prtscr] ");
+  serial_puts(path);
+  serial_puts(rc == 0 ? " ok\n" : " ERRO ao gravar\n");
+  if (rc != 0) {
+    ufree(png);
+    return -4;
+  }
+  shot_copy(path, png, len);
+  ufree(png);
+  if (out_path && max > 0) {
+    for (x = 0; path[x] && x < max - 1; x++) out_path[x] = path[x];
+    out_path[x] = 0;
+  }
+  return len;
+}
+
+int prtscr_save(char* out_path, int max) {
+  int w = 0, h = 0, y, x, n, rc;
+  uint8_t* row;
+  uint8_t* rgb;
+  char path[80];
+  if (!win_screen_size(&w, &h) || w < 1 || h < 1) return -1;
+  rc = shot_path(path);
+  if (rc < 0) return rc;
 
   row = (uint8_t*)kmalloc((uint32_t)(w * 3));
   rgb = (uint8_t*)umalloc_owned((uint32_t)w * (uint32_t)h * 3u, 0);
@@ -129,25 +167,50 @@ int prtscr_save(char* out_path, int max) {
     for (x = n * 3; x < w * 3; x++) d[x] = 0;
   }
   kfree(row);
-  png = png_encode_rgb(rgb, w, h, w * 3, SHOT_LEVEL, &len);
-  ufree(rgb);
-  if (!png) {
-    serial_puts("[prtscr] PNG falhou\n");
+  return shot_store(path, rgb, w, h, out_path, max);
+}
+
+/* Paleta VGA padrao do modo texto (a mesma do fbcon). */
+static const uint8_t txt_rgb[16][3] = {
+  {0x00, 0x00, 0x00}, {0x00, 0x00, 0xAA}, {0x00, 0xAA, 0x00}, {0x00, 0xAA, 0xAA},
+  {0xAA, 0x00, 0x00}, {0xAA, 0x00, 0xAA}, {0xAA, 0x55, 0x00}, {0xAA, 0xAA, 0xAA},
+  {0x55, 0x55, 0x55}, {0x55, 0x55, 0xFF}, {0x55, 0xFF, 0x55}, {0x55, 0xFF, 0xFF},
+  {0xFF, 0x55, 0x55}, {0xFF, 0x55, 0xFF}, {0xFF, 0xFF, 0x55}, {0xFF, 0xFF, 0xFF}
+};
+
+#define TXT_COLS 80
+#define TXT_ROWS 25
+
+int prtscr_text_save(char* out_path, int max) {
+  const int w = TXT_COLS * 8, h = TXT_ROWS * 16;
+  uint16_t cells[TXT_COLS * TXT_ROWS];
+  uint8_t* rgb;
+  char path[80];
+  int i, rc, r, px;
+  /* copia antes: o PNG demora e a tela pode mudar no meio */
+  for (i = 0; i < TXT_COLS * TXT_ROWS; i++) cells[i] = vga_text[i];
+  rc = shot_path(path);
+  if (rc < 0) return rc;
+  rgb = (uint8_t*)umalloc_owned((uint32_t)w * (uint32_t)h * 3u, 0);
+  if (!rgb) {
+    serial_puts("[prtscr] sem memoria\n");
     return -3;
   }
-  rc = file_save(path, (const char*)png, len);
-  serial_puts("[prtscr] ");
-  serial_puts(path);
-  serial_puts(rc == 0 ? " ok\n" : " ERRO ao gravar\n");
-  if (rc != 0) {
-    ufree(png);
-    return -4;
+  for (i = 0; i < TXT_COLS * TXT_ROWS; i++) {
+    uint16_t c = cells[i];
+    const uint8_t* g = vga_font_glyph((int)(c & 0xFFu));
+    const uint8_t* fg = txt_rgb[(c >> 8) & 0x0Fu];
+    const uint8_t* bg = txt_rgb[(c >> 12) & 0x0Fu];
+    int x0 = (i % TXT_COLS) * 8, y0 = (i / TXT_COLS) * 16;
+    for (r = 0; r < 16; r++) {
+      uint8_t* d = rgb + ((uint32_t)(y0 + r) * (uint32_t)w + (uint32_t)x0) * 3u;
+      for (px = 0; px < 8; px++) {
+        const uint8_t* k = (g[r] & (0x80u >> px)) ? fg : bg;
+        d[px * 3 + 0] = k[0];
+        d[px * 3 + 1] = k[1];
+        d[px * 3 + 2] = k[2];
+      }
+    }
   }
-  shot_copy(path, png, len);
-  ufree(png);
-  if (out_path && max > 0) {
-    for (x = 0; path[x] && x < max - 1; x++) out_path[x] = path[x];
-    out_path[x] = 0;
-  }
-  return len;
+  return shot_store(path, rgb, w, h, out_path, max);
 }

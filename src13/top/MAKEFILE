@@ -3,7 +3,7 @@
 # Sem o MAKE.EXE, ou se o make falhar: use o BUILD.BAT (compila tudo).
 # CC, CFLAGS, SYSINC e SYSLIB ja vem definidos pelo make.
 
-OBJS = top.obj tela.obj dados.obj procs.obj mapa.obj video.obj cpu.obj
+OBJS = top.obj tela.obj dados.obj procs.obj mapa.obj video.obj cpu.obj temp.obj
 
 TOP.EXE: $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS)

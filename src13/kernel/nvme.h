@@ -33,3 +33,6 @@ int nvme_write(uint32_t lba, uint32_t count, const void* buf);
 int nvme_raw_read(uint64_t lba, uint32_t count, void* buf);
 /* Setores do namespace 1; 0 sem SSD. */
 uint64_t nvme_raw_sectors(void);
+
+/* Temperatura do SSD em graus C (log SMART); -1000 sem leitura. Com o BKL. */
+int nvme_temp_c(void);

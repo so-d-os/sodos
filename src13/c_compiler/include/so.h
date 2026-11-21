@@ -194,6 +194,38 @@ struct k_cpu_stat {
 int k_cpu_count(void);
 int k_cpu_stat(int i, struct k_cpu_stat* out);
 
+/* Temperatura e indicadores (kernel/thermal.c; mesmo layout de kernel/thermal.h).
+ * Valores em graus C; K_HW_NONE = sem leitura. *_hist: uma amostra a cada
+ * step_s segundos, a mais nova no fim (hist_n validas); -128 = sem leitura.
+ * cpu_c e lido na hora; o resto vem da ultima amostra. 0 ok, -1 sem amostra. */
+#define K_HW_HIST 64
+#define K_HW_NONE -1000
+#define K_HW_GPUS 4
+struct k_hwstat {
+  int sensor;               /* 0 nenhum, 1 AMD Tctl, 2 Intel DTS */
+  int cpu_c;
+  int cpu_max_c, cpu_min_c;
+  int ssd_c, ssd_max_c;     /* NVMe (log SMART) */
+  int load_pct;             /* todas as CPUs, ultimos step_s segundos */
+  int ncpu;
+  unsigned mem_total_mb, mem_free_mb;
+  unsigned uptime_s;
+  unsigned hot_count;       /* amostras com a CPU >= 90 C */
+  int hist_n;
+  int step_s;
+  signed char cpu_hist[K_HW_HIST];
+  signed char ssd_hist[K_HW_HIST];
+  signed char load_hist[K_HW_HIST];
+  int gpu_n;                /* placas de video com sensor: AMD Polaris (RX 4xx/5xx), NVIDIA Pascal+ */
+  int gpu_c[K_HW_GPUS];     /* graus C; K_HW_NONE sem leitura */
+  int gpu_max_c[K_HW_GPUS];
+  unsigned gpu_id[K_HW_GPUS];   /* vendor << 16 | device */
+  char gpu_name[K_HW_GPUS][16];
+  signed char gpu_hist[K_HW_GPUS][K_HW_HIST];
+  unsigned pad[4];
+};
+int k_hwstat(struct k_hwstat* out);
+
 /* Threads (SMP). Cada thread roda em qualquer CPU de cpu_mask (0 = todas),
  * preemptada pelo timer local. fn(arg) devolve o codigo do join.
  * stack_size 0 = 256 KB. A thread herda a base do FS (TLS) de quem cria.

@@ -203,7 +203,7 @@ $(O)/MC.EXE: $(MC_SRC) ../mc/mc.h $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DL
 	$(HCC) -o $@ $(MC_SRC)
 
 # TOP.EXE (../top): programas e mapa da memoria no padrao do SPECIAL. BUILD.BAT idem.
-TOP_SRC = ../top/top.c ../top/tela.c ../top/dados.c ../top/procs.c ../top/mapa.c ../top/video.c ../top/cpu.c
+TOP_SRC = ../top/top.c ../top/tela.c ../top/dados.c ../top/procs.c ../top/mapa.c ../top/video.c ../top/cpu.c ../top/temp.c
 $(O)/TOP.EXE: $(TOP_SRC) ../top/top.h $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
 	$(HCC) -o $@ $(TOP_SRC)
 

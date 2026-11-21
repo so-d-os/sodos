@@ -36,6 +36,7 @@
 #define PATHMAX 260
 
 static char err[320];
+static void sync_dotgit(const char* root);
 
 /* ---------- utilidades ---------- */
 
@@ -250,8 +251,11 @@ static int get_refs(struct remote* r, int push) {
     have = 1;
   }
   if (!have) {
-    sprintf(err, "o repositorio esta vazio (sem HEAD)");
-    return -1;
+    /* repositorio vazio (recem-criado no GitHub): sem commit; o primeiro
+     * commit daqui cria o ramo no push */
+    memset(r->head, 0, 20);
+    if (!r->ref[0]) strcpy(r->ref, "refs/heads/main");
+    return 1;
   }
   if (!r->ref[0]) strcpy(r->ref, "HEAD");
   return 0;
@@ -1346,7 +1350,7 @@ static int cmd_clone(int argc, char** argv) {
   if (argc > 3) {
     strncpy(name, argv[3], sizeof(name) - 1);
     name[sizeof(name) - 1] = 0;
-    if (!strchr(name, ':') && !strchr(name, '\\')) {
+    if (!strchr(name, ':') && !strchr(name, '\\') && !long_ok(name)) {
       make83(name, none, 0, short83);
       strcpy(name, short83);
     }
@@ -1358,8 +1362,12 @@ static int cmd_clone(int argc, char** argv) {
     name[sizeof(name) - 1] = 0;
     n = (int)strlen(name);
     if (n > 4 && strcmp(name + n - 4, ".git") == 0) name[n - 4] = 0;
-    make83(name, none, 0, short83);
-    strcpy(name, short83);
+    /* a pasta com o nome do projeto (o FAT tem nomes longos); 8.3 so se o
+     * nome nao servir */
+    if (!long_ok(name)) {
+      make83(name, none, 0, short83);
+      strcpy(name, short83);
+    }
   }
   if (name[0] && name[1] == ':') strcpy(root, name);
   else {
@@ -1378,9 +1386,24 @@ static int cmd_clone(int argc, char** argv) {
     printf("rede nao pronta\n");
     return 1;
   }
-  if (get_refs(&r, 0) != 0) {
+  n = get_refs(&r, 0);
+  if (n < 0) {
     printf("erro: %s\n", err);
     return 1;
+  }
+  if (n == 1) {
+    /* vazio: so o .git, pronto para o primeiro commit */
+    unsigned char z[20];
+    char path[PATHMAX + 40];
+    memset(z, 0, 20);
+    dotgit_dirs(root);
+    git_file(root, "NAMES.TXT", path);
+    k_fsave(path, "", 0);
+    state_write(root, &r, z, z);
+    sync_dotgit(root);
+    printf("clonado %s em %s: o repositorio esta vazio (sem commits ainda).\n", r.url, root);
+    printf("Crie arquivos, git add -A, git commit -m ... e git push (cria o ramo %s).\n", r.ref + 11);
+    return 0;
   }
   printf("clonando %s em %s\n", r.ref, root);
   memset(&olds, 0, sizeof(olds));
@@ -1388,14 +1411,17 @@ static int cmd_clone(int argc, char** argv) {
     printf("\nerro: %s\n", err);
     return 1;
   }
+  sync_dotgit(root);
   return 0;
 }
 
+static const char* path_arg(int argc, char** argv);
 static int cmd_pull(int argc, char** argv) {
   struct remote r;
   char root[PATHMAX], hex[41];
   unsigned char cur[20], base[20];
-  if (find_root(argc > 2 ? argv[2] : 0, root) != 0) {
+  int gr;
+  if (find_root(path_arg(argc, argv), root) != 0) {
     printf("%s\n", err);
     return 1;
   }
@@ -1407,7 +1433,12 @@ static int cmd_pull(int argc, char** argv) {
     printf("rede nao pronta\n");
     return 1;
   }
-  if (get_refs(&r, 0) != 0) {
+  gr = get_refs(&r, 0);
+  if (gr == 1) {
+    printf("o servidor ainda esta vazio: nada para baixar\n");
+    return 0;
+  }
+  if (gr != 0) {
     printf("erro: %s\n", err);
     return 1;
   }
@@ -1643,6 +1674,125 @@ static int add_new(struct addst* a, const char* rel, int lower) {
 /* Arquivos que nao estao no index, em rel (recursivo). cb = 0 so conta. */
 typedef int (*untracked_cb)(struct addst* a, const char* rel);
 
+/* ---------- .gitignore ----------
+ * Da raiz do repositorio e de .git\info\exclude: um padrao por linha (#
+ * comentario), com * ? [..]; "nome/" so pastas; "/x" so na raiz; com /
+ * no meio vale o caminho inteiro; sem / vale o nome em qualquer pasta;
+ * "!x" volta a incluir. Sem diferenciar maiusculas (FAT). */
+#define IGN_MAX 128
+static char* ign_pat[IGN_MAX];
+static int ign_n, ign_loaded;
+static char ign_root[PATHMAX];
+
+static int globi(const char* p, const char* s) {
+  for (;;) {
+    if (!*p) return !*s;
+    if (*p == '*') {
+      while (*p == '*') p++;
+      if (!*p) return 1;
+      for (; *s; s++)
+        if (globi(p, s)) return 1;
+      return 0;
+    }
+    if (!*s) return 0;
+    if (*p == '?') {
+      p++;
+      s++;
+      continue;
+    }
+    if (*p == '[') {
+      const char* q = p + 1;
+      int neg = 0, ok = 0, c = lowc((unsigned char)*s);
+      if (*q == '!' || *q == '^') {
+        neg = 1;
+        q++;
+      }
+      while (*q && *q != ']') {
+        if (q[1] == '-' && q[2] && q[2] != ']') {
+          if (c >= lowc((unsigned char)q[0]) && c <= lowc((unsigned char)q[2])) ok = 1;
+          q += 3;
+        } else {
+          if (c == lowc((unsigned char)*q)) ok = 1;
+          q++;
+        }
+      }
+      if (ok == neg) return 0;
+      p = *q ? q + 1 : q;
+      s++;
+      continue;
+    }
+    if (lowc((unsigned char)*p) != lowc((unsigned char)*s)) return 0;
+    p++;
+    s++;
+  }
+}
+
+static void ign_add_file(const char* path) {
+  int len;
+  char* t = load_file(path, &len);
+  char* p;
+  if (!t) return;
+  for (p = t; *p && ign_n < IGN_MAX;) {
+    char* nl = strchr(p, '\n');
+    int l;
+    if (nl) *nl = 0;
+    l = (int)strlen(p);
+    while (l && (p[l - 1] == '\r' || p[l - 1] == ' ' || p[l - 1] == '\t')) p[--l] = 0;
+    if (l && p[0] != '#') ign_pat[ign_n++] = xstrdup(p);
+    if (!nl) break;
+    p = nl + 1;
+  }
+  free(t);
+}
+
+static void ign_load(const char* root) {
+  char path[PATHMAX + 40];
+  if (ign_loaded && strcmp(ign_root, root) == 0) return;
+  while (ign_n) free(ign_pat[--ign_n]);
+  strcpy(ign_root, root);
+  ign_loaded = 1;
+  path_join(path, root, ".gitignore");
+  ign_add_file(path);
+  path_join(path, root, ".git\\info\\exclude");
+  ign_add_file(path);
+}
+
+/* rel com \ (relativo a raiz); 1 = ignorado */
+static int ignored(const char* rel, int is_dir) {
+  char r[PATHMAX * 2];
+  const char* base;
+  int i, ign = 0;
+  for (i = 0; rel[i] && i < (int)sizeof(r) - 1; i++) r[i] = rel[i] == '\\' ? '/' : rel[i];
+  r[i] = 0;
+  base = strrchr(r, '/');
+  base = base ? base + 1 : r;
+  for (i = 0; i < ign_n; i++) {
+    char pt[300];
+    const char* p = ign_pat[i];
+    int neg = 0, dir_only = 0, anchored = 0, l, m;
+    if (*p == '!') {
+      neg = 1;
+      p++;
+    }
+    strncpy(pt, p, sizeof(pt) - 1);
+    pt[sizeof(pt) - 1] = 0;
+    l = (int)strlen(pt);
+    if (l && pt[l - 1] == '/') {
+      dir_only = 1;
+      pt[--l] = 0;
+    }
+    if (pt[0] == '/') {
+      anchored = 1;
+      memmove(pt, pt + 1, (size_t)l);
+    }
+    if (!pt[0] || (dir_only && !is_dir)) continue;
+    if (anchored || strchr(pt, '/')) m = globi(pt, r);
+    else m = globi(pt, base);
+    if (m) ign = !neg;
+  }
+  return ign;
+}
+
 static int scan_untracked(struct addst* a, const char* rel, untracked_cb cb) {
   char path[PATHMAX * 2];
   char* buf;
@@ -1682,9 +1832,15 @@ static int scan_untracked(struct addst* a, const char* rel, untracked_cb cb) {
       p[--l] = 0;
       dir = 1;
     }
-    if (l && strcmp(p, ".") != 0 && strcmp(p, "..") != 0 && !(!rel[0] && (ci_cmp(p, GITDIR) == 0 || ci_cmp(p, ".git") == 0))) {
+    if (!rel[0]) ign_load(a->root);
+    if (l && strcmp(p, ".") != 0 && strcmp(p, "..") != 0 && ci_cmp(p, ".git") != 0 && !(!rel[0] && ci_cmp(p, OLDDIR) == 0)) {
       if (rel[0]) sprintf(sub, "%s\\%s", rel, p);
       else strcpy(sub, p);
+      if (ignored(sub, dir)) {
+        if (!nl) break;
+        p = nl + 1;
+        continue;
+      }
       if (dir) total += scan_untracked(a, sub, cb);
       else if (!bydos_has(a, sub)) {
         total++;
@@ -1867,6 +2023,8 @@ static int cmd_status(int argc, char** argv) {
       if (ahead) printf("## %s...origin/%s [ahead %d]%c", branch_of(&r), branch_of(&r), ahead, g_sterm);
       else printf("## %s...origin/%s%c", branch_of(&r), branch_of(&r), g_sterm);
     }
+  } else if (sha_zero(cur)) {
+    printf("No ramo %s, ainda sem commits\n", branch_of(&r));
   } else {
     printf("No ramo %s, commit %.12s\n", r.ref, hex);
     if (ahead) printf("%d commit(s) local(is) para mandar (git push)\n", ahead);
@@ -2360,18 +2518,28 @@ static int do_commit(const char* root, const char* msg) {
     sprintf(err, "o relogio do sistema nao tem data");
     return -1;
   }
-  hc = commit_get(root, cur, &hl);
-  if (!hc || commit_parse(hc, htree, 0) != 0) {
-    sprintf(err, "nao achei o commit atual (COMMIT.TXT)");
+  if (sha_zero(cur)) {
+    /* primeiro commit (repositorio vazio): sem pai; a arvore "anterior" e a
+     * vazia */
+    list_load(root, "NAMES.TXT", &head);
+    memset(&th, 0, sizeof(th));
+    th.root = root;
+    list_tree(&head, &th, htree);
+    memcpy(tree, htree, 20);
+  } else {
+    hc = commit_get(root, cur, &hl);
+    if (!hc || commit_parse(hc, htree, 0) != 0) {
+      sprintf(err, "nao achei o commit atual (COMMIT.TXT)");
+      free(hc);
+      return -1;
+    }
     free(hc);
-    return -1;
+    /* a lista do HEAD tem que dar a arvore do HEAD */
+    list_load(root, "NAMES.TXT", &head);
+    memset(&th, 0, sizeof(th));
+    th.root = root;
+    list_tree(&head, &th, tree);
   }
-  free(hc);
-  /* a lista do HEAD tem que dar a arvore do HEAD */
-  list_load(root, "NAMES.TXT", &head);
-  memset(&th, 0, sizeof(th));
-  th.root = root;
-  list_tree(&head, &th, tree);
   if (memcmp(tree, htree, 20) != 0) {
     if (memcmp(cur, base, 20) != 0 || reindex(root, &r, cur) != 0) {
       if (!err[0]) sprintf(err, "a lista NAMES.TXT nao confere com o commit");
@@ -2412,9 +2580,11 @@ static int do_commit(const char* root, const char* msg) {
   sha_hex(tree, hex);
   sb_add(&s, "tree ", 5);
   sb_add(&s, hex, 40);
-  sb_add(&s, "\nparent ", 8);
-  sha_hex(cur, hex);
-  sb_add(&s, hex, 40);
+  if (!sha_zero(cur)) {
+    sb_add(&s, "\nparent ", 8);
+    sha_hex(cur, hex);
+    sb_add(&s, hex, 40);
+  }
   {
     char who[400];
     sprintf(who, "\nauthor %s <%s> %d %s\ncommitter %s <%s> %d %s\n\n", name, email, t, tz, name, email, t, tz);
@@ -2643,6 +2813,18 @@ static void base64(const unsigned char* in, int n, char* out) {
   out[o] = 0;
 }
 
+/* git push|pull [origin [ramo]] [-u] [pasta]: so o que parece pasta vale
+ * (antes "git push origin main" procurava a pasta "origin") */
+static const char* path_arg(int argc, char** argv) {
+  int i;
+  for (i = 2; i < argc; i++) {
+    const char* a = argv[i];
+    if (a[0] == '-' || strcmp(a, "origin") == 0) continue;
+    if (strchr(a, ':') || strchr(a, '\\') || strcmp(a, ".") == 0 || strcmp(a, "..") == 0) return a;
+  }
+  return 0;
+}
+
 static int cmd_push(int argc, char** argv) {
   struct remote r;
   char root[PATHMAX], token[256], login[128], cred[400], hex[41], bhex[41], url[400], line[300];
@@ -2651,7 +2833,7 @@ static int cmd_push(int argc, char** argv) {
   struct sbuf req;
   char* body;
   int len, st, p, ncommits = 0, ok = 0, unpack_ok = 0;
-  if (find_root(argc > 2 ? argv[2] : 0, root) != 0) {
+  if (find_root(path_arg(argc, argv), root) != 0) {
     printf("%s\n", err);
     return 1;
   }
@@ -2813,6 +2995,10 @@ static int cmd_log(int argc, char** argv) {
     return 1;
   }
   state_read(root, &r, cur, base);
+  if (sha_zero(cur)) {
+    printf("ainda nao ha commits em %s\n", branch_of(&r));
+    return 0;
+  }
   for (;;) {
     char* t;
     char* p;
@@ -3016,6 +3202,20 @@ static void sync_dotgit(const char* root) {
   sha_hex(base, bhex);
   sprintf(d, "%s\\.git", root);
   dotgit_dirs(root);
+  if (sha_zero(cur)) {
+    /* repositorio vazio: so HEAD (ramo ainda nao nascido) e config */
+    sprintf(f, "%s\\HEAD", d);
+    sprintf(t, "ref: refs/heads/%s\n", b);
+    put_if_diff(f, t);
+    sprintf(f, "%s\\config", d);
+    sprintf(t,
+            "[core]\n\trepositoryformatversion = 0\n\tfilemode = false\n\tbare = false\n"
+            "[remote \"origin\"]\n\turl = %s\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n",
+            r.url);
+    put_if_diff(f, t);
+    write_index(root);
+    return;
+  }
   sprintf(f, "%s\\HEAD", d);
   sprintf(t, "ref: refs/heads/%s\n", b);
   put_if_diff(f, t);
@@ -3024,7 +3224,8 @@ static void sync_dotgit(const char* root) {
   put_if_diff(f, t);
   sprintf(f, "%s\\refs\\remotes\\origin\\%s", d, b);
   sprintf(t, "%s\n", bhex);
-  put_if_diff(f, t);
+  if (sha_zero(base)) k_fdelete(f); /* o servidor ainda nao tem o ramo */
+  else put_if_diff(f, t);
   sprintf(f, "%s\\config", d);
   sprintf(t,
           "[core]\n\trepositoryformatversion = 0\n\tfilemode = false\n\tbare = false\n"
@@ -3391,8 +3592,10 @@ static int git_main(int argc, char** argv);
 int main(int argc, char** argv) {
   char root[PATHMAX];
   int rc = git_main(argc, argv);
-  /* depois do comando (clone, pull, commit...): o .git de fachada em dia */
-  if (find_root(0, root) == 0) sync_dotgit(root);
+  /* depois do comando: os arquivos padrao do .git em dia. No clone a pasta
+   * atual nao e o repositorio (ja foi feito no proprio clone): mexer nela
+   * migrava um _GIT antigo que estivesse ali sem ninguem pedir */
+  if (!(argc > 1 && strcmp(argv[1], "clone") == 0) && find_root(0, root) == 0) sync_dotgit(root);
   return rc;
 }
 

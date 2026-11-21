@@ -1,6 +1,7 @@
 #include "sched.h"
 #include "kthread.h"
 int fs_held_by_me(void); /* kexports.c */
+int shell_key_polling(void); /* kernel.c */
 
 #define SCHED_JOBS 8
 
@@ -61,4 +62,7 @@ void sched_yield(void) {
     break;
   }
   in_yield = 0;
+  /* Programa do console esperando tecla em laco (k_trygetc vazio + k_yield):
+   * empresta a CPU0 ate o proximo tick em vez de girar. */
+  if (shell_key_polling()) kt_world_idle(1);
 }

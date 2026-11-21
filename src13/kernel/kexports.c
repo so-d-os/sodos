@@ -1,6 +1,7 @@
 /* kexports.c - Funcoes do kernel que .EXE/.DLL importam como "KERNEL".
  * Cada linha EXP(nome) vira uma linha de c_compiler/lib/KERNEL.IMP (Makefile),
  * que o link usa para saber o que o kernel oferece. Convencao: cdecl. */
+#include "thermal.h"
 #include <stdint.h>
 #include "shell.h"
 #include "drives.h"
@@ -1408,6 +1409,8 @@ static int k_vram(struct k_vram* v) { return win_vram_info(v); }
 /* CPUs (SMP): quantas o kernel acordou e o estado de cada uma (TOP, aba CPU). */
 static int k_cpu_count(void) { return smp_cpu_count(); }
 static int k_cpu_stat(int i, struct k_cpu_stat* out) { return smp_cpu_stat(i, out); }
+/* Temperatura (CPU, SSD), carga e memoria com historico: TOP, aba Temp. */
+static int k_hwstat(struct k_hwstat* out) { return thermal_stat(out); }
 
 static int k_memmap(uint32_t* kb, int cells, uint32_t* cell_kb, uint32_t pid) {
   const struct BootInfo* bi = bootinfo_get();
@@ -1588,6 +1591,7 @@ static const struct kexp table[] = {
   EXP(k_vram),
   EXP(k_cpu_count),
   EXP(k_cpu_stat),
+  EXP(k_hwstat),
   EXP(k_exit),
   EXP(k_exec),
   EXP(k_shell),

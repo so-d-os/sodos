@@ -150,6 +150,10 @@ __export void gui_edit_select_all(gui_edit_t* e) {
   e->caret = e->len;
 }
 
+/* Caractere que entra no campo: ASCII e o CP850 de 0x80 a 0xFF (ç é ã...),
+ * que e como o WIN manda as teclas e a fonte desenha. */
+#define GUI_EDIT_CHAR(k) (((k) >= 32 && (k) < 127) || ((k) >= 0x80 && (k) <= 0xFF))
+
 __export int gui_edit_key(gui_edit_t* e, int key) {
   if (key == '\r' || key == '\n') return 2;
   /* Ctrl+A marca tudo; Ctrl+C copia e Ctrl+X recorta o campo (o campo nao
@@ -165,10 +169,10 @@ __export int gui_edit_key(gui_edit_t* e, int key) {
   }
   if (e->all) {
     e->all = 0;
-    if (key == '\b' || key == GUI_KEY_DEL || (key >= 32 && key < 127)) {
+    if (key == '\b' || key == GUI_KEY_DEL || GUI_EDIT_CHAR(key)) {
       e->len = e->caret = e->scroll = 0;
       e->text[0] = 0;
-      if (key < 32 || key >= 127) return 1;
+      if (!GUI_EDIT_CHAR(key)) return 1;
     }
   }
   if (key == '\b') {
@@ -200,7 +204,7 @@ __export int gui_edit_key(gui_edit_t* e, int key) {
     e->caret = e->len;
     return 1;
   }
-  if (key >= 32 && key < 127 && e->len < (int)sizeof(e->text) - 1) {
+  if (GUI_EDIT_CHAR(key) && e->len < (int)sizeof(e->text) - 1) {
     memmove(e->text + e->caret + 1, e->text + e->caret, (size_t)(e->len - e->caret + 1));
     e->text[e->caret++] = (char)key;
     e->len++;

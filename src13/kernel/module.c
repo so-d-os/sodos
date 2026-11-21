@@ -2,6 +2,7 @@
  * imports por nome ("KERNEL" = tabela do kernel, outro nome = arquivo .DLL). */
 #include <stdint.h>
 #include "module.h"
+#include "vt.h"
 #include "kthread.h"
 #include "mm.h"
 #include "drives.h"
@@ -681,7 +682,44 @@ int mod_kill(uint32_t pid) {
   return n;
 }
 
+static int mod_exec_run(const char* path, int argc, char** argv);
+
+/* Toda execucao vai para o log do sistema (Ctrl+F12): linha de comando e
+ * codigo de saida. */
 int mod_exec(const char* path, int argc, char** argv) {
+  const char* base = path ? path : "?";
+  const char* p;
+  int a, rc, room = 200;
+  for (p = base; *p; p++)
+    if (*p == '\\' || *p == '/' || *p == ':') base = p + 1;
+  syslog_stamp();
+  syslog_puts("> ");
+  syslog_puts(path ? path : "?");
+  for (a = 1; argv && a < argc && room > 0; a++) {
+    const char* s = argv[a] ? argv[a] : "";
+    syslog_putc(' ');
+    while (*s && room-- > 0) syslog_putc(*s++);
+  }
+  if (room <= 0) syslog_puts(" ...");
+  syslog_putc('\n');
+  rc = mod_exec_run(path, argc, argv);
+  syslog_stamp();
+  syslog_puts("< ");
+  syslog_puts(base);
+  if (rc == 0) syslog_puts(" OK (0)\n");
+  else {
+    syslog_puts(" retornou ");
+    syslog_num(rc);
+    if (rc <= MOD_ERR_NOTFOUND && rc >= MOD_ERR_DEPTH) {
+      syslog_puts(": ");
+      syslog_puts(mod_last_error());
+    }
+    syslog_putc('\n');
+  }
+  return rc;
+}
+
+static int mod_exec_run(const char* path, int argc, char** argv) {
   int id;
   int rc;
   uint8_t* stack;

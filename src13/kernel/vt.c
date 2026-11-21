@@ -12,6 +12,7 @@
 #include "drives.h"
 #include "shell.h"
 #include "env.h"
+#include "irq.h"
 
 #define VT_CELLS (80 * 25)
 #define VT_STACK (64 * 1024)
@@ -38,6 +39,7 @@ struct vt {
   int blink;
   int cur_hidden;
   int back;          /* WIN: tela que volta quando ele fecha */
+  uint32_t poll_t;   /* tick+1 em que cedeu sem tecla (k_trygetc): ver vt_idle */
 };
 
 void ctx_switch(uint64_t* save_rsp, uint64_t next_rsp);
@@ -50,6 +52,94 @@ static int vt_rr;
 static int vt_outn;
 static volatile uint16_t* vt_hw;   /* a tela de verdade */
 static uint8_t font0[256][16];     /* fonte do boot: a de cada tela nova */
+
+/* ---- log do sistema (Ctrl+F12) ----
+ * Anel em memoria: cada execucao (mod_exec) e, com SET PRODUCTION=1, a saida
+ * dos programas do WIN sem janela propria. A tela Ctrl+F12 mostra o anel
+ * desde o inicio (o que coube) e depois cada linha nova; quem estiver nela
+ * (o visor do log, o DISKSYNC ou um prompt) recebe o texto no proprio cursor,
+ * so quando ela e a tarefa rodando. */
+#define VT_LOG 10                 /* Ctrl+F12 */
+#define SLOG_SZ (64 * 1024)
+static char slog[SLOG_SZ];
+static volatile uint32_t slog_w;  /* bytes escritos desde o boot */
+static uint32_t slog_r;           /* ate onde a tela Ctrl+F12 ja mostrou */
+static volatile int slog_lk;
+static int slog_bol = 1;          /* proximo byte comeca linha */
+static int slog_in;               /* slog_flush rodando (putc pode ceder a vez) */
+int rtc_time(void);
+
+static void slog_add(char c) {
+  slog[slog_w % SLOG_SZ] = c;
+  slog_w++;
+  slog_bol = (c == '\n');
+}
+
+void syslog_putc(char c) {
+  if (c == '\r' || c == 0) return;
+  while (__sync_lock_test_and_set(&slog_lk, 1)) { }
+  slog_add(c);
+  __sync_lock_release(&slog_lk);
+}
+
+void syslog_puts(const char* s) {
+  if (!s) return;
+  while (__sync_lock_test_and_set(&slog_lk, 1)) { }
+  for (; *s; s++)
+    if (*s != '\r') slog_add(*s);
+  __sync_lock_release(&slog_lk);
+}
+
+void syslog_num(int v) {
+  char b[12];
+  int n = 0;
+  unsigned u = v < 0 ? (unsigned)-v : (unsigned)v;
+  do { b[n++] = (char)('0' + u % 10); u /= 10; } while (u && n < 11);
+  if (v < 0) syslog_putc('-');
+  while (n) syslog_putc(b[--n]);
+}
+
+/* "hh:mm:ss " no comeco de uma linha (fecha a linha anterior se precisar). */
+void syslog_stamp(void) {
+  int t = rtc_time();
+  char b[10];
+  if (!slog_bol) syslog_putc('\n');
+  if (t < 0) t = 0;
+  b[0] = (char)('0' + t / 100000);
+  b[1] = (char)('0' + t / 10000 % 10);
+  b[2] = ':';
+  b[3] = (char)('0' + t / 1000 % 10);
+  b[4] = (char)('0' + t / 100 % 10);
+  b[5] = ':';
+  b[6] = (char)('0' + t / 10 % 10);
+  b[7] = (char)('0' + t % 10);
+  b[8] = ' ';
+  b[9] = 0;
+  syslog_puts(b);
+}
+
+int syslog_production(void) {
+  const char* v = env_get("PRODUCTION");
+  char c;
+  if (!v || !v[0]) return 0;
+  c = (char)(v[0] | 0x20);
+  return c == '1' || c == 'o' || c == 's' || c == 'y' || c == 't' || c == 'p';
+}
+
+/* Na tarefa da tela Ctrl+F12, com o console dela carregado. */
+static void slog_flush(void) {
+  struct con_state cs;
+  if (!vt_on || vt_cur != VT_LOG || slog_in || kt_in_thread()) return;
+  con_state_save(&cs);
+  if (cs.out) return;   /* comando do prompt com > ou |: depois */
+  slog_in = 1;
+  while (slog_r != slog_w) {
+    if (slog_w - slog_r > SLOG_SZ) slog_r = slog_w - SLOG_SZ;
+    putc(slog[slog_r % SLOG_SZ]);
+    slog_r++;
+  }
+  slog_in = 0;
+}
 
 static void vt_save(struct vt* v) {
   mod_cpu_save(&v->cpu);
@@ -92,6 +182,7 @@ static void vt_switch_to(int j) {
     vts[j].stack = 0;
     vts[j].state = VS_FREE;
   }
+  if (vt_cur == VT_LOG) slog_flush();
 }
 
 static void font_save(uint8_t f[256][16]) {
@@ -175,6 +266,7 @@ static int vt_new(int i, uint32_t size, void (*fn)(void)) {
   v->blink = 1;
   v->cur_hidden = 0;
   v->state = VS_RUN;
+  if (i == VT_LOG) slog_r = slog_w > SLOG_SZ ? slog_w - SLOG_SZ : 0;   /* tudo o que coube */
   return 0;
 }
 
@@ -200,13 +292,16 @@ static void vt_win_entry(void) {
 }
 
 /* ---- servico DISKSYNC (SET DISKSYNC=1) ----
- * DISKSYNC.EXE roda numa tela de texto ao fundo (Ctrl+F12, ou outra livre),
- * como um programa qualquer de tela ao fundo: anda quando a tela visivel (o
- * WIN ou um prompt) espera tecla. O programa le DISKSYNC sozinho e sai com
- * SET DISKSYNC=0; a tela volta a ficar livre. */
-#define VT_SVC 10                 /* Ctrl+F12 */
+ * DISKSYNC.EXE roda na tela do log (Ctrl+F12), como um programa qualquer de
+ * tela ao fundo: anda quando a tela visivel (o WIN ou um prompt) espera
+ * tecla. O programa le DISKSYNC sozinho e sai com SET DISKSYNC=0; a tela
+ * volta a ser so o log. Se o usuario abriu um prompt no Ctrl+F12, o servico
+ * vai para a tela livre mais alta, como antes. */
+#define VT_SVC VT_LOG
 static int svc_vt = -1;
 static char svc_exe[DRV_PATH];
+static int log_idle;   /* o visor do log esta no laco dele (pode rodar o servico) */
+static int log_svc;    /* pedido de servico para o visor do log */
 
 static int svc_wanted(void) {
   const char* v = env_get("DISKSYNC");
@@ -231,20 +326,60 @@ static int svc_find(char* out, int max) {
   return mod_find_exe("DISKSYNC", out, max);
 }
 
-static void vt_svc_entry(void) {
+static void svc_run(void) {
   char line[DRV_PATH + 4];
   int i;
-  puts_k("SO DOS - servico DISKSYNC (SET DISKSYNC=0 para parar)\n\n");
   for (i = 0; svc_exe[i] && i < (int)sizeof(line) - 1; i++) line[i] = svc_exe[i];
   line[i] = 0;
   shell_exec_quiet(line);
   serial_puts("[vt] DISKSYNC terminou\n");
-  vts[vt_cur].state = VS_DEAD;
   svc_vt = -1;
+}
+
+static void vt_svc_entry(void) {
+  puts_k("SO DOS - servico DISKSYNC (SET DISKSYNC=0 para parar)\n\n");
+  svc_run();
+  vts[vt_cur].state = VS_DEAD;
   /* A pilha desta tarefa e liberada pela proxima troca (vt_switch_to). */
   if (vt_fg == vt_cur) vt_select(0);
   else vt_switch_to(vt_fg);
   for (;;) __asm__ volatile ("hlt");
+}
+
+/* Ctrl+F12: o log do sistema. Enter abre um prompt nesta tela. */
+static void vt_log_entry(void) {
+  int c;
+  puts_k("SO DOS - log do sistema (Ctrl+F12). Enter abre um prompt aqui.\n");
+  puts_k("SET PRODUCTION=1: programas do WIN sem janela, saida aqui.\n\n");
+  slog_flush();
+  for (;;) {
+    if (log_svc) {
+      log_svc = 0;
+      log_idle = 0;
+      puts_k("\n--- servico DISKSYNC (SET DISKSYNC=0 para parar) ---\n");
+      svc_run();
+      puts_k("\n--- DISKSYNC terminou ---\n");
+      slog_flush();
+    }
+    log_idle = 1;
+    if (vt_bg()) {
+      vt_yield(1);
+      continue;
+    }
+    c = shell_try_char();
+    if (!c) {
+      kt_bkl_breathe();
+      cpu_idle(1);
+      vt_idle();
+      continue;
+    }
+    cpu_idle(0);
+    if (c == '\n' || c == '\r') {
+      log_idle = 0;
+      puts_k("\n");
+      shell_loop();
+    }
+  }
 }
 
 void vt_service_check(void) {
@@ -256,8 +391,23 @@ void vt_service_check(void) {
     if (!win_screen_size(0, 0)) puts_k("DISKSYNC.EXE nao encontrado (PATHSODOS, D:\\SODOS, Z:\\SODOS)\n");
     return;
   }
-  /* Ctrl+F12; se o usuario ja abriu essa tela, a livre mais alta. */
-  for (i = VT_SVC; i > 0 && vts[i].state != VS_FREE; i--) { }
+  /* Na tela do log (Ctrl+F12): criada agora, ou o visor parado pega o pedido. */
+  if (vts[VT_LOG].state == VS_FREE || vts[VT_LOG].state == VS_DEAD) {
+    if (vts[VT_LOG].state == VS_DEAD) vts[VT_LOG].state = VS_FREE;
+    if (vt_new(VT_LOG, VT_STACK, vt_log_entry) != 0) return;
+    vts[VT_LOG].cpu.bkl = 1;   /* pode vir de um k_setenv (BKL pego pelo thunk) */
+    log_idle = 1;
+  }
+  if (log_idle) {
+    log_svc = 1;
+    if (vts[VT_LOG].state == VS_KEY) vts[VT_LOG].state = VS_RUN;
+    svc_vt = VT_LOG;
+    serial_puts("[vt] DISKSYNC na tela do log: ");
+    serial_puts(svc_exe);
+    serial_puts("\n");
+    return;
+  }
+  for (i = VT_SVC - 1; i > 0 && vts[i].state != VS_FREE; i--) { }
   if (i <= 0) {
     serial_puts("[vt] DISKSYNC: nenhuma tela livre\n");
     return;
@@ -313,7 +463,7 @@ void vt_select(int i) {
       if (vt_new(i, VT_WIN_STACK, vt_win_entry) != 0) return;
     }
   } else if (vts[i].state == VS_FREE) {
-    if (vt_new(i, VT_STACK, vt_text_entry) != 0) return;
+    if (vt_new(i, VT_STACK, i == VT_LOG ? vt_log_entry : vt_text_entry) != 0) return;
   }
   if (i == old) return;
   serial_puts("[vt] tela ");
@@ -335,6 +485,19 @@ void vt_select(int i) {
 void vt_yield(int wait) {
   if (!vt_bg()) return;
   vts[vt_cur].state = wait ? VS_KEY : VS_RUN;
+  vts[vt_cur].poll_t = 0;
+  vt_outn = 0;
+  vt_switch_to(vt_fg);
+}
+
+/* Programa ao fundo perguntou por tecla e nao havia (laco de k_trygetc, como
+ * o DISKSYNC): cede, e o vt_idle so volta a ele no proximo tick. Antes a tela
+ * visivel trocava para ele a cada volta do seu laco ocioso (milhares de vezes
+ * por segundo), e a CPU0 nunca parava. */
+void vt_yield_poll(void) {
+  if (!vt_bg()) return;
+  vts[vt_cur].state = VS_RUN;
+  vts[vt_cur].poll_t = (uint32_t)irq_ticks() + 1u;
   vt_outn = 0;
   vt_switch_to(vt_fg);
 }
@@ -342,9 +505,11 @@ void vt_yield(int wait) {
 void vt_idle(void) {
   int k, j;
   if (!vt_on || vt_cur != vt_fg) return;
+  if (vt_cur == VT_LOG) slog_flush();
   for (k = 1; k <= VT_TASKS; k++) {
     j = (vt_rr + k) % VT_TASKS;
     if (j == vt_fg || vts[j].state != VS_RUN) continue;
+    if (vts[j].poll_t && vts[j].poll_t == (uint32_t)irq_ticks() + 1u) continue;
     vt_rr = j;
     vt_switch_to(j);
     return;

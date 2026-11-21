@@ -499,15 +499,18 @@ char drives_current(void) {
 void drives_state_save(struct drives_state* s) {
   int i, k;
   s->letter = cur_letter;
+  /* so ate o NUL: a troca de tela (vt.c) chama isto a cada vez */
   for (i = 0; i < 26; i++)
-    for (k = 0; k < (int)sizeof(cur_dir[0]); k++) s->dir[i][k] = cur_dir[i][k];
+    for (k = 0; k < (int)sizeof(cur_dir[0]); k++)
+      if ((s->dir[i][k] = cur_dir[i][k]) == '\0') break;
 }
 
 void drives_state_load(const struct drives_state* s) {
   int i, k;
   cur_letter = s->letter;
   for (i = 0; i < 26; i++)
-    for (k = 0; k < (int)sizeof(cur_dir[0]); k++) cur_dir[i][k] = s->dir[i][k];
+    for (k = 0; k < (int)sizeof(cur_dir[0]); k++)
+      if ((cur_dir[i][k] = s->dir[i][k]) == '\0') break;
 }
 
 int drives_set_current(char letter) {

@@ -486,6 +486,41 @@ static void layout(struct wgui* g) {
   }
 }
 
+/* Janela de topo com tamanho novo (a janela do WIN mudou de tamanho, ou
+ * SetWindowPos/MoveWindow do programa): superficie nova com o que cabia da
+ * antiga e os avisos que o programa espera do Windows (WM_WINDOWPOSCHANGED e
+ * WM_SIZE). Antes so a tela do WIN mudava: o Claude Desktop (Chromium)
+ * continuava desenhando no tamanho antigo, encostado no canto. */
+struct winpos {
+  HANDLE hwnd, after;
+  int x, y, cx, cy;
+  uint32_t flags;
+};
+static void top_resize(struct wwin* w, int cw, int ch, int maxed) {
+  struct surf ns;
+  struct winpos wp;
+  if (cw < 1 || ch < 1 || (cw == w->w && ch == w->h && cw == w->s.w && ch == w->s.h)) return;
+  if (!surf_alloc(&ns, cw, ch, 1)) return;
+  surf_fill(&ns, 0, 0, cw, ch, sys_color(15));
+  if (w->s.px) {
+    surf_blit(&ns, 0, 0, w->s.w < cw ? w->s.w : cw, w->s.h < ch ? w->s.h : ch, &w->s, 0, 0,
+              w->s.w < cw ? w->s.w : cw, w->s.h < ch ? w->s.h : ch, 0);
+    if (!w->s.foreign) k_free(w->s.px);
+  }
+  w->s = ns;
+  w->w = cw;
+  w->h = ch;
+  memset(&wp, 0, sizeof(wp));
+  wp.hwnd = (HANDLE)w;
+  wp.cx = cw;
+  wp.cy = ch;
+  wp.flags = 0x0002 | 0x0004 | 0x0010; /* SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE */
+  wsend(w, WM_WINDOWPOSCHANGED, 0, (intptr_t)(uintptr_t)&wp);
+  wsend(w, WM_SIZE, maxed ? 2 : 0, ((intptr_t)ch << 16) | (cw & 0xFFFF)); /* SIZE_MAXIMIZED / RESTORED */
+  w->dirty = 1;
+  win_invalidate(w);
+}
+
 /* Abre, troca ou fecha a janela do WIN conforme as janelas de topo visiveis. */
 static void canvas_update(struct wgui* g) {
   struct wwin* v[32];
@@ -524,6 +559,9 @@ static void canvas_update(struct wgui* g) {
     if (g->canvas.px) k_free(g->canvas.px);
     if (!surf_alloc(&g->canvas, cw, ch, 1)) return;
     g->canvas_open = 1;
+    /* a janela do WIN pode abrir maior que a pedida: a principal ocupa a
+     * area toda (antes ficava no meio, com margem embaixo e dos lados) */
+    if (main->s.w != cw || main->s.h != ch) top_resize(main, cw, ch, 0);
   } else if (main->text) {
     char t[96];
     int k = wutf16_to_8(main->text, -1, t, (int)sizeof(t) - 1);
@@ -1011,6 +1049,26 @@ static WINAPI BOOL SetWindowPos(HANDLE h, HANDLE after, int x, int y, int cx, in
       w->h = cy;
       wsend(w, WM_SIZE, 0, ((intptr_t)cy << 16) | (cx & 0xFFFF));
     }
+  } else if (!(fl & 1) && cx > 0 && cy > 0) {
+    /* de topo: o tamanho vale (a principal fica no maximo do tamanho da
+     * janela do WIN; as outras, como pedido) */
+    struct wgui* g = gui_get();
+    /* cx/cy do Windows incluem a moldura; aqui a de topo e so o cliente
+     * (como no CreateWindow) */
+    if (w->cls && w->cls->kind == CK_APP && (w->style & WS_CAPTION) == WS_CAPTION) {
+      if (cx - 16 > 80) cx -= 16;
+      if (cy - 39 > 60) cy -= 39;
+    }
+    /* a principal ocupa sempre a janela do WIN inteira (quem muda o tamanho
+     * dela e o usuario, pela janela do WIN): o pedido do programa so vale
+     * para as outras. O Chromium tira a moldura no WM_NCCALCSIZE e pede o
+     * tamanho de fora: sobrava uma faixa vazia embaixo e a direita. */
+    if (w == g->canvas_main && g->canvas_open) {
+      cx = g->canvas.w;
+      cy = g->canvas.h;
+    }
+    top_resize(w, cx, cy, 0);
+    if (!w->parent) g->canvas_dirty = 1;
   }
   if (fl & 0x40) win_show(w, 1);  /* SWP_SHOWWINDOW */
   if (fl & 0x80) win_show(w, 0);  /* SWP_HIDEWINDOW */
@@ -1325,6 +1383,30 @@ static void keystate_track(const struct msg* m) {
   else if (m->message == WM_KEYUP && m->wparam < 256) key_down[m->wparam] = 0;
 }
 
+/* O WIN manda as teclas em CP850 (a fonte dele): ç = 0x87, é = 0x82, ã =
+ * 0xC6. Os programas do Windows esperam Unicode no WM_CHAR. */
+static const unsigned short cp850_uni_tab[128] = {
+  0x00C7, 0x00FC, 0x00E9, 0x00E2, 0x00E4, 0x00E0, 0x00E5, 0x00E7,
+  0x00EA, 0x00EB, 0x00E8, 0x00EF, 0x00EE, 0x00EC, 0x00C4, 0x00C5,
+  0x00C9, 0x00E6, 0x00C6, 0x00F4, 0x00F6, 0x00F2, 0x00FB, 0x00F9,
+  0x00FF, 0x00D6, 0x00DC, 0x00F8, 0x00A3, 0x00D8, 0x00D7, 0x0192,
+  0x00E1, 0x00ED, 0x00F3, 0x00FA, 0x00F1, 0x00D1, 0x00AA, 0x00BA,
+  0x00BF, 0x00AE, 0x00AC, 0x00BD, 0x00BC, 0x00A1, 0x00AB, 0x00BB,
+  0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0x00C1, 0x00C2, 0x00C0,
+  0x00A9, 0x2563, 0x2551, 0x2557, 0x255D, 0x00A2, 0x00A5, 0x2510,
+  0x2514, 0x2534, 0x252C, 0x251C, 0x2500, 0x253C, 0x00E3, 0x00C3,
+  0x255A, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256C, 0x00A4,
+  0x00F0, 0x00D0, 0x00CA, 0x00CB, 0x00C8, 0x0131, 0x00CD, 0x00CE,
+  0x00CF, 0x2518, 0x250C, 0x2588, 0x2584, 0x00A6, 0x00CC, 0x2580,
+  0x00D3, 0x00DF, 0x00D4, 0x00D2, 0x00F5, 0x00D5, 0x00B5, 0x00FE,
+  0x00DE, 0x00DA, 0x00DB, 0x00D9, 0x00FD, 0x00DD, 0x00AF, 0x00B4,
+  0x00AD, 0x00B1, 0x2017, 0x00BE, 0x00B6, 0x00A7, 0x00F7, 0x00B8,
+  0x00B0, 0x00A8, 0x00B7, 0x00B9, 0x00B3, 0x00B2, 0x25A0, 0x00A0,
+};
+static int cp850_uni(int k) {
+  return (k >= 0x80 && k <= 0xFF) ? cp850_uni_tab[k - 0x80] : k;
+}
+
 static int vk_of(int key, int* ch) {
   *ch = 0;
   switch (key) {
@@ -1448,7 +1530,7 @@ static void pump_events(struct wgui* g) {
       case 2: { /* KEY */
         struct wwin* a = top_active(g);
         struct wwin* f;
-        int ch, vk = vk_of(ev[3], &ch);
+        int ch, vk = vk_of(cp850_uni(ev[3]), &ch);
         if (!a || !a->enabled) break;
         f = a->focus && !a->focus->destroyed ? a->focus : a;
         /* Ctrl+letra (o WIN manda 1..26; com k_gui_clip(1) o Ctrl+V tambem):
@@ -1477,8 +1559,12 @@ static void pump_events(struct wgui* g) {
         if (ev[1] > 0 && ev[2] > 0 && (ev[1] != g->canvas.w || ev[2] != g->canvas.h)) {
           struct surf ns;
           if (surf_alloc(&ns, ev[1], ev[2], 1)) {
+            int big = ev[1] > g->canvas.w || ev[2] > g->canvas.h;
             k_free(g->canvas.px);
             g->canvas = ns;
+            /* a janela principal ocupa a tela toda do WIN: acompanha o tamanho */
+            if (g->canvas_main && !g->canvas_main->destroyed)
+              top_resize(g->canvas_main, ev[1], ev[2], big);
             layout(g);
             g->canvas_dirty = 1;
           }

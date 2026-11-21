@@ -37,6 +37,7 @@ int vt_hotkey(uint8_t sc);
 void vt_select(int i);
 /* A tela ao fundo cede a vez. wait=1: espera tecla e so volta na tela. */
 void vt_yield(int wait);
+void vt_yield_poll(void);   /* ao fundo, k_trygetc sem tecla: volta no proximo tick */
 /* A tela visivel, sem nada a fazer, da uma vez a uma tela ao fundo. */
 void vt_idle(void);
 /* Saida de caractere: ao fundo, cede a vez de tempos em tempos. */
@@ -47,3 +48,13 @@ int vt_win(void);
 /* SET DISKSYNC=1: abre DISKSYNC.EXE numa tela ao fundo (Ctrl+F12) se ainda
  * nao esta rodando. Sem a variavel nada acontece. env.c chama a cada SET. */
 void vt_service_check(void);
+
+/* Log do sistema, mostrado na tela Ctrl+F12 (anel de 64 KB desde o boot).
+ * Pode ser chamado de qualquer lugar do kernel, inclusive das tarefas do WIN. */
+void syslog_putc(char c);
+void syslog_puts(const char* s);
+void syslog_num(int v);
+void syslog_stamp(void);      /* "hh:mm:ss " comecando uma linha */
+/* SET PRODUCTION=1 (ou ON/SIM/YES/TRUE/PRODUCTION): o WIN nao abre janela de
+ * saida para os programas; o texto deles vai para o log (Ctrl+F12). */
+int syslog_production(void);

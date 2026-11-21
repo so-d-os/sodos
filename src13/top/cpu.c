@@ -11,14 +11,19 @@
 #define CPU_MAX 8
 
 static const char* const rotulos[10] = {
-  "Ajuda", "", "Procs", "", "Atualiz", "", "", "", "", "Sair"
+  "Ajuda", "", "Temp", "", "Atualiz", "", "", "", "", "Sair"
 };
 
 static struct k_cpu_stat c[CPU_MAX];
-static int n;
+static struct k_cpu_stat ant[CPU_MAX]; /* leitura anterior: o uso e a diferenca */
+static int n, tem_ant;
 
 static void le(void) {
   int i;
+  if (n > 0) {
+    memcpy(ant, c, sizeof c);
+    tem_ant = 1;
+  }
   n = k_cpu_count();
   if (n < 0) n = 0;
   if (n > CPU_MAX) n = CPU_MAX;
@@ -28,11 +33,21 @@ static void le(void) {
   }
 }
 
-/* Trabalhando / (trabalhando + parado), em %. */
-static unsigned pct(const struct k_cpu_stat* s) {
-  unsigned long long t = (unsigned long long)s->busy_ms + s->idle_ms;
+/* Trabalhando / (trabalhando + parado), em %, desde a leitura anterior
+ * (uso atual). Na primeira leitura da tela, desde o boot. */
+static unsigned pct(int i) {
+  const struct k_cpu_stat* s = &c[i];
+  unsigned b = s->busy_ms, t = s->busy_ms + s->idle_ms;
+  if (tem_ant) {
+    unsigned tb = s->busy_ms - ant[i].busy_ms;
+    unsigned tt = tb + (s->idle_ms - ant[i].idle_ms);
+    if (tt > 0 && tt < 0x80000000u) {
+      b = tb;
+      t = tt;
+    }
+  }
   if (!t) return 0;
-  return (unsigned)((unsigned long long)s->busy_ms * 100u / t);
+  return (unsigned)((unsigned long long)b * 100u / t);
 }
 
 /* "12:34" ou "1:02:03" */
@@ -53,11 +68,9 @@ static void desenha(void) {
   int i, r, online = 0;
 
   for (i = 0; i < n; i++) {
-    unsigned long long tt = (unsigned long long)c[i].busy_ms + c[i].idle_ms;
     if (c[i].online) online++;
-    carga += c[i].busy_ms;
-    if (tt > 0xFFFFFFFFu) tt = 0xFFFFFFFFu;
-    total += (unsigned)tt;
+    carga += pct(i);
+    total += 100u;
   }
 
   fundo();
@@ -73,7 +86,7 @@ static void desenha(void) {
   textow(CR + 3, CC + 2, "CPU  PAPEL  ESTADO   USO (0-100%)                 TEMPO", CW - 4, C_CABECA);
 
   for (i = 0; i < n; i++) {
-    unsigned p = pct(&c[i]);
+    unsigned p = pct(i);
     r = CR + 4 + i;
     sprintf(b, "CPU%d", i);
     textow(r, CC + 2, b, 5, C_FORTE);
@@ -100,7 +113,7 @@ static void desenha(void) {
   }
 
   separador(CR + CH - 6, CC, CW);
-  textow(CR + CH - 5, CC + 2, "USO = tempo trabalhando / (trabalhando + parado) desde o boot.",
+  textow(CR + CH - 5, CC + 2, "USO = tempo trabalhando / (trabalhando + parado) no ultimo 0,5 s.",
          CW - 4, C_JANELA);
   if (n > 1)
     textow(CR + CH - 4, CC + 2,
@@ -119,11 +132,12 @@ static void ajuda(void) {
         "O kernel descobre as CPUs no MADT do ACPI e sobe os APs com\n"
         "INIT-SIPI. A CPU0 e a BSP, que roda o SO; as outras sao APs.\n"
         "\n"
-        "A barra e o uso desde o boot: tempo trabalhando dividido pelo\n"
-        "tempo total. A BSP esta sempre ativa (o SO e polling); os APs\n"
+        "A barra e o uso atual (desde a ultima atualizacao, 0,5 s): tempo\n"
+        "trabalhando dividido pelo tempo total. A BSP para em hlt quando o\n"
+        "WIN ou o console nao tem o que fazer; os APs\n"
         "aparecem em hlt porque ainda nao ha escalonador por CPU.\n"
         "\n"
-        "F3 ou Tab vai aos processos   F5 atualiza   F10 ou ESC sai");
+        "F3 ou Tab vai a Temp   F5 atualiza   F10 ou ESC sai");
 }
 
 int tela_cpu(void) {

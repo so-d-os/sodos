@@ -114,7 +114,7 @@ static int prof_saver(void* arg) {
     n = prof_i < 131072u ? prof_i : 131072u;
     path[11] = (char)('0' + k);
     k = (k + 1) % 5;
-    kt_bkl_enter();
+    kt_bkl_enter_kernel();
     if (file_save(path, (const char*)prof_buf, (int)(n * 8u)) >= 0) {
       serial_puts("[prof] gravado ");
       serial_puts(path);

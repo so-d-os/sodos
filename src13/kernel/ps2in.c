@@ -129,7 +129,9 @@ void ps2in_inject(uint8_t b) {
  * Ctrl+Alt+Del. Uma thread do kernel (fora da CPU0) olha a hora do ultimo
  * pump; parado ha 1,5 s, ela mesma bombeia o teclado USB (Ctrl+Alt+Del
  * reinicia pelo kbd_watch). Ctrl+F1 com o mundo parado: solta a trava do
- * sistema de arquivos; se o mundo nao voltar em 3 s, reinicia. */
+ * sistema de arquivos. Nao reinicia mais sozinho: com o Claude (WINE)
+ * pesado o mundo podia so estar lento e o segundo Ctrl+F1 reiniciava o PC.
+ * Para reiniciar de verdade: Ctrl+Alt+Del. */
 static volatile uint64_t pump_ms;          /* ultimo ps2in_pump do mundo */
 static volatile uint64_t emerg_ms;         /* ultimo Ctrl+F1 */
 void fs_force_release(void);               /* kexports.c */
@@ -175,7 +177,7 @@ static int guard_main(void* arg) {
     }
     if (!noted) {
       noted = 1;
-      serial_puts("[guarda] teclas sem leitor ha 1,5 s: o mundo parou (Ctrl+F1 destrava, 2x reinicia; Ctrl+Alt+Del reinicia)\n");
+      serial_puts("[guarda] teclas sem leitor ha 1,5 s: o mundo parou (Ctrl+F1 destrava; Ctrl+Alt+Del reinicia)\n");
     }
     if (emerg_ms && emerg_ms != seen) {
       seen = emerg_ms;
@@ -184,8 +186,7 @@ static int guard_main(void* arg) {
         serial_puts("[guarda] Ctrl+F1 com o mundo parado: soltando a trava do disco\n");
         fs_force_release();
       } else if (now - first > 3000u) {
-        serial_puts("[guarda] segundo Ctrl+F1 e o mundo segue parado: reiniciando\n");
-        sys_reboot();
+        serial_puts("[guarda] Ctrl+F1 de novo e o mundo segue parado (Ctrl+Alt+Del reinicia)\n");
       }
     }
   }

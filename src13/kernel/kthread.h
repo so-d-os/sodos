@@ -50,6 +50,8 @@ int kt_cpu_threads(int idx);
 
 /* BKL. Os thunks dos k_* chamam enter/leave. */
 void kt_bkl_enter(void);
+/* kt_bkl_enter para codigo do kernel numa kthread (nao le o quadro do thunk). */
+void kt_bkl_enter_kernel(void);
 uint64_t kt_bkl_leave(void);
 /* Mundo: solta o BKL inteiro (antes de entrar num programa) e devolve a
  * profundidade; resume o pega de novo com essa profundidade. */

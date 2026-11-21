@@ -437,6 +437,23 @@ uint64_t nvme_raw_sectors(void) {
   return nv.raw ? nv.ns_secs : 0;
 }
 
+/* Temperatura do SSD (log SMART 02h, bytes 1-2 em kelvin), graus C; -1000
+ * sem SSD ou se o controlador recusou. Usa o buffer do identify (so no init). */
+int nvme_temp_c(void) {
+  uint32_t c[16];
+  unsigned k;
+  if (!nv.raw && nv.state != 1) return -1000;
+  cmd_clear(c);
+  c[0] = 0x02;                       /* Get Log Page */
+  c[1] = 0xFFFFFFFFu;                /* todos os namespaces */
+  set_prp(c, nv.idb, 512u);
+  c[10] = 0x02u | ((512u / 4u - 1u) << 16);
+  if (submit(0, c) != 0) return -1000;
+  k = (unsigned)nv.idb[1] | ((unsigned)nv.idb[2] << 8);
+  if (k < 200u || k > 400u) return -1000;
+  return (int)k - 273;
+}
+
 uint32_t nvme_sectors(void) { return nv.state == 1 ? nv.part_secs : 0; }
 uint64_t nvme_part_lba(void) { return nv.part_lba; }
 const char* nvme_name(void) { return nv.name; }

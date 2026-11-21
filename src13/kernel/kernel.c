@@ -38,6 +38,7 @@ int get_partition_info(uint32_t drive, uint8_t partition_num, uint32_t* lba_star
 int format_fat16(uint32_t drive, uint32_t lba_start, uint32_t total_sectors, const char* volume_label);
 
 #include "visual.h"
+#include "prtscr.h"
 #include "fbcon.h"
 #include "drives.h"
 #include "mm.h"
@@ -49,6 +50,7 @@ int format_fat16(uint32_t drive, uint32_t lba_start, uint32_t total_sectors, con
 #include "vt.h"
 #include "kexports.h"
 #include "smp.h"
+#include "thermal.h"
 #include "env.h"
 #include "bootpak.h"
 /* version.c */
@@ -837,6 +839,15 @@ static int kb_read(unsigned char* sc) {
 }
 
 /* wait = 0: nao espera; devolve 0 se nao ha tecla pronta. */
+/* tick+1 do ultimo get_key(0) sem tecla: um sched_yield logo depois e um
+ * programa esperando tecla em laco (k_trygetc + k_yield, como o TOP). */
+static uint32_t key_poll_t;
+int shell_key_polling(void) {
+  uint32_t t = key_poll_t;
+  key_poll_t = 0;
+  return t && (uint32_t)irq_ticks() + 1u - t <= 1u;
+}
+
 static int get_key(int wait) {
   unsigned char sc;
 
@@ -854,16 +865,25 @@ static int get_key(int wait) {
     /* O teclado e da tela visivel. Ao fundo, cede a vez. */
     if (vt_bg()) {
       cpu_idle(wait ? 1 : 0);
-      vt_yield(wait);
+      if (wait) vt_yield(1);
+      else vt_yield_poll();
       if (!wait) { cpu_idle(0); return 0; }
       continue;
     }
     net_poll();
     if (!kb_read(&sc)) {
-      if (!wait) { cpu_idle(0); return 0; }
+      if (!wait) {
+        cpu_idle(0);
+        key_poll_t = (uint32_t)irq_ticks() + 1u;
+        return 0;
+      }
       kt_bkl_breathe();
       cpu_idle(1);
       vt_idle();
+      /* Em vez de girar: empresta a CPU0 as threads ou para em hlt ate o
+       * proximo tick (1 ms) ou IRQ. Sem o escalonador (kt_up) volta logo. */
+      cpu_idle(0);
+      kt_world_idle(1);
       continue;
     }
     cpu_idle(0);
@@ -903,6 +923,12 @@ static int get_key(int wait) {
     if (!got) return 0;
     break_fire();
     if (sc & 0x80) return 0;
+    /* PrintScreen (E0 2A E0 37): a tela de texto vira PNG, como no WIN.
+     * Nenhum programa recebe a tecla. */
+    if (sc == 0x37) {
+      prtscr_text_save(0, 0);
+      return 0;
+    }
     {
       int c = keymap_ext_char(sc);
       if (c) return c;
@@ -912,6 +938,10 @@ static int get_key(int wait) {
 
   if (sc & 0x80)
     return 0;
+  if (sc == 0x54) {   /* Alt+PrintScreen (SysRq) */
+    prtscr_text_save(0, 0);
+    return 0;
+  }
   if (keymap_kp_nav(sc)) return ext_keys[sc];
   if (sc >= 0x3B && sc <= 0x44) return KEY_F(sc - 0x3A);
   if (sc == 0x57 || sc == 0x58) return KEY_F(sc - 0x57 + 11);
@@ -2191,6 +2221,7 @@ void kmain(const struct BootInfo* bi) {
 
   version_boot_log(); /* \LOG\BOOT.LOG: diz se o kernel mudou desde o boot anterior */
   serial_log_save();  /* \LOG\SERIAL.LOG: o log da COM1, para o PC sem serial */
+  thermal_start();  /* [temp] + D:\LOG\TEMP.LOG */
   vt_init();
   shell_loop();
 }

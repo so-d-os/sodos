@@ -3784,7 +3784,7 @@ static void cons_emit(char ch) {
     cons_refresh();
     return;
   }
-  if (ch < 32 || (unsigned char)ch > 126) return;
+  if ((unsigned char)ch < 32 || (unsigned char)ch == 127) return;
   if (c->ocol == 0) cmd_push(c, "");
   if (c->n < 1) return;
   if (c->ocol >= CMD_COLS - 1) {
@@ -3995,7 +3995,7 @@ static void cmd_paste(struct cmd_con* c) {
   for (k = 0; k < n; k++) {
     char ch = t[k];
     if (ch == '\n' || ch == '\t') ch = ' ';
-    if (ch < 32 || ch > 126) continue;
+    if ((unsigned char)ch < 32 || (unsigned char)ch == 127) continue;
     t[m++] = ch;
   }
   cmd_insert(c, t, m);
@@ -4078,6 +4078,16 @@ static void cmd_tab(struct cmd_con* c) {
   c->sel = 0;
 }
 
+/* Acento que nao combina (~ e x): o keymap devolve o ~ e guarda o x em
+ * keymap_pending(). No WIN o x vira uma tecla a mais no proximo giro do laco
+ * (win_pend). Antes ele sumia aqui e reaparecia depois no prompt do DOS. */
+static int win_pend, win_syn;
+static int win_keychar(uint8_t sc) {
+  int c = keymap_char(sc), p = keymap_pending();
+  if (p) win_pend = p;
+  return c;
+}
+
 static int cmd_key(struct wm_win* w, char ch) {
   struct cmd_con* c = (struct cmd_con*)w->st;
   if (!c || c->busy) return 0;
@@ -4107,7 +4117,8 @@ static int cmd_key(struct wm_win* w, char ch) {
     return 0;
   }
   if (ch == '\n' || ch == '\r') return cmd_enter(w);
-  if (ch >= 32 && ch < 127) {
+  /* ASCII e o CP850 de 0x80 em diante (ç é ã...): a fonte do WIN e CP850 */
+  if ((unsigned char)ch >= 32 && (unsigned char)ch != 127) {
     cmd_del_sel(c);
     cmd_insert(c, &ch, 1);
   }
@@ -4876,6 +4887,7 @@ struct gui_task {
   uint64_t rsp;
   struct mod_cpu cpu;
   struct wm_win* run;
+  int logout;          /* SET PRODUCTION=1: sem janela, a saida vai ao log (Ctrl+F12) */
   struct cmd_con* con; /* aberto pelo Command: escreve la, nao numa janela propria */
   struct con_tty* tty; /* tela de texto e teclas do programa do Command */
   int (*cmd)(int, char**); /* comando interno (EDIT) em vez de .EXE */
@@ -4884,6 +4896,7 @@ struct gui_task {
   int con_row, con_col;
   uint8_t* stack;
   uint8_t* xs_raw;     /* SSE/AVX salvos na preempcao (kmalloc, alinhado em uso) */
+  uint32_t poll_t;     /* tick+1 do ultimo k_trygetc vazio (0 = nenhum): ver gui_coop_pause */
   char path[80];
   char args[TASK_ARGBUF]; /* argc textos seguidos, cada um com o seu NUL */
 };
@@ -5081,13 +5094,18 @@ static int tty_key(int wait) {
       k = y->kq[y->kr];
       y->kr = (y->kr + 1) % TTY_KQ;
       y->kn--;
+      gtasks[task_cur].poll_t = 0;
       return k;
     }
     if (y->gone) return -1;
     gui_yield(WAKE_POLL);
     if (!wait) {
       y = tty_cur();
-      if (!y || y->kn == 0) return (y && !y->gone) ? 0 : -1;
+      if (!y || y->kn == 0) {
+        /* sem tecla: um k_yield logo em seguida e espera, nao calculo */
+        gtasks[task_cur].poll_t = (uint32_t)irq_ticks() + 1u;
+        return (y && !y->gone) ? 0 : -1;
+      }
     }
   }
 }
@@ -5146,7 +5164,7 @@ static int tty_key_of(uint8_t sc, int e0, int kp) {
   if (sc >= 0x3B && sc <= 0x44) return KEY_F(sc - 0x3A);
   if (sc == 0x57 || sc == 0x58) return KEY_F(sc - 0x57 + 11);
   {
-    int c = keymap_char(sc);
+    int c = win_keychar(sc);
     if (c && kbd_ctrl_down()) {
       int l = c | 0x20;
       if (l >= 'a' && l <= 'z') return l - 'a' + 1;
@@ -5851,7 +5869,7 @@ static int gui_key_event(uint8_t data, int* key) {
     int k = (was_e0 || keymap_kp_nav(data)) ? gui_key_ext(data) : 0;
     gui.e0 = 0;
     if (!k) {
-      int c = was_e0 ? keymap_ext_char(data) : keymap_char(data);
+      int c = was_e0 ? keymap_ext_char(data) : win_keychar(data);
       k = c;
       if (c == '\n') k = '\r';
     }
@@ -5889,6 +5907,8 @@ static void console_attach(struct gui_task* t) {
     run_row = t->con_row;
     run_col = t->con_col;
     kexp_set_console_hook(run_add);
+  } else if (t->logout) {
+    kexp_set_console_hook(syslog_putc);
   }
 }
 
@@ -5912,9 +5932,18 @@ static void gui_yield(int wake) {
   console_attach(&gtasks[task_cur]);
 }
 
+/* k_yield de uma tarefa do WIN. Logo depois de um k_trygetc vazio (mesmo
+ * tick ou o seguinte) e um programa esperando tecla em laco (TOP): cede como
+ * WAKE_POLL, e o laco do WIN pode emprestar a CPU0 (hlt) em vez de girar.
+ * Quem calcula entre um e outro (mais de 1 ms) continua WAKE_BUSY. */
 int gui_coop_pause(void) {
+  struct gui_task* t;
+  int wake = WAKE_BUSY;
   if (task_cur < 0 || !host_on || kt_in_thread()) return 0;
-  gui_yield(WAKE_BUSY);
+  t = &gtasks[task_cur];
+  if (t->poll_t && (uint32_t)irq_ticks() + 1u - t->poll_t <= 1u) wake = WAKE_POLL;
+  t->poll_t = 0;
+  gui_yield(wake);
   return 1;
 }
 
@@ -6541,6 +6570,11 @@ static void task_entry(void) {
     win_api_dirty = 1;
   }
   if (t->run && t->run->used && t->run->st) wm_run_status(t->run, rc);
+  if (t->logout && rc != 0) {
+    serial_puts("[visual] producao: ");
+    serial_puts(t->path);
+    serial_puts(" falhou, veja Ctrl+F12\n");
+  }
   t->wake = WAKE_DEAD;
   mod_cpu_load(&host_cpu);
   ctx_switch(&t->rsp, host_rsp);
@@ -6641,8 +6675,10 @@ static int task_spawn(struct wm_win* wins, int* focus, int big, const char* path
   t = &gtasks[ti];
   t->used = 1;
   t->wake = WAKE_NONE;
+  t->poll_t = 0;
   t->gid = -1;
   t->run = 0;
+  t->logout = 0;
   t->con = con;
   t->tty = 0;
   t->cmd = task_pending_cmd;
@@ -6672,7 +6708,11 @@ static int task_spawn(struct wm_win* wins, int* focus, int big, const char* path
   }
   wm_copy_str(t->path, (int)sizeof(t->path), path ? path : "");
   task_set_args(t, argc, argv);
-  if (!con) {
+  if (!con && syslog_production()) {
+    /* Producao: nada de janela de saida (o WINE abre varios filhos com
+     * --wine-spawn=N); o texto e o codigo de saida ficam no Ctrl+F12. */
+    t->logout = 1;
+  } else if (!con) {
     i = wm_new_run_window(wins, big, path, owner);
     if (i >= 0) t->run = &wins[i];
   }
@@ -6820,8 +6860,17 @@ static void wm_exec_sox(struct wm_win* wins, int* focus, int big, const char* pa
     serial_puts("[visual] programa ocupado, sem outro por cima\n");
     return;
   }
-  i = wm_new_run_window(wins, big, path, owner);
   int rc;
+  if (syslog_production()) {   /* sem janela: saida e codigo no Ctrl+F12 */
+    kexp_set_console_hook(syslog_putc);
+    gui_session(1);
+    rc = mod_exec(path, argc, argv);
+    if (!host_on) gui_session(0);
+    kexp_set_console_hook(0);
+    (void)rc;
+    return;
+  }
+  i = wm_new_run_window(wins, big, path, owner);
   if (i < 0) return;
   kexp_set_console_hook(run_add);
   gui_session(1);
@@ -10431,7 +10480,15 @@ static int win_wm_run(void) {
       uint8_t scb = 0;
       int from_abs = 0;
       uint32_t prof_p0 = (uint32_t)irq_ticks();
-      int kind = input_poll(packet, &pkt_idx, &scb, &from_abs);
+      int kind;
+      if (win_pend) {               /* a letra que sobrou do acento */
+        win_syn = win_pend;
+        win_pend = 0;
+        kbd_e0 = 0;
+        data = 0x39;                /* scancode qualquer de caractere */
+        goto wm_key;
+      }
+      kind = input_poll(packet, &pkt_idx, &scb, &from_abs);
       prof_poll += (uint32_t)irq_ticks() - prof_p0;
       if (kind < 0) {
         vt_idle();   /* as telas do DOS ao fundo andam */
@@ -11264,6 +11321,8 @@ static int win_wm_run(void) {
     {
       uint8_t sc = data;
       int kp = 0; /* Enter e / do teclado numerico: seguem como tecla comum */
+      int syn = win_syn; /* != 0: tecla que sobrou do acento (win_pend) */
+      win_syn = 0;
       int vt_to;
       /* Ctrl+F1..F12: telas do SO. Ctrl+F7 e esta. */
       vt_to = (!(sc & 0x80) && !kbd_e0 && kbd_ctrl_down()) ? vt_hotkey(sc) : -1;
@@ -11317,7 +11376,7 @@ static int win_wm_run(void) {
       if (desk_ren >= 0) {
         /* nome de icone do desktop em edicao: o teclado e dele */
         if (!(sc & 0x80) && (!kbd_e0 || kp)) {
-          desk_ren_key(kp ? kp : keymap_char(sc));
+          desk_ren_key(syn ? syn : kp ? kp : win_keychar(sc));
           need_draw = 1;
         }
         kbd_e0 = 0;
@@ -11333,7 +11392,7 @@ static int win_wm_run(void) {
           continue;
         }
         if (!(sc & 0x80) && sc != SCANCODE_LSHIFT && sc != SCANCODE_RSHIFT)
-          tty_push(ty, tty_key_of(sc, kbd_e0, kp));
+          tty_push(ty, syn ? syn : tty_key_of(sc, kbd_e0, kp));
         kbd_e0 = 0;
         continue;
       }
@@ -11454,7 +11513,7 @@ static int win_wm_run(void) {
         continue;
       }
       {
-        char c = kp ? (char)kp : (char)keymap_char(sc);
+        char c = syn ? (char)syn : kp ? (char)kp : (char)win_keychar(sc);
         if (c == 27) {
           if (note_dlg) {
             note_dlg = 0;
@@ -11481,7 +11540,7 @@ static int win_wm_run(void) {
             if (ni >= 0) note_dlg_apply(&wins[ni]);
             else note_dlg = 0;
             need_draw = 1;
-          } else if (c >= 32 && c < 127) {
+          } else if ((unsigned char)c >= 32 && (unsigned char)c != 127) {
             note_dlg_insert(c);
             need_draw = 1;
           }
