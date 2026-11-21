@@ -37,6 +37,15 @@ static void scopy(char* d, const char* s, int max) {
 static int ext_of(const char* file, char* out, int max) {
   const char* dot = 0;
   int i, n = 0;
+  /* "https://..." -> "HTTPS": enderecos da internet (o WINE manda o
+   * ShellExecute de URL para ca); no CFG, HTTP,HTTPS=D:\FIREFOX\FIREFOX.EXE */
+  for (i = 0; ((file[i] | 32) >= 'a' && (file[i] | 32) <= 'z') && i < 16; i++) {
+  }
+  if (i >= 2 && file[i] == ':' && file[i + 1] == '/' && file[i + 2] == '/') {
+    for (n = 0; n < i && n < max - 1; n++) out[n] = upc(file[n]);
+    out[n] = 0;
+    return n;
+  }
   for (i = 0; file[i]; i++) {
     if (file[i] == '\\' || file[i] == '/' || file[i] == ':') dot = 0;
     else if (file[i] == '.') dot = file + i + 1;

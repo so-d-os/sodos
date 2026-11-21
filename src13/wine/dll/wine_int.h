@@ -162,7 +162,7 @@ struct wobj {
   uint64_t u1, u2;
 };
 
-#define WHANDLE_MAX 1024
+#define WHANDLE_MAX 4096 /* o renderer do Claude passa de 1000 (threads, secoes, eventos) */
 #define WATEXIT_MAX 64
 #define WVEH_MAX 16
 
@@ -189,6 +189,7 @@ struct wproc {
   int exiting;
   /* saida do processo: a tarefa principal do SODOS espera aqui */
   volatile int exit_req;
+  int unh_reports;              /* exc.c: excecoes ja relatadas sem WINEDEBUG */
   int exit_code;
   /* sincronizacao */
   volatile int lock;            /* protege objetos, handles e regioes */
@@ -221,6 +222,15 @@ struct wproc {
   char* spawn_cmd;
   struct wobj** spawn_inh;      /* handles herdados, tirados no CreateProcess */
   struct wobj* spawn_obj;
+  /* ambiente do processo (bloco UTF-8 "NOME=valor\0...\0"): o que o pai passou
+   * no CreateProcess (lpEnvironment) ou herdou dele; 0 = o conjunto fixo +
+   * variaveis do SODOS (processo de cima) */
+  char* envb;
+  uint32_t envlen;
+  char* spawn_env;              /* para o filho (k_malloc_shared) */
+  char* spawn_dir;              /* lpCurrentDirectory do filho (k_malloc_shared) */
+  HANDLE spawn_std[3];          /* STARTUPINFO hStdInput/Output/Error para o filho */
+  HANDLE std[3];                /* GetStdHandle: 0 = console */
 };
 
 /* Processo corrente: PEB = gs:0x60. */
@@ -263,6 +273,7 @@ int wpipe_write(struct wobj* o, const void* buf, DWORD len, DWORD* done, void* o
 void wpipe_close(struct wobj* o);
 int wpipe_flush(HANDLE h); /* -1 = nao e pipe */
 int wpipe_fileinfo(HANDLE h, int cls, void* buf, DWORD len);
+int wpipe_mode(HANDLE h);
 void wobj_unref(struct wobj* o); /* obj.c */
 /* Handle que e ponteiro (GDI, menu, HSTRING...): so le o "magic" se o
  * endereco pode ser nosso. O Chromium passa valores invalidos de proposito
@@ -298,7 +309,10 @@ HANDLE wh_new(struct wobj* o);
 HANDLE wh_self_process(void); /* obj.c: handle real do proprio processo */
 int wh_is_self(HANDLE h);
 /* proc.c: processos filhos em paralelo (tarefa do WIN) */
-int wspawn_claim(int* argc, char*** argv);   /* no inicio do filho */
+int wspawn_claim(int* argc, char*** argv);
+char* wenv_snapshot(uint32_t* len);
+void wenv_publish(void); /* k32.c: ProcessParameters->Environment no PEB */
+char* wenv_snapshot(uint32_t* len); /* k32.c: bloco do ambiente atual (k_malloc_shared) */   /* no inicio do filho */
 void wspawn_exit(int code);                   /* na saida de qualquer processo */
 DWORD wnew_pid(void);
 void wimg_cache_proc(int delta); /* pe.c */
@@ -341,14 +355,29 @@ int wutf8_to_16(const char* s, int n, wchar16* d, int max);
 char* wdup16to8(const wchar16* s);
 wchar16* wdup8to16(const char* s);
 void* wzalloc(size_t n);
+/* heap do programa (util.c): blocos grandes acima de 4 GB */
+void* wheap_alloc(size_t n);
+void wprof_save(int force);   /* profsave.c: WINEAPPDATA -> WINEAPPSAVE */
+void* wheap_realloc(void* p, size_t n);
+void wheap_free(void* p);
+size_t wheap_size(void* p);
 __attribute__((noreturn)) void wexit(int code);    /* ExitProcess, de qualquer thread */
 
 void WINAPI wine_unimplemented(const char* what);
 void* wine_make_stub(const char* dll, const char* name);
+void* wine_api_stub(const char* dll, const char* name); /* k32.c */
 /* 1 = registra na serial cada GetProcAddress/import que faltou (SET WINEDEBUG=1). */
 extern int wine_debug;
 /* geracao global: objetos (eventos, processos, pipes) sao vistos por varios
  * processos do WINE; quem espera dorme aqui e confere o seu objeto ao acordar */
 extern volatile int wine_gen;
+/* baldes de espera (obj.c): quem espera um objeto dorme no balde dele */
+#define WBUCKETS 64
+int wbucket_of(const void* o);
+void wsignal_obj(const void* o); /* mudou o estado de o */
+void wsignal_global(void);       /* so mensagens/pipes sincronos (esperas globais) */
+void wvm_note(uint64_t a); /* vm.c: estado da pagina (relatorio de excecao) */
+void wgui_proc_exit(void); /* user.c: HWNDs do processo saem do registro global */
+void wurl_world_service(void); /* proc.c: abre o navegador pedido por ShellExecute */
 void wwait_note(const char* what, void* caller, uint64_t waited_ms); /* util.c */
 void wstack_note(const char* what, const uint64_t* sp);

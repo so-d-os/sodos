@@ -92,8 +92,77 @@ static void lista(void) {
   puts_k("  smp win <cpu>             abre o WIN naquela CPU\n");
 }
 
+extern uint64_t prof_buf[];
+extern volatile uint32_t prof_i;
+extern volatile int prof_on;
+int file_save(const char* path, const char* data, int size);
+void serial_puts(const char* s);
+
+/* Grava sozinho: com o sistema travado nao da para digitar "smp prof save".
+ * Uma thread fora da CPU0 grava a cada 60 s em D:\LOG\PROF0..4.BIN (rodizio);
+ * cada arquivo tem os ultimos ~65 s (o anel e preenchido pela interrupcao do
+ * timer, entao o trecho travado entra mesmo que a gravacao atrase). */
+static volatile int prof_saver_word, prof_saver_on;
+static int prof_saver(void* arg) {
+  static char path[] = "D:\\LOG\\PROF0.BIN";
+  int k = 0;
+  (void)arg;
+  while (prof_on) {
+    uint32_t n;
+    kt_futex_wait(&prof_saver_word, 0, 60000);
+    if (!prof_on) break;
+    n = prof_i < 131072u ? prof_i : 131072u;
+    path[11] = (char)('0' + k);
+    k = (k + 1) % 5;
+    kt_bkl_enter();
+    if (file_save(path, (const char*)prof_buf, (int)(n * 8u)) >= 0) {
+      serial_puts("[prof] gravado ");
+      serial_puts(path);
+      serial_puts("\n");
+    }
+    kt_bkl_leave();
+  }
+  prof_saver_on = 0;
+  return 0;
+}
+
 int cmd_smp(int argc, char** argv) {
   int cpu = 0, i;
+  /* smp prof on|off|save: amostra onde as CPUs estao (isr.c) */
+  if (argc >= 3 && seq(argv[1], "prof")) {
+    if (seq(argv[2], "on")) {
+      prof_i = 0;
+      prof_on = 1;
+      if (!prof_saver_on && kt_online_count() >= 2) {
+        prof_saver_on = 1;
+        if (kt_thread_create(prof_saver, 0, 16384, ~1u) <= 0) prof_saver_on = 0;
+      }
+      puts_k("Amostragem ligada: grava sozinha a cada 60 s em D:\\LOG\\PROF0..4.BIN\n");
+      puts_k("(smp prof save grava agora em D:\\LOG\\PROF.BIN).\n");
+      return 0;
+    }
+    if (seq(argv[2], "off")) {
+      prof_on = 0;
+      prof_saver_word = 1;
+      kt_futex_wake(&prof_saver_word, -1);
+      puts_k("Amostragem desligada.\n");
+      return 0;
+    }
+    if (seq(argv[2], "save")) {
+      uint32_t n = prof_i < 131072u ? prof_i : 131072u;
+      const char* path = argc >= 4 ? argv[3] : "D:\\LOG\\PROF.BIN";
+      if (file_save(path, (const char*)prof_buf, (int)(n * 8u)) < 0) {
+        puts_k("Nao consegui gravar.\n");
+        return 1;
+      }
+      puts_k("Gravadas ");
+      put_u(n);
+      puts_k(" amostras em ");
+      puts_k(path);
+      puts_k(".\n");
+      return 0;
+    }
+  }
   if (argc >= 4 && seq(argv[1], "run")) {
     char* d = linha;
     int len = 0;

@@ -22,6 +22,7 @@
 #define FSDRV_ABI 1      /* fsdrv_host e as ops ate space */
 #define FSDRV_ABI_MKDIR 2 /* ops->abi 2: tem mkdir (DLL antigo com 1 continua valendo) */
 #define FSDRV_ABI_WRITE 3 /* ops->abi 3: tambem grava e apaga arquivos */
+#define FSDRV_ABI_RMDIR 5 /* ops->abi 5: tambem remove pasta vazia */
 #define FSDRV_ABI_RENAME 4 /* ops->abi 4: tambem renomeia/move sem copiar */
 #define FSDRV_SYM "fs_driver"
 
@@ -84,6 +85,10 @@ struct fsdrv_ops {
    * -3 to e pasta (ou from e pasta e to existe); -4 somente leitura ou erro
    * de disco; -7 pasta para outra pasta. */
   int (*rename)(void* vol, const char* from, const char* to);
+  /* So com abi >= FSDRV_ABI_RMDIR. Remove uma pasta vazia. Codigos de
+   * fat_rmdir: 0 ok; -1 nao existe; -2 nao esta vazia; -3 e arquivo; -4
+   * somente leitura ou erro de disco. */
+  int (*rmdir)(void* vol, const char* path);
 };
 
 typedef const struct fsdrv_ops* (*fsdrv_entry_fn)(void);

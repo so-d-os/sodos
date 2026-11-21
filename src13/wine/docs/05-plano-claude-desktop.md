@@ -295,3 +295,252 @@ F0 e F1 primeiro: sao baratas e decidem o tamanho do resto (com ou sem F3b).
 - Proximo: desempenho (o laco principal do Electron fica ~850 ms travado a
   cada segundo, segundo o log `event-loop-stall`), clicar "Try again" e testar
   no PC real.
+- **Bancada em Linux com KVM (19/11, noite).** `scripts/claude-vmdisk.sh` monta
+  o disco da VM sem o instalador: baixa o `.msix` "latest" e grava o pacote
+  extraido em `D:\WINE\APPS\Claude_<versao>_x64__pzs8sxrjxfjjc` pelo mcopy
+  (segundos, contra ~47 min do instalador em PIO). `scripts/qmon.py` fala com
+  o monitor do QEMU onde nao ha `nc` (capturas e `vm.sh rips` voltaram).
+  Os scripts de teste (zig) nao sao necessarios: `claude-run.sh` so compila o
+  WINE.DLL.
+- **O Chromium apagava D:\WINE\APPS (o proprio Claude instalado).** O cache de
+  disco falha ("Unable to map Index file"), o Chromium renomeia `GPUCache` para
+  `old_GPUCache_000` e apaga recursivamente; no disco o `old_GPUCache_000` tinha
+  o conteudo de `D:\WINE` (`.` = cluster de `D:\WINE`) e a delecao levou APPS,
+  SYSTEM32, TEMP... Causa: o `fat.c` monta a pasta que vai alterar no buffer
+  estatico `sub_dir` e cede a CPU no meio da gravacao; so os `k_f*` dos
+  programas pegavam a trava do FS, e o carregador de modulos, o `kernel/wine.c`
+  (cabecalho do EXE de cada processo filho), o HOSTS do DNS, o shell etc. liam
+  sem ela e trocavam o `sub_dir`; o `dir_flush` gravava a pasta errada. Agora a
+  trava (`fs_lock`/`fs_unlock`, recursiva por dono) fica em toda entrada
+  publica do `fs/drives.c`; a tela de EXCEPTION grava o CRASH.LOG sem ela
+  (`fs_panic`). O `ffmpeg.dll` "nao encontrado" (erro 126) e as quedas dos
+  filhos eram consequencia disso.
+- **Network Service dado como morto.** O `CreateProcess` volta antes de a
+  tarefa principal registrar o filho (`spawn_async`) e o Chromium duplica os
+  handles do Mojo para ele logo em seguida: o `DuplicateHandle` nao achava o
+  filho e falhava. `wdup_to_child` espera o registro enquanto o pedido daquele
+  filho esta na fila (ate 5 s).
+- **Renderer com ACCESS_VIOLATION na segunda vista de uma secao.** O
+  `vmem_alias` usava o endereco da secao como fisico (memoria baixa 1:1), mas
+  com o VirtualAlloc indo primeiro para a memoria virtual a secao pode estar
+  acima de 1 TB: a PTE recebia um "fisico" alem do limite da CPU. Agora copia o
+  quadro da PTE de origem (commitando se preciso).
+- Resultado: navegador, crashpad, GPU, Network Service e um renderer juntos,
+  sem excecao, a rede recebendo dados e a janela "Claude" aberta (ainda branca
+  aos ~8 min). Disco da VM intacto depois da rodada (conferido com um walker
+  de FAT16 no host). Proximo: desempenho (esperas de SRW de 5 s+ no renderer;
+  `wine_gen` unico acorda todas as threads de todos os processos a cada
+  sinal).
+
+### 2026-11-20: primeiros pixels e esperas por objeto
+
+- **Janela branca: o processo GPU nao conseguia desenhar na janela do
+  browser.** Com `--disable-gpu` o viz (compositor) roda no processo GPU e
+  pinta com `GetDC(hwnd do browser)` + `StretchBlt` + `ReleaseDC` (confirmado
+  no Wine real: ~1100 blits em 5 min, so retangulos de dano). No WINE.DLL o
+  HWND e ponteiro da `struct wwin` do proprio processo; o de outro processo
+  caia no "DC da tela" e o blit sumia. Agora ha um registro global de janelas
+  (`xwins` em `user.c`; o WINE.DLL e uma instancia so e a memoria e um espaco
+  so): `GetDC`/`GetClientRect`/`IsWindow` aceitam HWND alheio; o DC desenha na
+  superficie do dono e o `ReleaseDC` marca `present_pending` no gui do dono.
+  Registro limpo no `win_destroy` e na saida do processo (`wgui_proc_exit`).
+- **`wine_gen` unico -> 64 baldes.** Quem espera um objeto (ou varios no mesmo
+  balde) dorme no futex do balde do endereco; `SetEvent`, `ReleaseMutex`,
+  `ReleaseSemaphore`, timer, fim de thread/processo e post na porta IOCP usam
+  `wsignal_obj(o)` (balde + global). Mensagens, pipes sincronos e o desenho
+  entre processos usam `wsignal_global()`; o resto (`net.c`, pool de threads)
+  continua `wsignal()` (tudo). Contador `waiters` por balde so poupa o
+  `k_futex_wake` (geracao sobe sempre; ordem soma-waiters/le-geracao contra
+  sobe-geracao/le-waiters evita acordar perdido).
+- Medido (KVM, 4 CPUs): do inicio ao 1o renderer 2 min 10 s -> 32 s; 1o quadro
+  na janela 1 min 17 s depois do inicio (antes: nunca). Sem excecao. A janela
+  mostra os botoes do Electron e a barra cinza do topo; o conteudo do
+  claude.ai ainda nao aparece.
+- **Referencia: Wine 11 real no Linux** (WineHQ `wine-stable-amd64` +
+  `wineserver` do pacote `wine-stable` extraido; o Wine 8.0 do Debian nao tem
+  `ProcessPrng` em bcryptprimitives e o Claude para num `int3`). Abre e loga
+  no claude.ai; janela em ~5 s. Rastro com
+  `WINEDEBUG=+pid,+bitblt,+dc,+win`.
+- Relatorio de excecao do WINE agora diz se o acesso era leitura/escrita e o
+  estado da pagina (reserva, commit, protecao) para enderecos >= 1 TB
+  (`wvm_note`), para o proximo crash na vista repetida de secao.
+- Proximo: por que o conteudo do claude.ai nao chega (o renderer da pagina
+  sai com 0 pelo retorno do `main`: o browser o dispensou?), comparar com o
+  rastro do Wine real.
+- **Conteudo do claude.ai chegou a janela** (rodada 01:12): o renderer 300
+  carrega o claude.ai e sai com 0 (troca de processo normal do Chromium pelo
+  COOP; o 308 assume), o JS da pagina inicializa (DatadogRUM, hCaptcha) e aos
+  ~5 min o compositor apresenta o menu (≡) e o botao escuro da tela de login.
+  So 5 quadros no total (`ReleaseDC de janela alheia`): o viz so desenha com
+  dano, nao e falta de BeginFrame. O gargalo e o tempo da pagina no renderer
+  (Wine real: ~5 s).
+- `CreateDCW`/`CreateDCA` implementados (DC da tela); antes devolviam 0.
+- O `--vmodule` chega aos filhos mas o Electron oficial nao tem VLOG.
+- Processos no Wine real (+process): crashpad, GPU, Network, 4 renderers,
+  `node.mojom.NodeService` (utilityProcess do app), mais 1 renderer, audio e
+  video. No SODOS o NodeService ainda nao tinha subido quando a pagina
+  apareceu.
+
+### 2026-11-20 (madrugada): desempenho do kernel e textos
+
+- **Amostragem das vCPUs** (`info registers -a` pelo monitor, 300 vezes;
+  simbolizado com `addr2line -f -e kernel.elf`): a CPU0 passava ~70% em
+  `drain_locked` (`kernel/ps2in.c`: `inb 0x64` a cada "tem tecla?" do laco do
+  WIN; numa VM cada inb e saida para o QEMU) segurando o BKL, e as threads do
+  Claude esperavam em `bkl_take`. Correcoes: com IRQ1/IRQ12 ligadas o
+  `ps2in_pump` le o 8042 no maximo a cada 20 ms; o laco do WIN ocioso (sem
+  entrada, sem tarefa com evento/ocupada, nada a desenhar) chama
+  `kt_world_idle(1)` (`world_lend`: solta o BKL e empresta a CPU0) em vez de
+  girar com `pause`.
+- **Disco**: o cache HTTP do Chromium em D: (ATA por PIO, cli + BKL) parava o
+  WIN a cada gravacao. O Electron ignora `--disk-cache-dir`; o WINE.DLL ganhou
+  `SET WINEAPPDATA=Z:\WINEAPP` (AppData do perfil em outra pasta; o
+  claude-run.sh liga por padrao, `APPDATA_DIR=` desliga). O SET do SODOS corta
+  antes de 250 caracteres: o claude-run.sh divide os argumentos em partes de
+  200.
+- Resultado: 1o renderer 8 s, 1o quadro 17 s, tela de login ~1 min (antes:
+  2 min, nunca, ~10 min).
+- **Textos sumidos**: no renderer as fontes do sistema chegam pelo
+  `DWriteFontCollectionProxy` do Chromium: `CreateCustomFontCollection` (vtable
+  4, chave da familia) com arquivos de `CreateCustomFontFileReference` no
+  loader dele. Os dois devolviam E_NOTIMPL; agora le cada arquivo pelo stream
+  do loader do app (`foreign_load`, reconhece o mesmo arquivo pelo conteudo) e
+  devolve uma colecao so com as familias. Rastro do Wine real (`+dwrite`)
+  mostrou o resto que o Chromium usa: IDWriteFactory2 (CreateGlyphRunAnalysis
+  v2), IDWriteFontFace1..5 (QIs recusados ainda; o texto sai sem eles).
+- **ACCESS_VIOLATION do renderer saindo** (rva 0x240b428, escrita "fora de
+  qualquer reserva"): o `wexit` soltava as vistas (e a reserva da vista
+  repetida) com a thread de E/S do Mojo ainda escrevendo. Agora as vistas de
+  quem sai vao para uma lista e so sao soltas 10 s depois; a reserva da vista
+  repetida fica com o kernel (`vmem_release_pid`).
+- Logs novos (WINEDEBUG=2): DirectWrite textura/contorno/QI recusado,
+  `UnmapViewOfFile: solta vista repetida`, `[vmem] release de reserva alheia`,
+  `[vmem] fim do pid`, `ReleaseDC de janela alheia, quadros`.
+- Proximo: QIs do DirectWrite (Factory2, FontFace1..5), `CreateTextFormat` no
+  browser, consoles do Claude.exe tapando a janela, ATA sem cli/BKL.
+- **Login (2026-11-20, 02:xx)**: o browser caiu (int3, `rva 0x6c80952`) enquanto
+  se digitava o e-mail: `SHGetSpecialFolderPathW` faltava e o gancho de falha de
+  delay-load do Chromium aborta. Implementados `SHGetSpecialFolderPathW/A`.
+- **Nomes longos**: export novo `k_dir_long` (kexports.c; `struct k_direntl`
+  com name[256] em so.h): lista com drives_items e troca cada apelido NOME~N
+  pelo nome longo (drives_long_name). `FindFirstFileW` do WINE usa ele. O
+  k_dir antigo (name[32]) fica igual para os EXEs ja compilados. Limites como
+  no Windows: nome 255, caminho 260 (DRV_PATH); `\\?\` ja era tirado no wpath.
+- O Claude recusa abrir com `--log-net-log` ("refusing to start - a debugging
+  or network-override switch is present"): sem NetLog do Chromium.
+- **"Couldn't finish loading ... allow assets-proxy.anthropic.com"**: o shell do
+  app desiste quando o claude.ai demora. Na rodada medida: 6,1 MB em ~80 s
+  (~76 KB/s) entre o documento e os assets; e um "DNS falhou: claude.ai" com
+  duas threads resolvendo juntas. `GetAddrInfoW` agora serializa o `k_dns` e
+  tenta 3 vezes. Proximo: vazao da rede (NE2000 por PIO + slirp + poll de 5 ms
+  do wnet_poll); as conexoes vao uma por vez para 160.79.104.10:443.
+- **MSG_PEEK** (a causa do "Couldn't finish loading" e do erro de conexao no
+  login): `recv(..., MSG_PEEK)` do WINE ignorava a flag e consumia o byte. O
+  Chromium testa conexoes ociosas assim; com dado pendente (ticket do TLS 1.3,
+  PING do HTTP/2) o registro TLS seguinte chegava quebrado, a conexao caia e o
+  claude.ai abria uma nova por recurso (53 conexoes abertas e fechadas, ~76
+  KB/s). Agora usa o peek do kernel (`k_sock_recv(..., 1)`); FIONREAD tambem.
+  Depois: 10 conexoes, nenhuma fechada cedo, tela de login inteira.
+- **Notebook (boot pelo GRUB, F8)**: `make version` + `make real` + `make send`
+  (build 11). No SSD (D:): `CLAUDE.EXE` = instalador oficial (267 MB, PE32,
+  baixado de api.anthropic.com/api/desktop/win32/x64/exe/latest/redirect),
+  pacote ja extraido em `D:\WINE\APPS\Claude_5.11492.5.0_x64__pzs8sxrjxfjjc`,
+  `D:\INSTCLAU.BAT` (roda o instalador) e `D:\RODACLAU.BAT` (abre o
+  instalado), os dois com os SET da bancada e WINEAPPDATA=Z:\WINEAPP.
+- Notebook: o Firefox do SSD ja e o build mais recente (FIREFOX.EXE de
+  2026-11-16, 7390 arquivos iguais no make send). `D:\AUTOEXEC.BAT` ganhou
+  `set FIREFOX_WORKFOLDER=D:\USER\DEFAULT\FIREFOX` (HOME/perfil, cache e
+  TEMP do Firefox; o port cria as pastas). O AUTOEXEC.BAT do SSD nao vem do
+  repositorio (make send nao o sobrescreve).
+- **Primeiro teste no notebook (build 12, 2026-11-19 23:4x)**: o instalador
+  oficial `CLAUDE.EXE` e PE32 (32 bits) e o WINE.DLL so roda x64 ("programa de
+  32 bits (ainda nao suportado)"): INSTCLAU.BAT nao serve por ora. Com o
+  RODACLAU.BAT o browser cai logo na partida (nao acontece na VM): o crashpad
+  handler recebe o pedido de dump, chama NtSuspendProcess (sem
+  implementacao) e ReadProcessMemory, falha e sai com 0xFFFF7002; o browser,
+  sem resposta, sai com 0xFFFF7001 ("crash server did not respond,
+  self-terminating"). Diferenca visivel no log: o notebook chama
+  `IsUserCetAvailableInEnvironment` (CPU com CET), a VM nao. O SERIAL.LOG do PC
+  real guarda so os primeiros 192 KB (serial.c SLOG_MAX), entao WINEDEBUG=2 nao
+  serve la; agora as 3 primeiras excecoes que vao ao filtro do programa saem
+  sempre (rip, modulo, rva, pilha), sem WINEDEBUG.
+- **Segundo teste no notebook (build 12)**: chegou a todos os processos, mas
+  em ~25 min (cada filho levava minutos para subir) e depois tudo fechou: o
+  browser chamou `CreateRemoteThread` (o Chromium forca o dump de um renderer
+  que nao responde, DumpAndCrashTargetProcess) e o stub de funcao ausente
+  encerrava o processo (0xC0000139), levando os filhos junto. Agora
+  CreateRemoteThread(Ex) cria a thread no proprio processo e recusa outro
+  processo com ERROR_ACCESS_DENIED.
+- **Lentidao no notebook = FAT32.DLL**: uma so posicao de leitura e uma so
+  janela da FAT (16 KB). Com varios processos lendo arquivos grandes
+  (Claude.exe 250 MB, app.asar, .pak) a posicao se perdia a cada chamada e
+  cada leitura andava a cadeia desde o primeiro cluster, recarregando a janela.
+  Agora: 8 posicoes por arquivo (fim e comeco da ultima leitura), e um cache
+  so de leitura de 4 janelas de 16 KB para o fat_next (zerado a cada
+  fat_set). Teste no host (2 arquivos de 120/90 MB lidos intercalados, 6000
+  leituras de 64 KB): FAT lida 320 MB -> 12 MB, total 742 -> 410 MB, dados
+  conferidos; escrita/rename/remove + fsck.fat ok. Build 13 no SSD.
+- **Amostrador de CPU no kernel** (`smp prof on|off|save`, isr.c + cmd_smp.c):
+  a cada tique (LAPIC 4 ms; PIT da CPU0 1 a cada 4) guarda cpu<<56 | pid<<48
+  | rip num anel de 131072; com `on` uma thread fora da CPU0 grava sozinha a
+  cada 60 s em D:\LOG\PROF0..4.BIN (o sistema travado nao deixa digitar). O
+  RODACLAU.BAT liga. Analise: profan.py (nm do ELF certo: kernel.elf na VM,
+  kernel_multiboot.elf no notebook).
+- **Causa da lentidao no notebook (build 15)**: CPU0 99,9% em `bkl_take` e as
+  outras em `kt_tlb_shootdown`. Quem tinha o BKL alterava paginas
+  (VirtualAlloc/Protect) e esperava a confirmacao da TLB de todas as CPUs; a
+  CPU0 esperava o BKL com interrupcoes desligadas e nao atendia a IPI, entao o
+  dono girava ate o limite (50M voltas, segundos no hardware real) a cada
+  operacao. `kt_tlb_poll()` atende pedido pendente de limpeza sem a IPI, nos
+  lacos do `bkl_take` e do proprio `kt_tlb_shootdown`.
+- **DirectWrite v2/v3** (o browser aborta sem eles): CHECK(factory2_) no
+  MapCharacters do proxy de fontes -> IDWriteFactory1/2 (GetSystemFontFallback
+  com MapCharacters sobre as fontes carregadas, FontFallbackBuilder,
+  CreateGlyphRunAnalysis v2 com tons de cinza); CHECK(factory3_) no
+  InitializeDirectWrite -> IDWriteFactory3 (so analise/params; conjuntos de
+  fontes E_NOTIMPL, que o Chromium aceita). `CreateNumberSubstitution`
+  devolvia E_NOTIMPL e o browser recursava ate estourar a pilha: tudo em ring
+  0, a VM reiniciava (triple fault). Na VM: login com todos os textos, sem
+  queda. Build 16 no SSD.
+- **Build 17 (login no notebook)**: (1) tecla `.` e pontuacao: vk_of mandava o
+  ASCII como VK ('.' = VK_DELETE, '!' = VK_PRIOR...); agora VK_OEM_* e os
+  digitos para os simbolos com Shift. (2) URL no ShellExecute (login abre o
+  navegador): a thread enfileira e a tarefa principal chama k_open_file (o
+  LINKEXT entende `esquema://` como extensao: `HTTP,HTTPS=D:\FIREFOX\FIREFOX.EXE`
+  no LINKEXT.CFG / "Abrir com"); sem associacao, SET WINEBROWSER ou o Firefox
+  do SODOS. O argumento do programa aberto pelo WIN passou de 128 para 2048
+  bytes. (3) Ctrl+V: o WINE pede k_gui_clip(1), Ctrl+letra vira Ctrl+tecla
+  com GetKeyState de verdade (estado atualizado ao tirar a mensagem da fila),
+  e o clipboard do WINE e o do SODOS (k_clip_get/set, UTF-16 para o
+  programa; sequencia muda com o conteudo).
+- **Login com Google ate o Firefox (2026-11-20, VM)**: "Continue with Google"
+  abre `https://claude.com/cai/login/app-google-auth?...` e o Firefox do SODOS
+  mostra o "Sign in with Google" (accounts.google.com). Corrigido:
+  (1) o Electron (`shell.openExternal`) manda a URL entre aspas
+  (`"https://..."`) e o `is_url` recusava; o ShellExecuteExW tira as aspas.
+  (2) HKCR\http(s)\shell\open\command no registro (o comando e so para
+  constar). (3) O navegador vem SO do LINKEXT (`SET LINKEXT=1` +
+  `HTTP,HTTPS=D:\FIREFOX\FIREFOX.EXE` no LINKEXT.CFG; content/LINKEXT.CFG ja
+  traz a linha); sem associacao, `SET WINEBROWSER` ou aviso no console (sem
+  caminho fixo do Firefox). (4) WIN: TASK_MAX 8 -> 16, GUI_MAX 8 -> 16,
+  WM_MAX 12 -> 24 — os 6+ processos do Claude enchiam a tabela e o Firefox
+  nao abria ("janelas de programa cheias"). (5) Kernel: `add_to_history`
+  copiava sem limite para a entrada de 128 bytes; o `SET WINE_ARGS=` de ~200
+  caracteres do claude-run.sh transbordava em `mem_file_count` e o kernel
+  caia em `find_mem_file` (#PF, CR2 0x240000000). (6) claude-run.sh: opcoes
+  padrao sem `--single-process` (CHECK na partida, F1) e `SET LINKEXT=1`.
+  Depois do clique o claude.ai tambem mostra um CAPTCHA na janela do Claude.
+- **Captcha (hCaptcha) com imagens (20/11/2026, VM).** As imagens ficavam em
+  branco porque o renderer caia com 0xe0000008 (sem memoria) em
+  `AllocateLockedDiscardableMemoryWithRetryOrDie`: o navegador criava a secao
+  de 4 MB do `DiscardableSharedMemory`, mas o `VirtualQuery` numa vista de
+  `MapViewOfFile` respondia MEM_FREE com base 0, o `mapped_size()` saia
+  absurdo e a alocacao era recusada. Correcoes:
+  - `VirtualQuery` responde as vistas de secao (base, tamanho, MEM_MAPPED;
+    `wview_query` em map.c);
+  - heap do programa (`wheap_*` em util.c): malloc/HeapAlloc/GlobalAlloc/
+    CoTaskMemAlloc/IMalloc com blocos >= 64 KB acima de 4 GB (k_hmalloc);
+  - log: falha de commit no VirtualAlloc, enderecos recusados e, em excecao,
+    pilha pelo unwind (.pdata) a partir de varios retornos candidatos;
+  - `vm.sh keys` digita "@"; `NETFWD` abre portas extras (o Claude recusa
+    `--remote-debugging-port`).

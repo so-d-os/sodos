@@ -215,9 +215,15 @@ int fs_held_by_me(void) { return fs_depth > 0 && fs_owner == fs_me(); }
 void fs_force_release(void) {
   if (fs_depth) fs_steal("tecla de emergencia");
 }
-static void fs_enter(void) {
-  int me = fs_me();
-  uint64_t t0 = irq_ticks();
+/* Tela de EXCEPTION (isr.c, CRASH.LOG): o mundo vai parar; grava sem trava. */
+volatile int fs_panic;
+/* Publica (drives.h): o drives.c pega a trava em toda entrada; recursiva. */
+void fs_lock(void) {
+  int me;
+  uint64_t t0;
+  if (fs_panic) return;
+  me = fs_me();
+  t0 = irq_ticks();
   while (fs_depth && fs_owner != me) {
     if (fs_owner >= 0x100000 && !kt_thread_alive(fs_owner - 0x100000)) {
       fs_steal("dona morta");
@@ -236,14 +242,16 @@ static void fs_enter(void) {
   fs_owner = me;
   fs_depth++;
 }
-static void fs_leave(void) {
-  if (fs_owner != fs_me()) return; /* a trava foi retomada de quem chama */
+#define fs_enter fs_lock
+void fs_unlock(void) {
+  if (fs_panic || fs_owner != fs_me()) return; /* a trava foi retomada de quem chama */
   if (fs_depth > 0 && --fs_depth == 0) {
     fs_owner = 0;
     fs_gen++;
     kt_futex_wake(&fs_gen, -1);
   }
 }
+#define fs_leave fs_unlock
 static int k_fsize(const char* path) {
   int rc;
   fs_enter();
@@ -316,6 +324,61 @@ static int k_dir(const char* path, struct dir_item* out, int max) {
   fs_enter();
   rc = drives_items(path, out, max);
   fs_leave();
+  return rc;
+}
+
+/* Como k_dir, mas com o nome longo inteiro (ate 255): a k_dirent tem
+ * name[32] (ABI dos EXEs ja compilados) e nomes maiores voltam como o apelido
+ * 8.3 (NOME~1). Aqui cada apelido e trocado pelo nome longo (drives_long_name).
+ * Para o WINE (FindFirstFile): o Chromium cria pastas com GUID de 36
+ * caracteres e depois lista e compara os nomes. */
+struct dir_item_long {
+  char name[256];
+  uint32_t size;
+  uint16_t date;
+  uint16_t time;
+  uint8_t dir;
+  uint8_t pad[3];
+};
+static int k_dir_long(const char* path, struct dir_item_long* out, int max) {
+  struct dir_item* tmp;
+  int rc, i;
+  if (!path || !out || max <= 0) return -1;
+  tmp = (struct dir_item*)umalloc_owned((uint32_t)sizeof(*tmp) * (uint32_t)max, 0);
+  if (!tmp) return -1;
+  fs_enter();
+  rc = drives_items(path, tmp, max);
+  for (i = 0; i < rc; i++) {
+    struct dir_item_long* o = &out[i];
+    int k, pl = 0;
+    for (k = 0; k < 31 && tmp[i].name[k]; k++) o->name[k] = tmp[i].name[k];
+    o->name[k] = 0;
+    o->size = tmp[i].size;
+    o->date = tmp[i].date;
+    o->time = tmp[i].time;
+    o->dir = tmp[i].dir;
+    o->pad[0] = o->pad[1] = o->pad[2] = 0;
+    for (k = 0; tmp[i].name[k]; k++)
+      if (tmp[i].name[k] == '~') break;
+    if (!tmp[i].name[k]) continue; /* sem ~: ja e o nome inteiro */
+    {
+      char full[DRV_PATH + 40];
+      char longn[256];
+      while (path[pl] && pl < DRV_PATH - 1) {
+        full[pl] = path[pl];
+        pl++;
+      }
+      if (pl && full[pl - 1] != '\\') full[pl++] = '\\';
+      for (k = 0; tmp[i].name[k] && pl < (int)sizeof(full) - 1; k++) full[pl++] = tmp[i].name[k];
+      full[pl] = 0;
+      if (drives_long_name(full, longn, (int)sizeof(longn)) == 0 && longn[0]) {
+        for (k = 0; k < 255 && longn[k]; k++) o->name[k] = longn[k];
+        o->name[k] = 0;
+      }
+    }
+  }
+  fs_leave();
+  ufree(tmp);
   return rc;
 }
 
@@ -531,11 +594,15 @@ static void* k_malloc_aligned(uint32_t n, uint32_t align) { return umalloc_align
 static void k_free(void* p) { ufree(p); }
 /* Memoria sem dono (do kernel): sobrevive ao processo que pediu. Para o que
  * dois processos dividem (pipes do WINE.DLL); quem pediu tem de soltar. */
-static void* k_malloc_shared(uint32_t n) { return umalloc_owned(n, 0); }
+static void* k_malloc_shared(uint32_t n) { return umalloc_owned(n, WINE_SHARED_OWNER); }
 static void k_free_shared(void* p) { ufree(p); }
 /* RAM acima de 4 GB (so programas de 64 bits enxergam). Teto: SET HIMEM. */
 static void* k_hmalloc(uint64_t n, uint64_t align) { return hm_user_alloc(n, align, um_owner()); }
 static void k_hfree(void* p) { hm_user_free(p); }
+/* Encerra a forca um programa (pid) ou, com all=1, todos menos os de inicio
+ * e quem chamou; a memoria dele sai junto (TOP: tecla DEL). Quantos
+ * encerrou; -1 sem WIN, -2 o WIN nao respondeu. */
+static int k_kill(uint32_t pid, int all) { return win_kill(pid, all); }
 static void k_hminfo(uint64_t* quota, uint64_t* used, uint64_t* total_ram) {
   hm_user_info(quota, used, total_ram);
 }
@@ -572,7 +639,20 @@ static uint64_t k_vm_reserve(uint64_t size, uint64_t align, uint64_t at) {
 }
 static int k_vm_commit(uint64_t va, uint64_t size, int prot) { return vmem_commit(va, size, prot); }
 static int k_vm_decommit(uint64_t va, uint64_t size) { return vmem_decommit(va, size); }
-static int k_vm_release(uint64_t va) { return vmem_release(va); }
+static int k_vm_release(uint64_t va) {
+  uint32_t o = vmem_owner(va), me = um_owner();
+  if (o && o != me) { /* reserva de outro processo: quem e? (vista repetida do Claude sumindo) */
+    serial_puts("[vmem] release de reserva alheia va=");
+    serial_hex32((uint32_t)(va >> 32));
+    serial_hex32((uint32_t)va);
+    serial_puts(" dono=");
+    serial_hex32(o);
+    serial_puts(" quem=");
+    serial_hex32(me);
+    serial_puts("\n");
+  }
+  return vmem_release(va);
+}
 static int k_vm_protect(uint64_t va, uint64_t size, int prot, int* old) { return vmem_protect(va, size, prot, old); }
 static int k_vm_query(uint64_t va, struct vmem_info* out) { return vmem_query(va, out); }
 static int k_vm_owns(uint64_t va) { return vmem_owns(va); }
@@ -1093,6 +1173,27 @@ static void ps_name(struct k_proc* p, const char* s) {
   for (; i < 32; i++) p->name[i] = 0;
 }
 
+/* Programas do Windows (tarefas do WIN sem modulo, pelo WINE.DLL) e a
+ * memoria compartilhada do WINE: somados pelo dono do bloco. */
+#define PS_EXTRA 20
+static struct {
+  int n;
+  uint32_t pid[PS_EXTRA];
+  uint64_t bytes[PS_EXTRA];
+} ps_x;
+static void ps_walk_owner(void* arg, int area, uint64_t addr, uint64_t size, int used, uint32_t owner) {
+  int i;
+  (void)arg;
+  (void)area;
+  (void)addr;
+  if (!used || !owner) return;
+  for (i = 0; i < ps_x.n; i++)
+    if (ps_x.pid[i] == owner) {
+      ps_x.bytes[i] += size;
+      return;
+    }
+}
+
 static struct ps_acc ps_tmp;
 
 /* Programas, DLLs, partes do kernel e servicos. Devolve quantos gravou. */
@@ -1116,6 +1217,42 @@ static int k_ps(struct k_proc* out, int max) {
     p->data_kb = to_kb(ps_tmp.data[i]);
     p->refs = (uint32_t)m->refs;
     p->pad = 0;
+  }
+  { /* tarefas do WIN sem modulo proprio: EXEs do Windows (Claude, ...) */
+    static char nm[PS_EXTRA][32];
+    static uint32_t pids[PS_EXTRA];
+    int t = win_task_list(nm, pids, PS_EXTRA - 1), j, k;
+    ps_x.n = 0;
+    for (j = 0; j < t; j++) {
+      int dup = 0;
+      for (k = 0; k < top_nmod; k++)
+        if (!top_mod[k].is_dll && top_mod[k].pid == pids[j]) dup = 1;
+      if (!dup) ps_x.pid[ps_x.n++] = pids[j];
+    }
+    ps_x.pid[ps_x.n++] = WINE_SHARED_OWNER;
+    for (j = 0; j < ps_x.n; j++) ps_x.bytes[j] = 0;
+    mm_walk(ps_walk_owner, 0);
+    for (j = 0; j < ps_x.n && n < max; j++) {
+      uint32_t pid = ps_x.pid[j];
+      if (pid == WINE_SHARED_OWNER && !ps_x.bytes[j]) continue;
+      p = &out[n++];
+      if (pid == WINE_SHARED_OWNER) {
+        ps_name(p, "WINE (secoes)");
+      } else {
+        const char* nmj = "?";
+        for (k = 0; k < t; k++)
+          if (pids[k] == pid) nmj = nm[k];
+        ps_name(p, nmj);
+      }
+      p->kind = pid == WINE_SHARED_OWNER ? KP_SYS : KP_EXE;
+      p->pid = pid == WINE_SHARED_OWNER ? 0 : pid;
+      p->state = pid == WINE_SHARED_OWNER ? 'S' : 'E';
+      p->base = 0;
+      p->image_kb = 0;
+      p->data_kb = to_kb(ps_x.bytes[j]);
+      p->refs = 0;
+      p->pad = 0;
+    }
   }
   if (n < max) {
     p = &out[n++];
@@ -1294,15 +1431,27 @@ static void k_thread_yield(void) {
   kt_bkl_leave();
 }
 static int k_thread_tls(unsigned long long fs) { return kt_thread_tls(fs); }
+void kt_if_check(const char* onde, uint64_t marca);
 static int k_futex_wait(volatile int* addr, int val, int timeout_ms) {
   int r;
-  if (kt_in_thread()) return kt_futex_wait(addr, val, timeout_ms);
+  if (kt_in_thread()) {
+    kt_if_check("entrada de k_futex_wait, anterior", (uint64_t)(uintptr_t)__builtin_return_address(0));
+    r = kt_futex_wait(addr, val, timeout_ms);
+    kt_if_check("saida de k_futex_wait", (uint64_t)(uintptr_t)__builtin_return_address(0));
+    return r;
+  }
   kt_bkl_enter();
   r = kt_futex_wait(addr, val, timeout_ms);
   kt_bkl_leave();
   return r;
 }
-static int k_futex_wake(volatile int* addr, int n) { return kt_futex_wake(addr, n); }
+static int k_futex_wake(volatile int* addr, int n) {
+  int r;
+  kt_if_check("entrada de k_futex_wake, anterior", (uint64_t)(uintptr_t)__builtin_return_address(0));
+  r = kt_futex_wake(addr, n);
+  kt_if_check("saida de k_futex_wake", (uint64_t)(uintptr_t)__builtin_return_address(0));
+  return r;
+}
 
 /* Excecoes do programa vao para entry (sinais da libc; ver isr.c). 0 desliga. */
 static int k_fault_entry(void* entry) { return isr_fault_set((uint64_t)(uintptr_t)entry); }
@@ -1335,6 +1484,7 @@ static const struct kexp table[] = {
   EXP(k_pwd),
   EXP(k_chdir),
   EXP(k_dir),
+  EXP(k_dir_long),
   EXP(k_getenv),
   EXP(k_setenv),
   EXP(k_fdelete),
@@ -1381,6 +1531,7 @@ static const struct kexp table[] = {
   EXP(k_msize),
   EXP(k_meminfo),
   EXP(k_ps),
+  EXP(k_kill),
   EXP(k_memmap),
   EXP(k_vram),
   EXP(k_cpu_count),

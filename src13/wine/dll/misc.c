@@ -197,8 +197,7 @@ static WINAPI BOOL AttachConsole(DWORD pid) {
 static WINAPI BOOL AllocConsole(void) { return 1; }
 static WINAPI BOOL FreeConsole(void) { return 1; }
 static WINAPI BOOL SetStdHandle(DWORD which, HANDLE h) {
-  (void)which;
-  (void)h;
+  if (which >= (DWORD)-12) wp()->std[(DWORD)-10 - which] = h; /* GetStdHandle passa a devolver */
   return 1;
 }
 

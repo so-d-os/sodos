@@ -86,6 +86,7 @@
 #define K_PGDN 0x105
 #define K_HOME 0x106
 #define K_END 0x107
+#define K_DEL 0x108    /* Delete: encerra o programa escolhido */
 #define K_F(n) (0x140 + (n))
 #define K_ESC 27
 #define K_ENTER '\n'
@@ -123,6 +124,7 @@ void barra(int r, int c, int w, unsigned feito, unsigned total);
 int tecla(int ms);
 /* Caixa com linhas separadas por \n e um botao OK sobre a tela atual. */
 void aviso(const char* titulo, const char* msg);
+int pergunta(const char* titulo, const char* msg);
 
 /* ---------- dados.c ---------- */
 #define MAX_PROC 48

@@ -16,7 +16,10 @@ static const char* const known[] = {
     "bcrypt", "crypt32", "version", "userenv", "psapi", "iphlpapi", "dnsapi", "secur32", "sechost",
     "netapi32", "winhttp", "wintrust", "wtsapi32", "setupapi", "cfgmgr32", "dwmapi", "comctl32",
     "shlwapi", "uxtheme", "imm32", "powrprof", "shcore", "rpcrt4", "msimg32", "gdiplus",
-    "vcruntime140", "vcruntime140_1", "msvcp140", "dwrite", "dxgi", "d3d11", "dcomp", "oleacc", "uiautomationcore", "propsys", "mpr", "ncrypt", "wevtapi", 0};
+    "vcruntime140", "vcruntime140_1", "msvcp140", "dwrite", "dxgi", "d3d11", "dcomp", "oleacc", "uiautomationcore", "propsys", "mpr", "ncrypt", "wevtapi",
+    /* carga atrasada do Claude Code (claude.exe/Bun): sem estas o LoadLibrary
+     * falhava e o delay-load lancava 0xC06D007E logo na partida */
+    "wsock32", "dbghelp", "tdh", "fwpuclnt", 0};
 
 /* sec_syms primeiro: substitui os stubs antigos de seguranca (sys, shell, compat) */
 static const struct wine_sym* const tables[] = {sec_syms, map_syms, nt_syms, pipe_syms, k32_syms, vm_syms,  obj_syms, exc_syms, file_syms,

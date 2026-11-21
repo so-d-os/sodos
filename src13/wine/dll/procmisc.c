@@ -329,6 +329,15 @@ static WINAPI BOOL RegisterWaitForSingleObject(HANDLE* out, HANDLE obj, void* cb
     k_free(r);
     return 0;
   }
+  /* o handle da thread nao volta para o programa: fecha ja (a thread segue).
+   * Antes cada espera registrada vazava um handle; o servico de rede do
+   * Chromium registra uma por evento de soquete e, com a rede lenta, chegava
+   * aos 1024 e caia (captcha sem imagens no notebook). */
+  {
+    typedef BOOL(WINAPI * ch_fn)(HANDLE);
+    ch_fn ch = LOOK(ch_fn, "CloseHandle");
+    if (ch) ch(h);
+  }
   if (wine_debug >= 2) wlogx("espera registrada: objeto ", (uint64_t)(uintptr_t)obj);
   *out = (HANDLE)r; /* o handle da espera e o proprio registro (fica: a thread ainda o le) */
   return 1;
@@ -428,7 +437,11 @@ static WINAPI BOOL K32GetProcessMemoryInfo(HANDLE h, struct procmem* m, DWORD cb
   memset(m, 0, cb);
   m->cb = cb;
   m->ws = m->peak_ws = 64u << 20;
-  m->pagefile = m->priv = 64u << 20;
+  m->pagefile = 64u << 20;
+  /* PrivateUsage so existe na versao _EX (80 bytes). Com cb = 72 gravar aqui
+   * passava 8 bytes do buffer de quem chama: no Bun (process.memoryUsage) era
+   * o stack cookie, e o Claude Code morria com 0xC0000409 */
+  if (cb >= sizeof(struct procmem)) m->priv = 64u << 20;
   return 1;
 }
 static WINAPI BOOL K32GetPerformanceInfo(void* pi, DWORD cb) {

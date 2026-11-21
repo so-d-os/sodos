@@ -304,3 +304,43 @@ void aviso(const char* titulo, const char* msg) {
   }
   memcpy(tela, copia, sizeof tela);
 }
+
+/* Caixa com Sim/Nao: 1 se Enter, S ou Y; 0 se Esc ou N. */
+int pergunta(const char* titulo, const char* msg) {
+  int n = 1, w = tam(titulo) + 8, l = 0, i, r, c, h, sim = 0;
+  const char* p;
+  for (p = msg; *p; p++) {
+    if (*p == '\n') {
+      n++;
+      l = 0;
+    } else if (++l + 8 > w) {
+      w = l + 8;
+    }
+  }
+  if (w < 30) w = 30;
+  if (w > COLS - 4) w = COLS - 4;
+  h = n + 6;
+  r = (ROWS - 1 - h) / 2;
+  c = (COLS - w) / 2;
+  memcpy(copia, tela, sizeof tela);
+  janela(r, c, h, w, titulo);
+  for (i = 0, p = msg; i < n; i++) {
+    int k = 0;
+    while (p[k] && p[k] != '\n') {
+      poe(r + 2 + i, c + 4 + k, (unsigned char)p[k], i == 0 ? C_FORTE : C_JANELA);
+      k++;
+    }
+    p += k;
+    if (*p) p++;
+  }
+  separador(r + h - 3, c, w);
+  botao(r + h - 2, c + w / 2 - 10, "Sim", 1);
+  botao(r + h - 2, c + w / 2 + 3, "Nao", 0);
+  for (;;) {
+    int k = tecla(0);
+    if (k == K_ENTER || k == 's' || k == 'S' || k == 'y' || k == 'Y') { sim = 1; break; }
+    if (k == K_ESC || k == K_EOF || k == 'n' || k == 'N') break;
+  }
+  memcpy(tela, copia, sizeof tela);
+  return sim;
+}

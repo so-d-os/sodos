@@ -260,6 +260,12 @@ uint64_t vmem_reserve_at(uint64_t va, uint64_t size, uint32_t pid) {
   return va;
 }
 
+/* pid dono da reserva de va (0 = nenhuma) */
+uint32_t vmem_owner(uint64_t va) {
+  struct vres* r = (va >= VM_BASE && va < VM_END && res) ? res_of(va) : 0;
+  return r ? r->pid : 0;
+}
+
 int vmem_owns(uint64_t va) { return va >= VM_BASE && va < VM_END && res && res_of(va) != 0; }
 
 static uint64_t prot_bits(int prot) {
@@ -307,8 +313,24 @@ int vmem_alias(uint64_t va, uint64_t phys, uint64_t size, int prot) {
   if (!r || end > r->base + r->size) return 0;
   for (a = va; a < end; a += PG) {
     uint64_t* e = pte_of(a, 1);
+    uint64_t src = phys + (a - va), frame = src;
     if (!e || *e) return 0;
-    *e = (phys + (a - va)) | PTE_C | PTE_ALIAS | prot_bits(prot);
+    if (src >= VM_BASE && src < VM_END) {
+      /* a origem tambem e memoria virtual (VirtualAlloc vai primeiro para ca):
+       * o quadro e o da PTE dela, nao o endereco. Antes a PTE recebia um
+       * "fisico" de 1 TB, acima do limite da CPU, e todo acesso a segunda vista
+       * dava falha de pagina (renderer do Claude: ACCESS_VIOLATION). */
+      uint64_t* se = res_of(src) ? pte_of(src, 1) : 0;
+      if (!se) return 0;
+      if (!(*se & PTE_C)) { /* reservada sem commit: commita para as duas */
+        uint64_t f = frame_get();
+        if (!f) return 0;
+        *se = f | PTE_C | prot_bits(2);
+      }
+      if (*se & PTE_ALIAS) return 0; /* alias de alias: nao */
+      frame = *se & PA_MASK;
+    }
+    *e = frame | PTE_C | PTE_ALIAS | prot_bits(prot);
   }
   tlb_flush();
   return 1;
@@ -428,6 +450,13 @@ void vmem_release_pid(uint32_t pid) {
       res[i].used = 0;
       n++;
     }
+  if (n) {
+    serial_puts("[vmem] fim do pid ");
+    serial_hex32(pid);
+    serial_puts(": reservas soltas ");
+    serial_hex32((uint32_t)n);
+    serial_puts("\n");
+  }
   if (n && !live()) drop_all();
 }
 

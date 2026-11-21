@@ -530,19 +530,23 @@ static WINAPI int __wgetmainargs(int* argc, wchar16*** argv, wchar16*** env, int
 static WINAPI void __set_app_type(int t) { (void)t; }
 
 /* ---------- memoria ---------- */
-static WINAPI void* ms_malloc(size_t n) { return k_malloc((unsigned)(n ? n : 1)); }
-static WINAPI void* ms_calloc(size_t a, size_t b) { return wzalloc(a * b); }
-static WINAPI void ms_free(void* p) {
-  if (p) k_free(p);
+static WINAPI void* ms_malloc(size_t n) { return wheap_alloc(n); }
+static WINAPI void* ms_calloc(size_t a, size_t b) {
+  void* p;
+  if (b && a > (size_t)-1 / b) return 0;
+  p = wheap_alloc(a * b);
+  if (p) memset(p, 0, (a && b) ? a * b : 1);
+  return p;
 }
+static WINAPI void ms_free(void* p) { wheap_free(p); }
 static WINAPI void* ms_realloc(void* p, size_t n) {
   if (!n) {
     ms_free(p);
     return 0;
   }
-  return k_realloc(p, (unsigned)n);
+  return wheap_realloc(p, n);
 }
-static WINAPI size_t ms_msize(void* p) { return k_msize(p); }
+static WINAPI size_t ms_msize(void* p) { return wheap_size(p); }
 static WINAPI void* _aligned_malloc(size_t n, size_t a) {
   return k_malloc_aligned((unsigned)(n ? n : 1), (unsigned)(a < 16 ? 16 : a));
 }

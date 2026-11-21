@@ -120,6 +120,30 @@ static struct wreg* reg_get(void) {
     set_sz(k, "CommonFilesDir", wine_dir("PROGRAM FILES\\COMMON FILES"));
   }
   key_make(r, "hkcu\\software\\microsoft\\windows\\currentversion");
+  {
+    /* navegador padrao: o Electron confere HKCR\<esquema>\shell\open antes do
+     * ShellExecute da URL. O comando e so para constar: quem escolhe o
+     * navegador e o LINKEXT do SODOS (LINKEXT.CFG, HTTP,HTTPS=programa; proc.c) */
+    static const char* const sch[] = {"http", "https", "mailto", 0};
+    int i;
+    char kp[80];
+    for (i = 0; sch[i]; i++) {
+      strcpy(kp, "hkcr\\");
+      strcat(kp, sch[i]);
+      k = key_make(r, kp);
+      if (k) {
+        set_sz(k, "", "URL:Protocol");
+        set_sz(k, "URL Protocol", "");
+      }
+      strcat(kp, "\\shell");
+      key_make(r, kp);
+      strcat(kp, "\\open");
+      key_make(r, kp);
+      strcat(kp, "\\command");
+      k = key_make(r, kp);
+      if (k) set_sz(k, "", "rundll32.exe url.dll,FileProtocolHandler %1");
+    }
+  }
   return r;
 }
 

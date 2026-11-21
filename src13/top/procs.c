@@ -10,7 +10,7 @@
 #define ATUALIZA 2000  /* ms */
 
 static const char* const rotulos[10] = {
-  "Ajuda", "Ordem", "Mapa", "", "Atualiz", "", "", "", "", "Sair"
+  "Ajuda", "Ordem", "Mapa", "", "Atualiz", "", "", "Encerra", "", "Sair"
 };
 
 static int sel, topo;
@@ -163,10 +163,37 @@ static void ajuda(void) {
         "\n"
         "Setas, PgUp, PgDn  escolhem         F2 ou O  troca a ordem\n"
         "Enter              mapa com destaque F3 ou Tab  mapa da memoria\n"
+        "Del ou F8          encerra o programa escolhido e solta a memoria dele\n"
         "F5 ou R            atualiza agora    F10 ou ESC  sai\n"
         "\n"
         "IMAGEM e o codigo carregado; DADOS e malloc e pilha.\n"
         "A lista se atualiza sozinha a cada 2 segundos.");
+}
+
+/* Del/F8: encerra o programa da linha (k_kill) e mostra quanto voltou. */
+static void encerra(void) {
+  const struct proc* p;
+  char msg[200];
+  unsigned antes, depois;
+  int r;
+  if (!n_procs) return;
+  p = &procs[sel];
+  if (p->k.kind != KP_EXE || !p->k.pid) {
+    aviso(" Encerrar ", "So programas (EXE) podem ser encerrados.\nDLLs, kernel e servicos fazem parte do sistema.");
+    return;
+  }
+  sprintf(msg, "Encerrar %s (pid %u)?\nA janela fecha e toda a memoria dele volta ao sistema.", p->k.name, p->k.pid);
+  if (!pergunta(" Encerrar programa ", msg)) return;
+  antes = res.livre_kb;
+  r = k_kill(p->k.pid, 0);
+  dados_le();
+  depois = res.livre_kb;
+  if (r == -1) strcpy(msg, "O WIN nao esta aberto: fora dele so roda o programa da tela.");
+  else if (r == -2) strcpy(msg, "O WIN nao respondeu ao pedido.");
+  else if (r == 0) strcpy(msg, "Nenhum programa encerrado (ja tinha saido?).");
+  else sprintf(msg, "Programas encerrados: %d\nMemoria devolvida: %u MB", r, depois > antes ? (depois - antes) / 1024u : 0u);
+  aviso(" Encerrar ", msg);
+  acha_sel();
 }
 
 int tela_procs(unsigned* destaque) {
@@ -199,6 +226,8 @@ int tela_procs(unsigned* destaque) {
       ajuda();
     } else if (k == K_F(3) || k == K_TAB || k == 'm' || k == 'M') {
       return 1;
+    } else if (k == K_DEL || k == K_F(8)) {
+      encerra();
     } else if (k == K_ENTER) {
       if (n_procs && procs[sel].k.kind == KP_EXE) *destaque = procs[sel].k.pid;
       return 1;

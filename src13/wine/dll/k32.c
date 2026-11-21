@@ -27,7 +27,14 @@ static WINAPI __attribute__((noreturn)) void ExitProcess(DWORD code) {
   wexit((int)code);
 }
 static WINAPI BOOL TerminateProcess(HANDLE h, DWORD code) {
-  if (wh_is_self(h)) wexit((int)code);
+  if (wh_is_self(h)) {
+    if (wine_debug >= 2 || code >= 0xC0000000u) {
+      uint64_t here;
+      wwait_note("TerminateProcess", __builtin_return_address(0), code);
+      wstack_note("TerminateProcess", &here);
+    }
+    wexit((int)code);
+  }
   return 0;
 }
 static WINAPI HANDLE GetCurrentProcess(void) { return H_PROCESS; }
@@ -82,6 +89,7 @@ static WINAPI BOOL GetModuleHandleExW(DWORD flags, const wchar16* name, HANDLE* 
 static WINAPI HANDLE LoadLibraryA(const char* name) {
   struct wmod* m = pe_load(name, 0);
   if (!m) {
+    wlog("LoadLibrary: DLL nao encontrada: ", name ? name : "(nulo)");
     wset_lasterr(ERROR_MOD_NOT_FOUND);
     return 0;
   }
@@ -153,6 +161,15 @@ static int keep_absent(const char* n) {
 static int api_dll(const char* m) {
   return strncmp(m, "kernel32", 8) == 0 || strncmp(m, "kernelbase", 10) == 0 || strncmp(m, "user32", 6) == 0 ||
          strncmp(m, "advapi32", 8) == 0 || strncmp(m, "gdi32", 5) == 0;
+}
+/* pe.c: import estatico que falta numa DLL de sistema vira "devolve 0" (como
+ * no GetProcAddress) em vez do stub que encerra o processo; o Claude Code
+ * (Bun) importa dezenas que nao usa na partida. 0 = nao e DLL de sistema. */
+void* wine_api_stub(const char* dll, const char* name) {
+  char low[24];
+  wlower(low, dll, (int)sizeof(low));
+  if (!api_dll(low) || (uintptr_t)name <= 0xFFFF) return 0;
+  return gen_stub(name, (void*)api_notimpl);
 }
 
 /* Nt* opcionais: quem pede trata NULL (o Go 1.25 so usa os "wait completion
@@ -238,6 +255,8 @@ static WINAPI DWORD GetModuleFileNameW(HANDLE h, wchar16* buf, DWORD n) {
 
 /* ---------- console / arquivos (W0: so console) ---------- */
 static WINAPI HANDLE GetStdHandle(DWORD which) {
+  struct wproc* p = wp();
+  if (which >= (DWORD)-12 && p->std[(DWORD)-10 - which]) return p->std[(DWORD)-10 - which];
   switch (which) {
     case (DWORD)-10: return H_STDIN;
     case (DWORD)-11: return H_STDOUT;
@@ -282,33 +301,34 @@ static WINAPI BOOL HeapDestroy(HANDLE h) {
 static WINAPI void* HeapAlloc(HANDLE h, DWORD fl, size_t n) {
   void* p;
   (void)h;
-  p = k_malloc((unsigned)(n ? n : 1));
-  if (p && (fl & 8)) memset(p, 0, n);
+  p = wheap_alloc(n);
+  if (p && (fl & 8)) memset(p, 0, n ? n : 1);
   if (!p) wset_lasterr(ERROR_NOT_ENOUGH_MEMORY);
   return p;
 }
 static WINAPI BOOL HeapFree(HANDLE h, DWORD fl, void* p) {
   (void)h;
   (void)fl;
-  if (p) k_free(p);
+  wheap_free(p);
   return 1;
 }
 static WINAPI void* HeapReAlloc(HANDLE h, DWORD fl, void* p, size_t n) {
-  size_t old = p ? k_msize(p) : 0;
+  size_t old = p ? wheap_size(p) : 0;
   void* q;
   (void)h;
-  q = k_realloc(p, (unsigned)(n ? n : 1));
+  q = wheap_realloc(p, n);
   if (q && (fl & 8) && n > old) memset((char*)q + old, 0, n - old);
+  if (!q) wset_lasterr(ERROR_NOT_ENOUGH_MEMORY);
   return q;
 }
 static WINAPI size_t HeapSize(HANDLE h, DWORD fl, const void* p) {
   (void)h;
   (void)fl;
-  return k_msize((void*)p);
+  return wheap_size((void*)p);
 }
 static WINAPI void* LocalAlloc(DWORD fl, size_t n) { return HeapAlloc(H_HEAP, (fl & 0x40) ? 8 : 0, n); }
 static WINAPI void* LocalFree(void* p) {
-  if (p) k_free(p);
+  wheap_free(p);
   return 0;
 }
 
@@ -551,13 +571,76 @@ static const struct env_fix env_fixed[] = {
     {"PATH", "SYSTEM32", 1},
     {0, 0, 0}};
 
+/* ---- ambiente do processo (wp()->envb) ---- */
+static int envname_eq(const char* e, const char* name) { /* "NOME=..." x nome, sem caixa */
+  while (*name && *e && *e != '=') {
+    char a = *e, b = *name;
+    if (a >= 'a' && a <= 'z') a = (char)(a - 32);
+    if (b >= 'a' && b <= 'z') b = (char)(b - 32);
+    if (a != b) return 0;
+    e++;
+    name++;
+  }
+  return !*name && *e == '=';
+}
+/* entrada "NOME=valor" no bloco (o '=' inicial de "=C:=C:\" faz parte do nome) */
+static const char* envb_find(const char* name) {
+  struct wproc* p = wp();
+  const char* e;
+  if (!p->envb) return 0;
+  for (e = p->envb; e < p->envb + p->envlen && *e; e += strlen(e) + 1) {
+    const char* s = e + (*e == '=' ? 1 : 0);
+    if (envname_eq(s, name)) return strchr(s, '=') + 1;
+  }
+  return 0;
+}
+static void envb_set(const char* name, const char* val) {
+  struct wproc* p = wp();
+  size_t nl = strlen(name), vl = val ? strlen(val) : 0, cap = p->envlen + nl + vl + 4;
+  char* nb = (char*)k_malloc((unsigned)cap);
+  size_t o = 0;
+  const char* e;
+  if (!nb) return;
+  for (e = p->envb; e && e < p->envb + p->envlen && *e; e += strlen(e) + 1) {
+    const char* s = e + (*e == '=' ? 1 : 0);
+    size_t l = strlen(e);
+    if (envname_eq(s, name)) continue;
+    memcpy(nb + o, e, l + 1);
+    o += l + 1;
+  }
+  if (val) {
+    memcpy(nb + o, name, nl);
+    o += nl;
+    nb[o++] = '=';
+    memcpy(nb + o, val, vl + 1);
+    o += vl + 1;
+  }
+  nb[o++] = 0;
+  k_free(p->envb);
+  p->envb = nb;
+  p->envlen = (uint32_t)o;
+}
+
 static int env_get(const char* name, char* out, int max) {
   int i, len;
+  {
+    const char* v = envb_find(name);
+    if (v) {
+      len = (int)strlen(v);
+      if (len >= max) len = max - 1;
+      memcpy(out, v, (size_t)len);
+      out[len] = 0;
+      return len;
+    }
+    /* com bloco proprio, so o conjunto fixo completa (como o Windows) */
+    if (wp()->envb) goto fixed;
+  }
   /* PATH do SODOS tem outro formato: fica o do conjunto fixo */
   if (!wstreq(name, "PATH")) {
     len = k_getenv(name, out, max);
     if (len >= 0) return len;
   }
+fixed:
   for (i = 0; env_fixed[i].name; i++) {
     const char* v;
     if (!wstreq(name, env_fixed[i].name)) continue;
@@ -598,12 +681,25 @@ static WINAPI DWORD GetEnvironmentVariableW(const wchar16* name, wchar16* buf, D
   return (DWORD)w;
 }
 static WINAPI BOOL SetEnvironmentVariableA(const char* name, const char* v) {
+  if (!name) return 0;
+  if (wp()->envb) {
+    envb_set(name, v);
+    wenv_publish();
+    return 1;
+  }
   return k_setenv(name, v ? v : "") == 0;
 }
 static WINAPI BOOL SetEnvironmentVariableW(const wchar16* name, const wchar16* v) {
   char* n8 = wdup16to8(name);
   char* v8 = v ? wdup16to8(v) : 0;
-  BOOL r = n8 ? k_setenv(n8, v8 ? v8 : "") == 0 : 0;
+  BOOL r;
+  if (n8 && wp()->envb) {
+    envb_set(n8, v8);
+    wenv_publish();
+    r = 1;
+  } else {
+    r = n8 ? k_setenv(n8, v8 ? v8 : "") == 0 : 0;
+  }
   k_free(n8);
   k_free(v8);
   return r;
@@ -621,16 +717,58 @@ static size_t env_add(char* b, size_t o, const char* name) {
   return o + (size_t)len + 1;
 }
 static char* env_block(size_t* size) {
-  char* b = (char*)wzalloc(4096);
+  char* b;
   size_t o = 0;
   int i;
   static const char* const extra[] = {"GODEBUG", "GOMAXPROCS", "GOTRACEBACK", 0};
+  struct wproc* p = wp();
+  if (p->envb) {
+    b = (char*)wzalloc(p->envlen + 2);
+    if (!b) return 0;
+    memcpy(b, p->envb, p->envlen);
+    *size = p->envlen;
+    return b;
+  }
+  b = (char*)wzalloc(4096);
   if (!b) return 0;
   for (i = 0; env_fixed[i].name; i++) o = env_add(b, o, env_fixed[i].name);
   for (i = 0; extra[i]; i++) o = env_add(b, o, extra[i]);
+  /* SET WINEENV=NOME1;NOME2: variaveis do SODOS que entram no ambiente dos
+   * programas do Windows (ex.: CLAUDE_CODE_GIT_BASH_PATH) */
+  {
+    char list[300], nm[64];
+    int n = k_getenv("WINEENV", list, (int)sizeof(list)), k = 0;
+    for (i = 0; n > 0 && i <= n; i++) {
+      char c = i < n ? list[i] : 0;
+      if (c == ';' || c == ',' || c == ' ' || c == 0) {
+        nm[k] = 0;
+        if (k) o = env_add(b, o, nm);
+        k = 0;
+      } else if (k < 63) {
+        nm[k++] = c;
+      }
+    }
+  }
   b[o++] = 0;
   *size = o;
   return b;
+}
+/* proc.c (CreateProcess sem lpEnvironment): o filho herda este ambiente */
+char* wenv_snapshot(uint32_t* len) {
+  size_t n = 0;
+  char* b;
+  char* s;
+  if (!wp()->envb) {
+    *len = 0;
+    return 0; /* o filho usa o padrao, como hoje */
+  }
+  b = env_block(&n);
+  if (!b) return 0;
+  s = (char*)k_malloc_shared((uint32_t)n + 2);
+  if (s) memcpy(s, b, n);
+  k_free(b);
+  *len = (uint32_t)n;
+  return s;
 }
 static WINAPI char* GetEnvironmentStringsA(void) {
   size_t n;
@@ -640,10 +778,27 @@ static WINAPI wchar16* GetEnvironmentStringsW(void) {
   size_t n = 0, i;
   char* b = env_block(&n);
   wchar16* w = (wchar16*)wzalloc((n + 2) * 2);
-  if (b && w)
-    for (i = 0; i < n; i++) w[i] = (uint8_t)b[i];
+  if (b && w) {
+    int m = wutf8_to_16(b, (int)n, w, (int)n + 1);
+    if (m < 0)
+      for (i = 0; i < n; i++) w[i] = (uint8_t)b[i];
+  }
   k_free(b);
   return w;
+}
+/* RTL_USER_PROCESS_PARAMETERS.Environment (+0x80) e EnvironmentSize (+0x3F0):
+ * o Bun (Zig) le o ambiente direto do PEB, sem GetEnvironmentStringsW */
+void wenv_publish(void) {
+  struct wproc* p = wp();
+  uint8_t* pp = (uint8_t*)(uintptr_t) * (uint64_t*)(p->peb + PEB_PARAMS);
+  wchar16* w;
+  size_t n = 0;
+  if (!pp) return;
+  w = GetEnvironmentStringsW();
+  if (!w) return;
+  while (w[n] || w[n + 1]) n++;
+  *(uint64_t*)(pp + 0x80) = (uint64_t)(uintptr_t)w;
+  *(uint64_t*)(pp + 0x3F0) = (uint64_t)(n + 2) * 2;
 }
 /* %NOME% -> valor */
 static WINAPI DWORD ExpandEnvironmentStringsW(const wchar16* src, wchar16* dst, DWORD n) {

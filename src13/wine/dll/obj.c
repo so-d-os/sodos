@@ -67,11 +67,62 @@ void wunlock(void) {
   }
 }
 
+/* ---------- acordar quem espera ----------
+ * wine_gen: geracao global. Antes TODO sinal (SetEvent, post numa porta,
+ * escrita num pipe) acordava todas as threads de todos os processos; com o
+ * Claude (5 processos, ~150 threads, a maioria ociosa num evento ou numa porta
+ * IOCP) cada mensagem do Mojo virava uma manada disputando wlock().
+ *
+ * Agora quem espera UM objeto (ou varios que caem no mesmo balde) dorme no
+ * balde do endereco dele; wsignal_obj(o) acorda so esse balde e o global.
+ * No global ficam as esperas de mensagens (user.c), pipes sincronos e
+ * WaitForMultipleObjects com objetos em baldes diferentes.
+ *
+ * A geracao do balde sobe sempre; waiters so poupa a chamada de acordar.
+ * Quem espera soma waiters ANTES de ler a geracao e quem sinaliza sobe a
+ * geracao ANTES de ler waiters (operacoes __sync, barreira total): um dos
+ * dois ve o outro, entao nao se perde acordar. */
 volatile int wine_gen;
-void wsignal(void) {
+struct wbucket {
+  volatile int gen;
+  volatile int waiters;
+  int pad[14]; /* uma linha de cache por balde */
+};
+static struct wbucket wbk[WBUCKETS];
+int wbucket_of(const void* o) {
+  uint64_t v = (uint64_t)(uintptr_t)o >> 4;
+  return (int)((v * 0x9E3779B97F4A7C15ull) >> 58) & (WBUCKETS - 1);
+}
+static void wake_global(void) {
   __sync_fetch_and_add(&wine_gen, 1);
   k_futex_wake(&wine_gen, -1);
 }
+static void wake_bucket(int b) {
+  __sync_fetch_and_add(&wbk[b].gen, 1);
+  if (__sync_fetch_and_add(&wbk[b].waiters, 0)) k_futex_wake(&wbk[b].gen, -1);
+}
+/* sinal sem objeto conhecido: todos (global e baldes com alguem) */
+void wsignal(void) {
+  int b;
+  wake_global();
+  for (b = 0; b < WBUCKETS; b++) wake_bucket(b);
+}
+/* mudou o estado de o: quem espera o (balde) e as esperas globais */
+void wsignal_obj(const void* o) {
+  wake_bucket(wbucket_of(o));
+  wake_global();
+}
+/* so as esperas globais (mensagens, pipes sincronos): ninguem num balde
+ * espera por isso */
+void wsignal_global(void) { wake_global(); }
+/* espera: b < 0 = global. wenter antes de ler a geracao, wleave depois. */
+static void wenter(int b) {
+  if (b >= 0) __sync_fetch_and_add(&wbk[b].waiters, 1);
+}
+static void wleave(int b) {
+  if (b >= 0) __sync_fetch_and_sub(&wbk[b].waiters, 1);
+}
+static volatile int* wword(int b) { return b >= 0 ? &wbk[b].gen : &wine_gen; }
 
 /* ---------- handles ---------- */
 #define H_BASE 0x200u
@@ -107,6 +158,21 @@ HANDLE wh_new(struct wobj* o) {
     }
   wunlock();
   wlog("handles esgotados", 0);
+  {
+    /* uma vez: quantos de cada tipo, para achar o vazamento */
+    static int dumped;
+    if (!dumped) {
+      unsigned cnt[16] = {0};
+      dumped = 1;
+      for (i = 1; i < WHANDLE_MAX; i++)
+        if (p->handles[i]) cnt[(unsigned)p->handles[i]->type & 15]++;
+      for (i = 0; i < 16; i++)
+        if (cnt[i]) {
+          wlogx("  handles do tipo ", (uint64_t)i);
+          wlogx("    quantos ", (uint64_t)cnt[i]);
+        }
+    }
+  }
   return 0;
 }
 
@@ -189,6 +255,18 @@ int wh_is_self(HANDLE h) {
   return o && o->u1 == SELF_MARK;
 }
 
+static WINAPI BOOL DuplicateHandle(HANDLE sp, HANDLE h, HANDLE dp, HANDLE* out, DWORD acc, BOOL inh, DWORD opt);
+/* ReOpenFile: outro handle para o mesmo arquivo. Aqui o objeto e um so (sem
+ * modos por handle): uma copia do handle basta (o Bun reabre stdio e logs). */
+static WINAPI HANDLE ReOpenFile(HANDLE h, DWORD access, DWORD share, DWORD flags) {
+  HANDLE out = 0;
+  (void)share; (void)flags;
+  if (!DuplicateHandle((HANDLE)(intptr_t)-1, h, (HANDLE)(intptr_t)-1, &out, access, 0, 2 /* SAME_ACCESS */)) {
+    if (!wget_lasterr()) wset_lasterr(6);
+    return (HANDLE)(intptr_t)-1;
+  }
+  return out;
+}
 static WINAPI BOOL DuplicateHandle(HANDLE sp, HANDLE h, HANDLE dp, HANDLE* out, DWORD acc, BOOL inh, DWORD opt) {
   struct wobj* o;
   uintptr_t v = (uintptr_t)h;
@@ -328,12 +406,16 @@ DWORD wwait(int n, struct wobj** objs, int all, DWORD timeout_ms) {
   uint64_t t0 = wnow_ms();
   int noted = 0;
   void* caller = wait_caller;
+  int b = wbucket_of(objs[0]), i0;
+  for (i0 = 1; i0 < n; i0++)
+    if (wbucket_of(objs[i0]) != b) b = -1; /* baldes diferentes: global */
+  wenter(b);
   for (;;) {
     int g, i, ready = 0, first = -1;
     uint64_t now = wnow_ms(), next = ~0ull;
     int64_t w = -1;
     wlock();
-    g = wine_gen;
+    g = *wword(b);
     for (i = 0; i < n; i++) {
       if (obj_ready(objs[i], me, 0, now)) {
         ready++;
@@ -350,13 +432,21 @@ DWORD wwait(int n, struct wobj** objs, int all, DWORD timeout_ms) {
         obj_ready(objs[first], me, 1, now);
       }
       wunlock();
+      wleave(b);
       return (DWORD)first;
     }
     wunlock();
-    if (p->exit_req) park_if_exiting();
+    if (p->exit_req) {
+      wleave(b);
+      park_if_exiting();
+      wenter(b);
+    }
     if (timeout_ms != INFINITE) {
       uint64_t el = now - t0;
-      if (el >= timeout_ms) return WAIT_TIMEOUT;
+      if (el >= timeout_ms) {
+        wleave(b);
+        return WAIT_TIMEOUT;
+      }
       w = (int64_t)(timeout_ms - el);
     }
     if (next != ~0ull) {
@@ -375,7 +465,7 @@ DWORD wwait(int n, struct wobj** objs, int all, DWORD timeout_ms) {
       }
       if (w < 0 || w > 5000) w = 5000;
     }
-    k_futex_wait(&wine_gen, g, w < 0 ? -1 : (int)(w ? w : 1));
+    k_futex_wait(wword(b), g, w < 0 ? -1 : (int)(w ? w : 1));
   }
 }
 
@@ -467,6 +557,24 @@ static WINAPI BOOL WaitOnAddress(volatile void* addr, void* cmp, size_t size, DW
 static WINAPI void WakeByAddressSingle(void* addr) { k_futex_wake((volatile int*)addr, 1); }
 static WINAPI void WakeByAddressAll(void* addr) { k_futex_wake((volatile int*)addr, -1); }
 
+/* As mesmas pela ntdll (o Claude Code, claude.exe/Bun, importa direto: sem
+ * elas o stub encerrava o processo com 0xC0000139 na primeira espera).
+ * timeout: NULL = infinito; negativo = relativo em 100 ns. */
+static WINAPI long RtlWaitOnAddress(volatile void* addr, void* cmp, size_t size, const int64_t* timeout) {
+  DWORD ms = INFINITE;
+  if (timeout) {
+    int64_t t = *timeout;
+    if (t < 0) t = -t;
+    t /= 10000;
+    ms = t >= 0xFFFFFFFEll ? 0xFFFFFFFEu : (DWORD)t;
+  }
+  return WaitOnAddress(addr, cmp, size, ms) ? 0 : 0x102; /* STATUS_TIMEOUT */
+}
+static WINAPI void RtlWakeAddressSingle(void* addr) { WakeByAddressSingle(addr); }
+static WINAPI void RtlWakeAddressAll(void* addr) { WakeByAddressAll(addr); }
+static WINAPI void RtlFillMemory(void* d, size_t n, int c) { memset(d, c, n); }
+static WINAPI void RtlExitUserProcess(DWORD code) { wexit((int)code); }
+
 /* ---------- eventos, mutex, semaforo ---------- */
 static HANDLE new_event(int manual, int initial) {
   struct wobj* o = wobj_new(OBJ_EVENT);
@@ -505,7 +613,7 @@ static WINAPI BOOL SetEvent(HANDLE h) {
   wlock();
   o->signaled = 1;
   wunlock();
-  wsignal();
+  wsignal_obj(o);
   return 1;
 }
 static WINAPI BOOL ResetEvent(HANDLE h) {
@@ -552,7 +660,7 @@ static WINAPI BOOL ReleaseMutex(HANDLE h) {
     o->owner = 0;
   }
   wunlock();
-  wsignal();
+  wsignal_obj(o);
   return 1;
 }
 static WINAPI HANDLE CreateSemaphoreW(void* sa, int initial, int max, const wchar16* name) {
@@ -580,7 +688,7 @@ static WINAPI BOOL ReleaseSemaphore(HANDLE h, int n, int* prev) {
   if (prev) *prev = o->count;
   o->count += n;
   wunlock();
-  wsignal();
+  wsignal_obj(o);
   return 1;
 }
 
@@ -622,7 +730,7 @@ static WINAPI BOOL SetWaitableTimer(HANDLE h, const int64_t* due, int period, vo
   o->period = period;
   o->armed = 1;
   wunlock();
-  wsignal();
+  wsignal_obj(o);
   return 1;
 }
 static WINAPI BOOL CancelWaitableTimer(HANDLE h) {
@@ -660,7 +768,7 @@ int wiocp_post(struct wobj* port, DWORD bytes, uintptr_t key, void* ov) {
     port->qn++;
   }
   wunlock();
-  wsignal();
+  wsignal_obj(port);
   return 1;
 }
 
@@ -718,17 +826,20 @@ static WINAPI BOOL GetQueuedCompletionStatusEx(HANDLE h, struct ov_entry* ents, 
   int noted = 0;
   void* caller = __builtin_return_address(0);
   (void)alert;
+  int b;
   if (!port) {
     wset_lasterr(ERROR_INVALID_HANDLE);
     return 0;
   }
+  b = wbucket_of(port);
+  wenter(b);
   for (;;) {
     int g;
     DWORD n = 0;
     int64_t w = -1;
     if (p->net) wnet_poll();
     wlock();
-    g = wine_gen;
+    g = *wword(b);
     while (port->qn > 0 && n < max) {
       struct iocp_ent* e = &port->q[port->qhead];
       ents[n].key = e->key;
@@ -742,13 +853,19 @@ static WINAPI BOOL GetQueuedCompletionStatusEx(HANDLE h, struct ov_entry* ents, 
     wunlock();
     if (n) {
       if (wine_debug >= 2) wlogx("porta: retirou de ", (uint64_t)(uintptr_t)port);
+      wleave(b);
       *got = n;
       return 1;
     }
-    if (p->exit_req) park_if_exiting();
+    if (p->exit_req) {
+      wleave(b);
+      park_if_exiting();
+      wenter(b);
+    }
     if (ms != INFINITE) {
       uint64_t el = wnow_ms() - t0;
       if (el >= ms) {
+        wleave(b);
         *got = 0;
         wset_lasterr(WAIT_TIMEOUT);
         return 0;
@@ -762,7 +879,7 @@ static WINAPI BOOL GetQueuedCompletionStatusEx(HANDLE h, struct ov_entry* ents, 
       wwait_note("porta de conclusao", caller, wnow_ms() - t0);
     }
     if (wine_debug >= 2 && (w < 0 || w > 5000)) w = 5000;
-    k_futex_wait(&wine_gen, g, w < 0 ? -1 : (int)(w ? w : 1));
+    k_futex_wait(wword(b), g, w < 0 ? -1 : (int)(w ? w : 1));
   }
 }
 static WINAPI BOOL GetQueuedCompletionStatus(HANDLE h, DWORD* bytes, uintptr_t* key, void** ov, DWORD ms) {
@@ -784,7 +901,7 @@ static void thread_finish(struct wobj* t, DWORD code) {
   t->exited = 1;
   t->exit_code = code;
   wunlock();
-  wsignal();
+  wsignal_obj(t);
 }
 
 /* Tudo o que e codigo do Windows roda na pilha do Windows: callbacks de TLS e
@@ -809,6 +926,15 @@ static int thread_tramp(void* arg) {
   while (t->suspend > 0) k_futex_wait(&t->suspend, t->suspend, 50);
   pe_tls_attach_all(t->teb);
   rc = wine_call_on_stack((void*)thread_body, t, t->stack->base + t->stack->size - 64);
+  /* ja de volta na pilha do kernel: a pilha do Windows (1 MB commitado) volta.
+   * Antes ficava ate o processo sair; o servico de rede do Chromium cria e
+   * solta threads o tempo todo e acumulava centenas (erro 8 no Rust/tokio). */
+  if (!t->manual && t->stack) {
+    void vm_stack_free(struct vmreg* r); /* vm.c */
+    struct vmreg* st = t->stack;
+    t->stack = 0;
+    vm_stack_free(st);
+  }
   thread_finish(t, (DWORD)rc);
   return (int)rc;
 }
@@ -818,7 +944,14 @@ static struct wobj* thread_new(void* start, void* param, size_t stack, int suspe
   struct wobj* t = wobj_new(OBJ_THREAD);
   uint8_t* teb = (uint8_t*)k_malloc_aligned(TEB_SIZE, 64);
   void** tlsarr = (void**)wzalloc(sizeof(void*) * TLS_SLOTS);
-  if (!t || !teb || !tlsarr) return 0;
+  if (!t || !teb || !tlsarr) {
+    /* arena baixa (k_malloc) sem memoria: diz qual faltou e quanto ha */
+    unsigned lt = 0, lf = 0;
+    k_meminfo(&lt, &lf);
+    wlogx("thread: sem memoria baixa (1 obj, 2 TEB, 4 TLS) ", (uint64_t)((t ? 0 : 1) | (teb ? 0 : 2) | (tlsarr ? 0 : 4)));
+    wlogx("  arena baixa livre (KB) ", (uint64_t)(lf >> 10));
+    return 0;
+  }
   if (!stack) stack = p->exe && p->exe->stack_reserve ? p->exe->stack_reserve : 0x100000;
   if (stack < 0x40000) stack = 0x40000;
   /* commitado: 1 MB nas threads de trabalho (o padrao do Windows), tudo na
@@ -827,7 +960,16 @@ static struct wobj* thread_new(void* start, void* param, size_t stack, int suspe
     size_t commit = is_main ? stack : (stack > 0x100000 ? 0x100000 : stack);
     struct vmreg* vm_stack_alloc(size_t reserve, size_t commit); /* vm.c */
     t->stack = vm_stack_alloc(stack, commit);
-    if (!t->stack) return 0;
+    if (!t->stack) {
+      void k_hminfo(uint64_t* quota, uint64_t* used, uint64_t* total_ram);
+      uint64_t q = 0, u = 0, tr = 0;
+      k_hminfo(&q, &u, &tr);
+      wlogx("thread: sem memoria para a pilha, reserva ", (uint64_t)stack);
+      wlogx("  commit ", (uint64_t)commit);
+      wlogx("  HIMEM cota (MB) ", q >> 20);
+      wlogx("  HIMEM usado (MB) ", u >> 20);
+      return 0;
+    }
     t->stack_commit = commit;
   }
   memset(teb, 0, TEB_SIZE);
@@ -857,6 +999,9 @@ static struct wobj* thread_new(void* start, void* param, size_t stack, int suspe
     wlogx("k_thread_create falhou: ", (uint64_t)(int64_t)t->ktid);
     return 0;
   }
+  /* ninguem faz join: sem detach a vaga no kernel (KT_MAX 1024 no sistema
+   * todo) ficava morta ate o processo sair */
+  k_thread_detach(t->ktid);
   return t;
 }
 
@@ -874,6 +1019,23 @@ static WINAPI HANDLE CreateThread(void* sa, size_t stack, void* start, void* par
   }
   if (tid) *tid = t->tid;
   return wh_new(t);
+}
+/* CreateRemoteThread: no proprio processo e um CreateThread. Em outro
+ * processo nao da (o Chromium usa para forcar o dump de um renderer que nao
+ * responde, DumpAndCrashTargetProcess): falha com ERROR_ACCESS_DENIED e o
+ * Chromium segue. Antes o stub de funcao ausente encerrava o browser inteiro
+ * (0xC0000139) e todas as janelas do Claude fechavam (notebook lento). */
+static WINAPI HANDLE CreateRemoteThread(HANDLE proc, void* sa, size_t stack, void* start, void* param,
+                                        DWORD flags, DWORD* tid) {
+  if (wh_is_self(proc)) return CreateThread(sa, stack, start, param, flags, tid);
+  if (wine_debug) wlog("CreateRemoteThread em outro processo: recusado", 0);
+  wset_lasterr(5); /* ERROR_ACCESS_DENIED */
+  return 0;
+}
+static WINAPI HANDLE CreateRemoteThreadEx(HANDLE proc, void* sa, size_t stack, void* start, void* param,
+                                          DWORD flags, void* attrs, DWORD* tid) {
+  (void)attrs;
+  return CreateRemoteThread(proc, sa, stack, start, param, flags, tid);
 }
 static WINAPI __attribute__((noreturn)) void ExitThread(DWORD code) {
   struct wobj* t = wthread();
@@ -907,11 +1069,15 @@ static WINAPI DWORD ResumeThread(HANDLE h) {
 }
 /* Sem parar thread alheia: o Go trata -1 como "nao deu para preemptar". */
 static WINAPI DWORD SuspendThread(HANDLE h) {
+  static int n;
+  if (wine_debug >= 2 && n++ < 5) wwait_note("SuspendThread (recusado)", __builtin_return_address(0), 0);
   (void)h;
   wset_lasterr(ERROR_ACCESS_DENIED);
   return (DWORD)-1;
 }
 static WINAPI BOOL GetThreadContext(HANDLE h, void* ctx) {
+  static int n;
+  if (wine_debug >= 2 && n++ < 5) wwait_note("GetThreadContext (recusado)", __builtin_return_address(0), 0);
   (void)h;
   (void)ctx;
   wset_lasterr(ERROR_ACCESS_DENIED);
@@ -979,15 +1145,16 @@ static WINAPI BOOL GetExitCodeProcess(HANDLE h, DWORD* code) {
 
 #define S(n) {#n, (void*)n}
 const struct wine_sym obj_syms[] = {
-    S(CloseHandle), S(DuplicateHandle), S(GetHandleInformation), S(SetHandleInformation),
+    S(CloseHandle), S(DuplicateHandle), S(ReOpenFile), S(GetHandleInformation), S(SetHandleInformation),
     S(WaitForMultipleObjectsEx), S(WaitForMultipleObjects), S(WaitForSingleObjectEx),
     S(WaitForSingleObject), S(Sleep), S(SleepEx), S(SwitchToThread), S(WaitOnAddress),
-    S(WakeByAddressSingle), S(WakeByAddressAll), S(CreateEventA), S(CreateEventW), S(CreateEventExW),
+    S(WakeByAddressSingle), S(WakeByAddressAll), S(RtlWaitOnAddress), S(RtlWakeAddressSingle),
+    S(RtlWakeAddressAll), S(RtlFillMemory), S(RtlExitUserProcess), S(CreateEventA), S(CreateEventW), S(CreateEventExW),
     S(SetEvent), S(ResetEvent), S(CreateMutexW), S(CreateMutexA), S(CreateMutexExW), S(OpenMutexW),
     S(ReleaseMutex), S(CreateSemaphoreW), S(CreateSemaphoreA), S(CreateSemaphoreExW),
     S(ReleaseSemaphore), S(CreateWaitableTimerExW), S(CreateWaitableTimerW), S(SetWaitableTimer),
     S(CancelWaitableTimer), S(CreateIoCompletionPort), S(PostQueuedCompletionStatus),
-    S(GetQueuedCompletionStatusEx), S(GetQueuedCompletionStatus), S(CreateThread), S(ExitThread),
+    S(GetQueuedCompletionStatusEx), S(GetQueuedCompletionStatus), S(CreateThread), S(CreateRemoteThread), S(CreateRemoteThreadEx), S(ExitThread),
     S(GetExitCodeThread), S(ResumeThread), S(SuspendThread), S(GetThreadContext), S(SetThreadContext),
     S(TerminateThread), S(SetThreadPriority), S(GetThreadPriority), S(SetThreadAffinityMask),
     S(GetThreadId), S(SetThreadDescription), S(SetThreadStackGuarantee), S(GetProcessAffinityMask),

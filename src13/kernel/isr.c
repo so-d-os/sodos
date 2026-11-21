@@ -312,6 +312,7 @@ static void crash_save(void) {
   static char path[] = "?:\\CRASH.LOG";
   char order[3] = { mod_exe_drive(), 'U', 'D' };
   int i, k;
+  fs_panic = 1; /* o dono da trava pode ser quem caiu */
   for (i = 0; i < 3; i++) {
     char L = order[i];
     if (!L) continue;
@@ -324,9 +325,10 @@ static void crash_save(void) {
     path[0] = L;
     if (file_save(path, crash_txt, crash_n) >= 0) {
       crash_path = path;
-      return;
+      break;
     }
   }
+  fs_panic = 0;
 }
 
 static void crash_on_stack(void) {
@@ -410,6 +412,23 @@ static uint64_t fault_target(const isr_frame_t* f) {
   return 0;
 }
 
+/* ---------- amostragem de CPU (smp prof) ----------
+ * Para achar onde o tempo vai no PC real (sem monitor do QEMU): a cada tique
+ * do timer (LAPIC 4 ms nas outras CPUs; PIT da CPU0 1 a cada 4 ms) guarda
+ * cpu, pid e o rip interrompido num anel. "smp prof save" grava o anel em
+ * \LOG\PROF.BIN (uint64: cpu<<56 | (pid&0xFF)<<48 | rip). */
+#define PROF_N 131072u
+uint64_t prof_buf[PROF_N];
+volatile uint32_t prof_i;
+volatile int prof_on;
+uint32_t um_owner(void);
+int kt_cpu_index(void);
+static void prof_hit(uint64_t rip) {
+  uint32_t i = __atomic_fetch_add(&prof_i, 1u, __ATOMIC_RELAXED);
+  prof_buf[i & (PROF_N - 1u)] = (rip & 0x0000FFFFFFFFFFFFull) | ((uint64_t)(um_owner() & 0xFFu) << 48) |
+                                ((uint64_t)(kt_cpu_index() & 0xFF) << 56);
+}
+
 isr_ret_t isr_dispatch(isr_frame_t* f) {
   __asm__ volatile ("cli");
 
@@ -421,6 +440,7 @@ isr_ret_t isr_dispatch(isr_frame_t* f) {
   /* Escalonador SMP: EOI antes, porque a troca de tarefa pode demorar a
    * voltar por aqui. */
   if (f->int_no == 0xF2) {
+    if (prof_on) prof_hit(f->eip);
     smp_ipi_ack();
     kt_tick_lapic(SMP_TICK_MS);
     return isr_ret0;
@@ -442,6 +462,10 @@ isr_ret_t isr_dispatch(isr_frame_t* f) {
 
   /* IRQ 32..47: enviar EOI e retornar (nao travar) */
   if (f->int_no >= 32 && f->int_no <= 47) {
+    if (f->int_no == 32 && prof_on) {
+      static uint32_t pit_n;
+      if ((++pit_n & 3u) == 0) prof_hit(f->eip); /* 1 ms -> 4 ms, como as outras */
+    }
     irq_handle(f);
     return isr_ret0;
   }

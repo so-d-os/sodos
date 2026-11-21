@@ -1244,7 +1244,9 @@ static int ui_ia;         /* 1 = painel de IA ligado */
 static int ui_ia_launch;  /* pedido de abrir o AIPANEL pendente */
 /* pedido de abrir um programa no WIN (k_win_launch) */
 static char launch_path[LINKEXT_PATH_MAX];
-static char launch_arg[LINKEXT_PATH_MAX];   /* arquivo (LINKEXT); "" = sem */
+/* arquivo ou endereco (LINKEXT, ShellExecute de URL do WINE); "" = sem.
+ * Enderecos de login passam de 500 caracteres: nao e o LINKEXT_PATH_MAX. */
+static char launch_arg[2048];
 static int launch_pending;
 
 static uint32_t gui_col(uint32_t rgb);   /* definido mais abaixo */
@@ -2461,8 +2463,21 @@ static int uhci_wait(struct uhci_td* td, int n) {
   }
 }
 
+/* 1 enquanto uma transferencia de controle usa a fila (tablet_take nao
+ * religa o tablet por cima dela) */
+static volatile int usb_ctrl_busy;
+static int usb_ctrl_raw(uint8_t addr, uint8_t rtype, uint8_t req,
+                        uint16_t val, uint16_t idx, int len, int din);
 static int usb_ctrl(uint8_t addr, uint8_t rtype, uint8_t req,
                     uint16_t val, uint16_t idx, int len, int din) {
+  int r;
+  usb_ctrl_busy = 1;
+  r = usb_ctrl_raw(addr, rtype, req, val, idx, len, din);
+  usb_ctrl_busy = 0;
+  return r;
+}
+static int usb_ctrl_raw(uint8_t addr, uint8_t rtype, uint8_t req,
+                        uint16_t val, uint16_t idx, int len, int din) {
   struct uhci_td* td = uhci_tds;
   int n = 0;
   int toggle = 1;
@@ -2676,7 +2691,14 @@ static int tablet_take(void) {
   if (!mouse_abs_mode || !td) return 0;
   sts = td->sts;
   __asm__ volatile ("" ::: "memory");
-  if (sts & (1u << 23)) return 0;
+  if (sts & (1u << 23)) {
+    /* TD do tablet ativo mas fora da fila: uma transferencia de controle
+     * (usb_ctrl) usou a mesma QH e, no fim, a controladora deixou elem = T.
+     * O mouse ficava parado para sempre (VM do Claude: captcha sem mouse). */
+    if (uhci_q && !usb_ctrl_busy && (uhci_q->elem & ~0xFu) != ((uint32_t)(uintptr_t)td & ~0xFu))
+      uhci_q->elem = (uint32_t)(uintptr_t)td;
+    return 0;
+  }
   lat_note((uint32_t)irq_ticks());
   if (sts & ((1u << 22) | (1u << 21) | (1u << 20) | (1u << 18))) {
     td->token &= ~(1u << 19);
@@ -2848,7 +2870,7 @@ static void draw_win_desktop(uint32_t col_desk, uint32_t col_win, uint32_t col_t
   *text_y1 = (uint32_t)(win_y + win_h - 8);
 }
 
-#define WM_MAX 12
+#define WM_MAX 24
 #define WM_KIND_MGR  0
 #define WM_KIND_NOTE 1
 #define WM_KIND_APP  2
@@ -4800,9 +4822,9 @@ static void wm_run_status(struct wm_win* w, int rc) {
  * Varios .EXE (navegador, fontes avancadas, ...) ficam abertos juntos.
  * Cada um tem o seu retangulo e a sua fila. Quem espera tecla ou rede
  * devolve o turno ao desktop; um clique traz essa janela para a frente. */
-#define GUI_MAX 8
+#define GUI_MAX 16
 #define GUI_Q 64   /* com entrada crua cada tecla sao 2+ bytes */
-#define TASK_MAX 8
+#define TASK_MAX 16   /* Claude (WINE) sozinho abre 6+ processos; + navegador do login */
 #define TASK_STACK (48 * 1024)
 #define TASK_ARGC 16
 #define TASK_ARGBUF 192
@@ -6339,6 +6361,143 @@ static void task_reap(int ti) {
   t->gid = -1;
 }
 
+/* ---------- encerrar programas a forca (KILL, KILLALL, DEL no TOP) ----------
+ * Pedidos de qualquer lugar (comando, k_kill de um programa) vao para uma fila
+ * e o laco do WIN atende: so ele pode fechar janelas e soltar a pilha de uma
+ * tarefa que nao esta rodando. mod_kill solta a memoria do programa (heap,
+ * imagem, DLLs, threads, memoria virtual, soquetes). */
+#define KILLQ_MAX 16
+static volatile uint32_t killq[KILLQ_MAX];
+static volatile int killq_n, killq_all;
+static volatile uint32_t killq_keep;   /* quem pediu o KILLALL nao morre */
+static volatile uint32_t killq_req, killq_ack;
+static volatile int killq_count;       /* tarefas encerradas no ultimo pedido */
+
+static int task_force_kill(int ti) {
+  struct gui_task* t = &gtasks[ti];
+  uint32_t pid = t->cpu.pid;
+  if (!t->used || ti == task_cur) return 0;
+  serial_puts("[visual] encerrando a forca a tarefa ");
+  serial_puts(t->path);
+  serial_puts("\n");
+  if (t->wake != WAKE_DEAD && t->wake != WAKE_NONE && pid) mod_kill(pid);
+  if (t->run) { /* a janela de saida do programa fecha junto */
+    t->run->auto_close = 1;
+    run_close_pending = 1;
+  }
+  task_reap(ti);
+  return 1;
+}
+
+static void killq_service(void) {
+  int i, n = 0, k;
+  uint32_t req = killq_req;
+  if (!gtasks || req == killq_ack) return;
+  if (killq_all) {
+    uint32_t mark;
+    /* ninguem abriu nada ainda: tudo o que roda e do inicio */
+    if (!mod_boot_mark()) mod_mark_boot();
+    mark = mod_boot_mark();
+    for (i = 0; i < TASK_MAX; i++) {
+      uint32_t pid, root;
+      if (!gtasks[i].used || i == task_cur) continue;
+      pid = gtasks[i].cpu.pid;
+      if (!pid) continue;                                /* comando interno */
+      if (killq_keep && mod_chain_has(killq_keep, pid)) continue; /* quem pediu */
+      root = mod_root_pid(pid);
+      if (mark && root < mark) continue;                 /* programa de inicio */
+      n += task_force_kill(i);
+    }
+  }
+  for (k = 0; k < killq_n; k++) {
+    uint32_t want = killq[k];
+    for (i = 0; i < TASK_MAX; i++)
+      if (gtasks[i].used && gtasks[i].cpu.pid && mod_chain_has(gtasks[i].cpu.pid, want))
+        n += task_force_kill(i);
+  }
+  killq_n = 0;
+  killq_all = 0;
+  killq_keep = 0;
+  if (n) {
+    (void)wine_reset_if_idle(); /* sem EXE do Windows: WINE.DLL e secoes saem */
+    serial_puts("[visual] tarefas encerradas a forca: ");
+    serial_hex32((uint32_t)n);
+    serial_puts("\n");
+  }
+  killq_count = n;
+  killq_ack = req;
+}
+
+/* pids das tarefas do WIN cujo programa tem esse nome (CLAUDE.EXE,
+ * Claude.exe ou so CLAUDE). Quantos gravou em out. */
+static int name_match(const char* path, const char* name) {
+  const char* b = path;
+  const char* q;
+  int i;
+  for (q = path; *q; q++)
+    if (*q == '\\' || *q == ':' || *q == '/') b = q + 1;
+  for (i = 0; name[i] && b[i]; i++) {
+    char x = name[i], y = b[i];
+    if (x >= 'a' && x <= 'z') x = (char)(x - 32);
+    if (y >= 'a' && y <= 'z') y = (char)(y - 32);
+    if (x != y) return 0;
+  }
+  return !name[i] && (!b[i] || b[i] == '.');
+}
+int win_task_pids(const char* name, uint32_t* out, int max) {
+  int i, n = 0;
+  if (!host_on || !gtasks || !name) return -1;
+  for (i = 0; i < TASK_MAX && n < max; i++)
+    if (gtasks[i].used && gtasks[i].cpu.pid && name_match(gtasks[i].path, name)) out[n++] = gtasks[i].cpu.pid;
+  return n;
+}
+
+/* Tarefas do WIN para o TOP (k_ps): nome do programa e pid. */
+int win_task_list(char (*names)[32], uint32_t* pids, int max) {
+  int i, n = 0, k;
+  if (!host_on || !gtasks) return 0;
+  for (i = 0; i < TASK_MAX && n < max; i++) {
+    const char* b;
+    const char* q;
+    if (!gtasks[i].used || !gtasks[i].cpu.pid) continue;
+    b = gtasks[i].path;
+    for (q = b; *q; q++)
+      if (*q == '\\' || *q == ':' || *q == '/') b = q + 1;
+    for (k = 0; k < 31 && b[k]; k++) names[n][k] = b[k];
+    names[n][k] = 0;
+    pids[n++] = gtasks[i].cpu.pid;
+  }
+  return n;
+}
+
+/* pid = 0 e all = 1: KILLALL (menos os de inicio e quem pediu).
+ * Devolve quantas tarefas encerrou; -1 se o WIN nao esta aberto, -2 se nao
+ * houve resposta (o WIN parado em outra tela). */
+int win_kill(uint32_t pid, int all) {
+  uint32_t me = mod_current_pid(), req, t0;
+  if (!host_on || !gtasks) return -1;
+  if (all) {
+    killq_keep = me;
+    killq_all = 1;
+  } else if (killq_n < KILLQ_MAX) {
+    killq[killq_n++] = pid;
+  }
+  req = killq_req + 1;
+  killq_req = req;
+  if (task_cur < 0 && !kt_in_thread()) { /* no laco do WIN (comando do Command) */
+    killq_service();
+    return killq_count;
+  }
+  t0 = net_ms();
+  while (killq_ack != req) { /* tarefa ou thread (API HTTP): o laco atende */
+    if (net_ms() - t0 > 5000) return -2;
+    if (in_task()) gui_yield(WAKE_POLL);
+    else if (kt_in_thread()) kt_yield_in_thread();
+    else return -2; /* outra tela do mundo: o laco do WIN nao roda agora */
+  }
+  return killq_count;
+}
+
 static void cons_puts(const char* s) {
   while (s && *s) cons_emit(*s++);
 }
@@ -6549,6 +6708,17 @@ static int task_pick(void) {
   return -1;
 }
 
+/* alguma tarefa do WIN quer CPU ja (evento na fila ou calculando)? */
+static int tasks_want_cpu(void) {
+  int i;
+  if (!gtasks || !gwins) return 0;
+  for (i = 0; i < TASK_MAX; i++) {
+    if (!gtasks[i].used) continue;
+    if (task_has_event(i) || gtasks[i].wake == WAKE_BUSY) return 1;
+  }
+  return 0;
+}
+
 static void tasks_pump(void) {
   int ti = task_pick();
   if (ti < 0) return;
@@ -6661,10 +6831,22 @@ static void wm_exec_sox(struct wm_win* wins, int* focus, int big, const char* pa
 }
 
 /* arg != 0: arquivo passado como argv[1] (abrir com, LINKEXT). */
+/* 1 enquanto o WIN abre um programa sozinho (o AIPANEL do inicio) */
+static int autostart_launch;
+
+static int desk_ext_is(const char* name, const char* ext);
 static void wm_exec_arg(struct wm_win* wins, int* focus, int big, const char* path,
                         const char* arg) {
   uint8_t* bak;
   int n;
+  /* primeira abertura que nao e automatica: daqui em diante nao e "inicio"
+   * (KILLALL). O pid do programa sai depois, no mod_exec da tarefa. */
+  if (!autostart_launch && !mod_boot_mark()) {
+    serial_puts("[visual] primeira abertura pelo usuario: ");
+    serial_puts(path);
+    serial_puts("\n");
+    mod_mark_boot();
+  }
   int i;
   int rc;
   uint32_t magic[2] = {0, 0};
@@ -6689,6 +6871,42 @@ static void wm_exec_arg(struct wm_win* wins, int* focus, int big, const char* pa
     if (owner && owner->st && gui_focus < 0) app_status_set("executou");
     return;
   }
+  /* Nao e programa do SODOS nem do Windows: decide pelo tipo. Antes tudo caia
+   * no binario plano abaixo e um .BAT (texto) aberto pelo /win/launch era
+   * executado como codigo: #UD no kernel. */
+  if (desk_ext_is(path, "BAT")) {
+    char bexe[DRV_PATH];
+    char* argv[4];
+    if (mod_find_exe("BAT", bexe, (int)sizeof(bexe)) != 0) {
+      app_status_set("BAT.EXE nao encontrado");
+      return;
+    }
+    argv[0] = bexe;
+    argv[1] = (char*)path;
+    argv[2] = (char*)arg;
+    argv[3] = 0;
+    wm_exec_sox(wins, focus, big, bexe, owner, arg && arg[0] ? 3 : 2, argv);
+    app_win = owner;
+    if (owner && owner->st && gui_focus < 0) app_status_set("executou");
+    return;
+  }
+  if ((magic[0] & 0xFFFFu) == 0x5A4Du) { /* MZ sem PE: DOS de 16 bits */
+    serial_puts("[visual] EXE do DOS (16 bits) nao roda: ");
+    serial_puts(path);
+    serial_puts("\n");
+    app_status_set("EXE do DOS: nao suportado");
+    return;
+  }
+  if (!desk_ext_is(path, "BIN")) {
+    /* dado (texto, imagem...): o programa associado, se houver */
+    if (linkext_fn && linkext_fn(path) == 0) return;
+    serial_puts("[visual] nao e programa: ");
+    serial_puts(path);
+    serial_puts("\n");
+    app_status_set("nao e programa");
+    return;
+  }
+  /* .BIN: binario plano antigo, carregado no PROG_SLOT */
   if (mod_depth > 0) {
     serial_puts("[visual] programa ocupado, sem outro por cima\n");
     return;
@@ -9875,6 +10093,7 @@ static int win_wm_run(void) {
       else wm_exec(wins, &focus, big, launch_path);
       need_draw = 1;
     }
+    killq_service();
     if (run_close_pending) {
       int k;
       run_close_pending = 0;
@@ -9904,7 +10123,9 @@ static int win_wm_run(void) {
     if (ui_ia_launch) {
       ui_ia_launch = 0;
       if (!gui_raise_title("SODOS IA")) {
+        autostart_launch = 1;
         host_open_ai(wins, &focus, big);
+        autostart_launch = 0;
         need_draw = 1;
       }
     }
@@ -10211,7 +10432,11 @@ static int win_wm_run(void) {
       prof_poll += (uint32_t)irq_ticks() - prof_p0;
       if (kind < 0) {
         vt_idle();   /* as telas do DOS ao fundo andam */
-        __asm__ volatile ("pause");
+        /* Nada a fazer: empresta a CPU0 e o BKL as threads por 1 ms (o tique
+         * do PIT acorda). Antes girava aqui com o BKL, e as threads dos
+         * programas (o Claude no WINE: ~150) esperavam no bkl_take. */
+        if (!need_draw && !win_api_dirty && !tasks_want_cpu()) kt_world_idle(1);
+        else __asm__ volatile ("pause");
         continue;
       }
       in_ms = (uint32_t)irq_ticks();

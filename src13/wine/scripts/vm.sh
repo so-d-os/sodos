@@ -10,13 +10,17 @@
 #   vm.sh serial [n]      fim da serial
 #   vm.sh stop
 # PORT (padrao 8803) e VMDIR (padrao /tmp/sodos-wine-vm) escolhem a VM.
-# GUI=1 no start abre a janela do QEMU (para o usuario ver).
+# O start abre a janela do QEMU. HEADLESS=1 sobe sem janela, mas ai a rede
+# fica lenta: sem o timer da tela o laco principal do QEMU so atende o slirp
+# a cada ~500 ms (cada pacote do host chega 0,5 s atrasado; um GET de 2 bytes
+# leva 1 s e o Claude da "Couldn't finish loading").
 # KEEP=1 no start reaproveita os discos da VM anterior (programas instalados).
 S=$(cd "$(dirname "$0")/../.." && pwd)
 PORT=${PORT:-8803}
 V=${VMDIR:-/tmp/sodos-wine-vm}
 MON=$V/mon
-mon() { printf '%s\n' "$1" | nc -U -q1 "$MON" 2>/dev/null | tr -d '\r' | sed 's/\x1b\[[0-9;]*[A-Za-z]//g'; }
+qmon() { python3 "$S/wine/scripts/qmon.py" "$MON"; }
+mon() { printf '%s\n' "$1" | qmon 2>/dev/null | tr -d '\r' | sed 's/\x1b\[[0-9;]*[A-Za-z]//g'; }
 case "$1" in
   start)
     sh "$0" stop >/dev/null 2>&1
@@ -36,11 +40,13 @@ case "$1" in
       [ -f "$f" ] && mcopy -o -i "$I" "$f" "::/$(basename "$f" | tr a-z A-Z)" </dev/null
     done
     DISP="-display none"
-    [ -n "$GUI" ] && DISP=""
+    [ -z "$HEADLESS" ] && DISP=""
+    # NETFWD=",hostfwd=tcp::9223-:9222": mais portas (DevTools do Chromium)
+    # MEM=14000: mais RAM (3 claude.exe de 372 MB + ramdisk nao cabem em 8 GB)
     # QEMU_EXTRA="-s": gdb do QEMU na porta 1234 (watchpoints de hardware)
-    setsid qemu-system-x86_64 -accel kvm -cpu host -m 8192 -smp 4 -usb -device usb-tablet -vga std $DISP $QEMU_EXTRA \
+    setsid qemu-system-x86_64 -accel kvm -cpu host -m ${MEM:-8192} -smp 4 -usb -device usb-tablet -vga std $DISP $QEMU_EXTRA \
       -monitor "unix:$MON,server,nowait" -serial "file:$V/serial.log" \
-      -netdev user,id=n0,hostfwd=tcp::$PORT-:8797 -device ne2k_pci,netdev=n0 -boot order=c \
+      -netdev user,id=n0,hostfwd=tcp::$PORT-:8797$NETFWD -device ne2k_pci,netdev=n0 -boot order=c \
       -drive format=raw,file="$V/os.img",if=ide,index=0 \
       -drive format=raw,file="$V/disk.img",if=ide,index=1 \
       -drive format=raw,file="$S/disk2.img",if=ide,index=2,snapshot=on > "$V/qemu.log" 2>&1 </dev/null &
@@ -59,12 +65,12 @@ case "$1" in
     printf '%s' "$2" | python3 -c '
 import sys
 m = {" ": "spc", "\\": "backslash", ":": "shift-semicolon", ".": "dot", "-": "minus", "/": "slash",
-     "=": "equal", "_": "shift-minus", "\n": "ret", ",": "comma", ";": "semicolon"}
+     "=": "equal", "_": "shift-minus", "\n": "ret", ",": "comma", ";": "semicolon", "@": "shift-2"}
 for c in sys.stdin.read().replace("\\n", "\n"):
     if c in m: print("sendkey " + m[c])
     elif c.isupper(): print("sendkey shift-" + c.lower())
     else: print("sendkey " + c)
-' | while read -r l; do printf '%s\n' "$l"; sleep 0.08; done | nc -U -q1 "$MON" >/dev/null 2>&1
+' | while read -r l; do printf '%s\n' "$l"; sleep 0.08; done | qmon >/dev/null 2>&1
     ;;
   shot)
     N=${2:-vm}

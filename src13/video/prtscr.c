@@ -5,6 +5,10 @@
  * DISKSYNC.EXE copia com o mesmo nome para o pendrive). A hora e a do RTC,
  * a mesma do relogio da barra de tarefas. Dois prints no mesmo segundo
  * andam o segundo para frente ate achar um nome livre.
+ *
+ * Depois do Z: (que some no boot) vai uma copia para D:\TEMP, para nao ter
+ * que copiar a mao. SET PRTSCRCOPY=pasta troca o destino; SET PRTSCRCOPY=0
+ * desliga.
  */
 #include <stdint.h>
 #include "prtscr.h"
@@ -13,6 +17,7 @@
 #include "drives.h"
 #include "serial.h"
 #include "kexports.h"
+#include "env.h"
 
 int win_screen_size(int* w, int* h);
 int win_screen_bgr(int y, uint8_t* dst, int max);
@@ -56,6 +61,29 @@ static int next_sec(int t) {
     }
   }
   return h * 10000 + m * 100 + s;
+}
+
+/* copia em D:\TEMP (ou SET PRTSCRCOPY=pasta; =0 desliga), mesmo nome */
+static void shot_copy(const char* zpath, const uint8_t* png, int len) {
+  const char* dir = env_get("PRTSCRCOPY");
+  const char* name = zpath;
+  const char* p;
+  char dst[160];
+  int n = 0, rc;
+  if (!dir || !*dir) dir = "D:\\TEMP";
+  if (dir[0] == '0' && !dir[1]) return;
+  if (!drives_is_mounted(dir[0] & ~32)) return;
+  for (p = zpath; *p; p++)
+    if (*p == '\\') name = p + 1;
+  drives_mkdir(dir);
+  for (p = dir; *p && n < 120; p++) dst[n++] = *p;
+  if (n && dst[n - 1] != '\\') dst[n++] = '\\';
+  for (p = name; *p && n < 158; p++) dst[n++] = *p;
+  dst[n] = 0;
+  rc = file_save(dst, (const char*)png, len);
+  serial_puts("[prtscr] copia ");
+  serial_puts(dst);
+  serial_puts(rc == 0 ? " ok\n" : " ERRO ao gravar\n");
 }
 
 int prtscr_save(char* out_path, int max) {
@@ -108,11 +136,15 @@ int prtscr_save(char* out_path, int max) {
     return -3;
   }
   rc = file_save(path, (const char*)png, len);
-  ufree(png);
   serial_puts("[prtscr] ");
   serial_puts(path);
   serial_puts(rc == 0 ? " ok\n" : " ERRO ao gravar\n");
-  if (rc != 0) return -4;
+  if (rc != 0) {
+    ufree(png);
+    return -4;
+  }
+  shot_copy(path, png, len);
+  ufree(png);
   if (out_path && max > 0) {
     for (x = 0; path[x] && x < max - 1; x++) out_path[x] = path[x];
     out_path[x] = 0;

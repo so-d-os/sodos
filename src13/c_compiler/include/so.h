@@ -48,6 +48,17 @@ struct k_dirent {
 };
 /* Pasta "U:\\SRC": quantas entradas (sem . e ..); -1 se nao e pasta. */
 int k_dir(const char* path, struct k_dirent* out, int max);
+/* Como k_dir, com o nome longo inteiro (ate 255; k_dirent corta em 31 e
+ * devolve o apelido 8.3). Kernels de 2026-11-20 em diante. */
+struct k_direntl {
+  char name[256];
+  unsigned size;
+  unsigned short date;
+  unsigned short time;
+  unsigned char dir;
+  unsigned char pad[3];
+};
+int k_dir_long(const char* path, struct k_direntl* out, int max);
 /* Ambiente do sistema (SET NOME=valor, o mesmo do prompt e do AUTOEXEC.BAT).
  * k_getenv copia o valor para out e devolve o tamanho; -1 se nao existe.
  * k_setenv com val vazio apaga. 0 ok. */
@@ -125,6 +136,11 @@ struct k_proc {
 };
 /* Devolve quantas entradas gravou em out. */
 int k_ps(struct k_proc* out, int max);
+/* Encerra a forca o programa pid (janelas e toda a memoria que reservou) ou,
+ * com all=1, todos menos os de inicio e quem chamou (KILLALL). Devolve
+ * quantos encerrou; -1 sem o WIN aberto, -2 o WIN nao respondeu.
+ * Kernels de 2026-11-20 em diante. */
+int k_kill(unsigned pid, int all);
 
 /* Mapa da RAM fisica: 'cells' celulas de *cell_kb KB, do endereco 0 ao fim
  * da ultima regiao de RAM. kb[celula * KM_CATS + categoria] = KB daquela

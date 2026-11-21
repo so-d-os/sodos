@@ -306,7 +306,7 @@ int drives_use(char letter) {
   return drv_ready(letter_idx(letter)) ? 0 : -1;
 }
 
-int drives_mount_usb(void) {
+static int drives_mount_usb_u(void) {
   if (!pendrive_on()) return -4;
   usb_try_ms = 0;
   usb_hold = 0;
@@ -333,7 +333,7 @@ int drives_usb_mounted(void) {
 
 /* Monta o pendrive em L. 0 ok; -1 sem pendrive; -2 sem FAT; -4 PENDRIVE=0;
  * -5 letra ocupada por outra unidade; -6 letra invalida. */
-int drives_usb_mount_at(char L) {
+static int drives_usb_mount_at_u(char L) {
   int idx = letter_idx(L);
   if (!pendrive_on()) return -4;
   if (idx < 0 || L == 'C' || L == 'c' || L == 'Z' || L == 'z') return -6;
@@ -397,7 +397,7 @@ static void sb_label(struct sbuf* b, const uint8_t* bs) {
 
 /* PENDRIVE SCAN: liga o USB, procura o pendrive e descreve disco, particoes
  * e onde esta montado. Devolve a letra montada, 0 se nao montou, -4 desligado. */
-int drives_usb_scan(char* out, int max) {
+static int drives_usb_scan_u(char* out, int max) {
   struct sbuf b = { out, 0, max };
   uint8_t s0[512], bs[512];
   uint32_t secs;
@@ -461,7 +461,7 @@ int drives_usb_scan(char* out, int max) {
 }
 
 /* PENDRIVE EJECT: solta e nao monta sozinho ate PENDRIVE MOUNT/SCAN. */
-int drives_usb_eject(void) {
+static int drives_usb_eject_u(void) {
   if (!drives_usb_mounted()) return -1;
   usb_unmount();
   usb_hold = 1;
@@ -815,7 +815,7 @@ static int d_write(const char* name, const char* data, int size) {
   return 0;
 }
 
-int file_read_at(const char* path, uint32_t offset, char* buf, int len) {
+static int file_read_at_u(const char* path, uint32_t offset, char* buf, int len) {
   char L;
   char name[DRV_PATH];
   int idx;
@@ -862,7 +862,7 @@ int file_read_at(const char* path, uint32_t offset, char* buf, int len) {
   }
 }
 
-int file_load(const char* path, char* buf, int max_size) {
+static int file_load_u(const char* path, char* buf, int max_size) {
   char L;
   char name[DRV_PATH];
   int idx;
@@ -917,7 +917,7 @@ int file_load(const char* path, char* buf, int max_size) {
   }
 }
 
-int file_size(const char* path) {
+static int file_size_u(const char* path) {
   char L;
   char name[DRV_PATH];
   int idx;
@@ -945,7 +945,7 @@ int file_size(const char* path) {
   }
 }
 
-int file_save(const char* path, const char* data, int size) {
+static int file_save_u(const char* path, const char* data, int size) {
   char L;
   char name[DRV_PATH];
   int idx;
@@ -1017,7 +1017,7 @@ void drives_prompt(char* out, int max) {
   out[n] = 0;
 }
 
-int drives_chdir(const char* spec) {
+static int drives_chdir_u(const char* spec) {
   char L;
   char name[DRV_PATH];
   int idx;
@@ -1049,7 +1049,7 @@ int drives_chdir(const char* spec) {
   return 0;
 }
 
-int file_list(const char* path, char* out, int max) {
+static int file_list_u(const char* path, char* out, int max) {
   char L;
   char name[DRV_PATH];
   int idx;
@@ -1434,7 +1434,7 @@ static int dir_walk(int idx, char L, const char* name, const char* pat, int flag
   return 0;
 }
 
-void drives_dir(const char* spec, int flags, const char* order) {
+static void drives_dir_u(const char* spec, int flags, const char* order) {
   char dspec[DRV_PATH];
   char pat[32];
   char L;
@@ -1535,7 +1535,7 @@ static int ext_remove(int idx, const char* name) {
   return r == -5 ? -2 : r;
 }
 
-int drives_del(const char* spec) {
+static int drives_del_u(const char* spec) {
   char dspec[DRV_PATH];
   char pat[32];
   char L;
@@ -1568,7 +1568,9 @@ int drives_del(const char* spec) {
   }
   it = (struct dir_item*)kmalloc(DIR_ITEMS_MAX * (uint32_t)sizeof(struct dir_item));
   if (!it) return -2;
+  fs_lock(); /* so a listagem: fn pega a trava em cada file_* */
   n = dir_collect(idx, L, name, it, DIR_ITEMS_MAX);
+  fs_unlock();
   if (n < 0) {
     kfree(it);
     return -2;
@@ -1623,7 +1625,9 @@ int drives_glob(const char* spec, drives_glob_fn fn, void* ctx) {
   if (idx < 0 || !drv_ready(idx)) return -2;
   it = (struct dir_item*)kmalloc(DIR_ITEMS_MAX * (uint32_t)sizeof(struct dir_item));
   if (!it) return -2;
+  fs_lock(); /* so a listagem: fn pega a trava em cada file_* */
   n = dir_collect(idx, L, name, it, DIR_ITEMS_MAX);
+  fs_unlock();
   if (n < 0) {
     kfree(it);
     return -2;
@@ -1650,7 +1654,7 @@ int drives_glob(const char* spec, drives_glob_fn fn, void* ctx) {
 }
 
 /* Itens da pasta path (com tamanho e data). -1 se nao e pasta. */
-int drives_items(const char* path, struct dir_item* out, int max) {
+static int drives_items_u(const char* path, struct dir_item* out, int max) {
   char L;
   char name[DRV_PATH];
   int idx;
@@ -1660,7 +1664,7 @@ int drives_items(const char* path, struct dir_item* out, int max) {
   return dir_collect(idx, L, name, out, max);
 }
 
-int drives_long_name(const char* path, char* out, int max) {
+static int drives_long_name_u(const char* path, char* out, int max) {
   char L;
   char name[DRV_PATH];
   int idx;
@@ -1688,10 +1692,14 @@ static int dir_op(const char* path, int make) {
   idx = letter_idx(L);
   if (!name[0] || idx < 0 || !drv_ready(idx)) return -1;
   if (drv_kind[idx] == DRV_EXT) {
-    /* FAT32: o driver so cria pastas (sem rd) */
+    /* FAT32: md desde o abi 2, rd desde o abi 5 */
     const struct fsdrv_ops* o = drv_ops[idx];
     uint16_t fd, ft;
-    if (!make || o->abi < FSDRV_ABI_MKDIR || !o->mkdir) return -1;
+    if (!make) {
+      if (o->abi < FSDRV_ABI_RMDIR || !o->rmdir) return -1;
+      return o->rmdir(drv_vol[idx], name);
+    }
+    if (o->abi < FSDRV_ABI_MKDIR || !o->mkdir) return -1;
     fat_now(&fd, &ft);
     return o->mkdir(drv_vol[idx], name, fd, ft);
   }
@@ -1701,7 +1709,7 @@ static int dir_op(const char* path, int make) {
 
 /* Renomeia/move no mesmo disco FAT sem copiar os dados (fat_rename).
  * -6 unidades diferentes e -5 unidade que nao e FAT: quem chama copia. */
-int drives_rename(const char* from, const char* to) {
+static int drives_rename_u(const char* from, const char* to) {
   char L1, L2;
   char n1[DRV_PATH];
   char n2[DRV_PATH];
@@ -1726,11 +1734,23 @@ int drives_rename(const char* from, const char* to) {
   return fat_rename(n1, n2);
 }
 
-int drives_mkdir(const char* path) { return dir_op(path, 1); }
-int drives_rmdir(const char* path) { return dir_op(path, 0); }
+int drives_mkdir(const char* path) {
+  int r;
+  fs_lock();
+  r = dir_op(path, 1);
+  fs_unlock();
+  return r;
+}
+int drives_rmdir(const char* path) {
+  int r;
+  fs_lock();
+  r = dir_op(path, 0);
+  fs_unlock();
+  return r;
+}
 
 /* Espaco da unidade em KB. -1 se nao e disco FAT montado. */
-int drives_space(char letter, uint32_t* total_kb, uint32_t* free_kb) {
+static int drives_space_u(char letter, uint32_t* total_kb, uint32_t* free_kb) {
   int idx = letter_idx(letter);
   uint32_t t, f;
   if (idx < 0 || !drv_ready(idx) || !is_tree(idx)) return -1;
@@ -1751,7 +1771,7 @@ void drives_print_dir(const char* spec) {
   drives_dir(spec, 0, 0);
 }
 
-int drives_names(char letter, char out[][32], int max) {
+static int drives_names_u(char letter, char out[][32], int max) {
   char L = norm_letter(letter);
   int idx = letter_idx(L);
   int n = 0;
@@ -1788,7 +1808,7 @@ int drives_names(char letter, char out[][32], int max) {
   return n;
 }
 
-void drives_list(char letter) {
+static void drives_list_u(char letter) {
   int idx = letter_idx(letter);
   char L = norm_letter(letter);
   if (!drv_ready(idx)) {
@@ -1892,7 +1912,7 @@ static int enum_one_dir(char out[][48], int n, int max, const char* dir) {
   return n;
 }
 
-int drives_enum_paths(char out[][48], int max) {
+static int drives_enum_paths_u(char out[][48], int max) {
   int n = 0;
   int i;
   if (!out || max <= 0) return 0;
@@ -1909,4 +1929,142 @@ int drives_enum_paths(char out[][48], int max) {
   for (i = 0; i < mem_file_count && n < max; i++)
     put_path(out[n++], 48, 'C', mem_files[i].name);
   return n;
+}
+
+/* ---------- trava do sistema de arquivos ----------
+ * O fat.c tem um estado so (unidade atual, FAT, a pasta em sub_dir) e cede a
+ * CPU no meio de leituras e gravacoes. Antes so os k_* dos programas pegavam
+ * a trava; o carregador de modulos, o kernel/wine.c (cabecalho do EXE), o
+ * HOSTS do DNS, o shell etc. liam sem ela e trocavam o sub_dir de quem estava
+ * gravando: o dir_flush gravava a pasta errada no cluster (Claude Desktop:
+ * D:\WINE copiado no GPUCache, e o rd recursivo do Chromium apagou
+ * D:\WINE\APPS). Agora toda entrada publica do drives.c passa por aqui. */
+int file_read_at(const char* path, uint32_t offset, char* buf, int len) {
+  int r;
+  fs_lock();
+  r = file_read_at_u(path, offset, buf, len);
+  fs_unlock();
+  return r;
+}
+int file_load(const char* path, char* buf, int max_size) {
+  int r;
+  fs_lock();
+  r = file_load_u(path, buf, max_size);
+  fs_unlock();
+  return r;
+}
+int file_size(const char* path) {
+  int r;
+  fs_lock();
+  r = file_size_u(path);
+  fs_unlock();
+  return r;
+}
+int file_save(const char* path, const char* data, int size) {
+  int r;
+  fs_lock();
+  r = file_save_u(path, data, size);
+  fs_unlock();
+  return r;
+}
+int file_list(const char* path, char* out, int max) {
+  int r;
+  fs_lock();
+  r = file_list_u(path, out, max);
+  fs_unlock();
+  return r;
+}
+int drives_chdir(const char* spec) {
+  int r;
+  fs_lock();
+  r = drives_chdir_u(spec);
+  fs_unlock();
+  return r;
+}
+void drives_dir(const char* spec, int flags, const char* order) {
+  fs_lock();
+  drives_dir_u(spec, flags, order);
+  fs_unlock();
+}
+int drives_del(const char* spec) {
+  int r;
+  fs_lock();
+  r = drives_del_u(spec);
+  fs_unlock();
+  return r;
+}
+int drives_items(const char* path, struct dir_item* out, int max) {
+  int r;
+  fs_lock();
+  r = drives_items_u(path, out, max);
+  fs_unlock();
+  return r;
+}
+int drives_long_name(const char* path, char* out, int max) {
+  int r;
+  fs_lock();
+  r = drives_long_name_u(path, out, max);
+  fs_unlock();
+  return r;
+}
+int drives_rename(const char* from, const char* to) {
+  int r;
+  fs_lock();
+  r = drives_rename_u(from, to);
+  fs_unlock();
+  return r;
+}
+int drives_space(char letter, uint32_t* total_kb, uint32_t* free_kb) {
+  int r;
+  fs_lock();
+  r = drives_space_u(letter, total_kb, free_kb);
+  fs_unlock();
+  return r;
+}
+int drives_names(char letter, char out[][32], int max) {
+  int r;
+  fs_lock();
+  r = drives_names_u(letter, out, max);
+  fs_unlock();
+  return r;
+}
+void drives_list(char letter) {
+  fs_lock();
+  drives_list_u(letter);
+  fs_unlock();
+}
+int drives_enum_paths(char out[][48], int max) {
+  int r;
+  fs_lock();
+  r = drives_enum_paths_u(out, max);
+  fs_unlock();
+  return r;
+}
+int drives_usb_scan(char* out, int max) {
+  int r;
+  fs_lock();
+  r = drives_usb_scan_u(out, max);
+  fs_unlock();
+  return r;
+}
+int drives_usb_mount_at(char L) {
+  int r;
+  fs_lock();
+  r = drives_usb_mount_at_u(L);
+  fs_unlock();
+  return r;
+}
+int drives_usb_eject(void) {
+  int r;
+  fs_lock();
+  r = drives_usb_eject_u();
+  fs_unlock();
+  return r;
+}
+int drives_mount_usb(void) {
+  int r;
+  fs_lock();
+  r = drives_mount_usb_u();
+  fs_unlock();
+  return r;
 }

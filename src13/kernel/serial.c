@@ -29,10 +29,15 @@ static int tx_ready(void) {
 }
 
 /* Copia de tudo o que sai na COM1, para o \LOG\SERIAL.LOG: o PC real nao tem
- * serial. Guarda os primeiros 192 KB do boot (o diagnostico esta no comeco). */
+ * serial. Guarda os primeiros 192 KB do boot (o diagnostico de hardware esta
+ * no comeco) e, num anel, o ultimo 1 MB (onde o programa que falhou deixou o
+ * log: o Claude/WINE no notebook passava dos 192 KB antes da falha). */
 #define SLOG_MAX (192u * 1024u)
+#define STAIL_MAX (1024u * 1024u)
 static char slog[SLOG_MAX];
 static volatile uint32_t slog_n;
+static char stail[STAIL_MAX];
+static volatile uint32_t stail_n; /* total escrito depois da cabeca */
 
 const char* serial_log(uint32_t* n) {
   uint32_t v = slog_n;
@@ -40,11 +45,26 @@ const char* serial_log(uint32_t* n) {
   return slog;
 }
 
+/* Final do log em ordem, depois da cabeca: copia ate max bytes em out.
+ * *skipped = bytes que ficaram entre a cabeca e este final (sobrescritos). */
+uint32_t serial_log_tail(char* out, uint32_t max, uint32_t* skipped) {
+  uint32_t total = stail_n, have = total > STAIL_MAX ? STAIL_MAX : total, i, start;
+  if (have > max) have = max;
+  start = total - have;
+  for (i = 0; i < have; i++) out[i] = stail[(start + i) % STAIL_MAX];
+  if (skipped) *skipped = start;
+  return have;
+}
+
 void serial_putc(char c) {
   volatile int spin = 100000;
   if (c != '\r') {
     uint32_t i = __atomic_fetch_add(&slog_n, 1u, __ATOMIC_RELAXED);
     if (i < SLOG_MAX) slog[i] = c;
+    else {
+      uint32_t j = __atomic_fetch_add(&stail_n, 1u, __ATOMIC_RELAXED);
+      stail[j % STAIL_MAX] = c;
+    }
   }
   while (!tx_ready() && --spin > 0) { }
   outb(COM1, (uint8_t)c);

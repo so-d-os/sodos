@@ -687,10 +687,41 @@ static WINAPI BOOL UnhookWinEvent(HANDLE h) {
   return 1;
 }
 
-/* ---------- area de transferencia (dentro do processo) ---------- */
+/* ---------- area de transferencia ----------
+ * Texto vai e vem do clipboard do SODOS (k_clip_get/k_clip_set, o mesmo do
+ * DOS, Command e Bloco de notas): Ctrl+V no Claude cola o que foi copiado no
+ * SODOS e copiar no Claude vale fora dele. O texto do SODOS e lido como UTF-8
+ * (Latin-1 se nao for UTF-8 valido). Outros formatos ficam so no processo. */
+#define CF_TEXT_ 1
+#define CF_OEMTEXT_ 7
+#define CF_UNICODETEXT_ 13
+int k_clip_get(char* out, int max);
+void k_clip_set(const char* s, int n);
 static DWORD clip_fmt;
 static void* clip_data;
 static int clip_open;
+static void* clip_sodos;  /* copia entregue por GetClipboardData (liberada na proxima) */
+static int is_text(DWORD f) { return f == CF_TEXT_ || f == CF_OEMTEXT_ || f == CF_UNICODETEXT_; }
+static int sodos_text(char* buf, int max) {
+  int n = k_clip_get(buf, max);
+  if (n < 0) n = 0;
+  if (n >= max) n = max - 1;
+  buf[n] = 0;
+  return n;
+}
+static int utf8_ok(const char* s) {
+  const uint8_t* p = (const uint8_t*)s;
+  while (*p) {
+    int k = *p < 0x80 ? 0 : (*p & 0xE0) == 0xC0 ? 1 : (*p & 0xF0) == 0xE0 ? 2 : (*p & 0xF8) == 0xF0 ? 3 : -1;
+    if (k < 0) return 0;
+    p++;
+    while (k--) {
+      if ((*p & 0xC0) != 0x80) return 0;
+      p++;
+    }
+  }
+  return 1;
+}
 static WINAPI BOOL OpenClipboard(HANDLE h) {
   (void)h;
   if (clip_open) return 0;
@@ -711,12 +742,74 @@ static WINAPI HANDLE SetClipboardData(DWORD fmt, HANDLE mem) {
   if (clip_data) k_free(clip_data);
   clip_fmt = fmt;
   clip_data = mem; /* passa a ser do sistema */
+  if (mem && fmt == CF_UNICODETEXT_) {
+    char* u = wdup16to8((const wchar16*)mem);
+    if (u) {
+      k_clip_set(u, -1);
+      k_free(u);
+    }
+  } else if (mem && (fmt == CF_TEXT_ || fmt == CF_OEMTEXT_)) {
+    k_clip_set((const char*)mem, -1);
+  }
   return mem;
 }
-static WINAPI HANDLE GetClipboardData(DWORD fmt) { return fmt == clip_fmt ? (HANDLE)clip_data : 0; }
-static WINAPI BOOL IsClipboardFormatAvailable(DWORD fmt) { return clip_data && fmt == clip_fmt; }
-static WINAPI DWORD EnumClipboardFormats(DWORD fmt) { return (!fmt && clip_data) ? clip_fmt : 0; }
-static WINAPI DWORD GetClipboardSequenceNumber(void) { return 1; }
+static WINAPI HANDLE GetClipboardData(DWORD fmt) {
+  static char buf[65536];
+  int n;
+  if (!is_text(fmt)) return fmt == clip_fmt ? (HANDLE)clip_data : 0;
+  n = sodos_text(buf, (int)sizeof(buf));
+  if (!n) return fmt == clip_fmt ? (HANDLE)clip_data : 0;
+  if (clip_sodos) k_free(clip_sodos);
+  clip_sodos = 0;
+  if (fmt == CF_UNICODETEXT_) {
+    wchar16* w;
+    int i, k;
+    if (utf8_ok(buf)) {
+      k = wutf8_to_16(buf, -1, 0, 0);
+      w = (wchar16*)k_malloc((unsigned)(k + 1) * 2u);
+      if (!w) return 0;
+      wutf8_to_16(buf, -1, w, k);
+      w[k] = 0;
+    } else {
+      w = (wchar16*)k_malloc((unsigned)(n + 1) * 2u);
+      if (!w) return 0;
+      for (i = 0; i < n; i++) w[i] = (uint8_t)buf[i];
+      w[n] = 0;
+    }
+    clip_sodos = w;
+  } else {
+    char* t = (char*)k_malloc((unsigned)n + 1u);
+    if (!t) return 0;
+    memcpy(t, buf, (size_t)n + 1);
+    clip_sodos = t;
+  }
+  return clip_sodos;
+}
+static WINAPI BOOL IsClipboardFormatAvailable(DWORD fmt) {
+  char b[8];
+  if (is_text(fmt) && k_clip_get(b, (int)sizeof(b)) > 0) return 1;
+  return clip_data && fmt == clip_fmt;
+}
+static WINAPI DWORD EnumClipboardFormats(DWORD fmt) {
+  char b[8];
+  int has = k_clip_get(b, (int)sizeof(b)) > 0;
+  if (has) {
+    if (!fmt) return CF_UNICODETEXT_;
+    if (fmt == CF_UNICODETEXT_) return CF_TEXT_;
+    if (fmt == CF_TEXT_) return clip_data && !is_text(clip_fmt) ? clip_fmt : 0;
+    return 0;
+  }
+  return (!fmt && clip_data) ? clip_fmt : 0;
+}
+/* muda quando o texto do SODOS muda (o Chromium usa para saber se a area de
+ * transferencia mudou) */
+static WINAPI DWORD GetClipboardSequenceNumber(void) {
+  static char buf[65536];
+  int n = sodos_text(buf, (int)sizeof(buf)), i;
+  DWORD hsh = 2166136261u;
+  for (i = 0; i < n; i++) hsh = (hsh ^ (uint8_t)buf[i]) * 16777619u;
+  return (hsh ^ (DWORD)n) | 1u;
+}
 static WINAPI long OleSetClipboard(void* obj) {
   (void)obj;
   return 0;
@@ -1268,7 +1361,7 @@ static WINAPI int MulDiv(int a, int b, int c) {
   if (r > 0x7FFFFFFF || r < -0x7FFFFFFF - 1) return -1;
   return (int)r;
 }
-static WINAPI size_t GlobalSize(void* p) { return p ? k_msize(p) : 0; }
+static WINAPI size_t GlobalSize(void* p) { return wheap_size(p); }
 static WINAPI DWORD GetCompressedFileSizeW(const wchar16* name, DWORD* hi) {
   char* n = wdup16to8(name);
   char path[300];
@@ -1514,7 +1607,8 @@ static WINAPI long NtQueryInformationFile(HANDLE h, void* iosb, void* buf, DWORD
 }
 static WINAPI long NtDeviceIoControlFile(HANDLE h, HANDLE ev, void* apc, void* ctx, void* iosb, DWORD code,
                                          void* in, DWORD nin, void* out, DWORD nout) {
-  (void)h; (void)ev; (void)apc; (void)ctx; (void)iosb; (void)code; (void)in; (void)nin; (void)out; (void)nout;
+  (void)h; (void)ev; (void)apc; (void)ctx; (void)iosb; (void)in; (void)nin; (void)out; (void)nout;
+  { static int n_; if (wine_debug >= 2 && n_ < 12) { n_++; wlogx("NtDeviceIoControlFile (nao suportado), codigo ", code); wlogx("  handle ", (uint64_t)(uintptr_t)h); } }
   return (long)0xC00000BB; /* STATUS_NOT_SUPPORTED */
 }
 

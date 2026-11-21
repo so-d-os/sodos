@@ -171,10 +171,150 @@ static int wstat(const char* path, uint32_t* size) {
   return 0;
 }
 
+/* ---------- data de modificacao das travas (".lock") ----------
+ * Todos os tempos de arquivo aqui sao "agora" (o kernel nao tem stat com
+ * data). Para as travas isso nao serve: o Claude Code (proper-lockfile) pega
+ * a trava com mkdir("x.lock") e, se ela ja existe, olha a data: com mais de
+ * 10 s e de um processo que morreu e pode ser removida. Com "agora" uma trava
+ * esquecida (queda de energia, killall) nunca vencia e todo claude.exe ficava
+ * esperando para sempre. Entao, so para nomes terminados em ".lock": a data
+ * gravada pelo FAT (listando a pasta-mae) ou a que o dono renovou com
+ * SetFileTime (tabela na memoria, de todos os processos). */
+#define LOCKT_N 32
+static struct lockt {
+  char path[300];
+  uint64_t ft;
+} lockt[LOCKT_N];
+static volatile int lockt_busy;
+static unsigned lockt_next;
+
+static int is_lock_path(const char* p) {
+  size_t n = p ? strlen(p) : 0;
+  return n > 5 && p[n - 5] == '.' && (p[n - 4] | 32) == 'l' && (p[n - 3] | 32) == 'o' && (p[n - 2] | 32) == 'c' &&
+         (p[n - 1] | 32) == 'k';
+}
+static int path_ieq(const char* a, const char* b) {
+  for (; *a && *b; a++, b++) {
+    int x = *a, y = *b;
+    if (x >= 'a' && x <= 'z') x -= 32;
+    if (y >= 'a' && y <= 'z') y -= 32;
+    if (x != y) return 0;
+  }
+  return *a == *b;
+}
+static void lockt_lock(void) {
+  while (__sync_lock_test_and_set(&lockt_busy, 1)) k_thread_yield();
+}
+static void lockt_set(const char* path, uint64_t ft) {
+  int i, at = -1;
+  if (!is_lock_path(path) || strlen(path) >= sizeof(lockt[0].path)) return;
+  if (ft && wine_debug >= 2) wlog("trava renovada: ", path);
+  lockt_lock();
+  for (i = 0; i < LOCKT_N; i++)
+    if (lockt[i].path[0] && path_ieq(lockt[i].path, path)) at = i;
+  if (!ft) {
+    if (at >= 0) lockt[at].path[0] = 0;
+  } else {
+    if (at < 0) at = (int)(lockt_next++ % LOCKT_N);
+    strcpy(lockt[at].path, path);
+    lockt[at].ft = ft;
+  }
+  __sync_lock_release(&lockt_busy);
+}
+static uint64_t fat_to_filetime(unsigned date, unsigned time) {
+  int y = 1980 + (int)(date >> 9), m = (int)(date >> 5 & 15), d = (int)(date & 31);
+  int64_t era, yoe, doy, doe, days;
+  if (m < 1 || m > 12 || d < 1) return 0;
+  y -= m <= 2;
+  era = (y >= 0 ? y : y - 399) / 400;
+  yoe = y - era * 400;
+  doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  days = era * 146097 + doe - 719468;
+  return ((uint64_t)days * 86400u + (time >> 11) * 3600u + (time >> 5 & 63) * 60u + (time & 31) * 2u + 11644473600ull) *
+         10000000ull;
+}
+/* Os outros arquivos: a data tem de ficar PARADA enquanto ninguem grava. Com
+ * "agora" a cada consulta o Claude Code achava que o .claude.json tinha mudado
+ * e relia o arquivo inteiro do disco sem parar (cada getConfig = stat + leitura;
+ * no notebook um claude.exe ficou minutos so nisso, com o BKL). Sem stat com
+ * data no kernel: a data e a da ultima gravacao feita por um programa do
+ * Windows neste boot (tabela por hash do caminho, de todos os processos), ou
+ * a hora em que o WINE foi usado pela primeira vez. */
+#define MTAB_N 2048
+static struct mtab {
+  uint32_t hash;
+  uint64_t ft;
+} mtab[MTAB_N];
+static uint64_t mtab_epoch;
+
+static uint32_t path_hash(const char* p) {
+  uint32_t h = 2166136261u;
+  for (; *p; p++) {
+    unsigned c = (unsigned char)*p;
+    if (c >= 'a' && c <= 'z') c -= 32;
+    if (c == '/') c = 92;
+    h = (h ^ c) * 16777619u;
+  }
+  return h ? h : 1;
+}
+static void mtab_touch(const char* path) {
+  uint32_t h = path_hash(path);
+  struct mtab* m = &mtab[h % MTAB_N];
+  m->ft = wfiletime_now();
+  m->hash = h;
+}
+static int wsave(const char* path, const char* data, int n) {
+  int r = k_fsave(path, data, n);
+  if (r >= 0) mtab_touch(path);
+  return r;
+}
+static int wrename(const char* from, const char* to) {
+  int r = k_frename(from, to);
+  if (r == 0) mtab_touch(to);
+  return r;
+}
+
+/* Tempo de modificacao de path para as APIs de stat. */
+static uint64_t wpath_time(const char* path) {
+  uint64_t now = wfiletime_now(), ft = 0;
+  char dir[300];
+  const char* leaf;
+  char* slash;
+  struct k_direntl* ents;
+  int i, n;
+  if (!is_lock_path(path) || strlen(path) >= sizeof(dir)) {
+    uint32_t h = path_hash(path);
+    struct mtab m = mtab[h % MTAB_N];
+    if (!mtab_epoch) mtab_epoch = now;
+    return m.hash == h && m.ft && m.ft <= now ? m.ft : mtab_epoch;
+  }
+  lockt_lock();
+  for (i = 0; i < LOCKT_N; i++)
+    if (lockt[i].path[0] && path_ieq(lockt[i].path, path)) ft = lockt[i].ft;
+  __sync_lock_release(&lockt_busy);
+  if (ft) return ft < now ? ft : now;
+  strcpy(dir, path);
+  slash = strrchr(dir, '\\');
+  if (!slash) return now;
+  leaf = path + (slash - dir) + 1;
+  slash[slash == dir + 2 ? 1 : 0] = 0;   /* "D:\x" -> "D:\" */
+  ents = (struct k_direntl*)k_malloc((unsigned)(sizeof(*ents) * 256u));
+  if (!ents) return now;
+  n = k_dir_long(dir, ents, 256);
+  for (i = 0; i < n; i++)
+    if (path_ieq(ents[i].name, leaf)) {
+      ft = fat_to_filetime(ents[i].date, ents[i].time);
+      break;
+    }
+  k_free(ents);
+  return ft && ft < now ? ft : now;
+}
+
 /* ---------- objetos de arquivo ---------- */
 void wfile_flush(struct wobj* f) {
   if (f->type != OBJ_FILE || !f->writable || !f->dirty || !f->path) return;
-  if (k_fsave(f->path, (const char*)(f->data ? f->data : (const uint8_t*)""), (int)f->size) < 0)
+  if (wsave(f->path, (const char*)(f->data ? f->data : (const uint8_t*)""), (int)f->size) < 0)
     wlog("erro gravando ", f->path);
   f->dirty = 0;
 }
@@ -215,8 +355,10 @@ void wfile_close(struct wobj* f) {
   }
   wfile_flush(f);
   if (f->type == OBJ_FILE && (f->u2 & 1) && f->path) { /* FILE_DISPOSITION: apaga ao fechar */
+    lockt_set(f->path, 0);
     if (f->is_dir) {
-      k_rmdir(f->path);
+      if (k_rmdir(f->path)) wlog("pasta nao removida ao fechar: ", f->path);
+      else if (is_lock_path(f->path)) wlog("trava solta: ", f->path);
     } else if (!ram_delete(f->path)) {
       k_fdelete(f->path);
     }
@@ -256,7 +398,7 @@ static HANDLE open_file(const char* name, DWORD access, DWORD disp, DWORD flags)
   struct wobj* f;
   uint32_t size = 0;
   int st, want_write = (access & 0x40000000u) || (access & 0x10000000u) || (access & 6u);
-  if (name[0] == 92 && name[1] == 92 && name[2] == 46 && name[3] == 92 && (name[4] | 32) == 112 &&
+  if (name[0] == 92 && name[1] == 92 && (name[2] == 46 || name[2] == 63) && name[3] == 92 && (name[4] | 32) == 112 &&
       (name[5] | 32) == 105 && (name[6] | 32) == 112 && (name[7] | 32) == 101 && name[8] == 92) {
     wchar16* w = wdup8to16(name); /* cliente de named pipe */
     HANDLE h = w ? wpipe_open(w, flags) : INVALID_HANDLE_VALUE;
@@ -273,6 +415,8 @@ static HANDLE open_file(const char* name, DWORD access, DWORD disp, DWORD flags)
   wpath(name, path, (int)sizeof(path));
   st = wstat(path, &size);
   if (wine_debug) wlog(st ? "CreateFile " : "CreateFile (nao existe) ", path);
+  if (wine_debug && is_lock_path(path))
+    wlogx("  trava: acesso<<32 | disp<<28 | flags>>8 ", (uint64_t)access << 32 | (uint64_t)disp << 28 | flags >> 8);
   {
     struct ramfile* r;
     ram_lock();
@@ -363,7 +507,7 @@ static HANDLE open_file(const char* name, DWORD access, DWORD disp, DWORD flags)
     if (!st || disp == 2 || disp == 5) {
       f->dirty = 1;
       /* o arquivo passa a existir ja (outro handle pode abrir) */
-      if (!st) k_fsave(path, "", 0);
+      if (!st) wsave(path, "", 0);
     }
   } else {
     f->size = size;
@@ -463,6 +607,15 @@ static WINAPI BOOL WriteFile(HANDLE h, const void* buf, DWORD n, DWORD* done, st
   }
   f = wh_get(h, 0);
   if (f && f->type == OBJ_SOCKET) return wsock_write(f, buf, n, done, ov);
+  if (f && f->type == OBJ_PIPE && wine_debug >= 2 && (h == wp()->std[1] || h == wp()->std[2])) {
+    /* stdout/stderr herdados de um pai (o Claude Code escreve o erro dele ai):
+     * copia no serial para dar para ler */
+    char t[240];
+    DWORD k = n < sizeof(t) - 1 ? n : (DWORD)sizeof(t) - 1, i;
+    for (i = 0; i < k; i++) t[i] = ((const char*)buf)[i] == '\n' ? ' ' : ((const char*)buf)[i];
+    t[k] = 0;
+    wlog(h == wp()->std[2] ? "stderr: " : "stdout: ", t);
+  }
   if (f && f->type == OBJ_PIPE) return wpipe_write(f, buf, n, done, ov);
   if (f && f->type == OBJ_MISC) {
     if (done) *done = n;
@@ -495,6 +648,10 @@ static WINAPI BOOL WriteFile(HANDLE h, const void* buf, DWORD n, DWORD* done, st
     /* arquivo pequeno (log): vai para o disco a cada escrita, para existir
      * mesmo se o programa nao fechar; os grandes so no fechamento */
     if (f->size <= 256u * 1024u) wfile_flush(f);
+    /* log maior (o main.log do Claude passa de 256 KB em poucos usos e a
+     * copia no disco parava ali, sem o trecho que interessa): grava de novo a
+     * cada 16 KB acrescentados, ate 8 MB */
+    else if (f->append && f->size <= 8u * 1024u * 1024u && (f->size >> 14) != ((f->size - n) >> 14)) wfile_flush(f);
     if (done) *done = n;
     if (ov) {
       ov->internal = 0;
@@ -592,7 +749,11 @@ static WINAPI DWORD GetFileType(HANDLE h) {
   }
   if (f->type == OBJ_FILE) return 1; /* DISK */
   if (f->type == OBJ_SOCKET) return 3; /* PIPE */
-  if (f->type == OBJ_PIPE) return 3;
+  if (f->type == OBJ_PIPE) {
+    if (wine_debug >= 2 && (h == wp()->std[0] || h == wp()->std[1] || h == wp()->std[2]))
+      wlogx("GetFileType no stdio herdado (pipe) ", (uint64_t)(uintptr_t)h);
+    return 3;
+  }
   if (f->type == OBJ_MISC && f->u1 == 0x4C554E) return 2; /* NUL: CHAR */
   return 0;
 }
@@ -606,8 +767,17 @@ static WINAPI BOOL UnlockFileEx(HANDLE h, DWORD r, DWORD lo, DWORD hi, void* ov)
 }
 
 /* ---------- atributos ---------- */
+/* Amostra das consultas ao disco que nao aparecem no log do CreateFile
+ * (WINEDEBUG>=1): 1 a cada 200, com o caminho. Serve para achar quem fica
+ * consultando o disco em laco. */
+static volatile unsigned fs_trace_n;
+static void fs_trace(const char* what, const char* path) {
+  if (wine_debug && (__sync_add_and_fetch(&fs_trace_n, 1) % 200u) == 0) wlog(what, path);
+}
 static DWORD attrs_of(const char* path, uint32_t* size) {
-  int st = wstat(path, size);
+  int st;
+  fs_trace("amostra GetFileAttributes ", path);
+  st = wstat(path, size);
   if (!st) return INVALID_ATTRS;
   return st == 2 ? ATTR_DIR : ATTR_ARCHIVE;
 }
@@ -638,7 +808,7 @@ static WINAPI BOOL GetFileAttributesExW(const wchar16* name, int level, struct a
     return 0;
   }
   d->attrs = a;
-  d->ctime = d->atime = d->mtime = wfiletime_now();
+  d->ctime = d->atime = d->mtime = wpath_time(p);
   d->size_high = 0;
   d->size_low = size;
   return 1;
@@ -661,11 +831,23 @@ static WINAPI BOOL GetFileInformationByHandle(HANDLE h, struct by_handle_info* d
   }
   memset(d, 0, sizeof(*d));
   d->attrs = f->is_dir ? ATTR_DIR : ATTR_ARCHIVE;
-  d->ctime = d->atime = d->mtime = wfiletime_now();
+  d->ctime = d->atime = d->mtime = f->path ? wpath_time(f->path) : wfiletime_now();
   d->serial = 0x50D05;
   d->size_low = f->size;
   d->nlinks = 1;
-  d->idx_low = (DWORD)(uintptr_t)f;
+  /* identidade do arquivo: tem de ser a mesma a cada abertura. Era o endereco
+   * do objeto do handle, que muda a cada CreateFile: o vigia de arquivos do
+   * Claude Code (fs.watchFile compara o stat inteiro, ino incluido) via
+   * "mudou" em toda verificacao e relistava D:\WINE\USERS\SODOS e
+   * .claude\backups dezenas de vezes por segundo, parado; e o Desktop
+   * avisava "create-path identity mismatch" em todo arquivo que criava. */
+  if (f->path) {
+    uint32_t h = path_hash(f->path);
+    d->idx_low = h;
+    d->idx_high = (h * 2654435761u) ^ (DWORD)strlen(f->path);
+  } else {
+    d->idx_low = (DWORD)(uintptr_t)f;
+  }
   return 1;
 }
 static WINAPI BOOL GetFileInformationByHandleEx(HANDLE h, int cls, void* buf, DWORD len) {
@@ -683,7 +865,8 @@ static WINAPI BOOL GetFileInformationByHandleEx(HANDLE h, int cls, void* buf, DW
   switch (cls) {
     case 0: /* FileBasicInfo: 4 tempos + atributos */
       if (len < 40) break;
-      ((uint64_t*)buf)[0] = ((uint64_t*)buf)[1] = ((uint64_t*)buf)[2] = ((uint64_t*)buf)[3] = wfiletime_now();
+      ((uint64_t*)buf)[0] = ((uint64_t*)buf)[1] = ((uint64_t*)buf)[2] = ((uint64_t*)buf)[3] =
+          f->path ? wpath_time(f->path) : wfiletime_now();
       ((DWORD*)buf)[8] = f->is_dir ? ATTR_DIR : ATTR_ARCHIVE;
       return 1;
     case 1: /* FileStandardInfo */
@@ -702,14 +885,18 @@ static WINAPI BOOL GetFileInformationByHandleEx(HANDLE h, int cls, void* buf, DW
   return 0;
 }
 static WINAPI BOOL GetFileTime(HANDLE h, uint64_t* c, uint64_t* a, uint64_t* m) {
-  (void)h;
-  if (c) *c = wfiletime_now();
-  if (a) *a = wfiletime_now();
-  if (m) *m = wfiletime_now();
+  struct wobj* f = wh_get(h, OBJ_FILE);
+  uint64_t t = f && f->path ? wpath_time(f->path) : wfiletime_now();
+  if (c) *c = t;
+  if (a) *a = t;
+  if (m) *m = t;
   return 1;
 }
 static WINAPI BOOL SetFileTime(HANDLE h, const void* c, const void* a, const void* m) {
-  (void)h; (void)c; (void)a; (void)m;
+  struct wobj* f = wh_get(h, OBJ_FILE);
+  (void)c; (void)a;
+  /* so as travas guardam a data (ver wpath_time) */
+  if (f && f->path && m && *(const uint64_t*)m) lockt_set(f->path, *(const uint64_t*)m);
   return 1;
 }
 
@@ -746,7 +933,7 @@ static int copy_file(const char* from, const char* to) {
   if (n < 0) return 0;
   buf = (char*)k_malloc((unsigned)n + 1);
   if (!buf) return 0;
-  ok = k_fread(from, 0, buf, n) == n && k_fsave(to, buf, n) >= 0;
+  ok = k_fread(from, 0, buf, n) == n && wsave(to, buf, n) >= 0;
   k_free(buf);
   return ok;
 }
@@ -780,7 +967,7 @@ static WINAPI BOOL MoveFileExW(const wchar16* from, const wchar16* to, DWORD fl)
       }
       ram_unlock();
       /* saiu de TEMP: agora vai para o disco */
-      if (k_fsave(b, (const char*)rf->data, (int)rf->size) < 0) {
+      if (wsave(b, (const char*)rf->data, (int)rf->size) < 0) {
         wset_lasterr(112);
         return 0;
       }
@@ -790,7 +977,7 @@ static WINAPI BOOL MoveFileExW(const wchar16* from, const wchar16* to, DWORD fl)
     ram_unlock();
   }
   if ((fl & 1) && k_fsize(b) >= 0) k_fdelete(b); /* REPLACE_EXISTING */
-  r = k_frename(a, b);
+  r = wrename(a, b);
   if (r == 0) return 1;
   if ((r == -5 || r == -6 || r == -7) && copy_file(a, b)) {
     k_fdelete(a);
@@ -818,6 +1005,7 @@ static WINAPI BOOL CreateDirectoryW(const wchar16* name, void* sa) {
   char p[300];
   int r = k_mkdir(wpath16(name, p, (int)sizeof(p)));
   (void)sa;
+  if (is_lock_path(p)) wlog(r == 0 ? "trava pega: " : r == 1 ? "trava ocupada: " : "trava: mkdir falhou ", p);
   if (r == 1) {
     wset_lasterr(ERROR_ALREADY_EXISTS);
     return 0;
@@ -834,11 +1022,15 @@ static WINAPI BOOL CreateDirectoryA(const char* name, void* sa) {
   (void)sa;
   if (r == 1) wset_lasterr(ERROR_ALREADY_EXISTS);
   else if (r) wset_lasterr(ERROR_PATH_NOT_FOUND);
+  if (is_lock_path(p)) wlog(r == 0 ? "trava pega: " : r == 1 ? "trava ocupada: " : "trava: mkdir falhou ", p);
   return r == 0;
 }
 static WINAPI BOOL RemoveDirectoryW(const wchar16* name) {
   char p[300];
   int r = k_rmdir(wpath16(name, p, (int)sizeof(p)));
+  lockt_set(p, 0);
+  if (r) wlog("RemoveDirectory falhou: ", p);
+  else if (is_lock_path(p)) wlog("trava solta: ", p);
   if (r) wset_lasterr(r == -2 ? 145 : ERROR_PATH_NOT_FOUND); /* DIR_NOT_EMPTY */
   return r == 0;
 }
@@ -871,19 +1063,27 @@ static int wild(const char* pat, const char* s) {
   return *s == 0;
 }
 
+/* Os itens vem do k_dir_long: nome longo inteiro (o k_dir cortava em 31 e
+ * devolvia o apelido NOME~1; o Chromium lista as pastas do cache, com GUID de
+ * 36 caracteres, e procura pelo nome que criou). */
 static int find_fill(struct wobj* f, struct find_dataw* d) {
-  struct k_dirent* ents = (struct k_dirent*)f->data;
+  struct k_direntl* ents = (struct k_direntl*)f->data;
   const char* pat = (const char*)f->p2;
   while (f->pos < f->size) {
-    struct k_dirent* e = &ents[f->pos++];
+    struct k_direntl* e = &ents[f->pos++];
     int n;
     if (!wild(pat, e->name)) continue;
     memset(d, 0, sizeof(*d));
     d->attrs = e->dir ? ATTR_DIR : ATTR_ARCHIVE;
-    d->ctime = d->atime = d->mtime = wfiletime_now();
+    d->ctime = d->atime = d->mtime = fat_to_filetime(e->date, e->time);
+    if (!d->mtime || d->mtime > wfiletime_now()) d->ctime = d->atime = d->mtime = wfiletime_now();
     d->size_low = e->size;
     n = wutf8_to_16(e->name, -1, d->name, 259);
     d->name[n] = 0;
+    if (wine_debug >= 2 && strlen(e->name) > 31) {
+      static volatile int said;
+      if (__sync_add_and_fetch(&said, 1) <= 5) wlog("FindFirstFile: nome longo ", e->name);
+    }
     return 1;
   }
   return 0;
@@ -894,9 +1094,10 @@ static WINAPI HANDLE FindFirstFileW(const wchar16* spec, struct find_dataw* d) {
   char* slash;
   const char* pat;
   struct wobj* f;
-  struct k_dirent* ents;
+  struct k_direntl* ents;
   int n, max = 512;
   wpath16(spec, p, (int)sizeof(p));
+  fs_trace("amostra FindFirstFile ", p);
   slash = strrchr(p, '\\');
   if (slash) {
     pat = slash + 1;
@@ -905,16 +1106,16 @@ static WINAPI HANDLE FindFirstFileW(const wchar16* spec, struct find_dataw* d) {
     pat = p;
   }
   f = wobj_new(OBJ_FIND);
-  ents = (struct k_dirent*)k_malloc((unsigned)(sizeof(*ents) * (size_t)max));
+  ents = (struct k_direntl*)k_malloc((unsigned)(sizeof(*ents) * (size_t)max));
   if (!f || !ents) return INVALID_HANDLE_VALUE;
   f->p2 = sdup(*pat ? pat : "*");
   if (slash) {
     char dir[300];
     strcpy(dir, p);
     if (strlen(dir) == 2 && dir[1] == ':') strcat(dir, "\\");
-    n = k_dir(dir, ents, max);
+    n = k_dir_long(dir, ents, max);
   } else {
-    n = k_dir(wp()->cwd, ents, max);
+    n = k_dir_long(wp()->cwd, ents, max);
   }
   if (n < 0) {
     k_free(ents);
@@ -1071,6 +1272,21 @@ const char* wine_dir(const char* rel) {
   static char buf[4][160];
   static int k;
   char* b = buf[k++ & 3];
+  static const char app[] = "USERS\\SODOS\\APPDATA";
+  char alt[96];
+  int n;
+  /* SET WINEAPPDATA=Z:\WINEAPP: o AppData (Roaming e Local) do perfil vai
+   * para outra pasta. Para testes no ramdisk Z:: o Chromium grava o cache
+   * HTTP la, e no D: (ATA por PIO, com o BKL) cada gravacao parava o WIN. */
+  if (rel && !strncmp(rel, app, sizeof(app) - 1) && (rel[sizeof(app) - 1] == 0 || rel[sizeof(app) - 1] == '\\') &&
+      (n = k_getenv("WINEAPPDATA", alt, (int)sizeof(alt))) > 0 && n < (int)sizeof(alt)) {
+    alt[n] = 0;
+    while (n > 0 && alt[n - 1] == '\\') alt[--n] = 0;
+    strcpy(b, alt);
+    strcat(b, rel + sizeof(app) - 1);
+    ensure_dir(b);
+    return b;
+  }
   strcpy(b, WINE_ROOT);
   if (rel && *rel) {
     strcat(b, "\\");
@@ -1110,7 +1326,7 @@ static WINAPI DWORD GetTempFileNameW(const wchar16* dir, const wchar16* pre, DWO
   name[n++] = hex[(u >> 4) & 15];
   name[n++] = hex[u & 15];
   strcpy(name + n, ".TMP");
-  if (!uniq) k_fsave(name, "", 0);
+  if (!uniq) wsave(name, "", 0);
   put16(name, out, 260);
   return u ? u : 1;
 }
@@ -1169,11 +1385,14 @@ long wfile_setinfo(HANDLE h, int cls, const void* buf, DWORD len) {
   struct wobj* f = wh_get(h, OBJ_FILE);
   const uint8_t* b = (const uint8_t*)buf;
   if (!f) return (long)0xC0000008; /* STATUS_INVALID_HANDLE */
+  if (wine_debug && f->path && is_lock_path(f->path)) wlogx("  trava: SetInformation classe ", (uint64_t)cls);
   switch (cls) {
     case 4: /* FileBasicInformation: tempos/atributos (o FAT daqui nao guarda) */
     case 19: /* FileAllocationInformation */
     case 14: /* FilePositionInformation */
       if (cls == 14 && len >= 8) f->pos = *(const uint64_t*)b;
+      /* LastWriteTime (0 e -1 = nao muda): so as travas guardam, wpath_time */
+      if (cls == 4 && len >= 24 && f->path && *(const int64_t*)(b + 16) > 0) lockt_set(f->path, *(const uint64_t*)(b + 16));
       return 0;
     case 13: /* FileDispositionInformation: BOOLEAN DeleteFile */
       if (len < 1) return (long)0xC0000004;

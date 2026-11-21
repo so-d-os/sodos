@@ -59,9 +59,9 @@ struct dfamily {
   int fonts[16];
   int nfonts;
 };
-#define MAX_FILES 64
-#define MAX_FONTS 128
-#define MAX_FAMS 48
+#define MAX_FILES 160
+#define MAX_FONTS 256
+#define MAX_FAMS 128
 struct fstate {
   struct wproc* owner; /* carregado para este processo (memoria e dele) */
   struct dfile files[MAX_FILES];
@@ -134,25 +134,27 @@ static const char* font_dir(void) {
   return tries[0];
 }
 
-static void add_face(struct dfile* fl, uint32_t idx) {
+/* devolve a familia da face (-1 = nao entrou) */
+static int add_face(struct dfile* fl, uint32_t idx) {
   struct dfont* d;
   int k;
-  if (F.nfonts >= MAX_FONTS) return;
+  if (F.nfonts >= MAX_FONTS) return -1;
   d = &F.fonts[F.nfonts];
-  if (!ttf_open(&d->tt, fl->data, fl->size, idx)) return;
+  if (!ttf_open(&d->tt, fl->data, fl->size, idx)) return -1;
   d->file = fl;
   for (k = 0; k < F.nfams; k++)
     if (wcs_ieq(F.fams[k].name, d->tt.family)) break;
   if (k == F.nfams) {
-    if (F.nfams >= MAX_FAMS) return;
+    if (F.nfams >= MAX_FAMS) return -1;
     wcs_cpy(F.fams[k].name, d->tt.family, TTF_NAME);
     F.fams[k].nfonts = 0;
     F.nfams++;
   }
-  if (F.fams[k].nfonts >= 16) return;
+  if (F.fams[k].nfonts >= 16) return k;
   d->family = k;
   F.fams[k].fonts[F.fams[k].nfonts++] = F.nfonts;
   F.nfonts++;
+  return k;
 }
 
 static void fonts_load(void) {
@@ -285,6 +287,27 @@ static void* o_new(const void* vtbl, size_t size) {
   }
   return o;
 }
+/* WINEDEBUG=2: interface pedida que nao temos (os 80 primeiros) */
+static void dw_qi_miss(const char* who, const void* iid) {
+  /* uma linha por (processo, IID) */
+  static struct {
+    void* proc;
+    uint32_t d1;
+  } seen[96];
+  static volatile int nseen;
+  uint32_t d1 = *(const uint32_t*)iid;
+  void* me = wp();
+  int i, n;
+  if (wine_debug < 2) return;
+  n = nseen;
+  for (i = 0; i < n && i < 96; i++)
+    if (seen[i].proc == me && seen[i].d1 == d1) return;
+  i = __sync_fetch_and_add(&nseen, 1);
+  if (i >= 96) return;
+  seen[i].proc = me;
+  seen[i].d1 = d1;
+  wlogx(who, d1);
+}
 #define QI_SIMPLE(fn, d1, d2, d3, ...)                                                          \
   static HRESULT_ WINAPI fn(struct dw_obj* o, const void* iid, void** out) {                  \
     static const uint8_t d4[8] = {__VA_ARGS__};                                                \
@@ -294,6 +317,7 @@ static void* o_new(const void* vtbl, size_t size) {
       *out = o;                                                                                \
       return S_OK_;                                                                            \
     }                                                                                          \
+    dw_qi_miss("DirectWrite QI recusado (" #fn ") iid ", iid);                                 \
     *out = 0;                                                                                  \
     return E_NOINTERFACE_;                                                                     \
   }
@@ -615,6 +639,46 @@ static void sk_close(void* ctx) {
 struct glyph_offset {
   float adv, asc;
 };
+/* WINEDEBUG=2: o que o Skia pede para desenhar (familia, tamanho, glifos) e
+ * se saiu algo. Os 60 primeiros e depois 1 a cada 500. */
+static int dw_put(char* b, int j, const char* s) {
+  while (*s && j < 150) b[j++] = *s++;
+  return j;
+}
+static int dw_num(char* b, int j, int v) {
+  char t[12];
+  int k = 0;
+  if (v < 0) {
+    if (j < 150) b[j++] = '-';
+    v = -v;
+  }
+  do t[k++] = (char)('0' + v % 10); while ((v /= 10) && k < 11);
+  while (k && j < 150) b[j++] = t[--k];
+  return j;
+}
+static void dw_note(const char* what, int font, float em, const uint16_t* idx, DWORD n, int empty) {
+  static volatile int cnt;
+  char b[160];
+  int k, j = 0, i;
+  const wchar16* fam;
+  if (wine_debug < 2) return;
+  k = __sync_add_and_fetch(&cnt, 1);
+  if (k > 60 && k % 500) return;
+  fam = F.fams[F.fonts[font].family].name;
+  for (i = 0; fam[i] && j < 40; i++) b[j++] = (char)(fam[i] < 128 ? fam[i] : '?');
+  j = dw_put(b, j, " em10=");
+  j = dw_num(b, j, (int)(em * 10));
+  j = dw_put(b, j, " n=");
+  j = dw_num(b, j, (int)n);
+  j = dw_put(b, j, " g=");
+  for (i = 0; i < (int)n && i < 6; i++) {
+    j = dw_num(b, j, idx ? idx[i] : -1);
+    j = dw_put(b, j, ",");
+  }
+  j = dw_put(b, j, empty ? " VAZIO" : " ok");
+  b[j] = 0;
+  wlog(what, b);
+}
 static HRESULT_ WINAPI fc_outline(struct dw_face* f, float em, const uint16_t* idx, const float* advs,
                                   const struct glyph_offset* offs, DWORD n, BOOL sideways, BOOL rtl, void** sink) {
   const struct ttfont* t = &F.fonts[f->font].tt;
@@ -625,6 +689,7 @@ static HRESULT_ WINAPI fc_outline(struct dw_face* f, float em, const uint16_t* i
   (void)sideways;
   if (!sink) return E_INVALIDARG_;
   ((void(WINAPI*)(void*, int))((void**)*sink)[3])(sink, 1); /* D2D1_FILL_MODE_WINDING */
+  dw_note("DirectWrite contorno: ", f->font, em, idx, n, 0);
   memset(&c, 0, sizeof(c));
   c.sink = sink;
   c.scale = em / (float)t->upem;
@@ -833,6 +898,159 @@ static const void* const co_vtbl[] = {co_qi, o_addref, o_release_static, co_coun
 static struct dw_obj collection = {co_vtbl, 1};
 static void* collection_get(void) { return &collection; }
 
+/* ---------- colecao personalizada (CreateCustomFontCollection) ----------
+ * No renderer do Chromium as fontes do sistema vem por aqui: o
+ * DWriteFontCollectionProxy e o loader, e a cada familia pedida o browser
+ * manda os arquivos (handles) e ele chama CreateCustomFontCollection com a
+ * chave da familia. Lemos cada arquivo pelo stream do loader do app (ou
+ * reconhecemos um arquivo nosso), acrescentamos as faces e devolvemos uma
+ * colecao so com as familias delas. Antes devolvia E_NOTIMPL e o renderer
+ * ficava sem fontes do sistema: todo texto que nao era fonte web sumia. */
+struct dw_coll {
+  struct dw_obj o;
+  int n;
+  int fams[32];
+};
+static HRESULT_ WINAPI cc_qi(struct dw_obj* o, const void* iid, void** out) {
+  static const uint8_t c4[8] = {0xa8, 0x27, 0x87, 0xc1, 0xa0, 0x2a, 0x0f, 0xcc}; /* IDWriteFontCollection */
+  if (IS_UNK(iid) || guid_is(iid, 0xa84cee02, 0x3eea, 0x4eee, c4)) {
+    o_addref(o);
+    *out = o;
+    return S_OK_;
+  }
+  dw_qi_miss("DirectWrite QI recusado (colecao propria) iid ", iid);
+  *out = 0;
+  return E_NOINTERFACE_;
+}
+static DWORD WINAPI cc_count(struct dw_coll* c) { return (DWORD)c->n; }
+static HRESULT_ WINAPI cc_family(struct dw_coll* c, DWORD i, void** out) {
+  if (i >= (DWORD)c->n) return E_INVALIDARG_;
+  *out = family_get(c->fams[i]);
+  return *out ? S_OK_ : E_OUTOFMEMORY_;
+}
+static HRESULT_ WINAPI cc_find(struct dw_coll* c, const wchar16* name, DWORD* idx, BOOL* exists) {
+  int i;
+  *exists = 0;
+  *idx = 0xFFFFFFFFu;
+  for (i = 0; name && i < c->n; i++)
+    if (wcs_ieq(F.fams[c->fams[i]].name, name)) {
+      *exists = 1;
+      *idx = (DWORD)i;
+      break;
+    }
+  return S_OK_;
+}
+static const void* const cc_vtbl[] = {cc_qi, o_addref, o_release, cc_count, cc_family, cc_find, co_fromface};
+
+/* chamadas COM nos objetos do app (vtable[i]) */
+#define VT(obj, i) (((void* const*)*(void* const*)(obj))[i])
+typedef HRESULT_(WINAPI* cenum_fn)(void* self, void* factory, const void* key, DWORD size, void** out);
+typedef HRESULT_(WINAPI* movenext_fn)(void* self, BOOL* has);
+typedef HRESULT_(WINAPI* getfile_fn)(void* self, void** out);
+typedef HRESULT_(WINAPI* getkey_fn)(void* self, const void** key, DWORD* size);
+typedef HRESULT_(WINAPI* getloader_fn)(void* self, void** out);
+typedef HRESULT_(WINAPI* cstream_fn)(void* self, const void* key, DWORD size, void** out);
+typedef HRESULT_(WINAPI* read_fn)(void* self, const void** start, uint64_t off, uint64_t size, void** ctx);
+typedef void(WINAPI* relfrag_fn)(void* self, void* ctx);
+typedef HRESULT_(WINAPI* fsize_fn)(void* self, uint64_t* size);
+typedef DWORD(WINAPI* rel_fn)(void* self);
+#define REL(obj) ((rel_fn)VT(obj, 2))(obj)
+
+/* arquivo pelo loader do app (key, ksz) -> indice em F.files; le os bytes uma
+ * vez (o mesmo arquivo de novo e reconhecido pelo conteudo) */
+static int foreign_load(void* ld, const void* key, DWORD ksz) {
+  void* st = 0;
+  uint64_t size = 0;
+  const void* frag = 0;
+  void* ctx = 0;
+  uint8_t* data;
+  int i, r = -1;
+  if (ld == &loader) {
+    struct dfile* f = key_file(key, ksz);
+    return f ? (int)(f - F.files) : -1;
+  }
+  if (((cstream_fn)VT(ld, 3))(ld, key, ksz, &st) < 0 || !st) return -1;
+  if (((fsize_fn)VT(st, 5))(st, &size) < 0 || size < 12 || size > 64u << 20) goto out;
+  if (((read_fn)VT(st, 3))(st, &frag, 0, size, &ctx) < 0 || !frag) goto out;
+  for (i = 0; i < F.nfiles; i++)
+    if (F.files[i].size == (uint32_t)size && !memcmp(F.files[i].data, frag, size < 4096 ? (size_t)size : 4096) &&
+        !memcmp(F.files[i].data + size - 256, (const uint8_t*)frag + size - 256, 256)) {
+      r = i;
+      break;
+    }
+  if (r < 0 && F.nfiles < MAX_FILES && (data = (uint8_t*)wzalloc((size_t)size)) != 0) {
+    struct dfile* fl = &F.files[F.nfiles];
+    memcpy(data, frag, (size_t)size);
+    fl->data = data; /* fica ate o fim do processo */
+    fl->size = (uint32_t)size;
+    fl->path[0] = 0;
+    r = F.nfiles++;
+  }
+  ((relfrag_fn)VT(st, 4))(st, ctx);
+out:
+  REL(st);
+  return r;
+}
+/* IDWriteFontFile qualquer -> indice em F.files */
+static int custom_file(void* file) {
+  void* ld = 0;
+  const void* key = 0;
+  DWORD ksz = 0;
+  int r;
+  if (*(void* const*)file == (const void*)fi_vtbl) return (int)((struct dw_file*)file)->idx; /* nosso */
+  if (((getkey_fn)VT(file, 3))(file, &key, &ksz) < 0) return -1;
+  if (((getloader_fn)VT(file, 4))(file, &ld) < 0 || !ld) return -1;
+  r = foreign_load(ld, key, ksz);
+  if (ld != &loader) REL(ld);
+  return r;
+}
+
+static HRESULT_ WINAPI fa_customcoll(struct dw_obj* fac, void* cl, const void* key, DWORD ksz, void** out) {
+  void* en = 0;
+  struct dw_coll* c;
+  BOOL has = 0;
+  int guard = 0;
+  if (!out) return E_INVALIDARG_;
+  *out = 0;
+  if (!cl) return E_INVALIDARG_;
+  fonts_load();
+  c = (struct dw_coll*)o_new(cc_vtbl, sizeof(struct dw_coll));
+  if (!c) return E_OUTOFMEMORY_;
+  if (((cenum_fn)VT(cl, 3))(cl, fac, key, ksz, &en) >= 0 && en) {
+    while (guard++ < 256 && ((movenext_fn)VT(en, 3))(en, &has) >= 0 && has) {
+      void* file = 0;
+      int fi, nf = 1, j;
+      if (((getfile_fn)VT(en, 4))(en, &file) < 0 || !file) continue;
+      fi = custom_file(file);
+      REL(file);
+      if (fi < 0) continue;
+      {
+        const uint8_t* m = F.files[fi].data;
+        if (m[0] == 't' && m[1] == 't' && m[2] == 'c' && m[3] == 'f')
+          nf = (int)(((uint32_t)m[8] << 24) | ((uint32_t)m[9] << 16) | ((uint32_t)m[10] << 8) | m[11]);
+      }
+      for (j = 0; j < nf && j < 16; j++) {
+        int k, fam = -1, x;
+        /* face ja carregada deste arquivo? */
+        for (k = 0; k < F.nfonts; k++)
+          if (F.fonts[k].file == &F.files[fi] && F.fonts[k].tt.index == (uint32_t)j) {
+            fam = F.fonts[k].family;
+            break;
+          }
+        if (k == F.nfonts) fam = add_face(&F.files[fi], (uint32_t)j);
+        if (fam < 0) continue;
+        for (x = 0; x < c->n; x++)
+          if (c->fams[x] == fam) break;
+        if (x == c->n && c->n < 32) c->fams[c->n++] = fam;
+      }
+    }
+    REL(en);
+  }
+  if (wine_debug >= 2) wlogx("DirectWrite: colecao propria, familias ", (uint64_t)c->n);
+  *out = c;
+  return S_OK_;
+}
+
 /* ---------- IDWriteRenderingParams ---------- */
 QI_SIMPLE(rp_qi, 0x2f0da53a, 0x2add, 0x47cd, 0x82, 0xee, 0xd9, 0xec, 0x34, 0x68, 0x8e, 0x75)
 static float WINAPI rp_gamma(struct dw_obj* o) {
@@ -862,6 +1080,7 @@ static const void* const rp_vtbl[] = {rp_qi, o_addref, o_release, rp_gamma, rp_c
 struct dw_analysis {
   struct dw_obj o;
   int aliased;          /* DWRITE_RENDERING_MODE_ALIASED: textura 1x1 */
+  int gray;             /* IDWriteFactory2, antialias GRAYSCALE: textura 1x1 com tons */
   int l, t, r, b;
   uint8_t* alpha;       /* cobertura w*h */
 };
@@ -879,7 +1098,7 @@ struct rect_ {
 };
 static HRESULT_ WINAPI ga_bounds(struct dw_analysis* a, int type, struct rect_* rc) {
   /* tipo 0 = ALIASED_1x1, 1 = CLEARTYPE_3x1: so o do modo pedido tem pixels */
-  if ((type == 0) != (a->aliased != 0) || a->r <= a->l) {
+  if ((type == 0) != (a->aliased || a->gray) || a->r <= a->l) {
     rc->l = rc->t = rc->r = rc->b = 0;
     return S_OK_;
   }
@@ -894,7 +1113,7 @@ static HRESULT_ WINAPI ga_texture(struct dw_analysis* a, int type, const struct 
   if (w <= 0 || h <= 0) return S_OK_;
   if (size < (DWORD)(w * h * bpp)) return E_INVALIDARG_;
   memset(buf, 0, (size_t)(w * h * bpp));
-  if ((type == 0) != (a->aliased != 0) || !a->alpha) return S_OK_;
+  if ((type == 0) != (a->aliased || a->gray) || !a->alpha) return S_OK_;
   for (y = 0; y < h; y++) {
     int sy = rc->t + y;
     if (sy < a->t || sy >= a->b) continue;
@@ -969,6 +1188,7 @@ static HRESULT_ glyph_analysis(const struct glyph_run* run, float ppd, const str
     a->l = a->t = a->r = a->b = 0;
   }
   ttf_raster_end(&rs);
+  dw_note("DirectWrite textura: ", run->face->font, run->em, run->idx, run->n, !(a->r > a->l));
   *out = a;
   return S_OK_;
 }
@@ -976,10 +1196,15 @@ static HRESULT_ glyph_analysis(const struct glyph_run* run, float ppd, const str
 /* ---------- IDWriteFactory ---------- */
 static HRESULT_ WINAPI fa_qi(struct dw_obj* o, const void* iid, void** out) {
   static const uint8_t f4[8] = {0xa2, 0xe8, 0x1a, 0xdc, 0x7d, 0x93, 0xdb, 0x48}; /* IDWriteFactory */
-  if (IS_UNK(iid) || guid_is(iid, 0xb859ee5a, 0xd838, 0x4b5b, f4)) {
+  static const uint8_t f1[8] = {0xa1, 0x6e, 0x04, 0x86, 0x30, 0x7e, 0x60, 0x6a}; /* IDWriteFactory1 */
+  static const uint8_t f2[8] = {0x8d, 0xee, 0x3a, 0x9a, 0xf7, 0xb7, 0x32, 0xec}; /* IDWriteFactory2 */
+  static const uint8_t f3[8] = {0x87, 0xfc, 0xfe, 0x67, 0x55, 0x6a, 0x3b, 0x65}; /* IDWriteFactory3 */
+  if (IS_UNK(iid) || guid_is(iid, 0xb859ee5a, 0xd838, 0x4b5b, f4) || guid_is(iid, 0x30572f99, 0xdac6, 0x41db, f1) ||
+      guid_is(iid, 0x0439fc60, 0xca44, 0x4994, f2) || guid_is(iid, 0x9a1b41c3, 0xd3bb, 0x466a, f3)) {
     *out = o;
     return S_OK_;
   }
+  dw_qi_miss("DirectWrite QI recusado (fabrica) iid ", iid);
   *out = 0;
   return E_NOINTERFACE_; /* IDWriteFactory1..7 ainda nao */
 }
@@ -990,7 +1215,10 @@ static HRESULT_ WINAPI fa_syscoll(struct dw_obj* o, void** out, BOOL check) {
   *out = collection_get();
   return S_OK_;
 }
-static HRESULT_ WINAPI fa_notimpl(void) { return E_NOTIMPL_; }
+static HRESULT_ WINAPI fa_notimpl(void) {
+  if (wine_debug >= 2) wwait_note("DirectWrite: metodo da fabrica sem implementacao, chamado de", __builtin_return_address(0), 0);
+  return E_NOTIMPL_;
+}
 static HRESULT_ WINAPI fa_ok(void) { return S_OK_; }
 static HRESULT_ WINAPI fa_fileref(struct dw_obj* o, const wchar16* path, const void* t, struct dw_file** out) {
   int i;
@@ -1005,14 +1233,24 @@ static HRESULT_ WINAPI fa_fileref(struct dw_obj* o, const wchar16* path, const v
   *out = 0;
   return DWRITE_E_FILENOTFOUND; /* so as fontes do sistema */
 }
+static int foreign_load(void* ld, const void* key, DWORD ksz);
+/* Loader do programa (o proxy de fontes do Chromium com os handles que o
+ * browser mandou, ou o stream de uma fonte da web do Skia): le o arquivo
+ * agora pelo stream dele e devolve um arquivo nosso. */
 static HRESULT_ WINAPI fa_customref(struct dw_obj* o, const void* key, DWORD size, void* ld, struct dw_file** out) {
+  int fi;
   (void)o;
-  if (ld == &loader && key_file(key, size)) {
-    *out = file_new(key_file(key, size));
-    return *out ? S_OK_ : E_OUTOFMEMORY_;
-  }
+  if (!out) return E_INVALIDARG_;
   *out = 0;
-  return E_NOTIMPL_; /* loaders do programa (fontes da web) ainda nao */
+  if (!ld) return E_INVALIDARG_;
+  fonts_load();
+  fi = foreign_load(ld, key, size);
+  if (fi < 0) {
+    if (wine_debug >= 2) wlog("DirectWrite: CreateCustomFontFileReference sem dados do loader", 0);
+    return DWRITE_E_FILENOTFOUND;
+  }
+  *out = file_new(&F.files[fi]);
+  return *out ? S_OK_ : E_OUTOFMEMORY_;
 }
 static HRESULT_ WINAPI fa_face(struct dw_obj* o, int type, DWORD nfiles, struct dw_file* const* files, DWORD idx,
                                int sims, struct dw_face** out) {
@@ -1049,15 +1287,174 @@ static HRESULT_ WINAPI fa_analysis(struct dw_obj* o, const struct glyph_run* run
   (void)measuring;
   return glyph_analysis(run, ppd, xf, mode, bx, by, out);
 }
+/* ---------- IDWriteFactory1/2 ----------
+ * O browser do Chromium (dwrite_font_proxy_impl_win.cc) da CHECK(factory2_)
+ * quando um renderer pede fonte de reserva para um caractere: sem a v2 o
+ * browser abortava (int3) e o Claude fechava. O renderer usa a v2 tambem para
+ * rasterizar (CreateGlyphRunAnalysis com antialias em tons de cinza). */
+static const void* const fb_vtbl[];
+static struct dw_obj fallback = {fb_vtbl, 1};
+static HRESULT_ WINAPI fb_qi(struct dw_obj* o, const void* iid, void** out) {
+  static const uint8_t d4[8] = {0xb0, 0x5c, 0xf2, 0x24, 0x71, 0x3c, 0xc0, 0xff}; /* IDWriteFontFallback */
+  if (IS_UNK(iid) || guid_is(iid, 0xefa008f9, 0xf7a1, 0x48bf, d4)) {
+    *out = o;
+    return S_OK_;
+  }
+  dw_qi_miss("DirectWrite QI recusado (fallback) iid ", iid);
+  *out = 0;
+  return E_NOINTERFACE_;
+}
+static int font_has(int font, uint32_t cp) { return ttf_glyph(&F.fonts[font].tt, cp) != 0; }
+/* MapCharacters: a primeira fonte (a da familia pedida antes) que tem o
+ * caractere em pos; mapped_len = quantas unidades UTF-16 seguidas ela cobre. */
+static HRESULT_ WINAPI fb_map(struct dw_obj* o, void* src, DWORD pos, DWORD len, void* basecoll,
+                              const wchar16* basefam, int weight, int style, int stretch, DWORD* mapped_len,
+                              struct dw_font** font, float* scale) {
+  typedef HRESULT_(WINAPI * gtp_fn)(void* self, DWORD pos, const wchar16** text, DWORD* n);
+  const wchar16* t = 0;
+  DWORD n = 0, i = 0;
+  int best = -1, k, fam;
+  uint32_t cp;
+  (void)o; (void)basecoll; (void)style; (void)stretch;
+  if (!mapped_len || !font || !scale) return E_INVALIDARG_;
+  *font = 0;
+  *scale = 1.0f;
+  *mapped_len = len;
+  if (!src || !len) return S_OK_;
+  fonts_load();
+  if (((gtp_fn)VT(src, 3))(src, pos, &t, &n) < 0 || !t || !n) return S_OK_;
+  if (n > len) n = len;
+  cp = t[0];
+  if (cp >= 0xD800 && cp < 0xDC00 && n > 1 && t[1] >= 0xDC00 && t[1] < 0xE000)
+    cp = 0x10000u + ((cp - 0xD800u) << 10) + (t[1] - 0xDC00u);
+  fam = basefam ? fam_find(basefam) : -1;
+  if (fam >= 0)
+    for (k = 0; k < F.fams[fam].nfonts; k++)
+      if (font_has(F.fams[fam].fonts[k], cp)) {
+        best = F.fams[fam].fonts[k];
+        break;
+      }
+  for (k = 0; best < 0 && k < F.nfonts; k++)
+    if (font_has(k, cp)) best = k;
+  /* do mesmo peso, se a familia achada tem varios */
+  if (best >= 0) {
+    struct dfamily* df = &F.fams[F.fonts[best].family];
+    int bs = 1 << 30;
+    for (k = 0; k < df->nfonts; k++) {
+      int f = df->fonts[k], d = F.fonts[f].tt.weight - weight;
+      if (d < 0) d = -d;
+      if (font_has(f, cp) && d < bs) {
+        bs = d;
+        best = f;
+      }
+    }
+  }
+  /* quantas unidades seguidas a fonte (ou a falta dela) cobre */
+  while (i < n) {
+    uint32_t c = t[i];
+    DWORD w = 1;
+    if (c >= 0xD800 && c < 0xDC00 && i + 1 < n && t[i + 1] >= 0xDC00 && t[i + 1] < 0xE000) {
+      c = 0x10000u + ((c - 0xD800u) << 10) + (t[i + 1] - 0xDC00u);
+      w = 2;
+    }
+    if (i > 0 && (best >= 0 ? !font_has(best, c) : 0)) break;
+    if (best < 0 && i > 0) break; /* sem fonte: um caractere por vez */
+    i += w;
+  }
+  *mapped_len = i ? i : 1;
+  if (best >= 0) *font = font_new(best);
+  return S_OK_;
+}
+static const void* const fb_vtbl[] = {fb_qi, o_addref, o_release_static, fb_map};
+
+/* IDWriteFontFallbackBuilder: as regras do programa sao aceitas e o fallback
+ * e o do sistema (o browser do Chromium monta um assim) */
+static HRESULT_ WINAPI bb_qi(struct dw_obj* o, const void* iid, void** out) {
+  static const uint8_t d4[8] = {0xb8, 0x49, 0x8b, 0xe8, 0xb7, 0x3e, 0x14, 0xde};
+  if (IS_UNK(iid) || guid_is(iid, 0xfd882d06, 0x8aba, 0x4fb8, d4)) {
+    o_addref(o);
+    *out = o;
+    return S_OK_;
+  }
+  *out = 0;
+  return E_NOINTERFACE_;
+}
+static HRESULT_ WINAPI bb_create(struct dw_obj* o, void** out) {
+  (void)o;
+  *out = &fallback;
+  return S_OK_;
+}
+static const void* const bb_vtbl[] = {bb_qi, o_addref, o_release, fa_ok /* AddMapping */, fa_ok /* AddMappings */,
+                                      bb_create};
+
+/* IDWriteNumberSubstitution (so IUnknown). O Skia cria um antes de pedir
+ * fonte de reserva (a fonte de texto dele devolve o objeto); com E_NOTIMPL a
+ * busca falhava e o browser tentava de novo recursivamente ate estourar a
+ * pilha (tudo em ring 0: reinicio do PC). */
+QI_SIMPLE(ns_qi, 0x14885cc9, 0xbab0, 0x4f90, 0xb6, 0xed, 0x5c, 0x36, 0x6a, 0x2c, 0xd0, 0x3d)
+static const void* const ns_vtbl[] = {ns_qi, o_addref, o_release};
+static HRESULT_ WINAPI fa_numsubst(struct dw_obj* o, int method, const wchar16* locale, BOOL ignore, void** out) {
+  (void)o; (void)method; (void)locale; (void)ignore;
+  if (!out) return E_INVALIDARG_;
+  *out = o_new(ns_vtbl, sizeof(struct dw_obj));
+  return *out ? S_OK_ : E_OUTOFMEMORY_;
+}
+
+static HRESULT_ WINAPI fa_eudc(struct dw_obj* o, void** out, BOOL check) { return fa_syscoll(o, out, check); }
+static HRESULT_ WINAPI fa_customparams1(struct dw_obj* o, float g, float c, float ge, float ct, int geo, int mode,
+                                        void** out) {
+  (void)g; (void)c; (void)ge; (void)ct; (void)geo; (void)mode;
+  return fa_params(o, out);
+}
+static HRESULT_ WINAPI fa_sysfallback(struct dw_obj* o, void** out) {
+  (void)o;
+  if (!out) return E_INVALIDARG_;
+  fonts_load();
+  *out = &fallback;
+  return S_OK_;
+}
+static HRESULT_ WINAPI fa_fbbuilder(struct dw_obj* o, void** out) {
+  (void)o;
+  if (!out) return E_INVALIDARG_;
+  *out = o_new(bb_vtbl, sizeof(struct dw_obj));
+  return *out ? S_OK_ : E_OUTOFMEMORY_;
+}
+static HRESULT_ WINAPI fa_colorrun(void) { return (long)0x8898500C; } /* DWRITE_E_NOCOLOR: sem fontes coloridas */
+static HRESULT_ WINAPI fa_customparams2(struct dw_obj* o, float g, float c, float ge, float ct, int geo, int mode,
+                                        int grid, void** out) {
+  (void)grid;
+  return fa_customparams1(o, g, c, ge, ct, geo, mode, out);
+}
+static HRESULT_ WINAPI fa_analysis2(struct dw_obj* o, const struct glyph_run* run, const struct dw_matrix* xf,
+                                    int mode, int measuring, int grid, int aa, float bx, float by,
+                                    struct dw_analysis** out) {
+  HRESULT_ r;
+  (void)o; (void)measuring; (void)grid;
+  r = glyph_analysis(run, 1.0f, xf, mode, bx, by, out);
+  if (r == S_OK_ && *out && aa == 1 /* DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE */ && mode != 1) (*out)->gray = 1;
+  return r;
+}
+
 static const void* const fa_vtbl[] = {
-    fa_qi,       o_addref,        o_release_static, fa_syscoll,   fa_notimpl /* CreateCustomFontCollection */,
+    fa_qi,       o_addref,        o_release_static, fa_syscoll,   fa_customcoll,
     fa_ok /* RegisterFontCollectionLoader */, fa_ok /* UnregisterFontCollectionLoader */, fa_fileref,
     fa_customref, fa_face,        fa_params,        fa_monparams, fa_customparams,
     fa_ok /* RegisterFontFileLoader */, fa_ok /* UnregisterFontFileLoader */,
     fa_notimpl /* CreateTextFormat */, fa_notimpl /* CreateTypography */, fa_notimpl /* GetGdiInterop */,
     fa_notimpl /* CreateTextLayout */, fa_notimpl /* CreateGdiCompatibleTextLayout */,
     fa_notimpl /* CreateEllipsisTrimmingSign */, fa_notimpl /* CreateTextAnalyzer */,
-    fa_notimpl /* CreateNumberSubstitution */, fa_analysis};
+    fa_numsubst, fa_analysis,
+    /* IDWriteFactory1 */ fa_eudc, fa_customparams1,
+    /* IDWriteFactory2 */ fa_sysfallback, fa_fbbuilder, fa_colorrun, fa_customparams2, fa_analysis2,
+    /* IDWriteFactory3: o browser do Chromium da CHECK(factory3_) ao iniciar o
+     * proxy de fontes; o que ele usa no caminho normal e o GetSystemFontCollection
+     * da v1. Conjuntos de fontes (MatchUniqueFont, so para local()) aceitam
+     * falhar. Sem IDWriteFontCollection1: a nossa colecao so tem a vtable v1. */
+    fa_analysis2 /* CreateGlyphRunAnalysis (RENDERING_MODE1) */, fa_customparams2 /* CreateCustomRenderingParams */,
+    fa_notimpl /* CreateFontFaceReference (arquivo) */, fa_notimpl /* CreateFontFaceReference (caminho) */,
+    fa_notimpl /* GetSystemFontSet */, fa_notimpl /* CreateFontSetBuilder */,
+    fa_notimpl /* CreateFontCollectionFromFontSet */, fa_notimpl /* GetSystemFontCollection (v3) */,
+    fa_notimpl /* GetFontDownloadQueue */};
 static struct dw_obj factory = {fa_vtbl, 1};
 
 static WINAPI long DWriteCreateFactory(int type, const void* iid, void** out) {

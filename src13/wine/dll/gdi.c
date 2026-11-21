@@ -242,15 +242,56 @@ static WINAPI HANDLE GetDC(HANDLE h) {
     dc_prepare(&w->dc, w);
     return &w->dc;
   }
+  {
+    /* janela de outro processo (processo GPU do Chromium -> janela do
+     * browser): DC proprio, que desenha na superficie do dono */
+    struct wgui* xg = 0;
+    struct wwin* xw = h ? win_any(h, &xg) : 0;
+    if (xw && xg) {
+      struct wdc* d = dc_new();
+      static int said;
+      if (!d) return 0;
+      d->win = xw;
+      d->xgui = xg;
+      dc_prepare(d, xw);
+      if (!said && wine_debug) {
+        said = 1;
+        wlogx("GetDC: janela de outro processo ", (uint64_t)(uintptr_t)h);
+      }
+      return d;
+    }
+  }
   /* DC da tela: referencia para CreateCompatibleDC/GetDeviceCaps */
   return dc_new();
 }
 static WINAPI HANDLE GetWindowDC(HANDLE h) { return GetDC(h); }
+/* CreateDC("DISPLAY"/\\.\DISPLAY1): o Chromium pede para medir a tela
+ * (GetDeviceCaps); um DC da tela como o GetDC(0). Antes devolvia 0. */
+static WINAPI HANDLE CreateDCW(const wchar16* drv, const wchar16* dev, const wchar16* out, const void* init) {
+  (void)drv; (void)dev; (void)out; (void)init;
+  return dc_new();
+}
+static WINAPI HANDLE CreateDCA(const char* drv, const char* dev, const char* out, const void* init) {
+  (void)drv; (void)dev; (void)out; (void)init;
+  return dc_new();
+}
 static WINAPI int ReleaseDC(HANDLE h, HANDLE dc) {
   struct wwin* w = win_of(h);
   struct wdc* d = dc_of(dc);
   if (w && d == &w->dc) {
     if (!d->painting) win_invalidate(0); /* mostra o que foi desenhado */
+    return 1;
+  }
+  if (d && d->xgui) {
+    /* desenho na janela de outro processo: o dono apresenta (o laco de
+     * mensagens dele olha present_pending) */
+    static volatile int nx;
+    int k = __sync_add_and_fetch(&nx, 1);
+    if (wine_debug >= 2 && (k <= 5 || k % 50 == 0)) wlogx("ReleaseDC de janela alheia, quadros ", (uint64_t)k);
+    d->xgui->present_pending = 1;
+    d->magic = 0;
+    k_free(d);
+    wsignal_global();
     return 1;
   }
   if (d && !d->win && !d->bitmap) {
@@ -1009,7 +1050,7 @@ const struct wine_sym gdi_syms[] = {
     S(CreateRectRgn), S(CreateRectRgnIndirect), S(SetRectRgn), S(GetRgnBox), S(CombineRgn), S(EqualRgn),
     S(ExtSelectClipRgn), S(GetClipBox), S(GetClipRgn), S(SetGraphicsMode), S(SetWorldTransform),
     S(ModifyWorldTransform), S(GetWorldTransform), S(GetDIBits), S(SetDIBits), {"GdiAlphaBlend", (void*)AlphaBlend},
-    S(GetDC), S(GetWindowDC), S(ReleaseDC), S(CreateCompatibleDC), S(DeleteDC), S(SaveDC), S(RestoreDC),
+    S(GetDC), S(GetWindowDC), S(CreateDCW), S(CreateDCA), S(ReleaseDC), S(CreateCompatibleDC), S(DeleteDC), S(SaveDC), S(RestoreDC),
     S(CreateSolidBrush), S(CreateBrushIndirect), S(GetSysColorBrush), S(GetSysColor), S(CreatePen),
     S(CreateFontIndirectW), S(CreateFontW), {"GetStockObject", (void*)wGetStockObject},
     {"SelectObject", (void*)wSelectObject}, S(DeleteObject), S(GetObjectW), S(GetObjectType), S(GetCurrentObject),

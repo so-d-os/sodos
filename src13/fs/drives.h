@@ -7,6 +7,12 @@
 #define DRV_PATH     260
 
 void drives_init(void);
+/* Trava do sistema de arquivos (kexports.c), recursiva por dono. Toda entrada
+ * publica daqui ja pega; quem chama fat_* direto (drives_use) pega antes.
+ * fs_panic = 1: tela de EXCEPTION, grava sem trava. */
+void fs_lock(void);
+void fs_unlock(void);
+extern volatile int fs_panic;
 /* Unidade e pastas atuais: cada tela do DOS (vt.c) tem as suas. */
 struct drives_state {
   char letter;

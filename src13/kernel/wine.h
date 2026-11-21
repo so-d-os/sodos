@@ -43,6 +43,12 @@ void* wine_entry(void);
 void wine_exec_done(void);
 /* env.c chama quando WINE ou PATHSODOS mudam. */
 void wine_env_changed(void);
+/* Memoria sem processo dono do WINE.DLL (k_malloc_shared: secoes, pipes):
+ * tem este dono para o KILLALL soltar tudo quando nao sobra EXE do Windows. */
+#define WINE_SHARED_OWNER 0xFFFFFF00u
+/* Sem EXE do Windows rodando: descarrega o WINE.DLL (o estado dele fica
+ * limpo para o proximo) e solta a memoria compartilhada. 1 se fez. */
+int wine_reset_if_idle(void);
 /* Para o comando WINE/diagnostico: 1 se o DLL esta na memoria. */
 int wine_loaded(void);
 

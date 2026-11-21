@@ -17,6 +17,8 @@
 
 int wiocp_post(struct wobj* port, DWORD bytes, uintptr_t key, void* ov); /* obj.c */
 
+/* rastro (WINEDEBUG=2): as primeiras chamadas de cada funcao de soquete */
+#define NTR(nome, v) do { static int n_; if (wine_debug >= 2 && n_ < 8) { n_++; wlogx("rede> " nome " ", (uint64_t)(v)); } } while (0)
 #define WSAEINTR 10004
 #define WSAEFAULT 10014
 #define WSAEINVAL 10022
@@ -77,9 +79,11 @@ struct wsock {
   int rd_armed, wr_armed, conn_seen, close_seen;
   uint64_t rx, tx;          /* bytes (log) */
   int rx_logged;
+  int last_st;              /* ultimo k_sock_poll visto pelo select (rastro) */
 };
 
 struct wnet {
+  int trace_n;              /* rastro de dados por processo (WINEDEBUG=2) */
   struct wsock* socks;
   int started;
   int watcher;  /* thread vigia ja criada */
@@ -91,6 +95,16 @@ static struct wnet* net_get(void) {
   return (struct wnet*)p->net;
 }
 
+/* rastro do fluxo (so programas sem WSAEventSelect/overlapped: o Bun): os
+ * primeiros 600 eventos de cada processo */
+static void ntrace(const char* what, struct wsock* k, int64_t v) {
+  struct wnet* n;
+  if (wine_debug < 2 || !k || k->ev) return;
+  n = net_get();
+  if (!n || n->trace_n >= 600) return;
+  n->trace_n++;
+  wlogx(what, ((uint64_t)(uint32_t)k->k << 32) | (uint32_t)v);
+}
 static struct wsock* sock_of(uintptr_t s, struct wobj** obj) {
   struct wobj* o = wh_get((HANDLE)s, OBJ_SOCKET);
   if (obj) *obj = o;
@@ -116,9 +130,9 @@ static void complete(struct wsock* s, struct overlapped* ov, uint32_t status, ui
   struct wobj* o = s->obj;
   ov->internal = status;
   ov->internal_high = bytes;
-  if (o->p1) wiocp_post((struct wobj*)o->p1, bytes, (uintptr_t)o->u1, ov);
-  if (ov->event) {
-    struct wobj* e = wh_get(ov->event, OBJ_EVENT);
+  if (o->p1 && !((uintptr_t)ov->event & 1)) wiocp_post((struct wobj*)o->p1, bytes, (uintptr_t)o->u1, ov);
+  if ((uintptr_t)ov->event & ~(uintptr_t)1) {
+    struct wobj* e = wh_get((HANDLE)((uintptr_t)ov->event & ~(uintptr_t)1), OBJ_EVENT);
     if (e) {
       e->signaled = 1;
       wsignal();
@@ -299,6 +313,7 @@ static WINAPI DWORD WSAWaitForMultipleEvents(DWORD n, const HANDLE* hs, BOOL all
   return f ? f(n, hs, all, ms, alert) : 0xFFFFFFFFu;
 }
 static WINAPI int WSAEventSelect(uintptr_t s, HANDLE ev, long mask) {
+  NTR("WSAEventSelect", s);
   struct wsock* k = sock_of(s, 0);
   if (!k) return SOCKET_ERROR;
   if (wine_debug) wlogx("rede: WSAEventSelect (evento<<16|mascara) ", ((uint64_t)(uintptr_t)ev << 16) | (uint64_t)(mask & 0xFFFF));
@@ -334,6 +349,115 @@ static WINAPI int WSAEnumNetworkEvents(uintptr_t s, HANDLE ev, struct wsanet_eve
   __sync_lock_release(&poll_busy);
   if (ev) WSAResetEvent(ev);
   return 0;
+}
+
+/* ---------- select / WSAPoll ----------
+ * O Claude Code (Bun) chama select pela wsock32. Estado de cada soquete pelo
+ * k_sock_poll (1 ler, 2 escrever, 4 erro/fechado, 8 conectado). */
+static int sock_ready(struct wsock* k, int* rd, int* wr, int* ex) {
+  int st;
+  *rd = *wr = *ex = 0;
+  if (!k->k) return 0; /* ainda sem conexao */
+  st = k_sock_poll(k->k);
+  if (st & 8) k->connected = 1;
+  if (st != k->last_st) {
+    k->last_st = st;
+    ntrace("rede# select ve estado (soquete<<32|bits) ", k, st);
+  }
+  *rd = (st & 1) || (k->connected && (st & 4));
+  *wr = (st & 2) != 0; /* so com espaco na fila de envio */
+  *ex = (st & 4) && !k->connected;
+  return *rd || *wr || *ex;
+}
+struct ws_fdset {
+  uint32_t count;
+  uint32_t pad;
+  uint64_t fd[64];
+};
+struct ws_timeval {
+  int32_t sec, usec;
+};
+static int fdset_scan(struct ws_fdset* in, struct ws_fdset* out, int which) {
+  uint32_t i;
+  int n = 0;
+  if (!in) return 0;
+  out->count = 0;
+  for (i = 0; i < in->count && i < 64; i++) {
+    struct wsock* k = sock_of((uintptr_t)in->fd[i], 0);
+    int rd, wr, ex, hit;
+    if (!k) continue;
+    sock_ready(k, &rd, &wr, &ex);
+    hit = which == 0 ? rd : which == 1 ? wr : ex;
+    if (hit) {
+      out->fd[out->count++] = in->fd[i];
+      n++;
+    }
+  }
+  return n;
+}
+static void fdset_put(struct ws_fdset* d, const struct ws_fdset* src) {
+  uint32_t i;
+  if (!d) return;
+  for (i = 0; i < src->count && i < d->count; i++) d->fd[i] = src->fd[i];
+  d->count = src->count < d->count ? src->count : d->count;
+}
+static WINAPI int ms_select(int nfds, struct ws_fdset* r, struct ws_fdset* w, struct ws_fdset* e,
+                            const struct ws_timeval* tv) {
+  NTR("select r/w/e", ((r ? r->count : 0) << 8) | ((w ? w->count : 0) << 4) | (e ? e->count : 0));
+  uint64_t t0 = wnow_ms(), lim = tv ? (uint64_t)tv->sec * 1000u + (uint64_t)tv->usec / 1000u : ~0ull;
+  struct ws_fdset outr, outw, oute;
+  (void)nfds;
+  for (;;) {
+    int n;
+    k_net_pump();
+    n = fdset_scan(r, &outr, 0) + fdset_scan(w, &outw, 1) + fdset_scan(e, &oute, 2);
+    if (n || wnow_ms() - t0 >= lim) {
+      /* so o contador e as entradas que voltam: o fd_set de quem chama pode
+       * ser menor que 64 (o Bun usa um pequeno no topo da pilha e a copia
+       * inteira passava do fim dela) */
+      fdset_put(r, &outr);
+      fdset_put(w, &outw);
+      fdset_put(e, &oute);
+      return n;
+    }
+    poll_wait(5);
+  }
+}
+static WINAPI void* ms_getservbyport(int port, const char* proto) {
+  (void)port; (void)proto;
+  wset_lasterr(11004); /* WSANO_DATA */
+  return 0;
+}
+struct ws_pollfd {
+  uint64_t fd;
+  int16_t events, revents;
+  int32_t pad;
+};
+static WINAPI int WSAPoll(struct ws_pollfd* fds, DWORD nfds, int timeout) {
+  NTR("WSAPoll", nfds);
+  uint64_t t0 = wnow_ms();
+  for (;;) {
+    DWORD i;
+    int n = 0;
+    k_net_pump();
+    for (i = 0; i < nfds; i++) {
+      struct wsock* k = sock_of((uintptr_t)fds[i].fd, 0);
+      int rd, wr, ex;
+      fds[i].revents = 0;
+      if (!k) {
+        fds[i].revents = 0x4; /* POLLNVAL */
+        n++;
+        continue;
+      }
+      sock_ready(k, &rd, &wr, &ex);
+      if (rd && (fds[i].events & 0x300)) fds[i].revents |= (int16_t)(fds[i].events & 0x300);
+      if (wr && (fds[i].events & 0x10)) fds[i].revents |= 0x10;
+      if (ex) fds[i].revents |= 0x1; /* POLLERR */
+      if (fds[i].revents) n++;
+    }
+    if (n || (timeout >= 0 && wnow_ms() - t0 >= (uint64_t)timeout)) return n;
+    poll_wait(5);
+  }
 }
 
 /* ---------- API ---------- */
@@ -433,10 +557,12 @@ static WINAPI int ms_bind(uintptr_t s, const void* addr, int len) {
   return sock_of(s, 0) ? 0 : SOCKET_ERROR;
 }
 static WINAPI int ms_setsockopt(uintptr_t s, int lvl, int opt, const char* v, int len) {
+  NTR("ms_setsockopt", s);
   (void)lvl; (void)opt; (void)v; (void)len;
   return sock_of(s, 0) ? 0 : SOCKET_ERROR;
 }
 static WINAPI int ms_getsockopt(uintptr_t s, int lvl, int opt, char* v, int* len) {
+  NTR("ms_getsockopt", s);
   struct wsock* k = sock_of(s, 0);
   (void)lvl;
   if (!k) return SOCKET_ERROR;
@@ -449,10 +575,15 @@ static WINAPI int ms_getsockopt(uintptr_t s, int lvl, int opt, char* v, int* len
   return 0;
 }
 static WINAPI int ioctlsocket(uintptr_t s, long cmd, DWORD* arg) {
+  NTR("ioctlsocket", s);
   struct wsock* k = sock_of(s, 0);
   if (!k) return SOCKET_ERROR;
   if ((DWORD)cmd == 0x8004667Eu) k->nonblock = arg && *arg; /* FIONBIO */
-  if ((DWORD)cmd == 0x4004667Fu && arg) *arg = 0;            /* FIONREAD */
+  if ((DWORD)cmd == 0x4004667Fu && arg) {                     /* FIONREAD: quanto da para ler */
+    static char peekbuf[16384];
+    int n = k->k ? k_sock_recv(k->k, peekbuf, (int)sizeof(peekbuf), 1) : 0;
+    *arg = n > 0 ? (DWORD)n : 0;
+  }
   return 0;
 }
 
@@ -478,6 +609,7 @@ static int start_connect(struct wsock* k, const struct sockaddr_in4* a) {
 
 static WINAPI BOOL ConnectEx(uintptr_t s, const struct sockaddr_in4* addr, int len, void* sbuf, DWORD slen,
                              DWORD* sent, struct overlapped* ov) {
+  NTR("ConnectEx", s);
   struct wsock* k = sock_of(s, 0);
   (void)len; (void)sbuf; (void)slen;
   if (!k) return 0;
@@ -491,6 +623,7 @@ static WINAPI BOOL ConnectEx(uintptr_t s, const struct sockaddr_in4* addr, int l
   return 0;
 }
 static WINAPI int ms_connect(uintptr_t s, const struct sockaddr_in4* addr, int len) {
+  NTR("ms_connect", s);
   struct wsock* k = sock_of(s, 0);
   uint64_t t0 = wnow_ms();
   (void)len;
@@ -518,6 +651,7 @@ static WINAPI int ms_connect(uintptr_t s, const struct sockaddr_in4* addr, int l
 
 static WINAPI int WSARecv(uintptr_t s, struct wsabuf* bufs, DWORD nb, DWORD* got, DWORD* flags,
                           struct overlapped* ov, void* fn) {
+  NTR("WSARecv", s);
   struct wsock* k = sock_of(s, 0);
   int n;
   (void)fn;
@@ -532,6 +666,7 @@ static WINAPI int WSARecv(uintptr_t s, struct wsabuf* bufs, DWORD nb, DWORD* got
   for (;;) {
     n = bufs[0].len ? k_sock_recv(k->k, bufs[0].buf, (int)bufs[0].len, 0) : 0;
     count_io(k, 1, n);
+    if (!ov) ntrace(n >= 0 ? "rede# recv leu (soquete<<32|n) " : (k->nonblock ? "rede# recv vazio, nao bloqueia (soquete<<32|erro) " : "rede# recv vazio, BLOQUEIA (soquete<<32|erro) "), k, n);
     if (n >= 0) {
       if (got) *got = (DWORD)n;
       if (ov) {
@@ -564,6 +699,7 @@ static WINAPI int WSARecv(uintptr_t s, struct wsabuf* bufs, DWORD nb, DWORD* got
 }
 static WINAPI int WSASend(uintptr_t s, struct wsabuf* bufs, DWORD nb, DWORD* sent, DWORD flags,
                           struct overlapped* ov, void* fn) {
+  NTR("WSASend", s);
   struct wsock* k = sock_of(s, 0);
   int n;
   (void)fn;
@@ -577,6 +713,7 @@ static WINAPI int WSASend(uintptr_t s, struct wsabuf* bufs, DWORD nb, DWORD* sen
   for (;;) {
     n = bufs[0].len ? k_sock_send(k->k, bufs[0].buf, (int)bufs[0].len) : 0;
     count_io(k, 0, n);
+    if (!ov) ntrace(n >= 0 ? "rede# send aceitou (soquete<<32|n) " : "rede# send cheio (soquete<<32|pedido) ", k, n >= 0 ? n : (int64_t)bufs[0].len);
     if (n >= 0) {
       if (sent) *sent = (DWORD)n;
       if (ov) {
@@ -610,14 +747,42 @@ static WINAPI int WSASend(uintptr_t s, struct wsabuf* bufs, DWORD nb, DWORD* sen
   }
 }
 static WINAPI int ms_recv(uintptr_t s, char* buf, int len, int flags) {
+  NTR("ms_recv", s);
   struct wsabuf b;
   DWORD got = 0, fl = 0;
-  (void)flags;
+  if (flags & 2) {
+    /* MSG_PEEK: olha sem tirar do fluxo. O Chromium testa assim se uma
+     * conexao ociosa ainda vale (recv de 1 byte com MSG_PEEK); antes o byte
+     * era consumido e o registro TLS seguinte chegava quebrado: a conexao
+     * caia e o claude.ai abria uma nova a cada recurso ("Couldn't finish
+     * loading", erro de conexao no login). */
+    struct wsock* k = sock_of(s, 0);
+    int n;
+    if (!k) return SOCKET_ERROR;
+    if (!k->k || len <= 0) {
+      wset_lasterr(WSAENOTCONN);
+      return SOCKET_ERROR;
+    }
+    for (;;) {
+      n = k_sock_recv(k->k, buf, len, 1);
+      if (n >= 0) return n;
+      if (n == -2) {
+        wset_lasterr(WSAECONNRESET);
+        return SOCKET_ERROR;
+      }
+      if (k->nonblock) {
+        wset_lasterr(WSAEWOULDBLOCK);
+        return SOCKET_ERROR;
+      }
+      poll_wait(2);
+    }
+  }
   b.len = (uint32_t)len;
   b.buf = buf;
   return WSARecv(s, &b, 1, &got, &fl, 0, 0) == 0 ? (int)got : SOCKET_ERROR;
 }
 static WINAPI int ms_send(uintptr_t s, const char* buf, int len, int flags) {
+  NTR("ms_send", s);
   struct wsabuf b;
   DWORD sent = 0;
   b.len = (uint32_t)len;
@@ -756,7 +921,8 @@ static WINAPI BOOL AcceptEx_stub(void) {
 }
 static WINAPI int WSAIoctl(uintptr_t s, DWORD code, const DWORD* in, DWORD inlen, void* out, DWORD outlen,
                            DWORD* ret, void* ov, void* fn) {
-  (void)s; (void)inlen; (void)ov; (void)fn;
+  NTR("WSAIoctl", s);
+  (void)ov; (void)fn;
   if (code == 0xC8000006u && in && out && outlen >= 8) { /* SIO_GET_EXTENSION_FUNCTION_POINTER */
     *(void**)out = in[0] == 0x25A207B9u ? (void*)ConnectEx : (void*)AcceptEx_stub;
     if (ret) *ret = 8;
@@ -764,6 +930,24 @@ static WINAPI int WSAIoctl(uintptr_t s, DWORD code, const DWORD* in, DWORD inlen
   }
   if (ret) *ret = 0;
   if (code == 0x98000004u) return 0; /* SIO_KEEPALIVE_VALS */
+  /* FIONBIO / FIONREAD pelo WSAIoctl (o Bun usa assim): sem isto o soquete
+   * ficava bloqueante e o recv sem dados parava o laco de eventos do Claude
+   * Code para sempre (processo vivo, sem resposta) */
+  if (code == 0x8004667Eu && in && inlen >= 4) {
+    DWORD v = in[0];
+    return ioctlsocket(s, (long)code, &v);
+  }
+  if (code == 0x4004667Fu && out && outlen >= 4) {
+    int r = ioctlsocket(s, (long)code, (DWORD*)out);
+    if (ret) *ret = 4;
+    return r;
+  }
+  if (code == 0x48000022u && out && outlen >= 8) { /* SIO_BASE_HANDLE: o proprio */
+    *(uint64_t*)out = (uint64_t)s;
+    if (ret) *ret = 8;
+    return 0;
+  }
+  if (wine_debug) wlogx("WSAIoctl sem suporte, codigo ", code);
   wset_lasterr(WSAEOPNOTSUPP);
   return SOCKET_ERROR;
 }
@@ -839,7 +1023,18 @@ static WINAPI int GetAddrInfoW(const wchar16* node, const wchar16* service, cons
   } else if (wstreq(host, "localhost")) {
     ip = 0x7F000001u;
   } else if (!parse_ip(host, &ip)) {
-    if (k_dns(host, &ip) != 0) {
+    /* Uma consulta por vez e ate 3 tentativas: com duas threads do Network
+     * Service resolvendo juntas uma falhava (claude.ai na partida), e o
+     * Chromium mostra isso como erro de conexao. */
+    static volatile int dns_lock;
+    int tries, rc = -1;
+    for (tries = 0; tries < 3 && rc != 0; tries++) {
+      while (__sync_lock_test_and_set(&dns_lock, 1)) k_thread_yield();
+      rc = k_dns(host, &ip);
+      __sync_lock_release(&dns_lock);
+      if (rc != 0 && wine_debug) wlog("DNS falhou (tenta de novo): ", host);
+    }
+    if (rc != 0) {
       if (wine_debug) wlog("DNS falhou: ", host);
       return WSAHOST_NOT_FOUND;
     }
@@ -1073,7 +1268,7 @@ static WINAPI struct hostent_* ms_gethostbyname(const char* name) {
 #define S(n) {#n, (void*)n}
 const struct wine_sym net_syms[] = {
     S(WSACreateEvent), S(WSACloseEvent), S(WSASetEvent), S(WSAResetEvent), S(WSAWaitForMultipleEvents),
-    S(WSAEventSelect), S(WSAEnumNetworkEvents),
+    S(WSAEventSelect), S(WSAEnumNetworkEvents), {"select", (void*)ms_select}, S(WSAPoll), {"getservbyport", (void*)ms_getservbyport},
     {"inet_addr", (void*)ms_inet_addr}, {"inet_ntoa", (void*)ms_inet_ntoa}, {"inet_pton", (void*)ms_inet_pton},
     {"inet_ntop", (void*)ms_inet_ntop}, S(InetPtonW), S(InetNtopW), {"getaddrinfo", (void*)ms_getaddrinfo},
     {"freeaddrinfo", (void*)FreeAddrInfoW}, S(GetAddrInfoExW), S(FreeAddrInfoExW), S(GetAddrInfoExCancel),

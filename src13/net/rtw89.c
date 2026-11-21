@@ -1904,7 +1904,21 @@ static int tx_frame(int ch, uint32_t ch_dma, uint32_t qsel, int hw_seq,
   uint32_t seq;
   if (!wd_buf[ch]) return fail("TX nao preparado");
   if (len > TX_DATA_BUF || len < 24) return fail("quadro de TX invalido");
-  if (((r32(txchs[ch].idx) >> 16) & 0xFFFu) == next) return fail("fila de TX cheia");
+  if (((r32(txchs[ch].idx) >> 16) & 0xFFFu) == next) {
+    /* rajada (TCP do Chromium): espera a placa ler BDs (ate ~3 ms) em vez de
+     * jogar o quadro fora; perda vira retransmissao e ERR_TIMED_OUT. Sem o
+     * despejo de registradores a cada vez (o fail() faz 16 linhas). */
+    static uint32_t tx_full_drops;
+    int us = 3000;
+    while (((r32(txchs[ch].idx) >> 16) & 0xFFFu) == next && --us > 0) udelay_spin(1);
+    if (!us) {
+      if ((tx_full_drops++ & 0xFFu) == 0) {
+        rlog_hex("[rtw] fila de TX cheia, quadro descartado; descartes ", tx_full_drops);
+      }
+      last_err = "fila de TX cheia";
+      return -1;
+    }
+  }
   bcopy(data, frame, len);
   seq = (((uint32_t)frame[22] | ((uint32_t)frame[23] << 8)) & 0xFFF0u) >> 4;
   bzero(wd, TXWD_LEN);

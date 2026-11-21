@@ -377,7 +377,7 @@ static WINAPI BOOL EndDialog(HANDLE h, intptr_t r) {
   d->dlg_end = 1;
   d->dlg_result = r;
   if (!d->modal) win_show(d, 0);
-  wsignal();
+  wsignal_global();
   return 1;
 }
 

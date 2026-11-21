@@ -261,6 +261,16 @@ void wine_exec_done(void) {
   if (!w_busy && w_ops && !wanted()) unload_now();
 }
 
+int wine_reset_if_idle(void) {
+  void ufree_owner(uint32_t owner);
+  if (w_busy) return 0;
+  if (w_ops) unload_now();
+  ufree_owner(WINE_SHARED_OWNER);
+  kuser_off();
+  serial_puts("[wine] sem EXE do Windows: WINE.DLL e memoria compartilhada soltos\n");
+  return 1;
+}
+
 void wine_env_changed(void) {
   /* So descarrega: carregar fica para o primeiro EXE do Windows. */
   if (!wanted() && !w_busy) unload_now();

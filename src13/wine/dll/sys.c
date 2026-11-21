@@ -226,12 +226,12 @@ static WINAPI void* LocalFree_(void* p) {
   return 0;
 }
 static WINAPI void* GlobalAlloc(DWORD fl, size_t n) {
-  void* p = k_malloc((unsigned)(n ? n : 1));
+  void* p = wheap_alloc(n);
   if (p && (fl & 0x40)) memset(p, 0, n);
   return p;
 }
 static WINAPI void* GlobalFree(void* p) {
-  if (p) k_free(p);
+  wheap_free(p);
   return 0;
 }
 static WINAPI void* GlobalLock(void* p) { return p; }
@@ -290,10 +290,24 @@ static WINAPI long SHGetFolderPathW(HANDLE w, int csidl, HANDLE tok, DWORD fl, w
   }
   return put16(wine_dir(rel), out, &n) ? 0 : (long)0x8007007A;
 }
-static WINAPI void CoTaskMemFree(void* p) {
-  if (p) k_free(p);
+/* SHGetSpecialFolderPath: o Chromium pega por delay-load; faltando, o gancho
+ * de falha de delay-load dele aborta com int3 (o browser caiu enquanto se
+ * digitava o e-mail no login). MAX_PATH no buffer. */
+static WINAPI BOOL SHGetSpecialFolderPathW(HANDLE w, wchar16* out, int csidl, BOOL create) {
+  (void)create;
+  return out && SHGetFolderPathW(w, csidl, 0, 0, out) == 0;
 }
-static WINAPI void* CoTaskMemAlloc(size_t n) { return k_malloc((unsigned)(n ? n : 1)); }
+static WINAPI BOOL SHGetSpecialFolderPathA(HANDLE w, char* out, int csidl, BOOL create) {
+  wchar16 tmp[260];
+  int n;
+  (void)create;
+  if (!out || SHGetFolderPathW(w, csidl, 0, 0, tmp) != 0) return 0;
+  n = wutf16_to_8(tmp, -1, out, 259);
+  out[n < 259 ? n : 259] = 0;
+  return 1;
+}
+static WINAPI void CoTaskMemFree(void* p) { wheap_free(p); }
+static WINAPI void* CoTaskMemAlloc(size_t n) { return wheap_alloc(n); }
 
 /* CommandLineToArgvW: as regras de aspas e barras do CRT da Microsoft. */
 static WINAPI wchar16** CommandLineToArgvW(const wchar16* cmd, int* argc) {
@@ -368,7 +382,7 @@ const struct wine_sym sys_syms[] = {
     S(GetTokenInformation), S(ConvertSidToStringSidW), S(GetLengthSid), S(IsValidSid), S(CopySid),
     S(EqualSid), S(AllocateAndInitializeSid), S(FreeSid), S(CheckTokenMembership),
     S(GlobalAlloc), S(GlobalFree), S(GlobalLock), S(GlobalUnlock), S(SHGetKnownFolderPath),
-    S(SHGetFolderPathW), S(CoTaskMemFree), S(CoTaskMemAlloc), S(CommandLineToArgvW),
+    S(SHGetFolderPathW), S(SHGetSpecialFolderPathW), S(SHGetSpecialFolderPathA), S(CoTaskMemFree), S(CoTaskMemAlloc), S(CommandLineToArgvW),
     S(CoInitializeEx), S(CoInitialize), S(CoUninitialize), S(CoCreateInstance), S(RoInitialize),
     S(RoUninitialize),
     {0, 0}};

@@ -19,11 +19,12 @@ V=$VMDIR
 T=${1:-240}
 OUT=$S/wine/build/claude-run
 APP='D:\WINE\APPS\Claude_5.11492.5.0_x64__pzs8sxrjxfjjc\app\Claude.exe'
-ARGS=${CLAUDE_ARGS:---no-sandbox --single-process --in-process-gpu --disable-gpu --disable-gpu-compositing --enable-features=NetworkServiceInProcess --enable-logging=stderr --v=0}
+# processos separados (--single-process da CHECK na partida do Electron 45, docs/05 F1)
+ARGS=${CLAUDE_ARGS:---no-sandbox --disable-gpu --disable-software-rasterizer --use-gl=disabled --disable-3d-apis --disable-webgl --disable-webgpu --disable-accelerated-2d-canvas --disable-gpu-rasterization --ipc-connection-timeout=300 --enable-logging=stderr --v=0}
 mkdir -p "$OUT"
 cd "$S" || exit 1
 
-make -C wine > "$OUT/build.log" 2>&1 || { grep -n "error" "$OUT/build.log" | head; exit 1; }
+make -C wine build/WINE.DLL > "$OUT/build.log" 2>&1 || { grep -n "error" "$OUT/build.log" | head; exit 1; }
 
 # servidor HTTP do host com wine/build
 if ! curl -s -m 2 -o /dev/null http://127.0.0.1:8810/WINE.DLL; then
@@ -34,7 +35,7 @@ fi
 
 # VM no ar?
 if ! curl -s -m 3 -o /dev/null "http://127.0.0.1:$PORT/win"; then
-  GUI=${GUI-1} KEEP=1 sh wine/scripts/vm.sh start win || exit 1
+  KEEP=1 sh wine/scripts/vm.sh start win || exit 1
   rm -f "$V/wine.md5"
 fi
 cmd() { TIMEOUT=${2:-120} sh wine/scripts/vm.sh cmd "$1"; }
@@ -48,16 +49,24 @@ if [ "$NEW" != "$(cat "$V/wine.md5" 2>/dev/null)" ]; then
   echo "$NEW" > "$V/wine.md5"
 fi
 cmd "SET WINE=1" >/dev/null
-cmd "SET WINEDEBUG=2" >/dev/null
+cmd "SET WINEDEBUG=${WINEDEBUG-2}" >/dev/null
 cmd "SET HIMEM=${HIMEM:-80}" >/dev/null
 cmd "SET ELECTRON_ENABLE_LOGGING=1" >/dev/null
 cmd "SET WINE_ARGS_EXE=app\claude.exe" >/dev/null
+# "Abrir com": o login abre a URL no navegador do LINKEXT.CFG (HTTP,HTTPS=...)
+cmd "SET LINKEXT=1" >/dev/null
+# APPDATA=ram: AppData do perfil no ramdisk Z: (cache do Chromium sem ATA/BKL);
+# vazio = no D: (persistente)
+cmd "SET WINEAPPDATA=${APPDATA_DIR-Z:\WINEAPP}" >/dev/null
+# o perfil do Z: (login) e salvo num arquivo do D: e volta no proximo boot
+# (profsave.c); APPSAVE= desliga
+cmd "SET WINEAPPSAVE=${APPSAVE-D:\WINEAPP.SAV}" >/dev/null
 # o SET do SODOS guarda ate 259 caracteres: divide em WINE_ARGS, WINE_ARGS2, WINE_ARGS3
 set -- $ARGS
 A1=""; A2=""; A3=""
 for a in "$@"; do
-  if [ $(( ${#A1} + ${#a} + 1 )) -lt 250 ] && [ -z "$A2" ]; then A1="${A1:+$A1 }$a"
-  elif [ $(( ${#A2} + ${#a} + 1 )) -lt 250 ] && [ -z "$A3" ]; then A2="${A2:+$A2 }$a"
+  if [ $(( ${#A1} + ${#a} + 1 )) -lt 200 ] && [ -z "$A2" ]; then A1="${A1:+$A1 }$a"
+  elif [ $(( ${#A2} + ${#a} + 1 )) -lt 200 ] && [ -z "$A3" ]; then A2="${A2:+$A2 }$a"
   else A3="${A3:+$A3 }$a"; fi
 done
 cmd "SET WINE_ARGS=$A1" >/dev/null
@@ -74,7 +83,7 @@ while [ $i -lt "$T" ]; do
   # o processo principal terminou (o primeiro "start" e o do Claude)
   tail -n +"$N" "$V/serial.log" | grep -aq "\[wine\] ExitProcess" && break
 done
-printf "screendump /tmp/claude-run.ppm\n" | nc -U -q2 "$V/mon" > /dev/null 2>&1
+printf "screendump /tmp/claude-run.ppm\n" | python3 "$S/wine/scripts/qmon.py" "$V/mon" > /dev/null 2>&1
 sleep 2
 python3 "$S/wine/scripts/ppm2png.py" /tmp/claude-run.ppm "$OUT/tela.png" > /dev/null 2>&1
 tail -n +"$N" "$V/serial.log" > "$OUT/serial.txt"

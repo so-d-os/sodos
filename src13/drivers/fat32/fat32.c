@@ -29,7 +29,9 @@
 #define NAME_MAX 256
 #define PATH_MAX 260
 #define FATC_SECS 32u                  /* janela da FAT: 16 KB, 4096 entradas */
+#define RC_N 4u                        /* janelas so de leitura para fat_next */
 #define RUN_MAX (1024u * 1024u)        /* leitura direta: ate 1 MB por vez */
+#define POS_N 8u                       /* posicoes de leitura guardadas */
 #define CL_END 0x0FFFFFF8u
 
 struct vol {
@@ -55,9 +57,27 @@ struct vol {
   uint32_t fatc_n;     /* 0 = vazio */
   uint32_t fatc_d0, fatc_d1; /* setores sujos da janela [d0, d1); d1 = 0: limpa */
   /* ultimo arquivo lido */
-  char lpath[PATH_MAX];
-  uint32_t lfirst, lsize, lidx, lclus;
-  int lvalid;
+  /* Onde as ultimas leituras pararam, por arquivo (POS_N, a menos usada sai):
+   * com uma so, varios processos lendo arquivos diferentes (o Claude:
+   * Claude.exe de 250 MB, app.asar, .pak) a jogavam fora a cada chamada e
+   * cada leitura andava a cadeia desde o primeiro cluster (minutos por
+   * processo no notebook). */
+  struct fpos {
+    char path[PATH_MAX];
+    uint32_t first, size, idx, clus, stamp;
+    uint32_t sidx, sclus;  /* onde a ultima leitura comecou (releitura com sobreposicao) */
+    int valid;
+  } pos[POS_N];
+  uint32_t pos_tick;
+  /* Cache so de leitura da FAT para fat_next (RC_N janelas de FATC_SECS):
+   * com dois arquivos lidos alternadamente a janela unica (fatc, que recebe
+   * as escritas) ia e voltava a cada chamada. Toda escrita na FAT (fat_set)
+   * zera este cache. */
+  struct rcwin {
+    uint32_t* buf;
+    uint32_t first, n, stamp;
+  } rc[RC_N];
+  uint32_t rc_tick;
 };
 
 /* Uma entrada achada numa pasta. */
@@ -231,10 +251,48 @@ static int fat_win(struct vol* v, uint32_t sec) {
 }
 
 /* Proximo cluster da cadeia; 0 se acabou ou e invalido. */
+static void rc_clear(struct vol* v) {
+  uint32_t i;
+  for (i = 0; i < RC_N; i++) v->rc[i].n = 0;
+}
+/* Entrada c da FAT: da janela de escrita se ela tem o setor (pode estar suja),
+ * senao do cache de leitura. ~0u se nao deu para ler. */
+static uint32_t fat_peek(struct vol* v, uint32_t c) {
+  uint32_t sec = c / 128u, i, best = 0, first, n;   /* 128 entradas por setor */
+  struct rcwin* w;
+  if (v->fatc_n && sec >= v->fatc_first && sec < v->fatc_first + v->fatc_n)
+    return v->fatc[c - v->fatc_first * 128u];
+  if (sec >= v->fatsz) return ~0u;
+  for (i = 0; i < RC_N; i++) {
+    w = &v->rc[i];
+    if (w->buf && w->n && sec >= w->first && sec < w->first + w->n) {
+      w->stamp = ++v->rc_tick;
+      return w->buf[c - w->first * 128u];
+    }
+    if (!w->n || w->stamp < v->rc[best].stamp) best = i;
+  }
+  w = &v->rc[best];
+  if (!w->buf) { /* sem memoria para o cache: a janela de escrita */
+    if (fat_win(v, sec) < 0) return ~0u;
+    return v->fatc[c - v->fatc_first * 128u];
+  }
+  first = sec - sec % FATC_SECS;
+  n = v->fatsz - first;
+  if (n > FATC_SECS) n = FATC_SECS;
+  w->n = 0;
+  if (v->h->read(v->disk, v->fat_lba + first, n, w->buf) != 0) return ~0u;
+  w->first = first;
+  w->n = n;
+  w->stamp = ++v->rc_tick;
+  return w->buf[c - first * 128u];
+}
+
 static uint32_t fat_next(struct vol* v, uint32_t c) {
   uint32_t n;
-  if (!valid_clus(v, c) || fat_win(v, c / 128u) < 0) return 0;   /* 128 entradas por setor */
-  n = v->fatc[c - v->fatc_first * 128u] & 0x0FFFFFFFu;
+  if (!valid_clus(v, c)) return 0;
+  n = fat_peek(v, c);
+  if (n == ~0u) return 0;
+  n &= 0x0FFFFFFFu;
   if (n >= CL_END || !valid_clus(v, n)) return 0;
   return n;
 }
@@ -387,6 +445,11 @@ static void f_umount(void* p) {
   h = v->h;
   h->free(v->cbuf);
   h->free(v->fatc);
+  {
+    uint32_t i;
+    for (i = 0; i < RC_N; i++)
+      if (v->rc[i].buf) h->free(v->rc[i].buf);
+  }
   h->free(v);
 }
 
@@ -435,6 +498,10 @@ static void* f_mount(const struct fsdrv_host* h, uint32_t disk, uint32_t lba) {
   v->cbuf = (uint8_t*)h->alloc(v->csize);
   v->fatc = (uint32_t*)h->alloc(FATC_SECS * 512u);
   if (!v->cbuf || !v->fatc) goto fail;
+  {
+    uint32_t i; /* cache de leitura da FAT: sem memoria, fica sem */
+    for (i = 0; i < RC_N; i++) v->rc[i].buf = (uint32_t*)h->alloc(FATC_SECS * 512u);
+  }
   h->free(b);
   h->log("[fat32] volume montado\n");
   return v;
@@ -457,28 +524,53 @@ static int f_stat(void* p, const char* path, uint32_t* size) {
   return 0;
 }
 
+/* posicoes guardadas (struct vol pos[]) */
+static void pos_clear(struct vol* v) {
+  uint32_t i;
+  for (i = 0; i < POS_N; i++) v->pos[i].valid = 0;
+}
+static struct fpos* pos_find(struct vol* v, const char* path) {
+  uint32_t i;
+  for (i = 0; i < POS_N; i++)
+    if (v->pos[i].valid && seq(v->pos[i].path, path)) return &v->pos[i];
+  return 0;
+}
+static struct fpos* pos_victim(struct vol* v) {
+  uint32_t i, best = 0;
+  for (i = 0; i < POS_N; i++) {
+    if (!v->pos[i].valid) return &v->pos[i];
+    if (v->pos[i].stamp < v->pos[best].stamp) best = i;
+  }
+  return &v->pos[best];
+}
+
 static int f_read(void* p, const char* path, uint32_t off, void* buf, uint32_t len) {
   struct vol* v = (struct vol*)p;
   uint8_t* dst = (uint8_t*)buf;
   uint32_t first, size, idx, clus, done = 0, steps = 0;
+  struct fpos* ps;
+  uint32_t sidx, sclus;
   if (!v || !path || !buf) return -1;
-  if (v->lvalid && seq(v->lpath, path)) {
-    first = v->lfirst;
-    size = v->lsize;
+  ps = pos_find(v, path);
+  if (ps) {
+    first = ps->first;
+    size = ps->size;
   } else {
     struct ent e;
     if (lookup(v, path, &e) != 0 || (e.attr & 0x10)) return -1;
     first = e.clus;
     size = e.size;
-    v->lvalid = 0;
   }
   if (off >= size || len == 0) return 0;
   if (len > size - off) len = size - off;
   /* cluster que contem off: da posicao guardada se der, senao do comeco */
   idx = off / v->csize;
-  if (v->lvalid && seq(v->lpath, path) && v->lidx <= idx && valid_clus(v, v->lclus)) {
-    clus = v->lclus;
-    steps = v->lidx;
+  if (ps && ps->idx <= idx && valid_clus(v, ps->clus)) {
+    clus = ps->clus;
+    steps = ps->idx;
+  } else if (ps && ps->sidx <= idx && valid_clus(v, ps->sclus)) {
+    clus = ps->sclus;
+    steps = ps->sidx;
   } else {
     clus = first;
   }
@@ -487,6 +579,8 @@ static int f_read(void* p, const char* path, uint32_t off, void* buf, uint32_t l
     steps++;
   }
   if (!valid_clus(v, clus)) return -1;
+  sidx = idx;
+  sclus = clus;
   while (done < len) {
     uint32_t co = off % v->csize;
     uint32_t left = len - done;
@@ -519,17 +613,23 @@ static int f_read(void* p, const char* path, uint32_t off, void* buf, uint32_t l
     v->h->yield();
   }
   /* posicao para a proxima leitura (k_fread em sequencia) */
-  scopy(v->lpath, path, PATH_MAX);
-  v->lfirst = first;
-  v->lsize = size;
-  v->lidx = idx;
-  v->lclus = clus;
-  v->lvalid = clus != 0;
-  if (!v->lvalid) {
-    v->lidx = 0;
-    v->lclus = first;
-    v->lvalid = valid_clus(v, first);
+  if (!ps) {
+    ps = pos_victim(v);
+    scopy(ps->path, path, PATH_MAX);
   }
+  ps->first = first;
+  ps->size = size;
+  ps->idx = idx;
+  ps->clus = clus;
+  ps->valid = clus != 0;
+  if (!ps->valid) {
+    ps->idx = 0;
+    ps->clus = first;
+    ps->valid = valid_clus(v, first);
+  }
+  ps->sidx = sidx;
+  ps->sclus = sclus;
+  ps->stamp = ++v->pos_tick;
   return (int)done;
 }
 
@@ -632,6 +732,7 @@ static int fat_set(struct vol* v, uint32_t c, uint32_t val, uint8_t* sbuf) {
   uint32_t* e;
   (void)sbuf;
   if (!valid_clus(v, c) || fat_win(v, sec) < 0) return -1;
+  rc_clear(v);
   e = &v->fatc[c - v->fatc_first * 128u];
   *e = (*e & 0xF0000000u) | (val & 0x0FFFFFFFu);
   if (!v->fatc_d1) {
@@ -995,7 +1096,7 @@ static int f_mkdir(void* p, const char* path, uint16_t date, uint16_t time) {
 out:
   fsinfo_save(v, sbuf);
   v->h->free(sbuf);
-  v->lvalid = 0;
+  pos_clear(v);
   return err;
 }
 
@@ -1054,7 +1155,7 @@ static int f_write(void* p, const char* path, const void* data, uint32_t len, ui
   sbuf = (uint8_t*)v->h->alloc(512);
   if (!sbuf) return -3;
   v->cbuf_clus = 0;
-  v->lvalid = 0;
+  pos_clear(v);
 
   /* 1) cadeia nova inteira na FAT (marcada na janela) */
   nclus = (len + v->csize - 1) / v->csize;
@@ -1137,7 +1238,7 @@ undo_keep:
 out:
   fsinfo_save(v, sbuf);
   v->h->free(sbuf);
-  v->lvalid = 0;
+  pos_clear(v);
   return err;
 }
 
@@ -1176,7 +1277,7 @@ static int f_remove(void* p, const char* path) {
   if (!err && valid_clus(v, e.clus)) chain_free(v, e.clus, sbuf);
   fsinfo_save(v, sbuf);
   v->h->free(sbuf);
-  v->lvalid = 0;
+  pos_clear(v);
   return err;
 }
 
@@ -1224,7 +1325,7 @@ static int f_rename(void* p, const char* from, const char* to) {
   mcopy(tpl, v->cbuf + src.pos_off, 32);
   sbuf = (uint8_t*)v->h->alloc(512);
   if (!sbuf) return -4;
-  v->lvalid = 0;
+  pos_clear(v);
   /* O nome que sai da pasta de destino sai antes, para o novo poder usar o
    * mesmo 8.3: o arquivo substituido, ou a propria origem se so muda a caixa. */
   if (exists && ent_unlink(v, same ? &src : &dst) != 0) {
@@ -1240,13 +1341,48 @@ static int f_rename(void* p, const char* from, const char* to) {
 out:
   fsinfo_save(v, sbuf);
   v->h->free(sbuf);
-  v->lvalid = 0;
+  pos_clear(v);
   return err;
 }
 
+/* Remove uma pasta vazia. 0 ok; -1 nao existe (ou e a raiz); -2 nao esta
+ * vazia; -3 e arquivo; -4 somente leitura ou erro de disco. Os codigos sao os
+ * de fat_rmdir. Sem isto as travas do Claude Code (pasta "x.lock": mkdir para
+ * pegar, rmdir para soltar) ficavam para sempre no D: do notebook e o segundo
+ * claude.exe tentava sem parar. */
+static int any_cb(void* ctx, const struct ent* e) {
+  (void)ctx;
+  (void)e;
+  return 1;
+}
+
+static int f_rmdir(void* p, const char* path) {
+  struct vol* v = (struct vol*)p;
+  struct ent e, tmp;
+  uint8_t* sbuf;
+  int r, err;
+  if (!v || !path || !path[0]) return -1;
+  if (lookup(v, path, &e) != 0) return -1;
+  if (!e.lname[0] && !e.sname[0]) return -1;   /* a raiz */
+  if (!(e.attr & 0x10)) return -3;
+  if (e.attr & 0x01) return -4;
+  if (!valid_clus(v, e.clus) || e.clus == v->root) return -1;
+  r = dir_scan(v, e.clus, any_cb, 0, &tmp);
+  if (r < 0) return -4;
+  if (r) return -2;
+  sbuf = (uint8_t*)v->h->alloc(512);
+  if (!sbuf) return -4;
+  err = ent_unlink(v, &e);
+  if (!err) chain_free(v, e.clus, sbuf);
+  fsinfo_save(v, sbuf);
+  v->h->free(sbuf);
+  pos_clear(v);
+  return err ? -4 : 0;
+}
+
 static const struct fsdrv_ops ops = {
-  FSDRV_ABI_RENAME, FAT32_NAME, f_probe, f_mount, f_umount, f_stat, f_read, f_items, f_long_name,
-  f_space, f_mkdir, f_write, f_remove, f_rename,
+  FSDRV_ABI_RMDIR, FAT32_NAME, f_probe, f_mount, f_umount, f_stat, f_read, f_items, f_long_name,
+  f_space, f_mkdir, f_write, f_remove, f_rename, f_rmdir,
 };
 
 const struct fsdrv_ops* fs_driver(void) { return &ops; }

@@ -656,11 +656,23 @@ void puts_k(const char* s) { while (*s) putc(*s++); }
  * real nao tem serial: o diagnostico (USB, NVMe, rede) vem por aqui, e o
  * Windows le o arquivo no E:. Chamado no fim do boot e pelo MOUSE e pelo USB. */
 int serial_log_save(void) {
-  uint32_t n;
+  extern uint32_t serial_log_tail(char* out, uint32_t max, uint32_t* skipped);
+  /* cabeca + marca + final, num buffer fixo: na hora da falha (o motivo de
+   * gravar) a arena baixa pode estar sem memoria */
+  static const char mark[] = "\n\n===== [serial] fim do comeco do boot; a seguir o ultimo 1 MB do log =====\n\n";
+  static char out[192u * 1024u + sizeof(mark) + 1024u * 1024u];
+  uint32_t n, t, skipped = 0;
   const char* s = serial_log(&n);
   if (!drives_is_mounted('D')) return -1;
   (void)drives_mkdir("D:\\LOG");
-  return file_save("D:\\LOG\\SERIAL.LOG", s, (int)n);
+  for (t = 0; t < n; t++) out[t] = s[t];
+  t = serial_log_tail(out + n + sizeof(mark) - 1, 1024u * 1024u, &skipped);
+  if (t) {
+    { uint32_t k; for (k = 0; k + 1 < sizeof(mark); k++) out[n + k] = mark[k]; }
+    t += (uint32_t)sizeof(mark) - 1;
+  }
+  (void)skipped;
+  return file_save("D:\\LOG\\SERIAL.LOG", out, (int)(n + t));
 }
 
 /* Log para debug de fdisk (partition.c chama) */
@@ -960,8 +972,14 @@ static void add_to_history(const char* cmd) {
   }
   
   // Adiciona novo comando
+  /* linha maior que a entrada (SET longo pelo /exec): corta, nao transborda
+   * para last_ata_* / mem_file_count logo depois do vetor */
   int i = 0;
-  while ((history[history_count][i] = cmd[i]) != '\0') i++;
+  while (cmd[i] != '\0' && i < (int)sizeof(history[0]) - 1) {
+    history[history_count][i] = cmd[i];
+    i++;
+  }
+  history[history_count][i] = '\0';
   history_count++;
 }
 
@@ -2145,6 +2163,8 @@ void kmain(const struct BootInfo* bi) {
   register_builtin("api", cmd_api);
   register_builtin("dlls", cmd_dlls);
   register_builtin("smp", cmd_smp);
+  register_builtin("kill", cmd_kill);
+  register_builtin("killall", cmd_killall);
   register_builtin("shutdown", cmd_shutdown);
   register_builtin("set", cmd_set);
   register_builtin("ver", cmd_ver);

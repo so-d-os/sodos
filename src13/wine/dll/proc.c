@@ -26,7 +26,7 @@ struct inh_spec {
   DWORD count;
 };
 
-static HANDLE spawn(const char* cmdline, DWORD* err, const struct inh_spec* spec) {
+static HANDLE spawn(const char* cmdline, DWORD* err, const struct inh_spec* spec, char* env, char* dir) {
   struct wproc* p = wp();
   struct wobj* o;
   HANDLE h;
@@ -47,6 +47,8 @@ static HANDLE spawn(const char* cmdline, DWORD* err, const struct inh_spec* spec
   while (__sync_lock_test_and_set(&p->spawn_req, 1)) {
     if (wnow_ms() - t0 > 60000 || p->exit_req) {
       *err = ERROR_NOT_SUPPORTED;
+      if (env) k_free_shared(env);
+      if (dir) k_free_shared(dir);
       return 0;
     }
     k_thread_yield();
@@ -55,6 +57,8 @@ static HANDLE spawn(const char* cmdline, DWORD* err, const struct inh_spec* spec
   p->spawn_cmd = c;
   /* ja aqui: o Chromium fecha handles do filho logo que o CreateProcess volta */
   p->spawn_inh = spec && spec->mode ? inh_snapshot(p, spec) : 0;
+  p->spawn_env = env;
+  p->spawn_dir = dir;
   __sync_lock_test_and_set(&p->spawn_req, 2);
   k_futex_wake(&p->exit_req, -1);
   wlog("processo filho: ", cmdline);
@@ -301,6 +305,10 @@ struct spawnrec {
   DWORD pid;                /* pid do filho, ja dado no CreateProcess */
   volatile int claimed;
   struct wobj** inh;        /* handles herdados, copiados no CreateProcess */
+  char* env;                /* ambiente do filho (k_malloc_shared), 0 = padrao */
+  uint32_t envlen;
+  char* dir;                /* diretorio inicial (k_malloc_shared) */
+  HANDLE std[3];            /* STARTF_USESTDHANDLES: stdin/out/err no filho */
 };
 
 /* O Chromium fecha no pai, logo depois do CreateProcess, handles que so o
@@ -380,6 +388,30 @@ int wspawn_claim(int* argc, char*** argv) {
   }
   p->spawn_rec = r;
   p->pid = r->pid; /* o pid que o pai ja recebeu */
+  /* ambiente e diretorio que o pai pediu (CreateProcess lpEnvironment /
+   * lpCurrentDirectory): o Claude Desktop passa a configuracao e a sessao do
+   * Claude Code por variaveis de ambiente */
+  sp_lock();
+  if (r->env) {
+    p->envb = (char*)k_malloc(r->envlen ? r->envlen : 2);
+    if (p->envb) {
+      memcpy(p->envb, r->env, r->envlen);
+      p->envlen = r->envlen;
+    }
+    k_free_shared(r->env);
+    r->env = 0;
+  }
+  /* stdio do STARTUPINFO: os handles vieram herdados com o mesmo numero (o
+   * Node/libuv passa pipes; sem isso o filho escrevia no console e o Claude
+   * Code achava que estava num terminal: "--input-format requires --print") */
+  memcpy(p->std, r->std, sizeof(p->std));
+  if (r->dir) {
+    strncpy(p->cwd, r->dir, sizeof(p->cwd) - 1);
+    p->cwd[sizeof(p->cwd) - 1] = 0;
+    k_free_shared(r->dir);
+    r->dir = 0;
+  }
+  sp_unlock();
   *(uint64_t*)(p->teb + TEB_PID) = p->pid;
   /* heranca: os handles do pai, nos mesmos numeros (o Chromium passa numeros
    * de handle na linha de comando) */
@@ -406,6 +438,14 @@ int wspawn_claim(int* argc, char*** argv) {
       inh_drop(t); /* o que nao coube */
     }
   }
+  /* stdio do STARTUPINFO que nao veio herdado (handle sem objeto aqui): volta
+   * ao console. O utilitario do Electron (worker de git) recebia um numero
+   * sem objeto e o Node parava em "open EINVAL". */
+  for (i = 0; i < 3; i++)
+    if (p->std[i] && !wh_get(p->std[i], 0)) {
+      if (wine_debug) wlogx("stdio herdado sem objeto, volta ao console: ", (uint64_t)(uintptr_t)p->std[i]);
+      p->std[i] = 0;
+    }
   av = (char**)k_malloc(256 * sizeof(char*));
   if (!line || !av) {
     wlog("processo filho: sem memoria para a linha de comando", 0);
@@ -427,16 +467,27 @@ int wspawn_claim(int* argc, char*** argv) {
  * filho deste processo. */
 HANDLE wdup_to_child(struct wobj* proc, struct wobj* o) {
   struct spawnrec* r = 0;
+  struct wproc* p = wp();
+  uint64_t t0 = wnow_ms();
   int i, slot = -1;
-  sp_lock();
-  for (i = 0; i < SPAWN_MAX; i++)
-    if (spawns[i].used && spawns[i].obj == proc) {
-      r = &spawns[i];
-      break;
-    }
-  if (!r) {
+  for (;;) {
+    sp_lock();
+    for (i = 0; i < SPAWN_MAX; i++)
+      if (spawns[i].used && spawns[i].obj == proc) {
+        r = &spawns[i];
+        break;
+      }
+    if (r) break;
     sp_unlock();
-    return 0;
+    /* O CreateProcess volta antes de a tarefa principal registrar o filho
+     * (spawn_async) e o Chromium duplica handles do Mojo para ele logo em
+     * seguida: espera o registro enquanto o pedido deste filho esta na fila.
+     * Sem isso o Network Service ficava sem os handles e era dado como morto. */
+    if (!(p->spawn_req && p->spawn_obj == proc) || wnow_ms() - t0 > 5000) {
+      if (wine_debug) wlog("DuplicateHandle: o processo destino nao e filho deste", "");
+      return 0;
+    }
+    k_futex_wait(&p->exit_req, 0, 2);
   }
   wlock();
   if (r->child) { /* ja rodando: direto na tabela dele */
@@ -511,7 +562,7 @@ void wspawn_exit(int code) {
     if (pp) {
       r->obj->exit_code = (DWORD)code;
       r->obj->exited = 1;
-      k_futex_wake(&wine_gen, -1); /* quem espera o processo no pai */
+      wsignal_obj(r->obj); /* quem espera o processo no pai */
     }
     r->used = 0;
     p->spawn_rec = 0;
@@ -523,6 +574,9 @@ void wspawn_exit(int code) {
       if (!spawns[i].claimed) {
         inh_drop(spawns[i].inh);
         spawns[i].inh = 0;
+        if (spawns[i].env) k_free_shared(spawns[i].env);
+        if (spawns[i].dir) k_free_shared(spawns[i].dir);
+        spawns[i].env = spawns[i].dir = 0;
         spawns[i].used = 0;
       }
     }
@@ -557,6 +611,16 @@ static int spawn_async(struct wproc* p, struct wobj* o, const char* path, const 
   sp_unlock();
   r->inh = p->spawn_inh;
   p->spawn_inh = 0;
+  r->env = p->spawn_env;
+  p->spawn_env = 0;
+  if (r->env) {
+    memcpy(&r->envlen, r->env, 4);
+    memmove(r->env, r->env + 4, r->envlen);
+  }
+  r->dir = p->spawn_dir;
+  p->spawn_dir = 0;
+  memcpy(r->std, p->spawn_std, sizeof(r->std));
+  memset(p->spawn_std, 0, sizeof(p->spawn_std));
   if (r->inh) {
     int c = 0;
     for (i = 1; i < WHANDLE_MAX; i++)
@@ -579,6 +643,9 @@ static int spawn_async(struct wproc* p, struct wobj* o, const char* path, const 
       sp_lock();
       inh_drop(r->inh);
       r->inh = 0;
+      if (r->env) k_free_shared(r->env);
+      if (r->dir) k_free_shared(r->dir);
+      r->env = r->dir = 0;
       r->used = 0;
       sp_unlock();
       return 0;
@@ -640,6 +707,9 @@ void wspawn_world_service(void) {
   wlogx("processo filho terminou, codigo ", (uint32_t)rc);
   inh_drop(p->spawn_inh);
   p->spawn_inh = 0;
+  if (p->spawn_env) k_free_shared(p->spawn_env);
+  if (p->spawn_dir) k_free_shared(p->spawn_dir);
+  p->spawn_env = p->spawn_dir = 0;
   k_free(cmd);
   k_free(whole);
   wlock();
@@ -647,7 +717,7 @@ void wspawn_world_service(void) {
   o->exited = 1;
   wunlock();
   __sync_lock_release(&p->spawn_req);
-  wsignal();
+  wsignal_obj(o);
 }
 
 /* SET WINE_SPAWN=0 volta ao filho aninhado (o pai espera ele terminar) */
@@ -707,9 +777,74 @@ static WINAPI BOOL CreateProcessW(const wchar16* app, wchar16* cmd, void* pa, vo
   }
   k_free(a);
   k_free(c);
-  h = line[0] ? spawn(line, &err, &spec) : 0;
+  {
+    char* envs = 0;
+    char* dirs = 0;
+    uint32_t elen = 0;
+    if (env) {
+      /* lpEnvironment: UTF-16 com CREATE_UNICODE_ENVIRONMENT, senao ANSI */
+      if (fl & 0x400u) {
+        const wchar16* w = (const wchar16*)env;
+        size_t n = 0;
+        while (w[n] || w[n + 1]) n++;
+        n += 2;
+        envs = (char*)k_malloc_shared((uint32_t)(n * 3 + 2));
+        if (envs) {
+          int m = wutf16_to_8(w, (int)n, envs, (int)(n * 3 + 2));
+          elen = m > 0 ? (uint32_t)m : 0;
+        }
+      } else {
+        const char* e = (const char*)env;
+        size_t n = 0;
+        while (e[n] || e[n + 1]) n++;
+        n += 2;
+        envs = (char*)k_malloc_shared((uint32_t)n);
+        if (envs) {
+          memcpy(envs, e, n);
+          elen = (uint32_t)n;
+        }
+      }
+      if (envs && wine_debug) wlogx("CreateProcess: ambiente do filho, bytes ", elen);
+    } else {
+      envs = wenv_snapshot(&elen); /* herda o do pai (0 = o padrao) */
+    }
+    if (envs) {
+      /* o filho guarda o tamanho no fim do bloco (spawn_async copia) */
+      char* t = (char*)k_malloc_shared(elen + 8);
+      if (t) {
+        memcpy(t, &elen, 4);
+        memcpy(t + 4, envs, elen);
+      }
+      k_free_shared(envs);
+      envs = t;
+    }
+    if (dir) {
+      dirs = wdup16to8(dir);
+      if (dirs) {
+        char* s = (char*)k_malloc_shared((uint32_t)strlen(dirs) + 1);
+        if (s) strcpy(s, dirs);
+        k_free(dirs);
+        dirs = s;
+      }
+    }
+    if (si && (*(const DWORD*)((const uint8_t*)si + 60) & 0x100u)) { /* STARTF_USESTDHANDLES */
+      struct wproc* me = wp();
+      me->spawn_std[0] = *(HANDLE const*)((const uint8_t*)si + 80);
+      me->spawn_std[1] = *(HANDLE const*)((const uint8_t*)si + 88);
+      me->spawn_std[2] = *(HANDLE const*)((const uint8_t*)si + 96);
+      if (wine_debug) wlogx("CreateProcess: stdio do filho, stdout ", (uint64_t)(uintptr_t)me->spawn_std[1]);
+    } else {
+      memset(wp()->spawn_std, 0, sizeof(wp()->spawn_std));
+    }
+    h = line[0] ? spawn(line, &err, &spec, envs, dirs) : 0;
+    if (!line[0]) {
+      if (envs) k_free_shared(envs);
+      if (dirs) k_free_shared(dirs);
+    }
+  }
   k_free(line);
   if (!h) {
+    wlogx("CreateProcess falhou, erro ", err ? err : ERROR_FILE_NOT_FOUND);
     wset_lasterr(err ? err : ERROR_FILE_NOT_FOUND);
     return 0;
   }
@@ -752,6 +887,53 @@ struct shexinfo {
   HANDLE icon;
   HANDLE process;
 };
+/* ---------- enderecos (ShellExecute de URL) ----------
+ * O Claude abre o navegador para o login (e links). Quem abre programas no WIN
+ * e a tarefa principal do processo (k_open_file e k_win_launch_arg recusam
+ * threads), entao a thread so deixa o pedido aqui e wurl_world_service, no
+ * laco do main.c, abre pelo "Abrir com" (LINKEXT.CFG, HTTP,HTTPS=programa);
+ * sem associacao, SET WINEBROWSER. */
+int k_open_file(const char* path);
+int k_win_launch_arg(const char* exe, const char* arg);
+static char url_q[2048];
+static struct wproc* url_owner;
+static volatile int url_lock;
+static int is_url(const char* f) {
+  int i;
+  for (i = 0; ((f[i] | 32) >= 'a' && (f[i] | 32) <= 'z') && i < 16; i++) {
+  }
+  return i >= 2 && f[i] == ':' && f[i + 1] == '/' && f[i + 2] == '/';
+}
+static void url_request(const char* f) {
+  while (__sync_lock_test_and_set(&url_lock, 1)) k_thread_yield();
+  strncpy(url_q, f, sizeof(url_q) - 1);
+  url_q[sizeof(url_q) - 1] = 0;
+  url_owner = wp();
+  __sync_lock_release(&url_lock);
+  wlog("ShellExecute: endereco para o navegador: ", f);
+}
+void wurl_world_service(void) {
+  char u[2048];
+  char b[264];
+  int n;
+  if (url_owner != wp() || !url_q[0]) return;
+  while (__sync_lock_test_and_set(&url_lock, 1)) k_thread_yield();
+  strcpy(u, url_q);
+  url_q[0] = 0;
+  url_owner = 0;
+  __sync_lock_release(&url_lock);
+  if (k_open_file(u) == 0) return; /* LINKEXT achou o programa */
+  /* sem associacao: SET WINEBROWSER=programa (o navegador e configurado no
+   * LINKEXT: SET LINKEXT=1 e HTTP,HTTPS=D:\FIREFOX\FIREFOX.EXE no LINKEXT.CFG) */
+  n = k_getenv("WINEBROWSER", b, (int)sizeof(b));
+  if (n <= 0 || n >= (int)sizeof(b)) b[0] = 0;
+  if (!b[0]) {
+    wsay("ShellExecute: sem navegador para o endereco (LINKEXT.CFG: HTTP,HTTPS=programa; SET LINKEXT=1): ", u);
+    return;
+  }
+  if (k_win_launch_arg(b, u) != 0) wlog("ShellExecute: nao consegui abrir o navegador para ", u);
+}
+
 static WINAPI BOOL ShellExecuteExW(struct shexinfo* i) {
   char line[1024];
   char* f = i->file ? wdup16to8(i->file) : 0;
@@ -763,14 +945,28 @@ static WINAPI BOOL ShellExecuteExW(struct shexinfo* i) {
     char p[300];
     /* so programas; documentos/URLs ainda nao */
     size_t n = strlen(f);
+    /* o Electron (shell.openExternal) manda a URL entre aspas: "https://..." */
+    if (n >= 2 && f[0] == '"' && f[n - 1] == '"') {
+      memmove(f, f + 1, n - 2);
+      f[n - 2] = 0;
+      n -= 2;
+    }
     wpath(f, p, (int)sizeof(p));
+    if (is_url(f)) {
+      url_request(f);
+      k_free(f);
+      k_free(par);
+      i->inst = (HANDLE)(uintptr_t)42;
+      if (i->mask & 0x40) i->process = 0;
+      return 1;
+    }
     if (n > 4 && wstreq(f + n - 4, ".exe") && k_fsize(p) > 0) {
       append_quoted(line, sizeof(line), f);
       if (par && *par) {
         strncat(line, " ", sizeof(line) - strlen(line) - 1);
         strncat(line, par, sizeof(line) - strlen(line) - 1);
       }
-      h = spawn(line, &err, 0); /* ShellExecute: nada herdado */
+      h = spawn(line, &err, 0, 0, 0); /* ShellExecute: nada herdado */
     } else {
       wlog("ShellExecute: nao e um programa (ignorado): ", f);
       err = ERROR_FILE_NOT_FOUND;

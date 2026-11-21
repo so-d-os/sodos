@@ -140,6 +140,7 @@ struct wdc {
   struct rect clip;       /* em coordenadas da superficie */
   int cur_x, cur_y;       /* MoveToEx */
   DWORD align;
+  struct wgui* xgui;      /* GetDC de janela de outro processo: gui do dono */
 };
 
 /* ---------- janelas ---------- */
@@ -264,6 +265,8 @@ struct wgui {
 
 struct wgui* gui_get(void);
 struct wwin* win_of(HANDLE h);
+struct wwin* win_any(HANDLE h, struct wgui** gp); /* HWND de qualquer processo */
+void wgui_proc_exit(void);
 struct wwin* win_top(struct wwin* w);
 intptr_t wsend(struct wwin* w, DWORD m, uintptr_t wp, intptr_t lp);
 void win_invalidate(struct wwin* w);

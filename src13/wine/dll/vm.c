@@ -172,6 +172,15 @@ static struct vmreg* vm_reserve_virt(uintptr_t at, size_t n, DWORD type, DWORD p
  * (dezenas de threads cada) a arena baixa acabava e o CreateThread falhava
  * (o Chromium encerra como falta de memoria). A thread so enxerga a parte
  * commitada (TEB.StackLimit/DeallocationStack, obj.c). */
+/* pilha de uma thread que terminou (obj.c thread_tramp): solta a reserva */
+void vm_stack_free(struct vmreg* r) {
+  if (!r) return;
+  wlock();
+  reg_unlink(r);
+  wunlock();
+  reg_free(r);
+}
+
 struct vmreg* vm_stack_alloc(size_t reserve, size_t commit) {
   struct vmreg* r;
   uint64_t va;
@@ -225,6 +234,19 @@ static void commit_range(struct vmreg* r, uint8_t* a, size_t n) {
   }
 }
 
+static void vm_oom_log(const char* what, uint64_t n) {
+  void k_hminfo(uint64_t* quota, uint64_t* used, uint64_t* total_ram);
+  uint64_t q = 0, u = 0, t = 0;
+  unsigned lt = 0, lf = 0;
+  wlogx(what, n);
+  k_hminfo(&q, &u, &t);
+  k_meminfo(&lt, &lf);
+  wlogx("  HIMEM cota (MB) ", q >> 20);
+  wlogx("  HIMEM usado (MB) ", u >> 20);
+  wlogx("  RAM total (MB) ", t >> 20);
+  wlogx("  arena baixa livre (MB) ", (uint64_t)(lf >> 20));
+}
+
 void* WINAPI wVirtualAlloc(void* addr, size_t n, DWORD type, DWORD prot) {
   struct wproc* p = wp();
   struct vmreg* r;
@@ -242,17 +264,7 @@ void* WINAPI wVirtualAlloc(void* addr, size_t n, DWORD type, DWORD prot) {
     if (!r) r = vm_reserve(n, VM_PRIVATE, (type & MEM_COMMIT) != 0);
     if (!r) r = vm_reserve_virt(0, n, type, prot); /* nao cabe na RAM de uma vez */
     if (!r) {
-      wlogx("VirtualAlloc: sem memoria para ", n);
-      {
-        void k_hminfo(uint64_t* quota, uint64_t* used, uint64_t* total_ram);
-        uint64_t q = 0, u = 0, t = 0;
-        unsigned lt = 0, lf = 0;
-        k_hminfo(&q, &u, &t);
-        k_meminfo(&lt, &lf);
-        wlogx("  HIMEM cota (MB) ", q >> 20);
-        wlogx("  HIMEM usado (MB) ", u >> 20);
-        wlogx("  arena baixa livre (MB) ", (uint64_t)(lf >> 20));
-      }
+      vm_oom_log("VirtualAlloc: sem memoria para ", n);
       wset_lasterr(ERROR_NOT_ENOUGH_MEMORY);
       return 0;
     }
@@ -265,6 +277,7 @@ void* WINAPI wVirtualAlloc(void* addr, size_t n, DWORD type, DWORD prot) {
      * aleatorios e, se isso "desse certo", tomava um pedaco de outra reserva
      * como seu (CHECK no VirtualFree, de vez em quando). */
     wunlock();
+    if (wine_debug >= 2) wlogx("VirtualAlloc: reserva sobre reserva em ", (uint64_t)(uintptr_t)addr);
     wset_lasterr(ERROR_INVALID_ADDRESS);
     return 0;
   }
@@ -273,6 +286,8 @@ void* WINAPI wVirtualAlloc(void* addr, size_t n, DWORD type, DWORD prot) {
     size_t len = (size_t)((uint8_t*)addr - a) + n;
     if (a + len > r->base + r->size) {
       wunlock();
+      wlogx("VirtualAlloc: commit alem da reserva em ", (uint64_t)(uintptr_t)addr);
+      wlogx("  tamanho ", n);
       wset_lasterr(ERROR_INVALID_ADDRESS);
       return 0;
     }
@@ -281,6 +296,7 @@ void* WINAPI wVirtualAlloc(void* addr, size_t n, DWORD type, DWORD prot) {
       wunlock();
       if (type & MEM_COMMIT) ok = k_vm_commit((uint64_t)(uintptr_t)a, len, prot_k(prot));
       if (!ok) {
+        vm_oom_log("VirtualAlloc: commit sem memoria para ", len);
         wset_lasterr(ERROR_NOT_ENOUGH_MEMORY);
         return 0;
       }
@@ -311,6 +327,11 @@ void* WINAPI wVirtualAlloc(void* addr, size_t n, DWORD type, DWORD prot) {
   if ((type & MEM_RESERVE) && !((uintptr_t)addr & 0xFFFF)) {
     r = vm_reserve_virt((uintptr_t)addr, n, type, prot);
     if (r) return r->base;
+  }
+  if (n >= 0x10000 || !(type & MEM_RESERVE)) {
+    wlogx("VirtualAlloc: endereco recusado ", (uint64_t)(uintptr_t)addr);
+    wlogx("  tamanho ", n);
+    wlogx("  tipo ", type);
   }
   wset_lasterr(ERROR_INVALID_ADDRESS);
   return 0;
@@ -495,6 +516,19 @@ int wmem_readable(const void* p, size_t n) {
   return 1;
 }
 
+/* Para o relatorio de excecao: estado da pagina de um endereco >= 1 TB. */
+void wvm_note(uint64_t a) {
+  struct vmem_info vi;
+  if (a < 0x10000000000ull) return;
+  if (!k_vm_query(a & ~0xFFFull, &vi)) {
+    wlog("  pagina: fora de qualquer reserva", 0);
+    return;
+  }
+  wlogx("  pagina: reserva em ", vi.alloc_base);
+  wlogx("  pagina: commitada ", (uint64_t)vi.committed);
+  wlogx("  pagina: protecao (0 nada, 1 leitura, 2 leitura e escrita) ", (uint64_t)vi.prot);
+}
+
 static WINAPI size_t VirtualQuery(const void* addr, struct mbi* m, size_t len) {
   uintptr_t pg = (uintptr_t)addr & ~(uintptr_t)(PG - 1);
   struct vmreg* r;
@@ -504,7 +538,19 @@ static WINAPI size_t VirtualQuery(const void* addr, struct mbi* m, size_t len) {
   wlock();
   r = vm_find(addr);
   if (!r) {
+    int wview_query(const void* p, uint64_t* base, uint64_t* size, int* write); /* map.c */
+    uint64_t vb = 0, vs = 0;
+    int vw = 0;
     wunlock();
+    if (wview_query(addr, &vb, &vs, &vw)) { /* vista de secao (MapViewOfFile) */
+      m->alloc_base = (void*)(uintptr_t)vb;
+      m->alloc_protect = vw ? 4 : 2;
+      m->region = vb + vs - pg;
+      m->state = MEM_COMMIT;
+      m->protect = vw ? 4 : 2;
+      m->type = 0x40000; /* MEM_MAPPED */
+      return sizeof(*m);
+    }
     m->region = 0x10000;
     m->state = 0x10000; /* MEM_FREE */
     m->protect = 1;     /* PAGE_NOACCESS */

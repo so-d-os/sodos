@@ -613,6 +613,12 @@ struct k_proc {
   char name[32];
   unsigned pid, kind, state, base, image_kb, data_kb, refs, pad;
 };
+/* soxrun nao tem WIN: nada para encerrar */
+static int k_kill(unsigned pid, int all) {
+  (void)pid;
+  (void)all;
+  return -1;
+}
 static int k_ps(struct k_proc* out, int max) {
   static const struct k_proc fake[] = {
     { "MC.EXE", 3, 1, 'E', 0x01800000u, 92, 1100, 1, 0 },
@@ -1022,7 +1028,7 @@ static const struct {
   E(k_fsize), E(k_fload), E(k_fread), E(k_fsave), E(k_flist), E(k_dirlist), E(k_pwd), E(k_chdir),
   E(k_drive), E(k_set_drive), E(k_exe_drive), E(k_dir), E(k_fdelete), E(k_frename), E(k_mkdir), E(k_rmdir), E(k_dfree),
   E(k_vput), E(k_cursor), E(k_font_get), E(k_font_set), E(k_font_reset), E(k_blink),
-  E(k_malloc), E(k_free), E(k_realloc), E(k_msize), E(k_meminfo), E(k_ps), E(k_memmap), E(k_vram),
+  E(k_malloc), E(k_free), E(k_realloc), E(k_msize), E(k_meminfo), E(k_ps), E(k_kill), E(k_memmap), E(k_vram),
   E(k_exit), E(k_exec), E(k_shell), E(k_shell_capture), E(k_last_error), E(k_dll_load), E(k_dll_sym), E(k_dll_free),
   E(k_rdtsc), E(k_ms), E(k_date), E(k_time), E(k_random),
   E(k_net_ready), E(k_dns), E(k_tcp_connect), E(k_tcp_send), E(k_tcp_recv), E(k_net_pending), E(k_tcp_close),

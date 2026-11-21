@@ -19,7 +19,7 @@ CFLAGS = -m64 -O2 -fno-strict-aliasing -fno-tree-loop-distribute-patterns -ffree
   -fno-pic -fno-pie -fno-stack-protector -mno-red-zone -mcmodel=large -mstackrealign \
   -fno-asynchronous-unwind-tables -nostdinc -isystem $(CC_DIR)/include -Wall -Wno-unused-function
 
-SRC = main pe k32 crt util vm obj exc file sys tables net reg misc crypt winrt pkg zip proc sig compat user gdi ctl dlg text wfont shell uimisc comctl procmisc sec map safearray ordtab ttf dwrite nt pipe fill
+SRC = main pe k32 crt util vm obj exc file sys tables net reg misc crypt winrt pkg zip proc sig compat user gdi ctl dlg text wfont shell uimisc comctl procmisc sec map safearray ordtab ttf dwrite nt pipe fill profsave
 OBJ = $(patsubst %,$(B)/%.o,$(SRC))
 
 TESTS = HELLOW MSGBOXW WRT KUSER EXPLTEST VMTEST MAPTEST DWTEST FETCH SPAWNTEST PIPETEST

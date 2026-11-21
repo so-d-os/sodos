@@ -58,6 +58,7 @@ struct task {
   int bkl_depth;
   int kind;
   int tid;
+  uint64_t last_exp;        /* ultimo k_* chamado pelo thunk (if_guard) */
   uint32_t pid;
   char drive;
   struct task* qnext;
@@ -371,13 +372,36 @@ static void kt_schedule(void) {
   irq_restore(fl);
 }
 
+/* Pedido de limpeza da TLB pendente para esta CPU (kt_tlb_shootdown)?
+ * Atende sem esperar a IPI: quem espera o BKL ou outra limpeza pode estar com
+ * as interrupcoes desligadas, e a CPU dona do BKL ficava girando no
+ * kt_tlb_shootdown ate o limite (segundos no PC real) a cada VirtualAlloc ou
+ * VirtualProtect: a CPU0 (o mundo) presa no bkl_take, teclado e tela parados,
+ * o Claude levando 20+ min para abrir no notebook. */
+static void kt_tlb_poll(void) {
+  struct cpu* c = this_cpu();
+  uint32_t g = __atomic_load_n(&tlb_gen, __ATOMIC_ACQUIRE);
+  if (c->tlb_ack != g) {
+    uint64_t cr3;
+    __asm__ volatile ("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) :: "memory");
+    c->tlb_ack = g;
+  }
+}
+
 /* ---------- BKL ---------- */
 static void kt_die(struct task* t) __attribute__((noreturn));
 static void yield_raw(struct task* t);
 
+/* Threads dormindo a espera do BKL (bkl_sleep). Quem solta acorda uma. */
+static volatile int bkl_sleepers;
+static volatile uint32_t st_bkl_sleep;
+static void bkl_sleep(struct task* t);
+#define BKL_SPINS 400   /* voltas girando antes de dormir */
+
 static void bkl_take(struct task* t, int depth) {
   if (depth <= 0) return;
   int waiting = 0;
+  int spins = 0;
   if (bkl_owner == t) {
     t->bkl_depth = depth;
     return;
@@ -399,9 +423,22 @@ static void bkl_take(struct task* t, int depth) {
     }
     if (waiting && t->killed) __atomic_sub_fetch(&bkl_waiters, 1, __ATOMIC_RELAXED);
     st_bkl_spin++;
+    kt_tlb_poll();
     if (t->kind == K_THREAD) {
       if (t->killed) kt_die(t);
-      if (this_cpu()->nr > 0) yield_raw(t);
+      /* Girava para sempre (com yield a cada volta se havia outra thread na
+       * fila): com o BKL ocupado por uma leitura de disco, todas as CPUs
+       * ficavam a 100% no kt_schedule/bkl_take (notebook: 8 nucleos a 100%
+       * por minutos ate desligar; VM: ~1,8 bilhao de trocas em 9 min) e
+       * quem tinha trabalho de verdade nao recebia CPU. Agora gira um pouco
+       * (o BKL costuma ficar preso por microssegundos) e depois dorme ate
+       * quem soltar acordar, ou 2 ms. So com as interrupcoes ligadas em quem
+       * chamou. */
+      if (++spins >= BKL_SPINS && (fl & 0x200u)) {
+        bkl_sleep(t);
+        spins = BKL_SPINS / 2;
+        continue;
+      }
     }
     cpu_pause();
   }
@@ -416,9 +453,56 @@ static int bkl_drop(struct task* t) {
   if (t->kind == K_THREAD) mod_thread_leave(&t->msave);
   t->bkl_depth = 0;
   bkl_owner = 0;
-  __atomic_store_n(&bkl_lock, 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&bkl_lock, 0, __ATOMIC_SEQ_CST);
   irq_restore(fl);
+  if (__atomic_load_n(&bkl_sleepers, __ATOMIC_SEQ_CST) > 0) kt_futex_wake((volatile int*)&bkl_lock, 1);
   return d;
+}
+
+/* Uma thread de programa nunca pode rodar com as interrupcoes desligadas: sem
+ * o tique ela nao e preemptada, e se ficar num laco (o Bun do Claude Code
+ * gira chamando k_futex_wake) as outras threads da fila daquela CPU param
+ * para sempre (VM 2026-11-20: CPU2 com "trocas" congelado, fila=67, IRR com o
+ * vetor do timer pendente, RIP no programa com RFLAGS.IF=0; o Claude ficava
+ * em "pensando" sem fim e o teclado morria). Confere na entrada e na saida de
+ * todo k_*: religa e avisa no serial qual chamada foi, para achar quem deixa
+ * o IF desligado. */
+static volatile uint32_t st_if_fix;
+static void if_guard2(struct task* t, const char* onde, uint64_t alvo, uint64_t quem);
+static void if_guard(struct task* t, const char* onde, uint64_t alvo) { if_guard2(t, onde, alvo, 0); }
+static void if_guard2(struct task* t, const char* onde, uint64_t alvo, uint64_t quem) {
+  static const char hx[] = "0123456789ABCDEF";
+  uint64_t f;
+  uint32_t n;
+  char b[17];
+  int i;
+  if (t->kind != K_THREAD) return;
+  __asm__ volatile ("pushfq; pop %0" : "=r"(f) :: "memory");
+  if (f & 0x200u) return;
+  __asm__ volatile ("sti" ::: "memory");
+  n = __atomic_add_fetch(&st_if_fix, 1u, __ATOMIC_RELAXED);
+  if (n > 40u && (n & 0xFFFu)) return;
+  for (i = 0; i < 16; i++) b[i] = hx[(alvo >> (60 - 4 * i)) & 15u];
+  b[16] = 0;
+  serial_puts("[kt] IF desligado numa thread de programa, religado (");
+  serial_puts(onde);
+  serial_puts(") alvo=");
+  serial_puts(b);
+  for (i = 0; i < 16; i++) b[i] = hx[(quem >> (60 - 4 * i)) & 15u];
+  serial_puts(" chamador=");
+  serial_puts(b);
+  serial_puts(" pid=");
+  put_dec((uint32_t)t->pid);
+  serial_puts(" tid=");
+  put_dec((uint32_t)t->tid);
+  serial_puts(" vezes=");
+  put_dec(n);
+  serial_puts("\n");
+}
+void kt_if_check(const char* onde, uint64_t marca) {
+  struct task* t = cur();
+  if_guard2(t, onde, t->last_exp, marca);
+  if (marca && t->kind == K_THREAD) t->last_exp = marca;
 }
 
 void kt_bkl_enter(void) {
@@ -426,6 +510,18 @@ void kt_bkl_enter(void) {
   if (bkl_owner == t) {
     t->bkl_depth++;
     return;
+  }
+  if (t->kind == K_THREAD) {
+    /* chamado pelo bkl_thunk_common: o alvo (r11) e o ultimo push antes do call */
+    /* o alvo que aparece e o k_* ANTERIOR desta thread: quem pode ter
+     * deixado o IF desligado */
+    {
+      /* quadro do bkl_thunk_common: [rbp] = rbp do programa, [rbp+8] = retorno */
+      const uint64_t* fa = (const uint64_t*)__builtin_frame_address(0);
+      const uint64_t* tb = (const uint64_t*)fa[0];
+      if_guard2(t, "entrada de k_, anterior", t->last_exp, tb ? tb[1] : 0);
+      t->last_exp = tb ? tb[1] : fa[2];
+    }
   }
   bkl_take(t, 1);
 }
@@ -444,6 +540,7 @@ uint64_t kt_bkl_leave(void) {
       kt_schedule();
       if (t->killed) kt_die(t);
     }
+    if_guard(t, "saida de k_", t->last_exp);
   }
   return 0;
 }
@@ -475,7 +572,9 @@ void kt_bkl_breathe(void) {
   int d, i;
   if (!bkl_waiters || cur() != w || bkl_owner != w) return;
   d = bkl_drop(w);
-  for (i = 0; i < 4000 && !bkl_lock && bkl_waiters; i++) cpu_pause();
+  /* quem espera pode estar dormindo (bkl_sleep): acordar e trocar de tarefa
+   * leva mais que as 4000 voltas; espera ate alguem pegar, com limite */
+  for (i = 0; i < (bkl_sleepers ? 200000 : 4000) && !bkl_lock && bkl_waiters; i++) cpu_pause();
   bkl_take(w, d);
 }
 
@@ -535,6 +634,8 @@ void kt_dump(void) {
   int i;
   serial_puts("[kt] bkl_spin=");
   put_dec(st_bkl_spin);
+  serial_puts(" bkl_sleep=");
+  put_dec(st_bkl_sleep);
   serial_puts(" lend=");
   put_dec(st_lend);
   serial_puts(" fx_wait=");
@@ -715,6 +816,27 @@ static int thread_wait(struct task* t, volatile int* addr, int val, int timeout_
   return rc;
 }
 
+/* Dorme ate o BKL ser solto (bkl_drop acorda uma) ou 2 ms. bkl_sleepers
+ * sobe ANTES de conferir a trava e quem solta zera a trava ANTES de ler
+ * bkl_sleepers (as duas com barreira total): um dos dois ve o outro. */
+static void bkl_sleep(struct task* t) {
+  uint64_t fl = irq_save();
+  __atomic_add_fetch(&bkl_sleepers, 1, __ATOMIC_SEQ_CST);
+  spin_lock(&fx_lock);
+  if (!__atomic_load_n(&bkl_lock, __ATOMIC_SEQ_CST) || t->killed) {
+    spin_unlock(&fx_lock);
+    __atomic_sub_fetch(&bkl_sleepers, 1, __ATOMIC_SEQ_CST);
+    irq_restore(fl);
+    return;
+  }
+  block_on(t, (volatile int*)&bkl_lock, deadline_of(2));
+  st_bkl_sleep++;
+  spin_unlock(&fx_lock);
+  kt_schedule();
+  __atomic_sub_fetch(&bkl_sleepers, 1, __ATOMIC_SEQ_CST);
+  irq_restore(fl);
+}
+
 /* O mundo empresta a sua CPU as threads por ate 'ms', ou ate *addr mudar. */
 static void world_lend(volatile int* addr, int val, uint32_t ms) {
   struct task* w = &world;
@@ -732,6 +854,14 @@ static void world_lend(volatile int* addr, int val, uint32_t ms) {
   }
   irq_restore(fl);
   bkl_take(w, depth ? depth : 1);
+}
+
+/* Laco do WIN sem nada a fazer: empresta a CPU0 (e o BKL) as threads por
+ * ate ms, em vez de girar. Fora do mundo nao faz nada. */
+static volatile int world_idle_word;
+void kt_world_idle(uint32_t ms) {
+  if (!kt_up || cur() != &world || bkl_owner != &world) return;
+  world_lend(&world_idle_word, 0, ms);
 }
 
 static int world_wait(volatile int* addr, int val, int timeout_ms) {
@@ -1209,7 +1339,10 @@ void kt_tlb_shootdown(void) {
     struct cpu* d = &cpus[i];
     uint32_t spins = 0;
     if (!d->online || d == me) continue;
-    while ((int32_t)(d->tlb_ack - g) < 0 && spins++ < 50000000u) cpu_pause();
+    while ((int32_t)(d->tlb_ack - g) < 0 && spins++ < 50000000u) {
+      kt_tlb_poll(); /* duas limpezas ao mesmo tempo: atende a da outra */
+      cpu_pause();
+    }
   }
 }
 

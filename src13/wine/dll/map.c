@@ -47,12 +47,15 @@ struct view {
   int write;
   struct wproc* owner;
   uint64_t alias;         /* != 0: reserva propria (k_vm_alias) a soltar no Unmap */
+  uint64_t dead_ms;       /* na lista grave: hora em que o dono saiu */
 };
 uint64_t k_vm_reserve(uint64_t size, uint64_t align, uint64_t at);
 int k_vm_alias(uint64_t va, uint64_t phys, uint64_t size, int prot);
 int k_vm_release(uint64_t va);
 static struct section* sections;
 static struct view* views;
+static void grave_reap(void);
+static struct view* grave; /* vistas de processos que sairam (ver wmap_proc_exit) */
 static volatile int map_lock;
 
 static void mlock(void) {
@@ -340,6 +343,7 @@ static WINAPI void* MapViewOfFileEx(HANDLE m, DWORD acc, DWORD hi, DWORD lo, siz
     wset_lasterr(487); /* ERROR_INVALID_ADDRESS: so onde a secao ja esta */
     return 0;
   }
+  grave_reap();
   v = (struct view*)k_malloc_shared((uint32_t)sizeof(*v));
   if (!v) return 0;
   memset(v, 0, sizeof(*v));
@@ -389,6 +393,25 @@ static struct view* view_of(const void* p, int unlink) {
     }
   return 0;
 }
+/* VirtualQuery (vm.c) num endereco de vista: a vista e a "alocacao". O
+ * Chromium mede o mapeamento por RegionSize - (endereco - AllocationBase);
+ * antes vinha MEM_FREE com base 0 e o DiscardableSharedMemory do navegador
+ * via tamanho absurdo e recusava a memoria (renderer: sem memoria, imagens do
+ * captcha em branco). 1 = era vista. */
+int wview_query(const void* p, uint64_t* base, uint64_t* size, int* write) {
+  struct view* v;
+  int ok = 0;
+  mlock();
+  v = view_of(p, 0);
+  if (v) {
+    *base = (uint64_t)(uintptr_t)v->base & ~0xFFFull;
+    *size = (((uint64_t)(uintptr_t)v->base + v->size + 0xFFF) & ~0xFFFull) - *base;
+    *write = v->write;
+    ok = 1;
+  }
+  munlock();
+  return ok;
+}
 static void writeback(struct view* v, uint64_t off, uint64_t n) {
   if (v->write && v->s->writable && v->s->file) file_io(v->s->file, 1, v->off + off, v->base + off, n);
 }
@@ -404,8 +427,10 @@ static WINAPI BOOL FlushViewOfFile(const void* p, size_t n) {
   writeback(v, off, n);
   return 1;
 }
+static void grave_reap(void);
 static WINAPI BOOL UnmapViewOfFile(const void* p) {
   struct view* v;
+  grave_reap();
   mlock();
   v = view_of(p, 1);
   munlock();
@@ -414,14 +439,28 @@ static WINAPI BOOL UnmapViewOfFile(const void* p) {
     return 0;
   }
   writeback(v, 0, v->size);
-  if (v->alias) k_vm_release(v->alias);
+  if (v->alias) {
+    if (wine_debug >= 2) {
+      wlogx("UnmapViewOfFile: solta vista repetida ", v->alias);
+      wwait_note("  chamado de", __builtin_return_address(0), 0);
+    }
+    k_vm_release(v->alias);
+  }
   section_unref(v->s);
   k_free(v);
   return 1;
 }
-/* main.c (wexit): as vistas deste processo saem da lista */
+/* main.c (wexit): as vistas deste processo saem da lista. As outras threads
+ * do processo ainda rodam aqui (o kernel so as para no fim do exec) e a de
+ * E/S do Mojo escrevia na vista depois de solta: ACCESS_VIOLATION "fora de
+ * qualquer reserva" no renderer saindo, ou escrita em memoria ja liberada.
+ * Entao as vistas vao para a lista grave e so sao soltas 10 s depois
+ * (grave_reap). A reserva da vista repetida nunca e solta aqui: o kernel solta
+ * as reservas do pid no fim (vmem_release_pid); um k_vm_release atrasado
+ * soltaria o endereco ja reaproveitado por outro processo. */
 void wmap_proc_exit(void) {
   struct wproc* me = wp();
+  uint64_t now = wnow_ms();
   for (;;) {
     struct view** pp;
     struct view* v = 0;
@@ -432,10 +471,33 @@ void wmap_proc_exit(void) {
         *pp = v->next;
         break;
       }
+    if (v) {
+      v->owner = 0;
+      v->dead_ms = now ? now : 1;
+      v->next = grave;
+      grave = v;
+    }
     munlock();
     if (!v) return;
     writeback(v, 0, v->size);
-    if (v->alias) k_vm_release(v->alias);
+  }
+}
+/* solta as vistas da lista grave com mais de 10 s */
+static void grave_reap(void) {
+  uint64_t now = wnow_ms();
+  for (;;) {
+    struct view** pp;
+    struct view* v = 0;
+    if (!grave) return;
+    mlock();
+    for (pp = &grave; *pp; pp = &(*pp)->next)
+      if (now - (*pp)->dead_ms > 10000) {
+        v = *pp;
+        *pp = v->next;
+        break;
+      }
+    munlock();
+    if (!v) return;
     section_unref(v->s);
     k_free(v);
   }

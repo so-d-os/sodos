@@ -279,7 +279,8 @@ static int resolve_imports(struct wmod* m, const struct pe_info* pi) {
       }
       if (!fn) {
         if (wine_debug) wlog("nao implementado (stub): ", fname);
-        fn = wine_make_stub(dll, fname);
+        fn = (t >> 63) ? 0 : wine_api_stub(dll, fname);
+        if (!fn) fn = wine_make_stub(dll, fname);
         if (!fn) return -1;
       }
       iat[i] = (uint64_t)(uintptr_t)fn;

@@ -70,6 +70,32 @@ static void put_standard(uint8_t* o, const struct by_handle_info* bi) {
 long WINAPI wNtQueryInformationFile(HANDLE h, struct iosb* io, void* buf, DWORD len, int cls) {
   struct by_handle_info bi;
   uint8_t* o = (uint8_t*)buf;
+  {
+    int pm = wpipe_mode(h);
+    if (pm >= 0 && wine_debug >= 2) wlogx("NtQueryInformationFile em pipe, classe ", (uint32_t)cls);
+    if (pm >= 0) { /* pipe: so o que o libuv pede no stdio herdado */
+      switch (cls) {
+        case 16: /* FileModeInformation */
+          if (len < 4) return STATUS_INFO_LENGTH_MISMATCH_;
+          *(DWORD*)o = (DWORD)pm;
+          done(io, 0, 4);
+          return 0;
+        case 8: /* FileAccessInformation: ler e escrever */
+          if (len < 4) return STATUS_INFO_LENGTH_MISMATCH_;
+          *(DWORD*)o = 0x0012019Fu;
+          done(io, 0, 4);
+          return 0;
+        case 5: /* FileStandardInformation */
+          if (len < 24) return STATUS_INFO_LENGTH_MISMATCH_;
+          memset(o, 0, 24);
+          *(DWORD*)(o + 16) = 1;
+          done(io, 0, 24);
+          return 0;
+      }
+      done(io, STATUS_INVALID_INFO_CLASS_, 0);
+      return STATUS_INVALID_INFO_CLASS_;
+    }
+  }
   if (!handle_info(h, &bi)) {
     done(io, STATUS_INVALID_HANDLE_, 0);
     return STATUS_INVALID_HANDLE_;
@@ -145,7 +171,6 @@ long WINAPI wNtQueryInformationFile(HANDLE h, struct iosb* io, void* buf, DWORD 
 long WINAPI wNtQueryVolumeInformationFile(HANDLE h, struct iosb* io, void* buf, DWORD len, int cls) {
   uint8_t* o = (uint8_t*)buf;
   unsigned total = 0, freeb = 0;
-  (void)h;
   switch (cls) {
     case 1: /* FileFsVolumeInformation: tempo, serial, tam. do rotulo, objetos, rotulo */
       if (len < 24) return STATUS_INFO_LENGTH_MISMATCH_;
@@ -168,6 +193,12 @@ long WINAPI wNtQueryVolumeInformationFile(HANDLE h, struct iosb* io, void* buf, 
     case 4: /* FileFsDeviceInformation: FILE_DEVICE_DISK */
       if (len < 8) return STATUS_INFO_LENGTH_MISMATCH_;
       *(DWORD*)o = 7;
+      /* pipe = FILE_DEVICE_NAMED_PIPE, console = FILE_DEVICE_CONSOLE: o Bun
+       * decide por aqui como ler o stdin (com "disco" ele nunca lia o pipe
+       * do Claude Desktop) */
+      if (wpipe_mode(h) >= 0) *(DWORD*)o = 0x11;
+      else if ((uintptr_t)h == 0x10 || (uintptr_t)h == 0x14 || (uintptr_t)h == 0x18) *(DWORD*)o = 0x50;
+      if (wine_debug >= 2 && *(DWORD*)o != 7) wlogx("NtQueryVolumeInformationFile: tipo do dispositivo ", *(DWORD*)o);
       *(DWORD*)(o + 4) = 0;
       done(io, 0, 8);
       return 0;
@@ -211,6 +242,14 @@ long WINAPI wNtQueryDirectoryFile(HANDLE h, HANDLE ev, void* apc, void* ctx, str
   DWORD used = 0, prev = 0;
   int count = 0;
   (void)ev; (void)apc; (void)ctx; (void)mask;
+  /* ReturnSingleEntry e RestartScan sao BOOLEAN (1 byte): quem chama so
+   * escreve o byte baixo da posicao na pilha. Lidos como BOOL de 4 bytes, o
+   * lixo acima virava "recomece a varredura" em toda chamada e o readdir do
+   * Bun (Claude Code) nunca chegava ao fim: um claude.exe parado listava a
+   * mesma pasta ~170 vezes por segundo, com o BKL, e o resto do sistema
+   * ficava sem CPU (notebook: "Starting session" para sempre, 8 CPUs a 100%). */
+  single &= 0xFF;
+  restart &= 0xFF;
   if (!d || !d->is_dir || !d->path) {
     done(io, STATUS_INVALID_HANDLE_, 0);
     return STATUS_INVALID_HANDLE_;

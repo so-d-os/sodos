@@ -96,7 +96,9 @@ static WINAPI int WSANSPIoctl(HANDLE h, DWORD code, void* in, DWORD nin, void* o
 /* Sem aviso de mudanca de pasta: o FilePathWatcher do Chromium desiste. */
 static WINAPI BOOL ReadDirectoryChangesW(HANDLE h, void* buf, DWORD len, BOOL sub, DWORD filter, DWORD* got,
                                          void* ov, void* comp) {
+  static volatile unsigned said;
   (void)h; (void)buf; (void)len; (void)sub; (void)filter; (void)ov; (void)comp;
+  if ((__sync_add_and_fetch(&said, 1) % 50u) == 1) wlogx("ReadDirectoryChangesW (sem suporte), chamadas ", said);
   if (got) *got = 0;
   wset_lasterr(1); /* ERROR_INVALID_FUNCTION */
   return 0;
@@ -121,7 +123,8 @@ typedef BOOL(WINAPI* sfpe_fn)(HANDLE, int64_t, int64_t*, DWORD);
 typedef BOOL(WINAPI* seof_fn)(HANDLE);
 static WINAPI BOOL SetFileInformationByHandle(HANDLE h, int cls, void* buf, DWORD len) {
   switch (cls) {
-    case 0: /* FileBasicInfo: tempos e atributos (o FAT daqui nao guarda) */
+    case 0: /* FileBasicInfo: o FAT daqui nao guarda; so a data das travas */
+      wfile_setinfo(h, 4, buf, len);
       return 1;
     case 3: /* FileRenameInfo */
     case 4: /* FileDispositionInfo */
@@ -1092,6 +1095,28 @@ static long nt_status_of(DWORD e) {
   }
   return (long)0xC0000022; /* ACCESS_DENIED */
 }
+/* "\??\C:\x" e "\\?\C:\x" -> "C:\x" (no lugar) */
+static void nt_dos_name(wchar16* n) {
+  int k = 0, i;
+  if (n[0] == '\\' && (n[1] == '?' || n[1] == '\\') && n[2] == '?' && n[3] == '\\') k = 4;
+  if (!k) return;
+  for (i = 0; n[i + k]; i++) n[i] = n[i + k];
+  n[i] = 0;
+}
+/* nome de um OBJECT_ATTRIBUTES (UNICODE_STRING em +16) */
+static int oa_name(const uint8_t* oa, wchar16* name, int cap) {
+  const uint8_t* us;
+  DWORD n;
+  if (!oa) return -1;
+  us = *(const uint8_t* const*)(oa + 16);
+  if (!us) return -1;
+  n = *(const uint16_t*)us / 2;
+  if ((int)n >= cap) return -1;
+  memcpy(name, *(const wchar16* const*)(us + 8), n * 2);
+  name[n] = 0;
+  nt_dos_name(name);
+  return (int)n;
+}
 static WINAPI long NtCreateFile(HANDLE* out, DWORD access, const uint8_t* oa, struct ntiosb* io, void* alloc,
                                 DWORD attrs, DWORD share, DWORD disp, DWORD opts, void* ea, DWORD ealen) {
   static const DWORD map[6] = {2, 3, 1, 4, 5, 2};
@@ -1108,6 +1133,7 @@ static WINAPI long NtCreateFile(HANDLE* out, DWORD access, const uint8_t* oa, st
   if (n >= 399) return (long)0xC0000106; /* NAME_TOO_LONG */
   memcpy(name, *(const wchar16* const*)(us + 8), n * 2);
   name[n] = 0;
+  nt_dos_name(name);
   if (opts & 1) fl |= 0x02000000; /* FILE_DIRECTORY_FILE -> BACKUP_SEMANTICS */
   if (opts & 0x1000) fl |= 0x04000000; /* DELETE_ON_CLOSE */
   h = cf(name, access, share, 0, disp < 6 ? map[disp] : 3, fl | (attrs ? attrs : 0x80), 0);
@@ -1147,6 +1173,108 @@ static WINAPI long NtWriteFile(HANDLE h, HANDLE ev, void* apc, void* ctx, struct
                                const int64_t* off, DWORD* key) {
   (void)apc; (void)ctx; (void)key;
   return nt_rw(1, h, ev, io, (void*)buf, len, off);
+}
+/* ---------- ntdll que o Claude Code (claude.exe, Bun) importa direto ----------
+ * Sem elas o stub encerrava o processo (0xC0000139) na partida. */
+static WINAPI long NtOpenFile(HANDLE* out, DWORD access, const uint8_t* oa, struct ntiosb* io, DWORD share,
+                              DWORD opts) {
+  return NtCreateFile(out, access, oa, io, 0, 0, share, 1 /* FILE_OPEN */, opts, 0, 0);
+}
+struct attr_data_ {
+  DWORD attrs;
+  uint64_t ctime, atime, mtime;
+  DWORD size_hi, size_lo;
+} __attribute__((packed));
+typedef BOOL(WINAPI* gfae_fn)(const wchar16*, int, struct attr_data_*);
+/* FILE_BASIC_INFORMATION: 4 tempos (LARGE_INTEGER) + atributos */
+static WINAPI long NtQueryAttributesFile(const uint8_t* oa, uint8_t* info) {
+  gfae_fn ga = LOOKF(gfae_fn, "GetFileAttributesExW");
+  wchar16 name[400];
+  struct attr_data_ d;
+  if (oa_name(oa, name, 400) < 0 || !info || !ga) return (long)0xC000000D;
+  if (!ga(name, 0, &d)) return nt_status_of(wget_lasterr());
+  memcpy(info, &d.ctime, 8);
+  memcpy(info + 8, &d.atime, 8);
+  memcpy(info + 16, &d.mtime, 8);
+  memcpy(info + 24, &d.mtime, 8);
+  memcpy(info + 32, &d.attrs, 4);
+  return 0;
+}
+static WINAPI long NtClose(HANDLE h) {
+  typedef BOOL(WINAPI * ch_fn)(HANDLE);
+  ch_fn ch = LOOKF(ch_fn, "CloseHandle");
+  return ch && ch(h) ? 0 : (long)0xC0000008;
+}
+static WINAPI long NtQuerySecurityObject(HANDLE h, DWORD what, void* sd, DWORD len, DWORD* need) {
+  (void)h; (void)what; (void)sd; (void)len;
+  if (need) *need = 0;
+  return (long)0xC00000BB; /* NOT_SUPPORTED */
+}
+static WINAPI long NtSetSecurityObject(HANDLE h, DWORD what, void* sd) {
+  (void)h; (void)what; (void)sd;
+  return 0;
+}
+static WINAPI long NtOpenDirectoryObject(HANDLE* out, DWORD access, const void* oa) {
+  (void)access; (void)oa;
+  if (out) *out = 0;
+  return (long)0xC0000022;
+}
+static WINAPI long NtFsControlFile(HANDLE h, HANDLE ev, void* apc, void* ctx, struct ntiosb* io, DWORD code,
+                                   void* in, DWORD inlen, void* out, DWORD outlen) {
+  (void)h; (void)ev; (void)apc; (void)ctx; (void)in; (void)inlen; (void)out; (void)outlen;
+  if (wine_debug) wlogx("NtFsControlFile sem suporte, codigo ", code);
+  if (io) { io->status = (uintptr_t)(intptr_t)(long)0xC0000010; io->info = 0; }
+  return (long)0xC0000010; /* INVALID_DEVICE_REQUEST */
+}
+static WINAPI long NtCreateNamedPipeFile(HANDLE* out, DWORD access, const uint8_t* oa, struct ntiosb* io,
+                                         DWORD share, DWORD disp, DWORD opts, DWORD type, DWORD rmode,
+                                         DWORD cmode, DWORD maxi, DWORD inq, DWORD outq, const int64_t* tmo) {
+  typedef HANDLE(WINAPI * cnp_fn)(const wchar16*, DWORD, DWORD, DWORD, DWORD, DWORD, DWORD, void*);
+  cnp_fn cnp = LOOKF(cnp_fn, "CreateNamedPipeW");
+  wchar16 name[400], full[420];
+  int n, i, k = 0;
+  HANDLE h;
+  DWORD om = 0;
+  (void)share; (void)disp; (void)tmo; (void)cmode;
+  if (!out || !cnp || (n = oa_name(oa, name, 400)) < 0) return (long)0xC000000D;
+  /* "\Device\NamedPipe\x" -> "\\.\pipe\x" */
+  {
+    static const char dev[] = "\\Device\\NamedPipe\\";
+    int m = 0;
+    while (dev[m] && name[m] == (wchar16)dev[m]) m++;
+    if (!dev[m]) k = m;
+  }
+  {
+    static const char pre[] = "\\\\.\\pipe\\";
+    for (i = 0; pre[i]; i++) full[i] = (wchar16)pre[i];
+    for (; name[k] && i < 418; k++) full[i++] = name[k];
+    full[i] = 0;
+  }
+  if (access & 0x80000000u) om |= 1; /* GENERIC_READ -> PIPE_ACCESS_INBOUND */
+  if (access & 0x40000000u) om |= 2;
+  if (access & 1) om |= 1;           /* FILE_READ_DATA */
+  if (access & 2) om |= 2;           /* FILE_WRITE_DATA */
+  if (!om) om = 3;
+  if (!(opts & 0x30)) om |= 0x40000000u; /* sem SYNCHRONOUS_IO -> OVERLAPPED */
+  h = cnp(full, om, (type ? 4 : 0) | (rmode ? 2 : 0), maxi ? maxi : 255, outq, inq, 0, 0);
+  if (h == (HANDLE)(intptr_t)-1) {
+    long st = nt_status_of(wget_lasterr());
+    if (io) { io->status = (uintptr_t)(intptr_t)st; io->info = 0; }
+    return st;
+  }
+  *out = h;
+  if (io) { io->status = 0; io->info = 2; /* FILE_CREATED */ }
+  return 0;
+}
+static WINAPI void RtlUnwind(void* frame, void* target, void* rec, void* ret) {
+  (void)frame; (void)target; (void)rec; (void)ret;
+  wsay("RtlUnwind: SEH por tabela ainda nao suportado", 0);
+}
+/* apiset: "IsApiSetImplemented" responde nao para tudo (o chamador cai no
+ * caminho antigo) */
+static WINAPI BOOL IsApiSetImplemented(const char* name) {
+  (void)name;
+  return 0;
 }
 static WINAPI BOOL QueryUnbiasedInterruptTime(uint64_t* t) {
   if (!t) return 0;
@@ -1327,7 +1455,10 @@ static WINAPI long CreateErrorInfo(void** out) {
 const struct wine_sym fill_syms[] = {
     S(GetErrorInfo), S(SetErrorInfo), S(CreateErrorInfo),
     S(NtCreateFile), {"ZwCreateFile", (void*)NtCreateFile}, S(NtReadFile), {"ZwReadFile", (void*)NtReadFile},
-    S(NtWriteFile), {"ZwWriteFile", (void*)NtWriteFile}, S(QueryUnbiasedInterruptTime), S(IsProcessInJob),
+    S(NtWriteFile), {"ZwWriteFile", (void*)NtWriteFile},
+    S(NtOpenFile), {"ZwOpenFile", (void*)NtOpenFile}, S(NtQueryAttributesFile), S(NtClose), {"ZwClose", (void*)NtClose},
+    S(NtQuerySecurityObject), S(NtSetSecurityObject), S(NtOpenDirectoryObject), S(NtFsControlFile),
+    S(NtCreateNamedPipeFile), S(RtlUnwind), S(IsApiSetImplemented), S(QueryUnbiasedInterruptTime), S(IsProcessInJob),
     S(GetApplicationUserModelId), S(UnregisterApplicationRestart), S(OpenFileById), S(StartServiceW), S(DwmFlush),
     S(GetExtendedTcpTable), S(WNetOpenEnumW), S(WNetEnumResourceW), S(WNetCloseEnum), S(NCryptOpenStorageProvider),
     S(NCryptOpenKey), S(NCryptCreatePersistedKey), S(NCryptFinalizeKey), S(NCryptExportKey), S(NCryptSignHash),

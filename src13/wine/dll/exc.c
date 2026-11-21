@@ -53,13 +53,18 @@ void wine_fault_entry(void);
 __attribute__((noreturn)) void wine_ctx_resume(const uint8_t* ctx);
 void wine_fault_dispatch(const uint64_t* fr, uint64_t cr2, uint8_t* ctx);
 
+static void log_unwound_stack(const uint8_t* ctx);
 static void exc_report(const char* what, const struct exc_record* rec, const uint8_t* ctx) {
   uint64_t rip = *(const uint64_t*)(ctx + CTX_RIP);
   struct wmod* m;
   wlogx(what, rec->code);
   wlogx("  rip ", rip);
   wlogx("  rsp ", *(const uint64_t*)(ctx + CTX_RSP));
-  if (rec->nparams >= 2) wlogx("  endereco ", rec->info[1]);
+  if (rec->nparams >= 2) {
+    wlogx("  endereco ", rec->info[1]);
+    wlogx("  acesso (0 ler, 1 escrever, 8 executar) ", rec->info[0]);
+    wvm_note(rec->info[1]);
+  }
   m = pe_from_addr(rip);
   if (m) {
     wlog("  modulo ", m->name);
@@ -122,6 +127,131 @@ static void exc_report(const char* what, const struct exc_record* rec, const uin
       }
     }
   }
+  log_unwound_stack(ctx);
+}
+
+/* Pilha de verdade pelas tabelas de unwind (.pdata/UNWIND_INFO) do modulo,
+ * so para o log. Comeca no primeiro endereco de retorno da pilha que vem
+ * logo depois de uma instrucao call (o WINE.DLL nao tem .pdata). */
+static const uint32_t* unw_entry(struct wmod* m, uint64_t pc) {
+  const uint32_t* t;
+  uint32_t rva, lo = 0, hi;
+  if (!m || !m->pdata_rva) return 0;
+  rva = (uint32_t)(pc - (uint64_t)(uintptr_t)m->base);
+  t = (const uint32_t*)(m->base + m->pdata_rva);
+  hi = m->pdata_size / 12;
+  while (lo < hi) {
+    uint32_t mid = (lo + hi) / 2;
+    if (rva < t[mid * 3]) hi = mid;
+    else if (rva >= t[mid * 3 + 1]) lo = mid + 1;
+    else return &t[mid * 3];
+  }
+  return 0;
+}
+static int after_call(struct wmod* m, uint64_t ra) {
+  const uint8_t* c = (const uint8_t*)(uintptr_t)ra;
+  if (ra - (uint64_t)(uintptr_t)m->base < 0x1000) return 0;
+  if (c[-5] == 0xE8) return 1;
+  if (c[-6] == 0xFF && c[-5] == 0x15) return 1;
+  if (c[-2] == 0xFF && (c[-1] & 0x38) == 0x10) return 1;
+  if (c[-3] == 0xFF && (c[-2] & 0x38) == 0x10) return 1;
+  return 0;
+}
+/* leitura da pilha so dentro da pilha da thread: com registros velhos o
+ * unwind calculava enderecos como 0x1 e o proprio relatorio caia (#PF dentro
+ * do WINE.DLL, a excecao original sumia do log) */
+static uint64_t unw_lo, unw_hi;
+static int unw_bad;
+static uint64_t unw_rd(uint64_t a) {
+  if (a < unw_lo || a + 8 > unw_hi || (a & 7)) {
+    unw_bad = 1;
+    return 0;
+  }
+  return *(const uint64_t*)(uintptr_t)a;
+}
+/* um passo: atualiza r[16] (rsp = r[4]) e devolve o endereco de retorno */
+static uint64_t unw_step(struct wmod* m, uint64_t pc, uint64_t* r) {
+  const uint32_t* e = unw_entry(m, pc);
+  int guard = 0;
+  if (!e) { /* folha: retorno no topo */
+    uint64_t ra = unw_rd(r[4]);
+    r[4] += 8;
+    return ra;
+  }
+  for (;;) {
+    const uint8_t* ui = m->base + e[2];
+    uint8_t flags = ui[0] >> 3, ncodes = ui[2], freg = ui[3] & 15, foff = ui[3] >> 4;
+    const uint16_t* code = (const uint16_t*)(ui + 4);
+    uint32_t off_in = (uint32_t)(pc - (uint64_t)(uintptr_t)m->base) - e[0];
+    int i = 0;
+    while (i < ncodes) {
+      uint8_t pro = code[i] & 0xFF, op = (code[i] >> 8) & 15, info = code[i] >> 12;
+      int applies = guard || off_in >= pro;
+      int used = 1;
+      switch (op) {
+      case 0: if (applies) { r[info] = unw_rd(r[4]); r[4] += 8; } break;
+      case 1:
+        if (info == 0) { if (applies) r[4] += (uint64_t)code[i + 1] * 8; used = 2; }
+        else { if (applies) r[4] += (uint64_t)code[i + 1] | ((uint64_t)code[i + 2] << 16); used = 3; }
+        break;
+      case 2: if (applies) r[4] += (uint64_t)info * 8 + 8; break;
+      case 3: if (applies) r[4] = r[freg] - (uint64_t)foff * 16; break;
+      case 4: if (applies) r[info] = unw_rd(r[4] + (uint64_t)code[i + 1] * 8); used = 2; break;
+      case 5: if (applies) r[info] = unw_rd(r[4] + ((uint64_t)code[i + 1] | ((uint64_t)code[i + 2] << 16))); used = 3; break;
+      case 8: used = 2; break;
+      case 9: used = 3; break;
+      case 10: if (applies) r[4] = unw_rd(r[4] + (info ? 32 : 24)); return 0;
+      default: return 0;
+      }
+      i += used;
+      if (unw_bad) return 0;
+    }
+    if (!(flags & 4)) break; /* UNW_FLAG_CHAININFO: continua na funcao pai */
+    e = (const uint32_t*)(code + ((ncodes + 1) & ~1));
+    guard = 1;
+  }
+  {
+    uint64_t ra = unw_rd(r[4]);
+    r[4] += 8;
+    return ra;
+  }
+}
+static void log_unwound_stack(const uint8_t* ctx) {
+  const uint64_t* sp = (const uint64_t*)(uintptr_t)*(const uint64_t*)(ctx + CTX_RSP);
+  uint64_t top = *(uint64_t*)(wteb() + TEB_STACKBASE);
+  int i, tries = 0;
+  /* varios comecos: valores velhos na pilha tambem parecem retornos */
+  for (i = 0; i < 512 && (uint64_t)(uintptr_t)(sp + i) < top && tries < 16; i++) {
+    struct wmod* mm = pe_from_addr(sp[i]);
+    uint64_t r[16], pc;
+    int n;
+    if (!mm || !mm->base || !mm->pdata_rva || !after_call(mm, sp[i])) continue;
+    tries++;
+    memcpy(r, ctx + CTX_RAX, sizeof(r));
+    pc = sp[i];
+    r[4] = (uint64_t)(uintptr_t)(sp + i + 1);
+    wlogx("  pilha pelo unwind, a partir da posicao ", (uint64_t)i);
+    unw_lo = (uint64_t)(uintptr_t)sp;
+    unw_hi = top;
+    unw_bad = 0;
+    for (n = 0; n < 20 && pc; n++) {
+      struct wmod* m2 = pe_from_addr(pc);
+      if (!m2 || !m2->base) break;
+      wlogx("    rva ", pc - (uint64_t)(uintptr_t)m2->base);
+      if (r[4] < (uint64_t)(uintptr_t)sp || r[4] + 8 > top) break;
+      pc = unw_step(m2, pc - 1, r);
+      if (unw_bad) break;
+    }
+  }
+  { /* posicoes da pilha que caem em claude.exe etc. (rva), com o indice */
+    for (i = 0; i < 400 && (uint64_t)(uintptr_t)(sp + i) < top; i++) {
+      struct wmod* mm = pe_from_addr(sp[i]);
+      if (mm && mm->base && after_call(mm, sp[i])) {
+        wlogx("  pilha crua, posicao ", (uint64_t)i);
+        wlogx("    rva ", sp[i] - (uint64_t)(uintptr_t)mm->base);
+      }
+    }
+  }
 }
 
 /* 1 = algum handler mandou continuar (o contexto pode ter mudado). */
@@ -133,10 +263,20 @@ static int exc_dispatch(struct exc_record* rec, uint8_t* ctx) {
   ep.ctx = ctx;
   for (i = 0; i < WVEH_MAX && !cont; i++)
     if (p->veh[i] && ((veh_fn)p->veh[i])(&ep) == -1) cont = 1;
+  if (cont && wine_debug >= 2) { /* tratada pelo VEH do programa: so o codigo e onde */
+    static int n;
+    if (n++ < 20) {
+      wlogx("excecao tratada pelo programa (VEH), codigo ", rec->code);
+      wlogx("  rip ", *(const uint64_t*)(ctx + CTX_RIP));
+    }
+  }
   if (!cont && p->unhandled_filter) {
     /* o filtro do programa (crashpad) costuma encerrar o processo sem dizer
      * o que houve: com WINEDEBUG=2 o registro sai antes */
-    if (wine_debug >= 2) exc_report("excecao para o filtro do programa, codigo ", rec, ctx);
+    if (wine_debug >= 2 || p->unh_reports < 3) { /* sem WINEDEBUG: as 3 primeiras */
+      p->unh_reports++;
+      exc_report("excecao para o filtro do programa, codigo ", rec, ctx);
+    }
     if (((veh_fn)p->unhandled_filter)(&ep) == -1) cont = 1;
   }
   /* O Windows chama os "continue handlers" nos dois casos. */

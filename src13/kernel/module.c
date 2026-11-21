@@ -630,6 +630,40 @@ static void exec_release(uint32_t pid, int id) {
   if (id < 0) wine_exec_done();   /* EXE do Windows: pode soltar o WINE.DLL */
 }
 
+/* Programas de inicio (AUTOEXEC, servicos e o que o WIN abre sozinho) tem
+ * pid menor que a marca; KILLALL encerra so os de depois. O WIN marca uns
+ * segundos depois de abrir (mod_mark_boot). */
+static uint32_t boot_mark;
+void mod_mark_boot(void) {
+  if (boot_mark) return;
+  boot_mark = next_pid;
+  serial_puts("[mod] programas de inicio: pid < ");
+  serial_hex32(boot_mark);
+  serial_puts("\n");
+}
+uint32_t mod_boot_mark(void) { return boot_mark; }
+
+/* Primeiro programa da cadeia (quem chamou quem, ate o de fora). */
+uint32_t mod_root_pid(uint32_t pid) {
+  int i, guard = 0;
+  while ((i = live_find(pid)) >= 0 && live[i].prev && live_find(live[i].prev) >= 0 && guard++ < LIVE_MAX)
+    pid = live[i].prev;
+  return pid;
+}
+
+/* 1 se want esta na cadeia de pid (ele mesmo ou quem o chamou). */
+int mod_chain_has(uint32_t pid, uint32_t want) {
+  int i, guard = 0;
+  if (!want) return 0;
+  while (pid && guard++ <= LIVE_MAX) {
+    if (pid == want) return 1;
+    i = live_find(pid);
+    if (i < 0) return 0;
+    pid = live[i].prev;
+  }
+  return 0;
+}
+
 int mod_kill(uint32_t pid) {
   int n = 0;
   int i;
@@ -783,7 +817,19 @@ int mod_exec(const char* path, int argc, char** argv) {
     serial_puts("\n");
       /* PC sem serial: o log ate aqui vai para D:\LOG\SERIAL.LOG antes de o
        * programa rodar (se ele derrubar a maquina, o log mostra quem foi). */
-      (void)serial_log_save();
+      {
+        /* no maximo a cada 30 s: o Claude abre ~9 processos WINE e cada
+         * gravacao (1,4 MB com o final do log) segurava o disco e o BKL */
+        uint32_t net_ms(void);
+        static uint32_t last_save;
+        static int saved_once;
+        uint32_t now = net_ms();
+        if (!saved_once || now - last_save >= 30000u) {
+          saved_once = 1;
+          last_save = now;
+          (void)serial_log_save();
+        }
+      }
       {
         /* Codigo do programa roda sem o BKL: threads dele (e de outros)
          * entram no kernel enquanto isso. Volta com a mesma profundidade,

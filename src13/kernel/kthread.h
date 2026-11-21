@@ -38,6 +38,7 @@ void kt_ipi_tlb(void);
 int kt_in_thread(void);
 /* 1 se o mundo esta rodando na CPU corrente. */
 int kt_world_here(void);
+void kt_world_idle(uint32_t ms); /* laco do WIN ocioso: empresta a CPU0 por ate ms */
 /* Indice da CPU corrente (0 antes do SMP). */
 int kt_cpu_index(void);
 /* pid do programa dono da thread corrente. */

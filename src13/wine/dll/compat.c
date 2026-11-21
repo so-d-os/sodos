@@ -92,10 +92,17 @@ void* builtin_ordinal(const char* dll, unsigned ord) {
                                      "listen", "ntohl", "ntohs", "recv", "recvfrom", "select", "send", "sendto",
                                      "setsockopt", "shutdown", "socket"};
     const char* nm = 0;
-    if (ord < sizeof(ws) / sizeof(ws[0])) nm = ws[ord];
+    /* a wsock32 (Winsock 1.1) numera diferente da ws2_32 em 10..12:
+     * inet_addr, inet_ntoa, ioctlsocket. Com a ordem da ws2_32 o ioctlsocket
+     * do Bun (FIONBIO) caia no inet_ntoa: o soquete ficava bloqueante e o
+     * Claude Code parava no primeiro recv sem dados. */
+    if (strncmp(n, "wsock32", 7) == 0 && ord >= 10 && ord <= 12)
+      nm = ord == 10 ? "inet_addr" : ord == 11 ? "inet_ntoa" : "ioctlsocket";
+    else if (ord < sizeof(ws) / sizeof(ws[0])) nm = ws[ord];
     else if (ord == 51) nm = "gethostbyaddr";
     else if (ord == 52) nm = "gethostbyname";
     else if (ord == 55) nm = "getservbyname";
+    else if (ord == 56) nm = "getservbyport";
     else if (ord == 57) nm = "gethostname";
     else if (ord == 111) nm = "WSAGetLastError";
     else if (ord == 112) nm = "WSASetLastError";

@@ -423,3 +423,62 @@ void* wine_make_stub(const char* dll, const char* name) {
   p[21] = 0xE0;
   return p;
 }
+
+/* ---------- heap do programa (malloc da CRT e HeapAlloc) ----------
+ * O k_malloc vem da arena abaixo de 4 GB, dividida por todos os processos.
+ * Com o Claude (6+ processos do Chromium, malloc = HeapAlloc no Electron) ela
+ * acabava, e o bitmap de ~600 KB do canvas do hCaptcha virava "sem memoria"
+ * (0xe0000008) no renderer: o captcha ficava sem imagem. Blocos grandes (e
+ * qualquer bloco quando a arena baixa falha) vao para a RAM acima de 4 GB,
+ * com um cabecalho de 16 bytes (tamanho + marca). Ponteiro >= 4 GB = alto. */
+#define WH_BIG (64u * 1024u)
+#define WH_MAGIC 0x48474948574e4957ull /* "WINWHIGH" */
+#define WH_HIGH(p) ((uintptr_t)(p) >= 0x100000000ull)
+static void* wh_high_alloc(size_t n) {
+  uint64_t* h = (uint64_t*)k_hmalloc((unsigned long long)n + 16, 16);
+  if (!h) return 0;
+  h[0] = n;
+  h[1] = WH_MAGIC;
+  return h + 2;
+}
+static int wh_is_high(void* p) { return p && WH_HIGH(p) && ((uint64_t*)p)[-1] == WH_MAGIC; }
+void* wheap_alloc(size_t n) {
+  void* p = 0;
+  if (!n) n = 1;
+  if (n < WH_BIG && n < 0xFFFFFFF0u) p = k_malloc((unsigned)n);
+  if (!p) p = wh_high_alloc(n);
+  if (!p && n < 0xFFFFFFF0u) p = k_malloc((unsigned)n); /* sem HIMEM: tenta a arena baixa */
+  if (!p && wine_debug) wlogx("heap: sem memoria para ", n);
+  return p;
+}
+size_t wheap_size(void* p) {
+  if (!p) return 0;
+  if (wh_is_high(p)) return (size_t)((uint64_t*)p)[-2];
+  return k_msize(p);
+}
+void wheap_free(void* p) {
+  if (!p) return;
+  if (wh_is_high(p)) {
+    ((uint64_t*)p)[-1] = 0;
+    k_hfree((uint64_t*)p - 2);
+    return;
+  }
+  k_free(p);
+}
+void* wheap_realloc(void* p, size_t n) {
+  size_t old;
+  void* q;
+  if (!p) return wheap_alloc(n);
+  if (!n) n = 1;
+  if (!wh_is_high(p) && n < WH_BIG) {
+    q = k_realloc(p, (unsigned)n);
+    if (q) return q;
+  }
+  old = wheap_size(p);
+  if (wh_is_high(p) && n <= old && n >= old / 2) return p; /* encolher pouco: fica */
+  q = wheap_alloc(n);
+  if (!q) return 0;
+  memcpy(q, p, old < n ? old : n);
+  wheap_free(p);
+  return q;
+}

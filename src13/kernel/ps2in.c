@@ -211,6 +211,16 @@ void ps2in_pump(void) {
   /* Teclado USB primeiro, fora do cli: ele pode esperar comandos do xHCI. */
   xhci_kbd_pump();
   if (ps2_raw_depth) return;
+  /* Com IRQ1/IRQ12 ligadas a interrupcao ja enche as filas: ler a porta 0x64
+   * aqui e so rede de seguranca (IRQ perdida), no maximo a cada 20 ms. Antes
+   * cada "tem tecla?" do laco do WIN lia o 8042; numa VM cada inb e uma saida
+   * para o QEMU, e a CPU0 passava ~70% do tempo nisso segurando o BKL. */
+  if (ps2_irq_on) {
+    static uint32_t last;
+    uint32_t t = (uint32_t)irq_ticks();
+    if (t - last < 20) return;
+    last = t;
+  }
   f = irq_save();
   lk_take();
   drain_locked();

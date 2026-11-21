@@ -61,6 +61,61 @@ struct wwin* win_of(HANDLE h) {
   return 0;
 }
 
+/* ---------- janelas de outros processos ----------
+ * O processo GPU do Chromium desenha na janela do browser: recebe o HWND pela
+ * IPC e faz GetDC + BitBlt (SoftwareOutputDeviceWin). O WINE.DLL e um so para
+ * todos os processos e a memoria e um espaco so, entao o ponteiro vale em
+ * qualquer um; este registro diz quais HWNDs existem e de que processo (gui)
+ * sao. Antes o GetDC de um HWND alheio dava o DC da tela e a janela do Claude
+ * ficava branca. Mexe-se nele com wlock(). */
+#define XWIN_MAX 512
+static struct {
+  struct wwin* w;
+  struct wgui* g;
+} xwins[XWIN_MAX];
+static int nxwins;
+static void xwin_add_locked(struct wwin* w, struct wgui* g) {
+  int i;
+  for (i = 0; i < nxwins; i++)
+    if (!xwins[i].w) break;
+  if (i == nxwins) {
+    if (nxwins >= XWIN_MAX) return;
+    nxwins++;
+  }
+  xwins[i].w = w;
+  xwins[i].g = g;
+}
+/* processo saindo: as janelas dele (memoria do processo) deixam de valer */
+void wgui_proc_exit(void) {
+  struct wgui* g = (struct wgui*)wp()->user;
+  int i;
+  if (!g) return;
+  wlock();
+  for (i = 0; i < nxwins; i++)
+    if (xwins[i].g == g) xwins[i].w = 0;
+  wunlock();
+}
+/* HWND de qualquer processo; *gp = gui do dono */
+struct wwin* win_any(HANDLE h, struct wgui** gp) {
+  struct wwin* w = win_of(h);
+  int i;
+  if (w) {
+    if (gp) *gp = (struct wgui*)wp()->user;
+    return w;
+  }
+  if (!h || (uintptr_t)h < 0x10000) return 0;
+  wlock();
+  for (i = 0; i < nxwins; i++)
+    if (xwins[i].w == (struct wwin*)h) {
+      w = xwins[i].w;
+      if (w->magic != WIN_MAGIC || w->destroyed) w = 0;
+      if (w && gp) *gp = xwins[i].g;
+      break;
+    }
+  wunlock();
+  return w;
+}
+
 struct wwin* win_top(struct wwin* w) {
   while (w && w->parent) w = w->parent;
   return w;
@@ -303,7 +358,7 @@ intptr_t wsend(struct wwin* w, DWORD m, uintptr_t wp_, intptr_t lp) {
   s.next = g->sent;
   g->sent = &s;
   wunlock();
-  wsignal();
+  wsignal_global();
   while (!s.done && !p->exit_req && !w->destroyed) k_futex_wait(&s.done, 0, 20);
   if (!s.done) { /* a janela morreu: tira da fila */
     struct sentmsg** pp;
@@ -382,6 +437,9 @@ void wgui_world_service(void) {
     }
     g->req_rc = rc;
     if (rc != 0) wlogx("k_gui_open falhou (o EXE foi aberto pelo WIN?): ", (uint64_t)(int64_t)rc);
+    /* Ctrl+V chega como tecla (22) e o programa cola pelo clipboard do
+     * Windows, que le o do SODOS (uimisc.c); sem isso o WIN digitava o texto */
+    if (rc == 0) k_gui_clip(1);
   } else if (g->req == 2) {
     k_gui_close();
     g->req_rc = 0;
@@ -540,7 +598,7 @@ void win_invalidate(struct wwin* w) {
   if (!g) return;
   if (t) t->dirty = 1;
   else g->present_pending = 1;
-  wsignal();
+  wsignal_global();
 }
 
 /* ---------- pintura ---------- */
@@ -632,6 +690,7 @@ struct wwin* win_create(DWORD ex, const wchar16* cls, const wchar16* title, DWOR
     *pp = w;
     w->next = g->wins;
     g->wins = w;
+    xwin_add_locked(w, g);
     wunlock();
   } else {
     /* de topo: janelas normais de aplicativo tem moldura do Windows no tamanho */
@@ -651,6 +710,7 @@ struct wwin* win_create(DWORD ex, const wchar16* cls, const wchar16* title, DWOR
     wlock();
     w->next = g->wins;
     g->wins = w;
+    xwin_add_locked(w, g);
     wunlock();
   }
   memset(&cs, 0, sizeof(cs));
@@ -694,6 +754,11 @@ void win_destroy(struct wwin* w) {
   w->destroyed = 1;
   w->visible = 0;
   wlock();
+  {
+    int i;
+    for (i = 0; i < nxwins; i++)
+      if (xwins[i].w == w) xwins[i].w = 0;
+  }
   for (tp = &g->timers; *tp;) {
     if ((*tp)->win == w) {
       struct wtimer* t = *tp;
@@ -831,7 +896,7 @@ static WINAPI BOOL InvalidateRect(HANDLE h, const struct rect* r, BOOL erase) {
     struct wwin* i;
     for (i = g ? g->wins : 0; i; i = i->next)
       if (!i->parent) i->dirty = 1;
-    wsignal();
+    wsignal_global();
     return 1;
   }
   if (!w) return 0;
@@ -849,7 +914,7 @@ static WINAPI BOOL RedrawWindow(HANDLE h, const struct rect* r, HANDLE rgn, DWOR
   if (fl & 0x100) UpdateWindow(h); /* RDW_UPDATENOW */
   return 1;
 }
-static WINAPI BOOL IsWindow(HANDLE h) { return win_of(h) != 0; }
+static WINAPI BOOL IsWindow(HANDLE h) { return win_any(h, 0) != 0; }
 static WINAPI BOOL IsWindowVisible(HANDLE h) {
   struct wwin* w = win_of(h);
   for (; w; w = w->parent)
@@ -875,7 +940,7 @@ BOOL WINAPI wEnableWindow(HANDLE h, BOOL en) {
   return was;
 }
 static WINAPI BOOL GetClientRect(HANDLE h, struct rect* r) {
-  struct wwin* w = win_of(h);
+  struct wwin* w = win_any(h, 0); /* o processo GPU pergunta o da janela do browser */
   if (!w) return 0;
   r->left = r->top = 0;
   r->right = w->w;
@@ -1202,7 +1267,7 @@ static int q_push(struct wgui* g, struct wwin* w, DWORD m, uintptr_t wp_, intptr
   e->thread = w ? w->thread : thread;
   g->qn++;
   wunlock();
-  wsignal();
+  wsignal_global();
   return 1;
 }
 
@@ -1251,6 +1316,15 @@ static struct wwin* top_active(struct wgui* g) {
   return n ? v[n - 1] : 0;
 }
 
+/* Estado das teclas (GetKeyState): o Windows atualiza quando a mensagem de
+ * teclado sai da fila; o Chromium pergunta o Ctrl ao tratar o WM_KEYDOWN do
+ * V (Ctrl+V colar). Um por WINE.DLL: o teclado e um so. */
+static volatile uint8_t key_down[256];
+static void keystate_track(const struct msg* m) {
+  if (m->message == WM_KEYDOWN && m->wparam < 256) key_down[m->wparam] = 1;
+  else if (m->message == WM_KEYUP && m->wparam < 256) key_down[m->wparam] = 0;
+}
+
 static int vk_of(int key, int* ch) {
   *ch = 0;
   switch (key) {
@@ -1270,9 +1344,30 @@ static int vk_of(int key, int* ch) {
     case 9: *ch = 9; return 0x09;
   }
   if (key >= 32 && key < 256) {
+    /* Codigo virtual da tecla que produz o caractere (teclado US). Antes o
+     * ASCII ia como VK: '.' (0x2E) e VK_DELETE, '!' e VK_PRIOR, '-' e
+     * VK_INSERT... o Chromium tratava como tecla de edicao e o ponto nao
+     * entrava no campo de e-mail do login. Acentuados: so o WM_CHAR. */
+    static const char shifted_digits[] = ")!@#$%^&*(";
+    const char* d;
     *ch = key;
     if (key >= 'a' && key <= 'z') return key - 32;
-    return key;
+    if ((key >= 'A' && key <= 'Z') || (key >= '0' && key <= '9') || key == ' ') return key;
+    if (key < 128 && (d = strchr(shifted_digits, key)) != 0) return '0' + (int)(d - shifted_digits);
+    switch (key) {
+      case ';': case ':': return 0xBA;  /* VK_OEM_1 */
+      case '=': case '+': return 0xBB;  /* VK_OEM_PLUS */
+      case ',': case '<': return 0xBC;  /* VK_OEM_COMMA */
+      case '-': case '_': return 0xBD;  /* VK_OEM_MINUS */
+      case '.': case '>': return 0xBE;  /* VK_OEM_PERIOD */
+      case '/': case '?': return 0xBF;  /* VK_OEM_2 */
+      case '`': case '~': return 0xC0;  /* VK_OEM_3 */
+      case '[': case '{': return 0xDB;  /* VK_OEM_4 */
+      case '\\': case '|': return 0xDC; /* VK_OEM_5 */
+      case ']': case '}': return 0xDD;  /* VK_OEM_6 */
+      case '\'': case '"': return 0xDE; /* VK_OEM_7 */
+    }
+    return 0; /* acentuados e outros: so o caractere */
   }
   return 0;
 }
@@ -1356,6 +1451,17 @@ static void pump_events(struct wgui* g) {
         int ch, vk = vk_of(ev[3], &ch);
         if (!a || !a->enabled) break;
         f = a->focus && !a->focus->destroyed ? a->focus : a;
+        /* Ctrl+letra (o WIN manda 1..26; com k_gui_clip(1) o Ctrl+V tambem):
+         * Ctrl, letra, solta letra, solta Ctrl. 8/9/10/13 sao Backspace/Tab/
+         * Enter (vk_of). */
+        if (ev[3] >= 1 && ev[3] <= 26 && ev[3] != 8 && ev[3] != 9 && ev[3] != 10 && ev[3] != 13) {
+          int L = 'A' + ev[3] - 1;
+          q_push(g, f, WM_KEYDOWN, 0x11, 1, 0);
+          q_push(g, f, WM_KEYDOWN, (uintptr_t)L, 1, 0);
+          q_push(g, f, WM_KEYUP, (uintptr_t)L, (intptr_t)0xC0000001, 0);
+          q_push(g, f, WM_KEYUP, 0x11, (intptr_t)0xC0000001, 0);
+          break;
+        }
         if (vk) q_push(g, f, WM_KEYDOWN, (uintptr_t)vk, 1, 0);
         if (ch) q_push(g, f, WM_CHAR, (uintptr_t)ch, 1, 0);
         if (vk) q_push(g, f, WM_KEYUP, (uintptr_t)vk, (intptr_t)0xC0000001, 0);
@@ -1399,6 +1505,7 @@ static int next_message(struct wgui* g, struct msg* m, HANDLE filter, int remove
     *m = e->m;
     if (remove) {
       int j;
+      keystate_track(m);
       for (j = i; j > 0; j--) g->q[(g->qhead + j) % MSGQ] = g->q[(g->qhead + j - 1) % MSGQ];
       g->qhead = (g->qhead + 1) % MSGQ;
       g->qn--;
@@ -1504,7 +1611,7 @@ static WINAPI void PostQuitMessage(int code) {
   g->quit_code = code;
   g->quit_thread = me();
   g->quit_posted = 1;
-  wsignal();
+  wsignal_global();
 }
 static WINAPI intptr_t SendMessageW(HANDLE h, DWORD m, uintptr_t wp_, intptr_t lp) {
   struct wwin* w = win_of(h);
@@ -1664,7 +1771,7 @@ static WINAPI uintptr_t SetTimer(HANDLE h, uintptr_t id, DWORD ms, void* proc) {
   t->due = wnow_ms() + t->period;
   t->proc = proc;
   wunlock();
-  wsignal();
+  wsignal_global();
   return t->id;
 }
 static WINAPI BOOL KillTimer(HANDLE h, uintptr_t id) {
@@ -1819,13 +1926,11 @@ static WINAPI BOOL GetCursorPos(struct point* p) {
 }
 static WINAPI int ShowCursor(BOOL s) { return s ? 1 : 0; }
 static WINAPI short GetKeyState(int vk) {
-  (void)vk;
-  return 0;
+  if (vk == 0x10 || vk == 0xA0 || vk == 0xA1) vk = key_down[0x10] ? 0x10 : vk; /* Shift */
+  if (vk == 0xA2 || vk == 0xA3) vk = 0x11;                                   /* Ctrl esq/dir */
+  return vk >= 0 && vk < 256 && key_down[vk] ? (short)0x8000 : 0;
 }
-static WINAPI short GetAsyncKeyState(int vk) {
-  (void)vk;
-  return 0;
-}
+static WINAPI short GetAsyncKeyState(int vk) { return GetKeyState(vk); }
 static WINAPI HANDLE MonitorFromWindow(HANDLE h, DWORD f) {
   (void)h;
   (void)f;

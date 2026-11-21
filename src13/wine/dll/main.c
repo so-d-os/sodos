@@ -193,12 +193,29 @@ static int start(int argc, char** argv) {
   }
   p->cmdline = build_cmdline(argc, argv);
   p->wcmdline = wdup8to16(p->cmdline ? p->cmdline : "");
-  k_pwd(p->cwd, (int)sizeof(p->cwd));
+  if (!p->cwd[0]) k_pwd(p->cwd, (int)sizeof(p->cwd)); /* o filho ja traz o do CreateProcess */
   build_params(p);
   crt_set_process(p);
   wexplorer_stub();
   wlog("start ", p->cmdline);
+  /* na janela do programa: o comando que o abriu, com os argumentos (as
+   * janelas dos filhos do Claude ficavam vazias ou so com o erro, sem dizer
+   * o que tinha sido pedido). Linhas enormes do Chromium sao cortadas. */
+  if (p->cmdline) {
+    size_t n = strlen(p->cmdline);
+    wcon_write("> ", 2);
+    wcon_write(p->cmdline, n > 700 ? 700 : n);
+    if (n > 700) wcon_write(" ...", 4);
+    wcon_write("\r\n", 2);
+  }
 
+  if (!is_child) { /* perfil salvo de outro boot (profsave.c, SET WINEAPPSAVE) */
+    void wprof_restore(void);
+    wprof_restore();
+  }
+  /* depois do restore: resolver o APPDATA cria Z:\WINEAPP e o restore achava
+   * que o perfil ja existia neste boot */
+  wenv_publish();
   exe = pe_load(argv[0], 1);
   if (!exe) return 1;
   if (!exe->entry) {
@@ -215,9 +232,13 @@ static int start(int argc, char** argv) {
     wgui_world_service();   /* abrir/fechar a janela so esta tarefa pode */
     wcon_flush();           /* console das threads */
     wspawn_world_service(); /* processo filho: k_exec so daqui */
+    wurl_world_service();   /* ShellExecute de URL: o navegador (proc.c) */
+    if (!is_child) wprof_save(0); /* login etc. para o proximo boot, a cada minuto */
     k_futex_wait(&p->exit_req, 0, 20);
   }
+  if (!is_child) wprof_save(1);
   wcon_flush();
+  wgui_proc_exit();
   wlogx("ExitProcess ", (uint32_t)p->exit_code);
   wfile_proc_exit();
   return p->exit_code;
@@ -226,8 +247,16 @@ static int start(int argc, char** argv) {
 __attribute__((noreturn)) void wexit(int code) {
   struct wproc* p = wp();
   int first = !__sync_lock_test_and_set(&p->exiting, 1);
+  if (first && (uint32_t)code >= 0xC0000000u) {
+    /* saida com codigo de erro (0xC0000409 do Claude Code sem mensagem):
+     * quem chamou e a pilha */
+    uint64_t here;
+    wwait_note("saida com erro", __builtin_return_address(0), (uint32_t)code);
+    wstack_note("saida com erro", &here);
+  }
   if (first) {
     wspawn_exit(code);
+    wgui_proc_exit(); /* user.c: HWNDs deste processo saem do registro */
     {
       void wmap_proc_exit(void); /* map.c */
       void wpipe_proc_exit(void); /* pipe.c */

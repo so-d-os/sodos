@@ -496,19 +496,19 @@ static WINAPI DWORD im_ref(void* self) {
 }
 static WINAPI void* im_alloc(void* self, size_t n) {
   (void)self;
-  return k_malloc((unsigned)(n ? n : 1));
+  return wheap_alloc(n);
 }
 static WINAPI void* im_realloc(void* self, void* p, size_t n) {
   (void)self;
-  return k_realloc(p, (unsigned)(n ? n : 1));
+  return wheap_realloc(p, n);
 }
 static WINAPI void im_free(void* self, void* p) {
   (void)self;
-  if (p) k_free(p);
+  wheap_free(p);
 }
 static WINAPI size_t im_size(void* self, void* p) {
   (void)self;
-  return p ? k_msize(p) : 0;
+  return wheap_size(p);
 }
 static WINAPI int im_did(void* self, void* p) {
   (void)self;

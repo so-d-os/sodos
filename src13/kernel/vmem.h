@@ -10,6 +10,7 @@ struct vmem_info {
 uint64_t vmem_reserve(uint64_t size, uint64_t align, uint32_t pid);
 uint64_t vmem_reserve_at(uint64_t va, uint64_t size, uint32_t pid);
 int vmem_owns(uint64_t va);
+uint32_t vmem_owner(uint64_t va);
 int vmem_commit(uint64_t va, uint64_t size, int prot);
 int vmem_decommit(uint64_t va, uint64_t size);
 int vmem_alias(uint64_t va, uint64_t phys, uint64_t size, int prot);

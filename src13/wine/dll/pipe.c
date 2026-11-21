@@ -45,6 +45,7 @@ int wiocp_post(struct wobj* port, DWORD bytes, uintptr_t key, void* ov);
 #define ERROR_MORE_DATA 234
 #define ERROR_IO_PENDING 997
 #define ERROR_SEM_TIMEOUT 121
+#define FILE_FLAG_FIRST_PIPE_INSTANCE 0x00080000u
 
 struct overlapped {
   uintptr_t internal, internal_high;
@@ -72,6 +73,9 @@ struct pinst {
   int connected;           /* ha cliente ligado */
   int open[2];             /* handles abertos em cada lado (0 servidor, 1 cliente) */
   int ever_client;         /* ja houve cliente (para ERROR_PIPE_CONNECTED) */
+  DWORD cflags;            /* flags do CreateFile do cliente (FILE_FLAG_OVERLAPPED) */
+  int closing;             /* o cliente fechou: a instancia so aceita outro
+                            * depois do DisconnectNamedPipe (como no Windows) */
   DWORD pid[2];
   struct chunk *q[2], *qt[2]; /* q[x] = o que o lado x vai ler */
   int msg_read[2];
@@ -109,18 +113,25 @@ static void deliver(struct done_list* d) {
   int i;
   for (i = 0; i < d->n; i++) {
     struct done_ev* e = &d->e[i];
-    if (e->o && e->o->p1) wiocp_post((struct wobj*)e->o->p1, e->bytes, (uintptr_t)e->o->u1, e->ov);
-    if (wine_debug >= 2 && e->o) { /* para onde foi a conclusao */
+    /* hEvent com o bit 0 ligado: "nao poste na porta de conclusao" (Windows).
+     * O libuv le o pipe assim e cancela quando nao ha dado; a conclusao
+     * cancelada caia na IOCP dele, que tomava por "ha dados" e lia de novo,
+     * sem parar: a thread principal do Claude Desktop girava para sempre
+     * lendo o stdout do Claude Code. */
+    uintptr_t evh = (uintptr_t)e->ov->event;
+    int nopost = (evh & 1) != 0;
+    if (e->o && e->o->p1 && !nopost) wiocp_post((struct wobj*)e->o->p1, e->bytes, (uintptr_t)e->o->u1, e->ov);
+    if (wine_debug >= 2 && e->o && !nopost) { /* para onde foi a conclusao */
       wlogx(e->o->p1 ? "pipe: conclusao na porta " : "pipe: conclusao SEM porta, objeto ", e->o->p1 ? (uint64_t)(uintptr_t)e->o->p1 : (uint64_t)(uintptr_t)e->o);
     }
-    if (e->ov->event) {
+    if (evh & ~(uintptr_t)1) {
       typedef BOOL(WINAPI * se_fn)(HANDLE);
       static se_fn se;
       if (!se) se = (se_fn)builtin_lookup("SetEvent");
-      if (se) se(e->ov->event);
+      if (se) se((HANDLE)(evh & ~(uintptr_t)1));
     }
   }
-  if (d->n) wsignal();
+  if (d->n) wsignal_global(); /* portas e eventos ja foram sinalizados acima; aqui so as esperas sincronas */
 }
 
 static int name_eq(const wchar16* a, const wchar16* b) {
@@ -132,13 +143,14 @@ static int name_eq(const wchar16* a, const wchar16* b) {
     if (!x) return 1;
   }
 }
-/* "\\.\pipe\x" (ou so "x") -> "x" */
+/* "\\.\pipe\x", "\\?\pipe\x" (o libuv do Node usa este) ou so "x" -> "x" */
 static const wchar16* pipe_tail(const wchar16* n) {
   static const char pre[] = "\\\\.\\pipe\\";
   int i;
   for (i = 0; pre[i]; i++) {
     wchar16 c = n[i];
     if (c >= 'A' && c <= 'Z') c += 32;
+    if (i == 2 && c == '?') continue;
     if (c != (wchar16)pre[i]) return n;
   }
   return n + i;
@@ -268,16 +280,28 @@ static WINAPI HANDLE CreateNamedPipeW(const wchar16* name, DWORD omode, DWORD pm
   pi->pid[0] = wp()->pid;
   pi->used = 1;
   wlock();
-  for (i = 0; i < PIPE_MAX; i++)
-    if (!pipes[i]) {
-      slot = i;
-      pipes[i] = pi;
-      break;
-    }
+  /* FILE_FLAG_FIRST_PIPE_INSTANCE: recusa se o nome ja existe. O libuv
+   * (stdio dos filhos do Node) cria "uv\<n>-<pid>" assim e troca o <n> ate
+   * passar; sem a recusa todos os pipes tinham o mesmo nome e o cliente
+   * caia numa instancia velha: ConnectNamedPipe esperava para sempre e o
+   * Claude travava ao abrir a aba Code. */
+  if (omode & FILE_FLAG_FIRST_PIPE_INSTANCE)
+    for (i = 0; i < PIPE_MAX; i++)
+      if (pipes[i] && pipes[i]->used && name_eq(pipes[i]->name, pi->name)) {
+        slot = -2;
+        break;
+      }
+  if (slot == -1)
+    for (i = 0; i < PIPE_MAX; i++)
+      if (!pipes[i]) {
+        slot = i;
+        pipes[i] = pi;
+        break;
+      }
   wunlock();
   if (slot < 0) {
     k_free_shared(pi);
-    wset_lasterr(ERROR_PIPE_BUSY);
+    wset_lasterr(slot == -2 ? ERROR_ACCESS_DENIED : ERROR_PIPE_BUSY);
     return INVALID_HANDLE_VALUE;
   }
   h = end_handle(pi, 0);
@@ -322,14 +346,13 @@ HANDLE wpipe_open(const wchar16* name, DWORD flags) {
   struct pinst* pi = 0;
   int i, any = 0;
   HANDLE h;
-  (void)flags;
   d.n = 0;
   wlock();
   for (i = 0; i < PIPE_MAX; i++) {
     struct pinst* c = pipes[i];
     if (!c || !c->used || !name_eq(c->name, t)) continue;
     any = 1;
-    if (!c->connected && c->open[0] && !c->open[1]) {
+    if (!c->connected && !c->closing && c->open[0] && !c->open[1]) {
       pi = c;
       break;
     }
@@ -339,6 +362,7 @@ HANDLE wpipe_open(const wchar16* name, DWORD flags) {
     pi->ever_client = 1;
     pi->open[1] = 1;
     pi->pid[1] = wp()->pid;
+    pi->cflags = flags;
     pi->msg_read[1] = 0;
     if (pi->conn.used) {
       pi->conn.used = 0;
@@ -366,6 +390,17 @@ static struct pinst* pipe_of(HANDLE h, int* end) {
   return (struct pinst*)o->p2;
 }
 
+/* NtQueryInformationFile num pipe (nt.c): -1 = nao e pipe; senao o Mode
+ * (0 = sobreposto, 0x20 = FILE_SYNCHRONOUS_IO_NONALERT). O libuv (Node)
+ * pergunta isso no stdio herdado; sem resposta dava "open EINVAL". */
+int wpipe_mode(HANDLE h) {
+  int end;
+  struct pinst* pi = pipe_of(h, &end);
+  DWORD fl;
+  if (!pi) return -1;
+  fl = end == 0 ? pi->omode : pi->cflags;
+  return (fl & 0x40000000u) ? 0 : 0x20;
+}
 /* GetFileInformationByHandleEx num pipe (file.c): -1 = nao e pipe. O
  * crashpad-handler pede FileNameInfo no pipe herdado para saber o nome; o
  * Windows responde "\\nome", relativo a \\.\pipe. */
@@ -414,6 +449,12 @@ static WINAPI BOOL ConnectNamedPipe(HANDLE h, struct overlapped* ov) {
     wset_lasterr(ERROR_PIPE_CONNECTED);
     return 0;
   }
+  if (pi->closing) { /* o cliente ja fechou: falta o DisconnectNamedPipe */
+    wunlock();
+    plog("conectar: cliente fechou", pi, 0);
+    wset_lasterr(ERROR_NO_DATA);
+    return 0;
+  }
   plog(ov ? "conectar: pendente" : "conectar: esperando", pi, 0);
   if (ov && wp()->exiting) {
     wunlock();
@@ -456,6 +497,7 @@ static WINAPI BOOL DisconnectNamedPipe(HANDLE h) {
   d.n = 0;
   wlock();
   pi->connected = 0;
+  pi->closing = 0;
   pi->open[1] = 0; /* o handle do cliente fica quebrado */
   free_queue(pi, 0);
   free_queue(pi, 1);
@@ -477,7 +519,7 @@ static WINAPI BOOL WaitNamedPipeW(const wchar16* name, DWORD ms) {
       struct pinst* c = pipes[i];
       if (!c || !c->used || !name_eq(c->name, t)) continue;
       any = 1;
-      if (!c->connected && c->open[0]) free_ = 1;
+      if (!c->connected && !c->closing && c->open[0]) free_ = 1;
     }
     wunlock();
     if (free_) return 1;
@@ -707,7 +749,10 @@ void wpipe_close(struct wobj* o) {
   wlock();
   if (pi->obj[x] == o) pi->obj[x] = 0;
   pi->open[x] = 0;
-  if (x == 1) pi->connected = 0;
+  if (x == 1) {
+    if (pi->connected) pi->closing = 1;
+    pi->connected = 0;
+  }
   if (pi->rd[x].used) { /* o proprio lado fechou */
     pi->rd[x].used = 0;
     if (pi->rd[x].sync) defer(&d, 0, pi->rd[x].ov, ST_BROKEN, 0); /* quem espera acorda */
@@ -750,6 +795,7 @@ static WINAPI BOOL PeekNamedPipe(HANDLE h, void* buf, DWORD size, DWORD* rd, DWO
     wset_lasterr(ERROR_INVALID_HANDLE);
     return 0;
   }
+  plog("peek", pi, size);
   wlock();
   n = queued(pi, x);
   if (buf && size && pi->q[x]) {
