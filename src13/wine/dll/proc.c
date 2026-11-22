@@ -49,8 +49,12 @@ static HANDLE spawn(const char* cmdline, DWORD* err, const struct inh_spec* spec
   o->refs = 1; /* a tarefa principal tambem usa o objeto */
   o->u2 = wnew_pid(); /* pid do filho, como o Windows devolve no CreateProcess */
   h = wh_new(o);
-  /* um pedido por vez */
-  while (__sync_lock_test_and_set(&p->spawn_req, 1)) {
+  /* um pedido por vez. CAS 0 -> 1: o test_and_set gravava 1 por cima de um
+   * pedido ainda na fila (2) quando duas threads pediam ao mesmo tempo (o
+   * Claude Code abre git, bash e claude.exe em paralelo); a tarefa principal
+   * so atende o 2, o pedido sumia e todos esperavam os 60 s abaixo e saiam
+   * com ERROR_NOT_SUPPORTED (ENOTSUP no uv_spawn; conversa sem carregar). */
+  while (!__sync_bool_compare_and_swap(&p->spawn_req, 0, 1)) {
     if (wnow_ms() - t0 > 60000 || p->exit_req) {
       *err = ERROR_NOT_SUPPORTED;
       if (env) k_free_shared(env);

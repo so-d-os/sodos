@@ -24,11 +24,21 @@
 #define FSDRV_ABI_WRITE 3 /* ops->abi 3: tambem grava e apaga arquivos */
 #define FSDRV_ABI_RMDIR 5 /* ops->abi 5: tambem remove pasta vazia */
 #define FSDRV_ABI_RENAME 4 /* ops->abi 4: tambem renomeia/move sem copiar */
+#define FSDRV_ABI_ENTRY 6 /* ops->abi 6: entrada de um arquivo so (entry) */
 #define FSDRV_SYM "fs_driver"
 
 /* Igual a struct dir_item de drives.h (k_dirent dos programas). */
 struct fsdrv_item {
   char name[32];      /* nome longo se cabe em 31; senao o apelido 8.3 */
+  uint32_t size;
+  uint16_t date;      /* formato FAT; 0 = sem data */
+  uint16_t time;
+  uint8_t dir;
+};
+
+/* Um arquivo ou pasta so (ops->entry): nome longo inteiro, tamanho e data. */
+struct fsdrv_entry {
+  char name[256];
   uint32_t size;
   uint16_t date;      /* formato FAT; 0 = sem data */
   uint16_t time;
@@ -89,6 +99,10 @@ struct fsdrv_ops {
    * fat_rmdir: 0 ok; -1 nao existe; -2 nao esta vazia; -3 e arquivo; -4
    * somente leitura ou erro de disco. */
   int (*rmdir)(void* vol, const char* path);
+  /* So com abi >= FSDRV_ABI_ENTRY. A entrada do ultimo nome de path (arquivo
+   * ou pasta), achada com uma busca so, sem listar a pasta inteira (o stat()
+   * do Firefox fazia isso para cada arquivo do cache). 0 achou; -1 nao. */
+  int (*entry)(void* vol, const char* path, struct fsdrv_entry* out);
 };
 
 typedef const struct fsdrv_ops* (*fsdrv_entry_fn)(void);

@@ -23,6 +23,8 @@ extern int fat_rmdir(const char* path);
 extern int fat_file_size(const char* filename);
 extern int fat_dir_items(const char* path, struct dir_item* out, int max);
 extern int fat_long_name(const char* path, char* out, int max);
+extern int fat_entry(const char* path, char* name, int max, uint32_t* size, uint16_t* date,
+                     uint16_t* time, uint8_t* dir);
 extern int fat_delete(const char* path);
 extern int fat_rename(const char* from, const char* to);
 extern int fat_mkdir(const char* path);
@@ -2041,6 +2043,99 @@ int file_list_long(const char* path, char* out, int max) {
   kfree(it);
   return n < 0 ? -1 : pos;
 }
+static int ent_ieq(const char* a, const char* b) {
+  for (;; a++, b++) {
+    char x = *a, y = *b;
+    if (x >= 'a' && x <= 'z') x = (char)(x - 32);
+    if (y >= 'a' && y <= 'z') y = (char)(y - 32);
+    if (x != y) return 0;
+    if (!x) return 1;
+  }
+}
+
+static void ent_copy(char* d, const char* s, int max) {
+  int i;
+  for (i = 0; s[i] && i < max - 1; i++) d[i] = s[i];
+  d[i] = 0;
+}
+
+/* Unidade sem busca de um nome so (memoria, FAT32.DLL antigo): lista a pasta
+ * mae uma vez e procura o nome (o apelido NOME~1 vira o nome longo so do
+ * item que pode ser ele). */
+static int entry_by_list(const char* path, struct dir_item_long* out) {
+  char par[DRV_PATH + 4];
+  char full[DRV_PATH + 40];
+  char longn[FAT_NAME_MAX];
+  const char* leaf;
+  struct dir_item* it;
+  int k, s = -1, n, i, rc = -1;
+  for (k = 0; path[k] && k < DRV_PATH - 1; k++) {
+    par[k] = path[k];
+    if (path[k] == '\\' || path[k] == ':') s = k;
+  }
+  par[k] = 0;
+  if (s < 0 || !path[s + 1]) return -1;
+  leaf = path + s + 1;
+  par[s + 1] = 0;
+  it = (struct dir_item*)kmalloc(FLL_MAX * (uint32_t)sizeof(struct dir_item));
+  if (!it) return -1;
+  n = drives_items_u(par, it, FLL_MAX);
+  for (i = 0; i < n && rc != 0; i++) {
+    const char* nm = it[i].name;
+    if (!ent_ieq(nm, leaf)) {
+      for (k = 0; nm[k] && nm[k] != '~'; k++) { }
+      if (nm[k] != '~') continue;
+      ent_copy(full, par, DRV_PATH);
+      for (k = 0; full[k]; k++) { }
+      ent_copy(full + k, nm, (int)sizeof(full) - k);
+      if (drives_long_name_u(full, longn, (int)sizeof(longn)) != 0 || !ent_ieq(longn, leaf))
+        continue;
+      nm = longn;
+    }
+    ent_copy(out->name, nm, (int)sizeof(out->name));
+    out->size = it[i].size;
+    out->date = it[i].date;
+    out->time = it[i].time;
+    out->dir = it[i].dir;
+    rc = 0;
+  }
+  kfree(it);
+  return rc;
+}
+
+static int drives_entry_u(const char* path, struct dir_item_long* out) {
+  char L;
+  char name[DRV_PATH];
+  int idx;
+  if (!path || !out) return -1;
+  out->pad[0] = out->pad[1] = out->pad[2] = 0;
+  path_parse(path, &L, name, (int)sizeof(name));
+  idx = letter_idx(L);
+  if (!name[0] || idx < 0 || !drv_ready(idx)) return -1;
+  if (drv_kind[idx] == DRV_EXT && drv_ops[idx]->abi >= FSDRV_ABI_ENTRY && drv_ops[idx]->entry) {
+    struct fsdrv_entry e;
+    if (drv_ops[idx]->entry(drv_vol[idx], name, &e) != 0) return -1;
+    ent_copy(out->name, e.name, (int)sizeof(out->name));
+    out->size = e.size;
+    out->date = e.date;
+    out->time = e.time;
+    out->dir = e.dir;
+    return 0;
+  }
+  if (drv_kind[idx] == DRV_FAT)
+    return fat_entry(name, out->name, (int)sizeof(out->name), &out->size, &out->date,
+                     &out->time, &out->dir);
+  return entry_by_list(path, out);
+}
+
+int drives_entry(const char* path, struct dir_item_long* out) {
+  int r;
+  fs_lock();
+  r = drives_entry_u(path, out);
+  fs_unlock();
+  return r;
+}
+
 int drives_long_name(const char* path, char* out, int max) {
   int r;
   fs_lock();

@@ -544,3 +544,14 @@ F0 e F1 primeiro: sao baratas e decidem o tamanho do resto (com ou sem F3b).
     pilha pelo unwind (.pdata) a partir de varios retornos candidatos;
   - `vm.sh keys` digita "@"; `NETFWD` abre portas extras (o Claude recusa
     `--remote-debugging-port`).
+- **Ctrl+V no Claude (2026-11-22, SSD)**: a tecla chegava (trace `[wine] clip:` no
+  SERIAL.LOG) mas nenhuma funcao de clipboard era chamada. Causa: GetMessage/
+  PeekMessage ignoravam a faixa lo..hi; o Chromium, no WM_KEYDOWN do Ctrl, faz
+  `PeekMessage(WM_CHAR..WM_DEADCHAR, PM_REMOVE)` e levava junto o KEYDOWN do V.
+  Agora a faixa e respeitada (WM_QUIT sempre sai); GetKeyState devolve 0xFF80;
+  OpenClipboard guarda a thread dona e toma a vez apos 300 ms.
+- **Conversa sem carregar / ENOTSUP uv_spawn (2026-11-22, SSD)**: spawn() pegava
+  a vez com `__sync_lock_test_and_set(&spawn_req, 1)`, que grava 1 mesmo sobre
+  um pedido na fila (2); a tarefa principal so atende o 2, o pedido (git
+  for-each-ref) sumia e os CreateProcess seguintes esperavam 60 s e saiam com
+  ERROR_NOT_SUPPORTED. Agora CAS 0 -> 1.

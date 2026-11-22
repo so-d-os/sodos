@@ -1542,6 +1542,12 @@ static void pump_events(struct wgui* g) {
          * Enter (vk_of). */
         if (ev[3] >= 1 && ev[3] <= 26 && ev[3] != 8 && ev[3] != 9 && ev[3] != 10 && ev[3] != 13) {
           int L = 'A' + ev[3] - 1;
+          static int ctrl_trace;
+          if (ctrl_trace < 32 || wine_debug) {
+            ctrl_trace++;
+            wlogx("clip: tecla Ctrl+letra do WIN (22 = Ctrl+V), hwnd foco ", (uint64_t)(uintptr_t)f);
+            wlogx("clip:   codigo ", (uint64_t)ev[3]);
+          }
           q_push(g, f, WM_KEYDOWN, 0x11, 1, 0);
           q_push(g, f, WM_KEYDOWN, (uintptr_t)L, 1, 0);
           q_push(g, f, WM_KEYUP, (uintptr_t)L, (intptr_t)0xC0000001, 0);
@@ -1580,7 +1586,17 @@ static void pump_events(struct wgui* g) {
 
 /* ---------- laco de mensagens ---------- */
 struct wtimer;
-static int next_message(struct wgui* g, struct msg* m, HANDLE filter, int remove, uint64_t* wait_until) {
+/* Faixa de mensagens do GetMessage/PeekMessage (lo = hi = 0: todas). O
+ * Chromium, ao tratar o WM_KEYDOWN, faz PeekMessage(WM_CHAR..WM_DEADCHAR,
+ * PM_REMOVE) para juntar o caractere: sem o filtro ele tirava da fila (e
+ * descartava) o WM_KEYDOWN do V que vinha depois do Ctrl, e o Ctrl+V do
+ * Claude nao colava. WM_QUIT sai sempre, como no Windows. */
+static int msg_in_range(DWORD msg, DWORD lo, DWORD hi) {
+  if (!lo && !hi) return 1;
+  return msg >= lo && msg <= hi;
+}
+static int next_message(struct wgui* g, struct msg* m, HANDLE filter, int remove, uint64_t* wait_until,
+                        DWORD lo, DWORD hi) {
   struct wtimer* t;
   uint64_t now = wnow_ms();
   int i;
@@ -1592,6 +1608,7 @@ static int next_message(struct wgui* g, struct msg* m, HANDLE filter, int remove
   for (i = 0; i < g->qn; i++) {
     struct qmsg* e = &g->q[(g->qhead + i) % MSGQ];
     if (e->thread != me() && e->thread) continue;
+    if (!msg_in_range(e->m.message, lo, hi)) continue;
     *m = e->m;
     if (remove) {
       int j;
@@ -1614,6 +1631,7 @@ static int next_message(struct wgui* g, struct msg* m, HANDLE filter, int remove
   paint_dirty(g);
   for (t = g->timers; t; t = t->next) {
     if (t->thread != me()) continue;
+    if (!msg_in_range(WM_TIMER, lo, hi)) break;
     if (now >= t->due) {
       memset(m, 0, sizeof(*m));
       m->hwnd = t->win;
@@ -1636,14 +1654,12 @@ static int next_message(struct wgui* g, struct msg* m, HANDLE filter, int remove
 BOOL WINAPI wGetMessageW(struct msg* m, HANDLE h, DWORD lo, DWORD hi) {
   struct wgui* g = gui_get();
   struct wproc* p = wp();
-  (void)lo;
-  (void)hi;
   int marked = 0;
   if (!g) return -1;
   for (;;) {
     uint64_t until, now;
     int gen = wine_gen;
-    if (next_message(g, m, h, 1, &until)) {
+    if (next_message(g, m, h, 1, &until, lo, hi)) {
       if (marked) wwait_end();
       return m->message != WM_QUIT;
     }
@@ -1659,17 +1675,15 @@ BOOL WINAPI wGetMessageW(struct msg* m, HANDLE h, DWORD lo, DWORD hi) {
 static WINAPI BOOL PeekMessageW(struct msg* m, HANDLE h, DWORD lo, DWORD hi, DWORD remove) {
   struct wgui* g = gui_get();
   uint64_t until;
-  (void)lo;
-  (void)hi;
   if (!g) return 0;
-  return next_message(g, m, h, remove & 1, &until);
+  return next_message(g, m, h, remove & 1, &until, lo, hi);
 }
 static WINAPI BOOL WaitMessage(void) {
   struct wgui* g = gui_get();
   struct msg m;
   uint64_t until, now;
   int gen = wine_gen;
-  if (!g || next_message(g, &m, 0, 0, &until)) return 1;
+  if (!g || next_message(g, &m, 0, 0, &until, 0, 0)) return 1;
   now = wnow_ms();
   wwait_begin("WaitMessage", 0, 0, 0, __builtin_return_address(0));
   k_futex_wait(&wine_gen, gen, until > now ? (int)(until - now) : 1);
@@ -1757,7 +1771,7 @@ static DWORD msgwait_in(DWORD n, const HANDLE* hs, DWORD ms, DWORD mask, DWORD f
       struct wobj* o = wh_get(hs[i], 0);
       if (o && wwait(1, &o, 0, 0) == 0) return i;
     }
-    if (g && next_message(g, &m, 0, 0, &until)) return n;
+    if (g && next_message(g, &m, 0, 0, &until, 0, 0)) return n;
     if (ms != INFINITE && wnow_ms() - t0 >= ms) return WAIT_TIMEOUT;
     if (p->exit_req) k_thread_exit(0);
     k_futex_wait(&wine_gen, gen, 10);
@@ -2038,7 +2052,9 @@ static WINAPI int ShowCursor(BOOL s) { return s ? 1 : 0; }
 static WINAPI short GetKeyState(int vk) {
   if (vk == 0x10 || vk == 0xA0 || vk == 0xA1) vk = key_down[0x10] ? 0x10 : vk; /* Shift */
   if (vk == 0xA2 || vk == 0xA3) vk = 0x11;                                   /* Ctrl esq/dir */
-  return vk >= 0 && vk < 256 && key_down[vk] ? (short)0x8000 : 0;
+  /* como o Windows: apertada = 0xFF80 (ha codigo que testa 0x8000 e codigo
+   * que testa 0x80) */
+  return vk >= 0 && vk < 256 && key_down[vk] ? (short)0xFF80 : 0;
 }
 static WINAPI short GetAsyncKeyState(int vk) { return GetKeyState(vk); }
 static WINAPI HANDLE MonitorFromWindow(HANDLE h, DWORD f) {

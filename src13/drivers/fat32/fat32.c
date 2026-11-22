@@ -676,6 +676,19 @@ static int f_long_name(void* p, const char* path, char* out, int max) {
   return 0;
 }
 
+static int f_entry(void* p, const char* path, struct fsdrv_entry* out) {
+  struct vol* v = (struct vol*)p;
+  struct ent e;
+  if (!v || !out || !path || !path[0]) return -1;
+  if (lookup(v, path, &e) != 0) return -1;
+  scopy(out->name, e.lname[0] ? e.lname : e.sname, (int)sizeof(out->name));
+  out->dir = (e.attr & 0x10) ? 1 : 0;
+  out->size = out->dir ? 0 : e.size;
+  out->date = e.date;
+  out->time = e.time;
+  return 0;
+}
+
 static int f_space(void* p, uint32_t* total_kb, uint32_t* free_kb) {
   struct vol* v = (struct vol*)p;
   if (!v) return -1;
@@ -1381,8 +1394,8 @@ static int f_rmdir(void* p, const char* path) {
 }
 
 static const struct fsdrv_ops ops = {
-  FSDRV_ABI_RMDIR, FAT32_NAME, f_probe, f_mount, f_umount, f_stat, f_read, f_items, f_long_name,
-  f_space, f_mkdir, f_write, f_remove, f_rename, f_rmdir,
+  FSDRV_ABI_ENTRY, FAT32_NAME, f_probe, f_mount, f_umount, f_stat, f_read, f_items, f_long_name,
+  f_space, f_mkdir, f_write, f_remove, f_rename, f_rmdir, f_entry,
 };
 
 const struct fsdrv_ops* fs_driver(void) { return &ops; }

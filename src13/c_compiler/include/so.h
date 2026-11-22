@@ -59,6 +59,9 @@ struct k_direntl {
   unsigned char pad[3];
 };
 int k_dir_long(const char* path, struct k_direntl* out, int max);
+/* Um arquivo ou pasta so (nome longo, tamanho, data) com uma busca, sem
+ * listar a pasta inteira. 0 achou; -1 nao. Kernels de 2026-11-22 em diante. */
+int k_dir_entry(const char* path, struct k_direntl* out);
 /* Ambiente do sistema (SET NOME=valor, o mesmo do prompt e do AUTOEXEC.BAT).
  * k_getenv copia o valor para out e devolve o tamanho; -1 se nao existe.
  * k_setenv com val vazio apaga. 0 ok. */

@@ -709,6 +709,11 @@ static int sodos_text(char* buf, int max) {
   buf[n] = 0;
   return n;
 }
+static int clip_len_sodos(void) {
+  char b[8];
+  int n = k_clip_get(b, (int)sizeof(b));
+  return n < 0 ? 0 : n;
+}
 static int utf8_ok(const char* s) {
   const uint8_t* p = (const uint8_t*)s;
   while (*p) {
@@ -722,14 +727,47 @@ static int utf8_ok(const char* s) {
   }
   return 1;
 }
+/* Rastro das primeiras chamadas (SERIAL.LOG, "[wine] clip ..."): o Ctrl+V do
+ * Claude nao colava e nada aparecia no log. */
+static int clip_trace_n;
+static void clip_trace(const char* what, uint64_t v) {
+  if (clip_trace_n >= 96 && !wine_debug) return;
+  clip_trace_n++;
+  wlogx(what, v);
+}
+/* O WINE.DLL e um so para todos os processos: quem abriu e guardado (TEB da
+ * thread). Como no Windows, a mesma thread pode abrir de novo; aberta por
+ * outra ha mais de 300 ms = esquecida aberta (processo que morreu entre o
+ * Open e o Close), e a vez passa. Antes um Open sem Close travava a colagem
+ * de todos para sempre. */
+static uint8_t* volatile clip_owner;
+static uint64_t clip_since;
 static WINAPI BOOL OpenClipboard(HANDLE h) {
+  uint8_t* t = wteb();
+  uint64_t now = wnow_ms();
   (void)h;
-  if (clip_open) return 0;
+  if (clip_open && clip_owner != t && now - clip_since < 300) {
+    clip_trace("clip: OpenClipboard ocupado, dono teb ", (uint64_t)(uintptr_t)clip_owner);
+    wset_lasterr(5); /* ERROR_ACCESS_DENIED */
+    return 0;
+  }
+  if (clip_open && clip_owner != t) clip_trace("clip: OpenClipboard tomou de teb esquecido ", (uint64_t)(uintptr_t)clip_owner);
   clip_open = 1;
+  clip_owner = t;
+  clip_since = now;
+  {
+    /* o tamanho sai sempre que muda (o limite do rastro escondia se a copia
+     * do Command tinha chegado) */
+    static int last_len = -1;
+    int n = clip_len_sodos();
+    if (n != last_len) wlogx("clip: OpenClipboard, texto SODOS bytes (mudou) ", (uint64_t)n);
+    last_len = n;
+  }
   return 1;
 }
 static WINAPI BOOL CloseClipboard(void) {
   clip_open = 0;
+  clip_owner = 0;
   return 1;
 }
 static WINAPI BOOL EmptyClipboard(void) {
@@ -739,6 +777,9 @@ static WINAPI BOOL EmptyClipboard(void) {
   return 1;
 }
 static WINAPI HANDLE SetClipboardData(DWORD fmt, HANDLE mem) {
+  /* sempre no log: gravar texto aqui troca o clipboard do SODOS inteiro */
+  wlogx("clip: SetClipboardData fmt ", fmt);
+  if (mem && fmt == CF_UNICODETEXT_) wlogx("clip:   caracteres ", (uint64_t)(wheap_size(mem) / 2));
   if (clip_data) k_free(clip_data);
   clip_fmt = fmt;
   clip_data = mem; /* passa a ser do sistema */
@@ -756,8 +797,10 @@ static WINAPI HANDLE SetClipboardData(DWORD fmt, HANDLE mem) {
 static WINAPI HANDLE GetClipboardData(DWORD fmt) {
   static char buf[65536];
   int n;
+  clip_trace("clip: GetClipboardData fmt ", fmt);
   if (!is_text(fmt)) return fmt == clip_fmt ? (HANDLE)clip_data : 0;
   n = sodos_text(buf, (int)sizeof(buf));
+  clip_trace("clip: GetClipboardData texto bytes ", (uint64_t)n);
   if (!n) return fmt == clip_fmt ? (HANDLE)clip_data : 0;
   if (clip_sodos) k_free(clip_sodos);
   clip_sodos = 0;
@@ -787,6 +830,7 @@ static WINAPI HANDLE GetClipboardData(DWORD fmt) {
 }
 static WINAPI BOOL IsClipboardFormatAvailable(DWORD fmt) {
   char b[8];
+  clip_trace("clip: IsClipboardFormatAvailable fmt ", fmt);
   if (is_text(fmt) && k_clip_get(b, (int)sizeof(b)) > 0) return 1;
   return clip_data && fmt == clip_fmt;
 }
@@ -815,6 +859,7 @@ static WINAPI long OleSetClipboard(void* obj) {
   return 0;
 }
 static WINAPI long OleGetClipboard(void** obj) {
+  clip_trace("clip: OleGetClipboard (sem suporte) ", 0);
   if (obj) *obj = 0;
   return E_FAIL_;
 }

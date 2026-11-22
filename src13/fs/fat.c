@@ -1690,6 +1690,35 @@ int fat_dir_items(const char* path, struct dir_item* out, int max) {
   return n;
 }
 
+/* Entrada do ultimo nome de path (arquivo ou pasta) com uma busca so: nome
+ * longo inteiro, tamanho e data. 0 achou; -1 nao. */
+int fat_entry(const char* path, char* name, int max, uint32_t* size, uint16_t* date,
+              uint16_t* time, uint8_t* dir) {
+  struct dir_view parent;
+  char leaf[FAT_NAME_MAX];
+  struct fat_dir_entry* e;
+  int i;
+  if (fat_type == 0 || !path || !path[0] || !name || max < 2) return -1;
+  if (open_parent_mode(path, &parent, leaf, 0, 1) != 0) return -1;
+  e = dir_find(&parent, leaf, 0, 0);
+  if (!e) e = dir_find(&parent, leaf, 1, 0);
+  if (!e) return -1;
+  if (found_name[0]) {
+    for (i = 0; found_name[i] && i < max - 1; i++) name[i] = found_name[i];
+    name[i] = 0;
+  } else {
+    char sn[13];
+    fat_name_to_string(e, sn);
+    for (i = 0; sn[i] && i < max - 1; i++) name[i] = sn[i];
+    name[i] = 0;
+  }
+  *dir = (e->attributes & 0x10) ? 1 : 0;
+  *size = *dir ? 0 : e->size;
+  *date = e->date;
+  *time = e->time;
+  return 0;
+}
+
 /* Nome longo inteiro do ultimo nome de path (arquivo ou pasta). */
 int fat_long_name(const char* path, char* out, int max) {
   struct dir_view parent;

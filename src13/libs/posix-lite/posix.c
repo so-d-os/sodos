@@ -129,9 +129,27 @@ static struct fobj* fobj_new(const char* full) {
   return 0;
 }
 
+/* SET SODOS_IOLOG=1 (ou no ENV.TXT): cada arquivo carregado/gravado inteiro
+ * vai para a serial com o tamanho e o tempo gasto. */
+static int iolog = -1;
+static void io_note(const char* op, const char* path, int size, unsigned t0) {
+  char b[400];
+  int n;
+  if (iolog < 0) {
+    const char* e = getenv("SODOS_IOLOG");
+    iolog = e && *e == '1';
+  }
+  if (!iolog) return;
+  n = snprintf(b, sizeof(b), "[io] %s %s %d B %u ms\n", op, path, size, k_ms() - t0);
+  if (n > 0) k_dbg(b, n < (int)sizeof(b) ? n : (int)sizeof(b) - 1);
+}
+
 static int fobj_flush(struct fobj* o) {
+  unsigned t0;
   if (!o->dirty || o->gone) return 0;
+  t0 = k_ms();
   if (k_fsave(o->path, o->data ? o->data : "", o->size) < 0) return -1;
+  io_note("save", o->path, o->size, t0);
   o->dirty = 0;
   return 0;
 }
@@ -438,38 +456,27 @@ __export long sysconf(int name) {
 }
 
 /* data/hora FAT da entrada -> time_t (0 se nao tiver) */
+static time_t fat_time(unsigned d, unsigned t) {
+  struct tm tm;
+  if (!d) return 0;
+  memset(&tm, 0, sizeof(tm));
+  tm.tm_mday = (int)(d & 31);
+  tm.tm_mon = (int)((d >> 5) & 15) - 1;
+  tm.tm_year = (int)(d >> 9) + 80;
+  tm.tm_hour = (int)(t >> 11);
+  tm.tm_min = (int)((t >> 5) & 63);
+  tm.tm_sec = (int)(t & 31) * 2;
+  return mktime(&tm);
+}
+
 static time_t file_mtime(const char* full) {
-  /* nomes longos: com o k_dirent um nome de mais de 31 nunca batia */
-  static struct k_direntl ents[256];
-  char dir[PATH_MAX];
-  const char* name;
-  int n, i, k;
-  strncpy(dir, full, PATH_MAX - 1);
-  dir[PATH_MAX - 1] = 0;
-  k = (int)strlen(dir);
-  while (k > 0 && dir[k - 1] == '\\') dir[--k] = 0;
-  while (k > 0 && dir[k - 1] != '\\' && dir[k - 1] != ':') k--;
-  name = full + k;
-  if (!*name) return 0;
-  dir[k] = 0;
-  if (k == 0) k_pwd(dir, PATH_MAX);
-  n = k_dir_long(dir, ents, 256);
-  for (i = 0; i < n; i++) {
-    if (strcasecmp(ents[i].name, name) == 0) {
-      struct tm tm;
-      unsigned d = ents[i].date, t = ents[i].time;
-      if (!d) return 0;
-      memset(&tm, 0, sizeof(tm));
-      tm.tm_mday = (int)(d & 31);
-      tm.tm_mon = (int)((d >> 5) & 15) - 1;
-      tm.tm_year = (int)(d >> 9) + 80;
-      tm.tm_hour = (int)(t >> 11);
-      tm.tm_min = (int)((t >> 5) & 63);
-      tm.tm_sec = (int)(t & 31) * 2;
-      return mktime(&tm);
-    }
-  }
-  return 0;
+  /* Uma busca so (k_dir_entry). Antes listava a pasta inteira com
+   * k_dir_long, e cada nome longo da lista custava outra busca na pasta: o
+   * stat de cada arquivo do cache do Firefox (nomes de 40 letras) relia a
+   * pasta centenas de vezes e prendia o disco e o BKL por minutos. */
+  struct k_direntl e;
+  if (!full || !full[0] || k_dir_entry(full, &e) != 0) return 0;
+  return fat_time(e.date, e.time);
 }
 
 /* Numero de inode a partir do caminho (sem diferenciar maiusculas): a FAT nao
@@ -604,11 +611,15 @@ __export int open(const char* path, int flags, ...) {
     errno = ENOMEM;
     return -1;
   }
-  if (sz > 0 && k_fload(full, o->data, sz + 1) != sz) {
-    free(o->data);
-    o->data = 0;
-    errno = EIO;
-    return -1;
+  {
+    unsigned t0 = k_ms();
+    if (sz > 0 && k_fload(full, o->data, sz + 1) != sz) {
+      free(o->data);
+      o->data = 0;
+      errno = EIO;
+      return -1;
+    }
+    if (sz > 0) io_note("load", full, sz, t0);
   }
   o->data[sz] = 0;
   o->size = sz;
@@ -990,7 +1001,25 @@ __export int stat(const char* path, struct stat* st) {
   memset(st, 0, sizeof(*st));
   st->st_dev = 1;
   st->st_ino = path_ino(full);
-  /* Arquivo primeiro: e o caso comum e poupa listar a pasta. */
+  /* Uma busca so da o tipo, o tamanho e a data (k_dir_entry); a raiz da
+   * unidade nao tem entrada e cai no caminho antigo. */
+  {
+    struct k_direntl de;
+    if (k_dir_entry(full, &de) == 0) {
+      struct fobj* o = de.dir ? 0 : fobj_find(full);
+      st->st_mode = de.dir ? (S_IFDIR | S_IRWXU) : (S_IFREG | S_IRUSR | S_IWUSR);
+      st->st_size = de.dir ? 0 : (o ? o->size : (off_t)de.size);
+      st->st_mtime = fat_time(de.date, de.time);
+      st->st_atime = st->st_mtime;
+      st->st_ctime = st->st_mtime;
+#if __SIZEOF_POINTER__ == 8
+      st->st_nlink = 1;
+      st->st_blksize = 512;
+      st->st_atim.tv_sec = st->st_mtim.tv_sec = st->st_ctim.tv_sec = st->st_mtime;
+#endif
+      return 0;
+    }
+  }
   sz = k_fsize(full);
   {
     /* Aberto e ainda nao gravado: o tamanho de verdade e o da memoria. */

@@ -858,6 +858,13 @@ int shell_key_polling(void) {
   return t && (uint32_t)irq_ticks() + 1u - t <= 1u;
 }
 
+/* E0 lido e o byte seguinte ainda nao chegou: ele vem em outra IRQ1 e a
+ * fila do ps2in e memoria, entao a espera curta abaixo acaba antes. A
+ * proxima chamada trata o byte como tecla estendida (como o kbd_e0 do WIN).
+ * Sem isso o PrintScreen (E0 2A E0 37) das telas de texto virava o '*' do
+ * teclado numerico e nao salvava o PNG. */
+static int kb_e0_pend;
+
 static int get_key(int wait) {
   unsigned char sc;
 
@@ -903,7 +910,7 @@ static int get_key(int wait) {
       continue;
     }
     /* Ctrl+F1..F12 trocam de tela; Ctrl+F7 vai ao WIN. */
-    if (kbd_ctrl_down() && vt_hotkey(sc) >= 0) {
+    if (!kb_e0_pend && sc != 0xE0 && kbd_ctrl_down() && vt_hotkey(sc) >= 0) {
       vt_select(vt_hotkey(sc));
       if (!wait) return 0;
       continue;
@@ -926,12 +933,18 @@ static int get_key(int wait) {
     [0x52] = KEY_INS,
   };
 
-  if (sc == 0xE0) {
-    int n = 100000;
-    int got;
-    while (!(got = kb_read(&sc)) && --n > 0) { }
-    if (!got) return 0;
-    break_fire();
+  if (sc == 0xE0 || kb_e0_pend) {
+    if (sc == 0xE0) {
+      int n = 100000;
+      int got;
+      while (!(got = kb_read(&sc)) && --n > 0) { }
+      if (!got) {
+        kb_e0_pend = 1;
+        return 0;
+      }
+      break_fire();
+    }
+    kb_e0_pend = 0;
     if (sc & 0x80) return 0;
     /* PrintScreen (E0 2A E0 37): a tela de texto vira PNG, como no WIN.
      * Nenhum programa recebe a tecla. */

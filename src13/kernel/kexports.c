@@ -346,14 +346,6 @@ static int k_dir(const char* path, struct dir_item* out, int max) {
  * 8.3 (NOME~1). Aqui cada apelido e trocado pelo nome longo (drives_long_name).
  * Para o WINE (FindFirstFile): o Chromium cria pastas com GUID de 36
  * caracteres e depois lista e compara os nomes. */
-struct dir_item_long {
-  char name[256];
-  uint32_t size;
-  uint16_t date;
-  uint16_t time;
-  uint8_t dir;
-  uint8_t pad[3];
-};
 static int k_dir_long(const char* path, struct dir_item_long* out, int max) {
   struct dir_item* tmp;
   int rc, i;
@@ -393,6 +385,17 @@ static int k_dir_long(const char* path, struct dir_item_long* out, int max) {
   }
   fs_leave();
   ufree(tmp);
+  return rc;
+}
+
+/* A entrada de um arquivo ou pasta so (para o stat): como um item do
+ * k_dir_long, mas com uma busca, sem listar a pasta. 0 achou; -1 nao. */
+static int k_dir_entry(const char* path, struct dir_item_long* out) {
+  int rc;
+  if (!path || !out) return -1;
+  fs_enter();
+  rc = drives_entry(path, out);
+  fs_leave();
   return rc;
 }
 
@@ -1578,6 +1581,7 @@ static const struct kexp table[] = {
   EXP(k_chdir),
   EXP(k_dir),
   EXP(k_dir_long),
+  EXP(k_dir_entry),
   EXP(k_getenv),
   EXP(k_setenv),
   EXP(k_fdelete),

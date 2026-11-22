@@ -107,6 +107,18 @@ int drives_items(const char* path, struct dir_item* out, int max);
 int drives_long_name(const char* path, char* out, int max);
 /* file_list com os nomes longos inteiros (o desktop do WIN). */
 int file_list_long(const char* path, char* out, int max);
+/* k_direntl dos programas: uma entrada com o nome longo inteiro. */
+struct dir_item_long {
+  char name[256];
+  uint32_t size;
+  uint16_t date;
+  uint16_t time;
+  uint8_t dir;
+  uint8_t pad[3];
+};
+/* A entrada de um arquivo ou pasta so (o stat de um arquivo), sem listar a
+ * pasta inteira: no FAT32.DLL (abi 6) e no fat.c e uma busca. 0 achou. */
+int drives_entry(const char* path, struct dir_item_long* out);
 void drives_list(char letter);
 int drives_names(char letter, char out[][32], int max);
 char path_letter(const char* path);

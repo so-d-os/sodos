@@ -549,7 +549,8 @@ struct co {
   int keep;              /* so refaz a lista: nao grava nada que ja existia */
   int files;
   int written;
-  int skipped;
+  int skipped;           /* de proposito: caminho longo demais */
+  int failed;            /* erro: objeto sem pack ou k_fsave falhou */
   int kept;
 };
 
@@ -571,6 +572,21 @@ static void names_line(struct co* c, const char* dos, const char* lng, const uns
   sb_add(&c->names, "\t", 1);
   sb_add(&c->names, mode, -1);
   sb_add(&c->names, "\n", 1);
+}
+
+/* Cria as pastas do meio de full (abaixo de root, que ja existe): o k_fsave
+ * nao cria, e sem isso cobra\BUILD.BAT nao e gravado. */
+static void make_parents(const char* root, const char* full) {
+  char d[PATHMAX + 40];
+  int i;
+  strncpy(d, full, sizeof(d) - 1);
+  d[sizeof(d) - 1] = 0;
+  for (i = (int)strlen(root); d[i]; i++) {
+    if (d[i] != '\\') continue;
+    d[i] = 0;
+    if (!is_dir(d) && k_mkdir(d) != 0) printf("  nao criei a pasta %s\n", d);
+    d[i] = '\\';
+  }
 }
 
 static void put_file(struct co* c, const char* dosrel, const char* lng, const unsigned char* sha, const char* mode) {
@@ -602,12 +618,13 @@ static void put_file(struct co* c, const char* dosrel, const char* lng, const un
   data = pack_get(sha, &type, &size);
   if (!data || type != OBJ_BLOB) {
     printf("  objeto %s nao veio no pack: %s\n", hex, lng);
-    c->skipped++;
+    c->failed++;
     return;
   }
+  make_parents(c->root, full);
   if (k_fsave(full, (const char*)data, size) != 0) {
     printf("  nao gravou %s (%s)\n", full, lng);
-    c->skipped++;
+    c->failed++;
     return;
   }
   c->written++;
@@ -1231,7 +1248,9 @@ static int cfg_set(const char* path, const char* key, const char* val) {
 /* ---------- comandos ---------- */
 
 /* Busca o commit de r e grava os arquivos em root.
- * keep = 1: so refaz NAMES.TXT/HEAD.PCK do commit atual (nao mexe no INDEX nem em OBJ). */
+ * keep = 1: so refaz NAMES.TXT/HEAD.PCK do commit atual (nao mexe no INDEX nem em OBJ).
+ * Devolve 0 ok, -1 erro (nada atualizado), 1 = estado gravado mas arquivos
+ * ficaram sem gravar (err diz quantos). */
 static int fetch_checkout(const char* root, struct remote* r, int keep) {
   char* resp;
   unsigned char* pack;
@@ -1323,14 +1342,16 @@ static int fetch_checkout(const char* root, struct remote* r, int keep) {
     }
   }
   state_write(root, r, r->head, r->head);
-  if (keep) return 0;
+  if (c.failed) sprintf(err, "%d arquivo(s) nao foram gravados (veja acima)", c.failed);
+  if (keep) return c.failed ? 1 : 0;
   sha_hex(r->head, hex);
   printf("\r%d arquivos (%d gravados", c.files, c.written);
   if (removed) printf(", %d apagados", removed);
   if (c.kept) printf(", %d mantidos", c.kept);
   if (c.skipped) printf(", %d pulados", c.skipped);
+  if (c.failed) printf(", %d com erro", c.failed);
   printf(") em %u s\ncommit %.12s (%s)\n", (k_ms() - t0) / 1000, hex, r->ref);
-  return 0;
+  return c.failed ? 1 : 0;
 }
 
 static int cmd_clone(int argc, char** argv) {
@@ -1407,11 +1428,16 @@ static int cmd_clone(int argc, char** argv) {
   }
   printf("clonando %s em %s\n", r.ref, root);
   memset(&olds, 0, sizeof(olds));
-  if (fetch_checkout(root, &r, 0) != 0) {
+  n = fetch_checkout(root, &r, 0);
+  if (n < 0) {
     printf("\nerro: %s\n", err);
     return 1;
   }
   sync_dotgit(root);
+  if (n > 0) {
+    printf("erro: %s\n", err);
+    return 1;
+  }
   return 0;
 }
 
@@ -1454,8 +1480,9 @@ static int cmd_pull(int argc, char** argv) {
     return 1;
   }
   list_load(root, "NAMES.TXT", &olds);
-  if (fetch_checkout(root, &r, 0) != 0) {
-    printf("\nerro: %s\n", err);
+  gr = fetch_checkout(root, &r, 0);
+  if (gr != 0) {
+    printf(gr < 0 ? "\nerro: %s\n" : "erro: %s\n", err);
     return 1;
   }
   return 0;
