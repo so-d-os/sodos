@@ -494,6 +494,7 @@ struct wtrk {
   struct wproc* p;
   uint8_t* teb;
   uint32_t pid, tid;
+  uint32_t kpid;               /* pid do SODOS (wine_pid_gone) */
   const char* volatile what;   /* 0 = rodando */
   const char* detail;
   uint64_t obj, owner, since;
@@ -513,6 +514,7 @@ void wtrack_thread(struct wobj* t) {
     wtrk[i].p = wp();
     wtrk[i].teb = t->teb;
     wtrk[i].pid = wp()->pid;
+    wtrk[i].kpid = k_getpid();
     wtrk[i].tid = t->tid;
     wtrk[i].what = 0;
     wtrk[i].used = 1;
@@ -532,6 +534,16 @@ void wtrack_proc_exit(struct wproc* p) {
   int i;
   for (i = 0; i < WTRK_MAX; i++)
     if (wtrk[i].used && wtrk[i].p == p) wtrk[i].used = 0;
+}
+
+/* Chamado pelo kernel no fim do processo do SODOS (tambem no KILL e no
+ * Ctrl+Backspace, onde o wtrack_proc_exit nao roda): o wproc dele vai ser
+ * solto, entao as vagas nao podem continuar apontando para ele. */
+void wine_pid_gone(uint32_t kpid) {
+  int i;
+  if (!kpid) return;
+  for (i = 0; i < WTRK_MAX; i++)
+    if (wtrk[i].used && wtrk[i].kpid == kpid) wtrk[i].used = 0;
 }
 
 static struct wtrk* wtrk_cur(void) {

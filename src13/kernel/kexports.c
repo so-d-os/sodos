@@ -686,6 +686,8 @@ static void k_net_addr(uint32_t* ip, uint32_t* mask, uint32_t* gw, uint32_t* dns
 /* TEB do Windows da thread corrente (WINE.DLL): vira a base do GS dela
  * (TEB+0 e TEB+0x18 ficam com o kernel, ver kthread.c). 0 desliga. */
 static void k_win_teb(void* teb) { kt_win_teb_set((uint64_t)(uintptr_t)teb); }
+/* pid do SODOS do processo corrente (WINE.DLL: casar com o wine_pid_gone). */
+static uint32_t k_getpid(void) { return um_owner(); } /* certo tambem numa k_thread */
 /* Memoria num endereco baixo fixo para a imagem de um EXE sem relocacoes. */
 static void* k_win_lowmem(uint32_t addr, uint32_t size) { return wine_low_alloc(addr, size); }
 /* Memoria virtual dos programas do Windows (kernel/vmem.c). */
@@ -1617,6 +1619,7 @@ static const struct kexp table[] = {
   EXP(k_net_tap_send),
   EXP(k_net_addr),
   EXP_NOLOCK(k_win_teb),
+  EXP_NOLOCK(k_getpid),
   EXP(k_win_lowmem),
   EXP(k_vm_reserve),
   EXP(k_vm_commit),

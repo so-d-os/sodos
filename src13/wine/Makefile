@@ -44,7 +44,7 @@ $(LIBC64_OBJ) $(LINK64):
 	$(MAKE) -C $(CC_DIR) $(patsubst $(CC_DIR)/%,%,$@)
 
 $(B)/WINE.DLL: $(OBJ) $(LIBC64_OBJ) $(LINK64) $(KIMP)
-	$(LINK64) /dll /export:wine_driver /export:wine_dump /out:$@ $(OBJ) $(LIBC64_OBJ) $(KIMP)
+	$(LINK64) /dll /export:wine_driver /export:wine_dump /export:wine_pid_gone /out:$@ $(OBJ) $(LIBC64_OBJ) $(KIMP)
 	mkdir -p $(CC_DIR)/out/DRV
 	cp $@ $(CC_DIR)/out/DRV/WINE.DLL
 

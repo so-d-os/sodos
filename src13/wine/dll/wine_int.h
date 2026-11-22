@@ -394,6 +394,8 @@ void wwait_note(const char* what, void* caller, uint64_t waited_ms); /* util.c *
 void wtrack_thread(struct wobj* t);
 void wtrack_exit(struct wobj* t);
 void wtrack_proc_exit(struct wproc* p);
+uint32_t k_getpid(void);              /* kernel: pid do SODOS do processo */
+void wine_pid_gone(uint32_t kpid);     /* kernel: processo pid acabou (util.c) */
 void wwait_begin(const char* what, const void* obj, uint64_t owner_teb, const char* detail, void* caller);
 void wwait_begin_w(const char* what, const void* obj, const wchar16* detail, void* caller);
 void wwait_end(void);

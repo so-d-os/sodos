@@ -53,6 +53,8 @@ int wine_reset_if_idle(void);
 int wine_loaded(void);
 /* REBOOT: o que cada thread do Windows esta esperando, na serial. */
 void wine_dump_waits(void);
+/* Processo pid terminou: o WINE.DLL solta o que guardava dele. */
+void wine_pid_gone(uint32_t pid);
 
 /* KUSER_SHARED_DATA: pagina fixa em 0x7FFE0000 de onde o codigo do Windows le
  * o relogio sem chamar ninguem (o runtime do Go, por exemplo). So existe

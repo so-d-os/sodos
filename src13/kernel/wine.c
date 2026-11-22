@@ -174,6 +174,16 @@ void wine_dump_waits(void) {
   fn();
 }
 
+/* Fim de um processo (normal ou KILL/Ctrl+Backspace, module.c exec_release):
+ * o WINE.DLL esquece as threads dele. Sem isso o registro de esperas guardava
+ * ponteiros para o wproc ja solto e o wine_dump do REBOOT dava #GP. */
+void wine_pid_gone(uint32_t pid) {
+  void (*fn)(uint32_t);
+  if (!w_handle || !w_ops) return;
+  fn = (void (*)(uint32_t))mod_dll_sym(w_handle, "wine_pid_gone");
+  if (fn) fn(pid);
+}
+
 static void unload_now(void) {
   if (w_handle) {
     mod_dll_free(w_handle);

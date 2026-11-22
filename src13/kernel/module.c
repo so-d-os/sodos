@@ -619,6 +619,7 @@ static int live_find(uint32_t pid) {
 /* O que o fim do mod_exec devolve: DLLs, exports, imagem, .so e o heap. */
 static void exec_release(uint32_t pid, int id) {
   kt_release_pid(pid);   /* threads param antes do heap sumir */
+  wine_pid_gone(pid);    /* registro de esperas do WINE.DLL (antes do ufree_owner) */
   dyn_release_pid(pid);
   kexp_release_pid(pid);
   unload(id);
