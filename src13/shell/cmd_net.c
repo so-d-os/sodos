@@ -3,6 +3,7 @@
 #include "wifi.h"
 #include "wpa.h"
 #include "r8125.h"
+#include "virtio_net.h"
 
 static int usage(void) {
   puts_k("Uso: net [status]          placa e endereco atuais\n");
@@ -86,12 +87,14 @@ static int do_wifi(int argc, char** argv) {
 
 int cmd_net(int argc, char** argv) {
   if (argc < 2 || name_eq(argv[1], "status")) {
+    if (virtio_net_present()) virtio_net_status();
     if (r8125_present()) r8125_status();
     wifi_status();
     return 0;
   }
   if (name_eq(argv[1], "eth")) {
-    r8125_status();
+    if (virtio_net_present()) virtio_net_status();
+    else r8125_status();
     return 0;
   }
   if (name_eq(argv[1], "dhcp") && argc > 2 && name_eq(argv[2], "renew")) {

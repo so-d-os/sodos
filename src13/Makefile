@@ -42,6 +42,9 @@ SMP ?= 4
 # FSGSBASE, e sem ele a troca do TLS (FS base) a cada troca de thread/tarefa
 # usa wrmsr, que numa VM sai para o emulador (~10% da CPU com o Firefox).
 QEMU_CPU ?= $(if $(filter kvm,$(QEMU_ACCEL)),host,max)
+# Placa de rede do QEMU: virtio-net (DMA, rapida no KVM). NIC=ne2k_pci volta
+# para a NE2000 (E/S por porta, ~centenas de saidas da VM por quadro).
+NIC ?= virtio-net-pci
 QEMU=qemu-system-x86_64 -accel $(QEMU_ACCEL) -cpu $(QEMU_CPU) -m 8192 -smp $(SMP) -usb -device usb-tablet
 
 # VirtualBox (Windows/WSL).  wslpath/cygpath convertem o caminho para o
@@ -146,7 +149,7 @@ DISKS_CMD_O = $(DISKS_CMD_C:.c=.o)
 
 CMD_O = $(SHELL_CMD_O) $(DISKS_CMD_O)
 
-kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c video/gpu.c video/wfont.c video/prtscr.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/ps2in.c kernel/smp.c kernel/reboot.c kernel/xhci.c kernel/nvme.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c fs/fsdrv.c kernel/env.c kernel/linkext.c kernel/wine.c kernel/vmem.c kernel/bootpak.c kernel/mm.c net/net.c net/httpd.c net/png.c net/wpa.c net/rtw89.c net/wifi.c net/r8125.c kernel/module.c kernel/elf.c kernel/sched.c kernel/kthread.c kernel/kexports.c kernel/keymap.c kernel/clip.c kernel/vt.c kernel/version.c kernel/thermal.c $(SHELL_CMD_C) $(DISKS_CMD_C) kernel/ap_blob.o shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
+kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c video/gpu.c video/wfont.c video/prtscr.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/ps2in.c kernel/smp.c kernel/reboot.c kernel/xhci.c kernel/nvme.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c fs/fsdrv.c kernel/env.c kernel/linkext.c kernel/wine.c kernel/vmem.c kernel/bootpak.c kernel/mm.c net/net.c net/httpd.c net/png.c net/wpa.c net/rtw89.c net/wifi.c net/r8125.c net/virtio_net.c kernel/module.c kernel/elf.c kernel/sched.c kernel/kthread.c kernel/kexports.c kernel/keymap.c kernel/clip.c kernel/vt.c kernel/version.c kernel/thermal.c $(SHELL_CMD_C) $(DISKS_CMD_C) kernel/ap_blob.o shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
 	@[ -f kernel/version.h ] || sh tools/mkversion.sh
 	$(CC) $(CFLAGS) -c kernel/version.c -o kernel/version.o
 	$(CC) $(CFLAGS) -c kernel/thermal.c -o kernel/thermal.o
@@ -165,6 +168,7 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(CC) $(CFLAGS) -c net/rtw89.c -o net/rtw89.o
 	$(CC) $(CFLAGS) -c net/wifi.c -o net/wifi.o
 	$(CC) $(CFLAGS) -c net/r8125.c -o net/r8125.o
+	$(CC) $(CFLAGS) -c net/virtio_net.c -o net/virtio_net.o
 	$(CC) $(CFLAGS) -c kernel/module.c -o kernel/module.o
 	$(CC) $(CFLAGS) -c kernel/elf.c -o kernel/elf.o
 	$(CC) $(CFLAGS) -c kernel/kexports.c -o kernel/kexports.o
@@ -239,11 +243,11 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(AS) -f elf64 kernel/irq_stubs.asm -o kernel/irq_stubs.o
 	$(AS) -f elf64 kernel/modrun.asm -o kernel/modrun.o
 	$(AS) -f elf64 kernel/kernel_entry.asm -o kernel/kernel_entry.o
-	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/wine.o kernel/vmem.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o net/r8125.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o kernel/version.o kernel/thermal.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/wine.o kernel/vmem.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o net/r8125.o net/virtio_net.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o kernel/version.o kernel/thermal.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 # Mesmo kernel de kernel.elf, com o stub Multiboot2 na frente. O GRUB carrega este ELF.
 kernel_multiboot.elf: kernel.elf kernel/multiboot_header.o kernel/efistub.o kernel/linker_multiboot.ld
-	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/efistub.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/wine.o kernel/vmem.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o net/r8125.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o kernel/version.o kernel/thermal.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
+	$(LD) $(LDFLAGS) -T kernel/linker_multiboot.ld -o $@ kernel/multiboot_header.o kernel/efistub.o kernel/kernel_entry.o kernel/bootinfo.o kernel/kernel.o fs/files.o executables.o fs/fat.o fs/partition.o fs/fat_format.o video/visual.o video/font8x8_data.o video/font8x16_data.o video/fbcon.o video/gpu.o video/wfont.o video/prtscr.o kernel/serial.o kernel/idt.o kernel/isr.o kernel/pic.o kernel/irq.o kernel/ps2in.o kernel/smp.o kernel/ap_blob.o kernel/reboot.o kernel/xhci.o kernel/nvme.o kernel/interrupt_stack.o kernel/trace.o fs/drives.o fs/fsdrv.o kernel/env.o kernel/linkext.o kernel/wine.o kernel/vmem.o kernel/bootpak.o kernel/mm.o net/net.o net/httpd.o net/png.o net/wpa.o net/rtw89.o net/wifi.o net/r8125.o net/virtio_net.o kernel/module.o kernel/elf.o kernel/sched.o kernel/kthread.o kernel/kexports.o kernel/keymap.o kernel/clip.o kernel/vt.o kernel/version.o kernel/thermal.o $(CMD_O) shell/cmd_shutdown.o kernel/isr_stubs.o kernel/irq_stubs.o kernel/modrun.o
 
 
 kernel.bin: kernel.elf
@@ -428,7 +432,7 @@ disk2.img: os.img
 # ou o -serial file:./... apontava para o sitio errado e o log ficava vazio.
 
 run: os.img disk.img disk2.img
-	$(QEMU) -vga std -netdev user,id=n0,hostfwd=tcp::8797-:8797 -device ne2k_pci,netdev=n0 -boot order=c \
+	$(QEMU) -vga std -netdev user,id=n0,hostfwd=tcp::8797-:8797 -device $(NIC),netdev=n0 -boot order=c \
 	  -drive format=raw,file=os.img,if=ide,index=0 \
 	  -drive format=raw,file=disk.img,if=ide,index=1 \
 	  -drive format=raw,file=disk2.img,if=ide,index=2
@@ -456,7 +460,7 @@ run2: os.img disk2.img
 # Placa virtio-gpu (docs/GPU.md): o WIN usa D:\SODOS\DRV\VIRTGPU.DLL.
 # Sem o DLL, a mesma placa responde como Bochs VBE e tudo segue pela CPU.
 run-virtio: os.img disk.img disk2.img
-	$(QEMU) -device virtio-vga -netdev user,id=n0,hostfwd=tcp::8797-:8797 -device ne2k_pci,netdev=n0 -boot order=c \
+	$(QEMU) -device virtio-vga -netdev user,id=n0,hostfwd=tcp::8797-:8797 -device $(NIC),netdev=n0 -boot order=c \
 	  -drive format=raw,file=os.img,if=ide,index=0 \
 	  -drive format=raw,file=disk.img,if=ide,index=1 \
 	  -drive format=raw,file=disk2.img,if=ide,index=2
@@ -771,7 +775,7 @@ run-format: os.img disk.img disk2.img
 	@echo "dir"
 	@echo "=== Fim dos comandos ==="
 	@echo ""
-	$(QEMU) -vga std -netdev user,id=n0,hostfwd=tcp::8797-:8797 -device ne2k_pci,netdev=n0 -boot order=c \
+	$(QEMU) -vga std -netdev user,id=n0,hostfwd=tcp::8797-:8797 -device $(NIC),netdev=n0 -boot order=c \
 	  -drive format=raw,file=os.img,if=ide,index=0 \
 	  -drive format=raw,file=disk.img,if=ide,index=1 \
 	  -drive format=raw,file=disk2.img,if=ide,index=2
@@ -815,7 +819,7 @@ debug: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/pa
 # Debug: QEMU espera GDB na porta 1234 (-s) e inicia com CPU parada (-S).
 # No outro terminal: gdb -ex "target remote :1234" -ex "symbol-file kernel.elf" -ex "break kmain" -ex "c"
 run-gdb: os.img disk.img disk2.img
-	$(QEMU) -s -S -vga std -netdev user,id=n0,hostfwd=tcp::8797-:8797 -device ne2k_pci,netdev=n0 -boot order=c \
+	$(QEMU) -s -S -vga std -netdev user,id=n0,hostfwd=tcp::8797-:8797 -device $(NIC),netdev=n0 -boot order=c \
 	  -drive format=raw,file=os.img,if=ide,index=0 \
 	  -drive format=raw,file=disk.img,if=ide,index=1 \
 	  -drive format=raw,file=disk2.img,if=ide,index=2
@@ -826,7 +830,7 @@ run-log: os.img disk.img disk2.img
 	@echo "COM1 serial -> $(CURDIR)/qemu_serial.log"
 	@echo "QEMU trace  -> $(CURDIR)/qemu.log"
 	@rm -f "$(CURDIR)/qemu_serial.log" "$(CURDIR)/qemu.log"
-	$(QEMU) -vga std -netdev user,id=n0,hostfwd=tcp::8797-:8797 -device ne2k_pci,netdev=n0 -boot order=c \
+	$(QEMU) -vga std -netdev user,id=n0,hostfwd=tcp::8797-:8797 -device $(NIC),netdev=n0 -boot order=c \
 	  -drive format=raw,file=$(CURDIR)/os.img,if=ide,index=0 \
 	  -drive format=raw,file=$(CURDIR)/disk.img,if=ide,index=1 \
 	  -drive format=raw,file=$(CURDIR)/disk2.img,if=ide,index=2 \
@@ -840,7 +844,7 @@ run-log: os.img disk.img disk2.img
 run-log-stdio: os.img disk.img disk2.img
 	@echo "COM1 -> terminal + $(CURDIR)/qemu_serial.log (tee, linha a linha)"
 	@rm -f "$(CURDIR)/qemu_serial.log" "$(CURDIR)/qemu.log"
-	stdbuf -oL -eL $(QEMU) -vga std -netdev user,id=n0,hostfwd=tcp::8797-:8797 -device ne2k_pci,netdev=n0 -boot order=c \
+	stdbuf -oL -eL $(QEMU) -vga std -netdev user,id=n0,hostfwd=tcp::8797-:8797 -device $(NIC),netdev=n0 -boot order=c \
 	  -drive format=raw,file=$(CURDIR)/os.img,if=ide,index=0 \
 	  -drive format=raw,file=$(CURDIR)/disk.img,if=ide,index=1 \
 	  -drive format=raw,file=$(CURDIR)/disk2.img,if=ide,index=2 \
@@ -850,7 +854,7 @@ run-log-stdio: os.img disk.img disk2.img
 	  -serial stdio 2>&1 | stdbuf -oL tee "$(CURDIR)/qemu_serial.log"
 
 run-console: os.img disk.img disk2.img
-	$(QEMU) -display curses -vga std -netdev user,id=n0,hostfwd=tcp::8797-:8797 -device ne2k_pci,netdev=n0 -boot order=c \
+	$(QEMU) -display curses -vga std -netdev user,id=n0,hostfwd=tcp::8797-:8797 -device $(NIC),netdev=n0 -boot order=c \
 	  -drive format=raw,file=os.img,if=ide,index=0 \
 	  -drive format=raw,file=disk.img,if=ide,index=1 \
 	  -drive format=raw,file=disk2.img,if=ide,index=2

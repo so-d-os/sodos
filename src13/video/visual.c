@@ -8833,9 +8833,23 @@ static int at_res_alive(void) {
   return 1;
 }
 
+/* Tela em RAM (gfx_back, 32 bpp) com o quadro inteiro: ler dela e rapido.
+ * Ler a memoria de video, como get_pixel faz fora do quadro, e lentissimo na
+ * placa de verdade (GOP do notebook): o Alt+Tab levava segundos. */
+static int at_back_ok(void) { return gfx_bochs && gfx_back && !gfx_dbuf; }
+
+static void at_copy32(void* dst, const void* src, uint32_t n) {
+  __asm__ volatile ("rep movsl" : "+D"(dst), "+S"(src), "+c"(n) : : "memory");
+}
+
 /* Pixel do quadro em 0xRRGGBB (get_pixel devolve no formato do PIXA). */
 static uint32_t at_rgb(int x, int y) {
-  uint32_t v = get_pixel(x, y);
+  uint32_t v;
+  if (at_back_ok()) {
+    if (x < 0 || y < 0 || (uint32_t)x >= gfx_w || (uint32_t)y >= gfx_h) return 0;
+    return ((const uint32_t*)gfx_back)[(uint32_t)y * gfx_w + (uint32_t)x] & 0xFFFFFFu;
+  }
+  v = get_pixel(x, y);
   if (gfx_bochs) return (v & 0xFFu) << 16 | (v & 0xFF00u) | ((v >> 16) & 0xFFu);
   return gui_ega[v & 15u];
 }
@@ -8892,6 +8906,19 @@ static void at_snap(struct wm_win* wins, int title_h, int scale, uint32_t col_wi
                     uint32_t col_btn, uint32_t col_inactive) {
   int used[AT_MAX];
   int i, top = stack_top_z(wins);
+  /* Cada janela e desenhada sozinha na tela em RAM e reduzida; depois a tela
+   * em RAM volta como estava (nada disso chega a tela de verdade). */
+  uint32_t* save = 0;
+  uint32_t npx = gfx_w * gfx_h;
+  int old_off = gfx_offscreen;
+  uint32_t old_y0 = gfx_draw_y0;
+  uint32_t t0 = (uint32_t)irq_ticks();
+  if (at_back_ok()) save = (uint32_t*)umalloc_top(npx * 4u);
+  if (save) {
+    at_copy32(save, gfx_back, npx);
+    gfx_offscreen = 1;
+    gfx_draw_y0 = 0;
+  }
   at_free();
   for (i = 0; i < AT_MAX; i++) used[i] = 0;
   for (;;) {
@@ -8959,6 +8986,19 @@ static void at_snap(struct wm_win* wins, int title_h, int scale, uint32_t col_wi
     if (!s->pix) continue;
     at_grab(s, x, y, w, h);
     at_n++;
+  }
+  if (save) {
+    at_copy32(gfx_back, save, npx);
+    ufree(save);
+    gfx_offscreen = old_off;
+    gfx_draw_y0 = old_y0;
+  }
+  serial_puts(save ? "[alttab] miniaturas (RAM) ms=" : "[alttab] miniaturas (video) ms=");
+  {
+    char num[16];
+    int32_to_string((int32_t)((uint32_t)irq_ticks() - t0), num, (int)sizeof(num));
+    serial_puts(num);
+    serial_puts("\n");
   }
 }
 

@@ -14,6 +14,7 @@
 #include "irq.h"
 #include "env.h"
 #include "r8125.h"
+#include "virtio_net.h"
 
 #define SLIRP_IP   0x0A00020Fu
 #define SLIRP_MASK 0xFFFFFF00u
@@ -2831,7 +2832,11 @@ void net_init(void) {
   arp_valid = 0;
   tcp_state = ST_CLOSED;
   for (i = 0; i < 5; i++) g[i] = 0;
-  if (nic_find(&io) == 0 && ne_reset(io) == 0) {
+  /* virtio-net primeiro: no QEMU/KVM e DMA em lote, a NE2000 e E/S por
+   * porta (uma saida da VM a cada acesso). As duas presentes: fica a virtio. */
+  if (virtio_net_start() == 0) {
+    puts_k("Rede IPv4 10.0.2.15 (virtio-net). Comandos: ping, asm curl.asm\n");
+  } else if (nic_find(&io) == 0 && ne_reset(io) == 0) {
     nic_ok = 1;
     ne_ok = 1;
     gate_set(NET_MAGIC, fn_bits((void*)api_connect), fn_bits((void*)api_send),
