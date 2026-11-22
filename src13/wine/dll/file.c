@@ -598,30 +598,10 @@ static WINAPI BOOL ReadFile(HANDLE h, void* buf, DWORD n, DWORD* done, struct ov
   }
 }
 
-static WINAPI BOOL WriteFile(HANDLE h, const void* buf, DWORD n, DWORD* done, struct overlapped* ov) {
-  struct wobj* f;
+/* escrita num objeto de arquivo (WriteFile e a saida dos programas do
+ * SODOS em proc.c, quando o stdout herdado e um arquivo) */
+BOOL wfile_write(struct wobj* f, const void* buf, DWORD n, DWORD* done, struct overlapped* ov) {
   if (done) *done = 0;
-  if (h == H_STDOUT || h == H_STDERR) {
-    wcon_write((const char*)buf, n);
-    if (done) *done = n;
-    return 1;
-  }
-  f = wh_get(h, 0);
-  if (f && f->type == OBJ_SOCKET) return wsock_write(f, buf, n, done, ov);
-  if (f && f->type == OBJ_PIPE && wine_debug >= 2 && (h == wp()->std[1] || h == wp()->std[2])) {
-    /* stdout/stderr herdados de um pai (o Claude Code escreve o erro dele ai):
-     * copia no serial para dar para ler */
-    char t[240];
-    DWORD k = n < sizeof(t) - 1 ? n : (DWORD)sizeof(t) - 1, i;
-    for (i = 0; i < k; i++) t[i] = ((const char*)buf)[i] == '\n' ? ' ' : ((const char*)buf)[i];
-    t[k] = 0;
-    wlog(h == wp()->std[2] ? "stderr: " : "stdout: ", t);
-  }
-  if (f && f->type == OBJ_PIPE) return wpipe_write(f, buf, n, done, ov);
-  if (f && f->type == OBJ_MISC) {
-    if (done) *done = n;
-    return 1;
-  }
   if (!f || f->type != OBJ_FILE || !f->writable) {
     wset_lasterr(f ? ERROR_ACCESS_DENIED : ERROR_INVALID_HANDLE);
     return 0;
@@ -660,6 +640,33 @@ static WINAPI BOOL WriteFile(HANDLE h, const void* buf, DWORD n, DWORD* done, st
     }
     return 1;
   }
+}
+
+static WINAPI BOOL WriteFile(HANDLE h, const void* buf, DWORD n, DWORD* done, struct overlapped* ov) {
+  struct wobj* f;
+  if (done) *done = 0;
+  if (h == H_STDOUT || h == H_STDERR) {
+    wcon_write((const char*)buf, n);
+    if (done) *done = n;
+    return 1;
+  }
+  f = wh_get(h, 0);
+  if (f && f->type == OBJ_SOCKET) return wsock_write(f, buf, n, done, ov);
+  if (f && f->type == OBJ_PIPE && wine_debug >= 2 && (h == wp()->std[1] || h == wp()->std[2])) {
+    /* stdout/stderr herdados de um pai (o Claude Code escreve o erro dele ai):
+     * copia no serial para dar para ler */
+    char t[240];
+    DWORD k = n < sizeof(t) - 1 ? n : (DWORD)sizeof(t) - 1, i;
+    for (i = 0; i < k; i++) t[i] = ((const char*)buf)[i] == '\n' ? ' ' : ((const char*)buf)[i];
+    t[k] = 0;
+    wlog(h == wp()->std[2] ? "stderr: " : "stdout: ", t);
+  }
+  if (f && f->type == OBJ_PIPE) return wpipe_write(f, buf, n, done, ov);
+  if (f && f->type == OBJ_MISC) {
+    if (done) *done = n;
+    return 1;
+  }
+  return wfile_write(f, buf, n, done, ov);
 }
 
 static WINAPI BOOL WriteConsoleA(HANDLE h, const void* buf, DWORD n, DWORD* done, void* r) {

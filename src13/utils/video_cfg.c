@@ -30,9 +30,10 @@ static int g_menupos;   /* 0 esquerda, 1 centro, 2 direita */
 static int g_glass;     /* menu translucido */
 static int g_ia;        /* painel de IA na lateral */
 static unsigned g_bg;
-static char g_wall[32];          /* nome escolhido ("" = nenhum) */
+#define WNAME 256 /* nome longo inteiro (k_dir_long); era 32 */
+static char g_wall[WNAME];       /* nome escolhido ("" = nenhum) */
 static int g_wall_sel = -1;
-static char g_names[WALLS_MAX][32];
+static char g_names[WALLS_MAX][WNAME];
 static int g_n;
 static unsigned char* g_rgba;    /* imagem decodificada para o preview */
 static int g_rw, g_rh;
@@ -76,17 +77,17 @@ static int is_img_name(const char* n) {
 }
 
 static void scan_walls(void) {
-  struct k_dirent e[64];
+  static struct k_direntl e[64];
   int i, n;
   g_n = 0;
-  n = k_dir(WALLS_DIR, e, 64);
+  n = k_dir_long(WALLS_DIR, e, 64);
   if (n < 0) n = 0;
   for (i = 0; i < n && g_n < WALLS_MAX; i++) {
     if (e[i].dir) continue;
     if (!is_img_name(e[i].name)) continue;
     {
       int k = 0;
-      while (e[i].name[k] && k < 31) {
+      while (e[i].name[k] && k < WNAME - 1) {
         g_names[g_n][k] = e[i].name[k];
         k++;
       }
@@ -111,7 +112,7 @@ static void free_wall(void) {
 
 /* Carrega o papel de parede i (ou nenhum, i < 0) e aplica no kernel. */
 static void pick_wall(int i) {
-  char path[96];
+  char path[400];
   FILE* f;
   unsigned char* data;
   long n;
@@ -135,7 +136,7 @@ static void pick_wall(int i) {
     path[k++] = '\\';
     {
       int j = 0;
-      while (g_names[i][j] && k < 95) path[k++] = g_names[i][j++];
+      while (g_names[i][j] && k < (int)sizeof(path) - 1) path[k++] = g_names[i][j++];
     }
     path[k] = 0;
   }
@@ -178,7 +179,7 @@ static void pick_wall(int i) {
   g_rh = im.h;
   {
     int k = 0;
-    while (g_names[i][k] && k < 31) {
+    while (g_names[i][k] && k < WNAME - 1) {
       g_wall[k] = g_names[i][k];
       k++;
     }
@@ -190,7 +191,7 @@ static void pick_wall(int i) {
 
 /* Grava o estado atual em VIDEO.CFG e o papel de parede em WALL.RAW. */
 static void apply_all(void) {
-  char buf[128];
+  char buf[512]; /* wall= pode ter ate 255 */
   FILE* f;
   int n = 0;
 
@@ -352,7 +353,7 @@ int main(void) {
     /* le o cfg para o estado inicial da interface */
     FILE* f = fopen(CFG_PATH, "rb");
     if (f) {
-      char b[128];
+      char b[512];
       size_t n = fread(b, 1, sizeof(b) - 1, f);
       fclose(f);
       b[n] = 0;
@@ -374,7 +375,7 @@ int main(void) {
                      p[4] == '=') {
             int k = 0;
             p += 5;
-            while (*p && *p != '\n' && *p != '\r' && k < 31) g_wall[k++] = *p++;
+            while (*p && *p != '\n' && *p != '\r' && k < WNAME - 1) g_wall[k++] = *p++;
             g_wall[k] = 0;
             p--;
           } else if (p[0] == 'b' && p[1] == 'g' && p[2] == '=') {

@@ -19,5 +19,13 @@ void k_net_tap_close(void);
 int k_net_tap_recv(void* buf, int cap);
 int k_net_tap_send(const void* ip, int len);
 void k_net_addr(unsigned* ip, unsigned* mask, unsigned* gw, unsigned* dns);
+/* Memoria sem dono (sobrevive ao programa); a caixa do WSL fica nela. */
+void* k_malloc_shared(unsigned n);
+void k_free_shared(void* p);
+/* Registro de nomes do kernel: o servico publica, o cliente acha. */
+int k_svc_set(const char* name, void* p);
+void* k_svc_get(const char* name);
+/* 1 se este programa esta numa tela de texto ao fundo. */
+int k_vt_bg(void);
 
 #endif

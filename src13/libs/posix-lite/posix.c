@@ -72,11 +72,26 @@ struct fd_ent {
   struct fobj* f;
 };
 
+/* Pasta aberta: os nomes LONGOS inteiros (k_dir_long, ate 255), um atras do
+ * outro com NUL, mais o tipo de cada um. Antes era o k_dirlist num buffer de
+ * 16 KB com nomes cortados em 31: nome maior virava o apelido 8.3 (NOME~1) e
+ * uma pasta grande (cache2/entries do Firefox, SHA1 de 40) vinha pela metade.
+ *
+ * cur: a struct dirent do dirent.h e { d_name[32]; d_type } e os programas
+ * ja compilados leem o d_type no byte 32. O nome vai inteiro a partir do byte
+ * 0; com ate 31 caracteres o byte 32 continua sendo o d_type (igual a antes).
+ * Com mais, quem precisa do tipo usa __so_readdir_long (o readdir64 do port). */
 struct __so_DIR {
   int used;
-  int pos;
-  char list[LIST_MAX];
-  struct dirent cur;
+  int pos;  /* proxima entrada */
+  int n;
+  char* names;
+  int* offs;
+  unsigned char* types;
+  union {
+    struct dirent d;
+    char raw[256 + 8]; /* d_name[256] + d_type: igual ao dirent.h novo */
+  } cur;
 };
 
 static struct fd_ent fds[FD_MAX];
@@ -252,7 +267,7 @@ __export int chdir(const char* path) {
 
 __export char* getcwd(char* buf, size_t size) {
   PX_GUARD;
-  char tmp[64];
+  char tmp[PATH_MAX]; /* era 64: pasta atual com nome longo saia cortada */
   size_t n;
   k_pwd(tmp, (int)sizeof(tmp));
   n = strlen(tmp);
@@ -424,7 +439,8 @@ __export long sysconf(int name) {
 
 /* data/hora FAT da entrada -> time_t (0 se nao tiver) */
 static time_t file_mtime(const char* full) {
-  static struct k_dirent ents[256];
+  /* nomes longos: com o k_dirent um nome de mais de 31 nunca batia */
+  static struct k_direntl ents[256];
   char dir[PATH_MAX];
   const char* name;
   int n, i, k;
@@ -437,7 +453,7 @@ static time_t file_mtime(const char* full) {
   if (!*name) return 0;
   dir[k] = 0;
   if (k == 0) k_pwd(dir, PATH_MAX);
-  n = k_dir(dir, ents, 256);
+  n = k_dir_long(dir, ents, 256);
   for (i = 0; i < n; i++) {
     if (strcasecmp(ents[i].name, name) == 0) {
       struct tm tm;
@@ -1003,6 +1019,58 @@ __export int stat(const char* path, struct stat* st) {
   return 0;
 }
 
+static void dir_free(struct __so_DIR* d) {
+  free(d->names);
+  free(d->offs);
+  free(d->types);
+  d->names = 0;
+  d->offs = 0;
+  d->types = 0;
+  d->n = d->pos = 0;
+}
+
+/* Le a pasta inteira com os nomes longos. Comeca com 512 entradas e cresce
+ * ate caber (pasta FAT vai ate 65536). Quantos; <0 se nao e pasta. */
+static int dir_load(const char* full, struct __so_DIR* d) {
+  struct k_direntl* e = 0;
+  int max = 512, n, i, total = 0, at = 0;
+  for (;;) {
+    e = (struct k_direntl*)malloc(sizeof(*e) * (size_t)max);
+    if (!e) return -1;
+    n = k_dir_long(full, e, max);
+    if (n < max || max >= 65536) break;
+    free(e);
+    max *= 4;
+  }
+  if (n < 0) {
+    free(e);
+    return n;
+  }
+  for (i = 0; i < n; i++) {
+    e[i].name[255] = 0;
+    total += (int)strlen(e[i].name) + 1;
+  }
+  d->names = (char*)malloc((size_t)total + 1);
+  d->offs = (int*)malloc(sizeof(int) * (size_t)(n + 1));
+  d->types = (unsigned char*)malloc((size_t)n + 1);
+  if (!d->names || !d->offs || !d->types) {
+    free(e);
+    dir_free(d);
+    return -1;
+  }
+  for (i = 0; i < n; i++) {
+    int len = (int)strlen(e[i].name);
+    d->offs[i] = at;
+    memcpy(d->names + at, e[i].name, (size_t)len + 1);
+    at += len + 1;
+    d->types[i] = e[i].dir ? DT_DIR : DT_REG;
+  }
+  free(e);
+  d->n = n;
+  d->pos = 0;
+  return n;
+}
+
 __export DIR* opendir(const char* path) {
   PX_GUARD;
   char full[PATH_MAX];
@@ -1021,7 +1089,7 @@ __export DIR* opendir(const char* path) {
   }
   d = &dirs[i];
   memset(d, 0, sizeof(*d));
-  n = k_dirlist(full, d->list, LIST_MAX);
+  n = dir_load(full, d);
   if (n < 0) {
     /* ENOTDIR so quando existe e e arquivo. Pasta que nao existe e ENOENT:
      * o Firefox (nsLocalFile -> NS_ERROR_FILE_NOT_FOUND) aceita isso, mas
@@ -1036,33 +1104,37 @@ __export DIR* opendir(const char* path) {
   return d;
 }
 
-__export struct dirent* readdir(DIR* dp) {
+/* Proximo nome inteiro (ate 255) e o tipo (DT_DIR/DT_REG); 0 no fim. O
+ * readdir64 do port do Firefox usa este: o d_type da struct dirent so vale
+ * para nomes de ate 31. */
+__export const char* __so_readdir_long(DIR* dp, unsigned char* type) {
   PX_GUARD;
   struct __so_DIR* d = (struct __so_DIR*)dp;
-  int i = 0;
-  char* p;
   if (!d || !d->used) {
     errno = EBADF;
     return 0;
   }
-  p = d->list + d->pos;
-  while (*p == '\n') {
-    p++;
-    d->pos++;
-  }
-  if (!*p) return 0;
+  if (d->pos >= d->n) return 0;
+  if (type) *type = d->types[d->pos];
+  return d->names + d->offs[d->pos++];
+}
+
+__export struct dirent* readdir(DIR* dp) {
+  PX_GUARD;
+  struct __so_DIR* d = (struct __so_DIR*)dp;
+  unsigned char t = DT_UNKNOWN;
+  const char* nm = __so_readdir_long(dp, &t);
+  size_t len;
+  if (!nm) return 0;
   memset(&d->cur, 0, sizeof(d->cur));
-  while (*p && *p != '\n' && i < 31) d->cur.d_name[i++] = *p++;
-  d->cur.d_name[i] = 0;
-  if (i > 0 && d->cur.d_name[i - 1] == '\\') {
-    d->cur.d_name[i - 1] = 0;
-    d->cur.d_type = DT_DIR;
-  } else {
-    d->cur.d_type = DT_REG;
-  }
-  if (*p == '\n') p++;
-  d->pos = (int)(p - d->list);
-  return &d->cur;
+  len = strlen(nm);
+  if (len > 255) len = 255;
+  memcpy(d->cur.raw, nm, len);
+  /* byte 256: d_type do dirent.h novo (d_name[256]); byte 32: o do antigo
+   * (d_name[32]), so quando o nome cabe nele */
+  d->cur.raw[256] = (char)t;
+  if (len <= 31) d->cur.raw[32] = (char)t;
+  return &d->cur.d;
 }
 
 __export void rewinddir(DIR* dp) {
@@ -1078,6 +1150,7 @@ __export int closedir(DIR* dp) {
     errno = EBADF;
     return -1;
   }
+  dir_free(d);
   d->used = 0;
   return 0;
 }

@@ -400,7 +400,37 @@ static void park_if_exiting(void) {
 }
 
 static void* wait_caller; /* so para o registro de espera longa */
+static DWORD wwait_in(int n, struct wobj** objs, int all, DWORD timeout_ms);
+static const char* wobj_kind(const struct wobj* o) {
+  switch (o ? o->type : 0) {
+    case OBJ_EVENT: return "evento";
+    case OBJ_THREAD: return "fim de thread";
+    case OBJ_PROCESS: return "fim de processo";
+    case OBJ_MUTEX: return "mutex";
+    case OBJ_SEM: return "semaforo";
+    case OBJ_TIMER: return "timer";
+    case OBJ_IOCP: return "porta de conclusao (objeto)";
+    case OBJ_FILE: return "arquivo";
+    case OBJ_SOCKET: return "soquete";
+    case OBJ_PIPE: return "pipe";
+    default: return "objeto";
+  }
+}
+static DWORD wwait_from(int n, struct wobj** objs, int all, DWORD timeout_ms, void* caller) {
+  DWORD r;
+  /* espera curta (0 ms) nao bloqueia: nao marca */
+  if (!timeout_ms) return wwait_in(n, objs, all, timeout_ms);
+  wwait_begin(n > 1 ? (all ? "varios objetos (todos)" : "varios objetos (qualquer)") : wobj_kind(objs[0]),
+              objs[0], objs[0] && objs[0]->type == OBJ_MUTEX ? (uint64_t)objs[0]->owner : 0,
+              objs[0] && objs[0]->type == OBJ_PROCESS ? objs[0]->path : 0, caller);
+  r = wwait_in(n, objs, all, timeout_ms);
+  wwait_end();
+  return r;
+}
 DWORD wwait(int n, struct wobj** objs, int all, DWORD timeout_ms) {
+  return wwait_from(n, objs, all, timeout_ms, __builtin_return_address(0));
+}
+static DWORD wwait_in(int n, struct wobj** objs, int all, DWORD timeout_ms) {
   struct wproc* p = wp();
   uintptr_t me = (uintptr_t)wteb();
   uint64_t t0 = wnow_ms();
@@ -469,11 +499,10 @@ DWORD wwait(int n, struct wobj** objs, int all, DWORD timeout_ms) {
   }
 }
 
-static WINAPI DWORD WaitForMultipleObjectsEx(DWORD n, const HANDLE* hs, BOOL all, DWORD ms, BOOL alert) {
+static DWORD wfmo(DWORD n, const HANDLE* hs, BOOL all, DWORD ms, void* caller) {
   struct wobj* objs[64];
   DWORD i;
-  (void)alert;
-  if (wine_debug >= 2) wait_caller = __builtin_return_address(0);
+  if (wine_debug >= 2) wait_caller = caller;
   if (n > 64 || !n) {
     wset_lasterr(ERROR_INVALID_PARAMETER);
     return WAIT_FAILED;
@@ -491,15 +520,20 @@ static WINAPI DWORD WaitForMultipleObjectsEx(DWORD n, const HANDLE* hs, BOOL all
       return WAIT_FAILED;
     }
   }
-  return wwait((int)n, objs, all, ms);
+  return wwait_from((int)n, objs, all, ms, caller);
+}
+static WINAPI DWORD WaitForMultipleObjectsEx(DWORD n, const HANDLE* hs, BOOL all, DWORD ms, BOOL alert) {
+  (void)alert;
+  return wfmo(n, hs, all, ms, __builtin_return_address(0));
 }
 static WINAPI DWORD WaitForMultipleObjects(DWORD n, const HANDLE* hs, BOOL all, DWORD ms) {
-  return WaitForMultipleObjectsEx(n, hs, all, ms, 0);
+  return wfmo(n, hs, all, ms, __builtin_return_address(0));
 }
 static WINAPI DWORD WaitForSingleObjectEx(HANDLE h, DWORD ms, BOOL alert) {
-  return WaitForMultipleObjectsEx(1, &h, 0, ms, alert);
+  (void)alert;
+  return wfmo(1, &h, 0, ms, __builtin_return_address(0));
 }
-static WINAPI DWORD WaitForSingleObject(HANDLE h, DWORD ms) { return WaitForMultipleObjectsEx(1, &h, 0, ms, 0); }
+static WINAPI DWORD WaitForSingleObject(HANDLE h, DWORD ms) { return wfmo(1, &h, 0, ms, __builtin_return_address(0)); }
 
 static volatile int sleep_word;
 static WINAPI void Sleep(DWORD ms) {
@@ -508,12 +542,14 @@ static WINAPI void Sleep(DWORD ms) {
     k_thread_yield();
     return;
   }
+  if (ms >= 100) wwait_begin("Sleep", (void*)(uintptr_t)ms, 0, 0, __builtin_return_address(0));
   for (;;) {
     uint64_t el = wnow_ms() - t0;
     if (el >= ms) break;
     k_futex_wait(&sleep_word, 0, (int)(ms - el));
     if (wp()->exit_req) park_if_exiting();
   }
+  if (ms >= 100) wwait_end();
 }
 static WINAPI DWORD SleepEx(DWORD ms, BOOL a) {
   (void)a;
@@ -526,7 +562,16 @@ static WINAPI BOOL SwitchToThread(void) {
 }
 
 /* WaitOnAddress / WakeByAddress: o futex do kernel, direto. */
+static BOOL woa_in(volatile void* addr, void* cmp, size_t size, DWORD ms);
 static WINAPI BOOL WaitOnAddress(volatile void* addr, void* cmp, size_t size, DWORD ms) {
+  BOOL r;
+  if (!ms) return woa_in(addr, cmp, size, ms);
+  wwait_begin("WaitOnAddress", (const void*)addr, 0, 0, __builtin_return_address(0));
+  r = woa_in(addr, cmp, size, ms);
+  wwait_end();
+  return r;
+}
+static BOOL woa_in(volatile void* addr, void* cmp, size_t size, DWORD ms) {
   uint64_t t0 = wnow_ms();
   for (;;) {
     if (memcmp((const void*)addr, cmp, size) != 0) return 1;
@@ -818,13 +863,24 @@ struct ov_entry {
   uintptr_t internal;
   DWORD bytes;
 };
+static BOOL gqcs_in(HANDLE h, struct ov_entry* ents, DWORD max, DWORD* got, DWORD ms, BOOL alert, void* caller);
+static BOOL gqcs(HANDLE h, struct ov_entry* ents, DWORD max, DWORD* got, DWORD ms, BOOL alert, void* caller) {
+  BOOL r;
+  if (!ms) return gqcs_in(h, ents, max, got, ms, alert, caller);
+  wwait_begin("porta de conclusao (IOCP)", h, 0, 0, caller);
+  r = gqcs_in(h, ents, max, got, ms, alert, caller);
+  wwait_end();
+  return r;
+}
 static WINAPI BOOL GetQueuedCompletionStatusEx(HANDLE h, struct ov_entry* ents, DWORD max, DWORD* got, DWORD ms,
                                                BOOL alert) {
+  return gqcs(h, ents, max, got, ms, alert, __builtin_return_address(0));
+}
+static BOOL gqcs_in(HANDLE h, struct ov_entry* ents, DWORD max, DWORD* got, DWORD ms, BOOL alert, void* caller) {
   struct wproc* p = wp();
   struct wobj* port = wh_get(h, OBJ_IOCP);
   uint64_t t0 = wnow_ms();
   int noted = 0;
-  void* caller = __builtin_return_address(0);
   (void)alert;
   int b;
   if (!port) {
@@ -885,7 +941,7 @@ static WINAPI BOOL GetQueuedCompletionStatusEx(HANDLE h, struct ov_entry* ents, 
 static WINAPI BOOL GetQueuedCompletionStatus(HANDLE h, DWORD* bytes, uintptr_t* key, void** ov, DWORD ms) {
   struct ov_entry e;
   DWORD got = 0;
-  if (!GetQueuedCompletionStatusEx(h, &e, 1, &got, ms, 0) || !got) {
+  if (!gqcs(h, &e, 1, &got, ms, 0, __builtin_return_address(0)) || !got) {
     if (ov) *ov = 0;
     return 0;
   }
@@ -897,6 +953,7 @@ static WINAPI BOOL GetQueuedCompletionStatus(HANDLE h, DWORD* bytes, uintptr_t* 
 
 /* ---------- threads ---------- */
 static void thread_finish(struct wobj* t, DWORD code) {
+  wtrack_exit(t);
   wlock();
   t->exited = 1;
   t->exit_code = code;
@@ -988,6 +1045,7 @@ static struct wobj* thread_new(void* start, void* param, size_t stack, int suspe
   *(uint64_t*)(teb + TEB_PEB) = (uint64_t)(uintptr_t)p;
   *(struct wobj**)(teb + TEB_WTHREAD) = t;
   t->teb = teb;
+  wtrack_thread(t); /* registro de esperas (util.c) */
   t->start = start;
   t->param = param;
   t->suspend = suspended ? 1 : 0;
@@ -1059,7 +1117,15 @@ static WINAPI BOOL GetExitCodeThread(HANDLE h, DWORD* code) {
 static WINAPI DWORD ResumeThread(HANDLE h) {
   struct wobj* t = wh_get(h, OBJ_THREAD);
   int prev;
-  if (!t) return (DWORD)-1;
+  if (!t) {
+    /* hThread do CreateProcess (proc.c) e um objeto de processo: o filho ja
+     * roda, mas o libuv (Bun/Claude Code) cria com CREATE_SUSPENDED e trata
+     * -1 aqui como falha do uv_spawn (EUNKNOWN): diz "estava suspensa 1 vez" */
+    struct wobj* o = wh_get(h, 0);
+    if (o && o->type == OBJ_PROCESS) return 1;
+    wset_lasterr(ERROR_INVALID_HANDLE);
+    return (DWORD)-1;
+  }
   prev = t->suspend;
   if (prev > 0) {
     t->suspend = prev - 1;

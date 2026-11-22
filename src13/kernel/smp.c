@@ -180,15 +180,20 @@ static int ipi(uint32_t id, uint32_t cmd) {
   return rc;
 }
 
-/* Todas menos esta (shorthand 11). */
+/* Todas as CPUs ligadas pelo SODOS menos esta, uma IPI por destino.
+ * Antes era o shorthand 11 ("todas menos esta"), que chega tambem as CPUs
+ * que o SODOS nao liga (SMP_MAX 8; o Ryzen 7 5825U tem 16 threads, as 8
+ * de cima esperando SIPI). No notebook a primeira IPI de TLB depois do
+ * smp_init (pci_mmio_map do NVMe) parava o SMU: Tctl e RAPL congelados,
+ * sem controle de temperatura/ventoinha, PC desligando/resetando. */
 static void ipi_others(uint32_t cmd) {
+  uint32_t me = lapic_rd(0x20) >> 24;
   int i;
-  uint64_t fl;
-  __asm__ volatile ("pushfq; pop %0; cli" : "=r"(fl) :: "memory");
-  lapic_wr(0x300, 0x000C0000u | cmd);
-  for (i = 0; i < 100000; i++)
-    if (!(lapic_rd(0x300) & (1u << 12))) break;
-  if (fl & 0x200u) __asm__ volatile ("sti" ::: "memory");
+  for (i = 0; i < ncpu && i < SMP_MAX; i++) {
+    if (ids[i] == me) continue;
+    if (i > 0 && !ap_up[i]) continue;
+    (void)ipi(ids[i], cmd);
+  }
 }
 
 void smp_send_ipi(int cpu, uint8_t vec) {

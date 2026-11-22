@@ -284,6 +284,7 @@ typedef void (WINAPI * lock_fn)(void*);
 static BOOL cv_wait(volatile int* cv, void* lock, const char* rel, const char* acq, DWORD ms, void* caller) {
   lock_fn r = (lock_fn)builtin_lookup(rel), a = (lock_fn)builtin_lookup(acq);
   int seq = *cv, rc;
+  if (ms) wwait_begin("variavel de condicao", (const void*)cv, 0, 0, caller);
   if (r) r(lock);
   if (wine_debug >= 2 && ms == INFINITE) {
     rc = k_futex_wait(cv, seq, 5000);
@@ -294,6 +295,7 @@ static BOOL cv_wait(volatile int* cv, void* lock, const char* rel, const char* a
   } else {
     rc = k_futex_wait(cv, seq, ms == INFINITE ? -1 : (int)ms);
   }
+  if (ms) wwait_end();
   if (a) a(lock);
   /* INFINITE nunca devolve FALSE (o Chromium chama abort() se devolver);
    * acordar sem sinal e permitido no Windows tambem */
@@ -316,14 +318,21 @@ void wsrw_wait(volatile intptr_t* v, intptr_t seen); /* k32.c */
 void wsrw_wake(volatile intptr_t* v);
 static WINAPI void AcquireSRWLockShared(void** l) {
   volatile intptr_t* v = (volatile intptr_t*)l;
-  int spins = 0;
+  int spins = 0, marked = 0;
   for (;;) {
     intptr_t cur = *v;
-    if (cur >= 0 && __sync_val_compare_and_swap(v, cur, cur + 1) == cur) return;
+    if (cur >= 0 && __sync_val_compare_and_swap(v, cur, cur + 1) == cur) {
+      if (marked) wwait_end();
+      return;
+    }
     if (cur >= 0) continue; /* outro leitor mexeu: tenta de novo */
     if (++spins < 64) {
       __builtin_ia32_pause();
       continue;
+    }
+    if (!marked) {
+      marked = 1;
+      wwait_begin("SRW compartilhado", l, 0, 0, __builtin_return_address(0));
     }
     wsrw_wait(v, cur);
   }
@@ -420,21 +429,36 @@ static WINAPI long SHGetSpecialFolderLocation(HANDLE w, int csidl, void** out) {
 static WINAPI void ILFree(void* p) {
   if (p) k_free(p);
 }
+/* Nomes longos inteiros (k_dir_long) no heap: 128 k_direntl na pilha seriam
+ * 34 KB por nivel. Lista de novo ate esvaziar (antes parava em 128). */
 static void delete_tree(const char* path) {
-  struct k_dirent ents[128];
-  int n = k_dir(path, ents, 128), i;
+  struct k_direntl* ents = (struct k_direntl*)k_malloc(sizeof(struct k_direntl) * 128);
+  int n, i, rounds = 0, gone;
+  if (!ents) return;
+  n = k_dir_long(path, ents, 128);
   if (n < 0) {
+    k_free(ents);
     k_fdelete(path);
     return;
   }
-  for (i = 0; i < n; i++) {
-    char sub[300];
-    strcpy(sub, path);
-    strcat(sub, "\\");
-    strncat(sub, ents[i].name, sizeof(sub) - strlen(sub) - 1);
-    if (ents[i].dir) delete_tree(sub);
-    else k_fdelete(sub);
+  while (n > 0 && rounds++ < 512) {
+    gone = 0;
+    for (i = 0; i < n; i++) {
+      char sub[300];
+      strcpy(sub, path);
+      strcat(sub, "\\");
+      strncat(sub, ents[i].name, sizeof(sub) - strlen(sub) - 1);
+      if (ents[i].dir) {
+        delete_tree(sub);
+        gone++;
+      } else if (k_fdelete(sub) >= 0) {
+        gone++;
+      }
+    }
+    if (!gone) break;
+    n = k_dir_long(path, ents, 128);
   }
+  k_free(ents);
   k_rmdir(path);
 }
 struct shfileop {

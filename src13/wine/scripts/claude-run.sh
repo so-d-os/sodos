@@ -34,7 +34,12 @@ if ! curl -s -m 2 -o /dev/null http://127.0.0.1:8810/WINE.DLL; then
 fi
 
 # VM no ar?
-if ! curl -s -m 3 -o /dev/null "http://127.0.0.1:$PORT/win"; then
+# 3 tentativas de 15 s: a API responde devagar com a VM ocupada (WSL, Claude)
+up=0
+for t in 1 2 3; do
+  curl -s -m 15 -o /dev/null "http://127.0.0.1:$PORT/win" && { up=1; break; }
+done
+if [ "$up" = 0 ]; then
   KEEP=1 sh wine/scripts/vm.sh start win || exit 1
   rm -f "$V/wine.md5"
 fi

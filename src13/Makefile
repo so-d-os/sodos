@@ -639,6 +639,10 @@ disk-files: $(DISK)
 	@if ! mdir -i $(DISK)@@512 ::/WINE >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/WINE; fi
 	@if ! mdir -i $(DISK)@@512 ::/WINE/BIN >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/WINE/BIN; fi
 	@mcopy -o -i $(DISK)@@512 c_compiler/out/GIT.EXE ::/WINE/BIN/GIT.EXE
+	@# WSL: o mesmo programa como D:\WSL.EXE e como o bash do Claude Code (BASH.EXE
+	@# -c ... roda no Linux da VM; SET WSL=1). A imagem D:\WSL\*.IMG (2 GB) vai a mao.
+	@if [ -f wsl/build/WSL.EXE ]; then mcopy -o -i $(DISK)@@512 wsl/build/WSL.EXE ::/WSL.EXE; \
+	  mcopy -o -i $(DISK)@@512 wsl/build/WSL.EXE ::/WINE/BIN/BASH.EXE; fi
 	@# Firmware das placas (firmware/README.txt): o AMDSMC.DLL le \SODOS\FW\P10KSMC.BIN.
 	@if ! mdir -i $(DISK)@@512 ::/SODOS/FW >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS/FW; fi
 	@mcopy -o -i $(DISK)@@512 firmware/amdgpu/polaris10_k_smc.bin ::/SODOS/FW/P10KSMC.BIN

@@ -152,7 +152,7 @@ static int inside(const char* a, const char* b) {
 /* Lista uma pasta inteira (cresce o buffer ate caber). */
 class Listing {
 public:
-  struct k_dirent* ent;
+  struct k_direntl* ent;
   int n;
 
   Listing(void) {
@@ -166,17 +166,17 @@ public:
     int cap = 256;
     for (;;) {
       if (ent) free(ent);
-      ent = (struct k_dirent*)malloc(sizeof(struct k_dirent) * (size_t)cap);
+      ent = (struct k_direntl*)malloc(sizeof(struct k_direntl) * (size_t)cap);
       if (!ent) {
         n = -1;
         return -1;
       }
-      n = k_dir(path, ent, cap);
+      n = k_dir_long(path, ent, cap); /* nomes inteiros: antes copiava NOME~1 */
       if (n < cap || cap >= 65536) return n;
       cap = cap * 2;
     }
   }
-  struct k_dirent* find(const char* name) {
+  struct k_direntl* find(const char* name) {
     int i, j;
     for (i = 0; i < n; i++) {
       for (j = 0; ent[i].name[j] && name[j]; j++)
@@ -193,10 +193,10 @@ static int is_dir(const char* path) {
 }
 
 /* Entrada de um arquivo (tamanho e data) lendo a pasta dele. */
-static int stat_file(const char* full, struct k_dirent* out) {
+static int stat_file(const char* full, struct k_direntl* out) {
   char dir[XPATH], name[XPATH];
   Listing l;
-  struct k_dirent* e;
+  struct k_direntl* e;
   split_path(full, dir, name);
   if (!name[0] || l.load(dir) < 0) return -1;
   e = l.find(name);
@@ -205,7 +205,7 @@ static int stat_file(const char* full, struct k_dirent* out) {
   return 0;
 }
 
-static unsigned stamp(struct k_dirent* e) {
+static unsigned stamp(struct k_direntl* e) {
   return ((unsigned)e->date << 16) | e->time;
 }
 
@@ -277,8 +277,8 @@ public:
     return 0;
   }
 
-  void copy_file(const char* src, const char* dst, struct k_dirent* se) {
-    struct k_dirent de;
+  void copy_file(const char* src, const char* dst, struct k_direntl* se) {
+    struct k_direntl de;
     int exists = stat_file(dst, &de) == 0;
     int size, got;
     char* buf;
@@ -342,7 +342,7 @@ public:
       made = 1;
     }
     for (i = 0; i < l.n && !stop; i++) {
-      struct k_dirent* e = &l.ent[i];
+      struct k_direntl* e = &l.ent[i];
       if (e->dir) continue;
       if (!wild_match(mask, e->name)) continue;
       if (path_join(a, src_dir, e->name) < 0 || path_join(b, dst_dir, e->name) < 0) {
@@ -358,7 +358,7 @@ public:
     }
     if (!sub) return found;
     for (i = 0; i < l.n && !stop; i++) {
-      struct k_dirent* e = &l.ent[i];
+      struct k_direntl* e = &l.ent[i];
       if (!e->dir) continue;
       if (path_join(a, src_dir, e->name) < 0 || path_join(b, dst_dir, e->name) < 0) {
         fail("caminho longo demais", e->name);
@@ -470,7 +470,7 @@ int main(int argc, char** argv) {
   /* um arquivo so, para um destino que nao e pasta: copia com o novo nome */
   if (!has_wild(mask) && strcmp(mask, "*") != 0 && !x.sub && !x.as_dir && !is_dir(dst) &&
       arg_dst && arg_dst[strlen(arg_dst) - 1] != '\\' && arg_dst[strlen(arg_dst) - 1] != '/') {
-    struct k_dirent se;
+    struct k_direntl se;
     char d2[XPATH], n2[XPATH];
     if (stat_file(src, &se) < 0 || se.dir) {
       printf("XCOPY: arquivo nao encontrado: %s\n", src);

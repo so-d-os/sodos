@@ -35,3 +35,5 @@ struct k_hwstat {
 void thermal_start(void);
 /* Copia o estado; a temperatura da CPU e lida na hora. 0 ok, -1 sem dados. */
 int thermal_stat(struct k_hwstat* out);
+/* Sonda do SMU numa etapa do boot ("[smu] etapa: energia +N"). */
+void smu_mark(const char* stage);

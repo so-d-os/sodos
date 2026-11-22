@@ -85,6 +85,8 @@ int env_set(const char* name, const char* val) {
    * primeiro EXE do Windows. */
   if (gen != g && name_is(name, "WINE")) wine_env_changed();
   if (gen != g && name_is(name, "DISKSYNC")) vt_service_check();
+  if (gen != g && name_is(name, "WSL")) vt_wsl_check();
+  if (gen != g && name_is(name, "SYSTEMLOG")) syslog_service_check();
   if (gen != g && name_is(name, "HIMEM")) {
     /* % da RAM total que programas de 64 bits podem pegar acima de 4 GB. */
     uint32_t pct = 0;

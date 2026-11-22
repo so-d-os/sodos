@@ -238,6 +238,7 @@ static int start(int argc, char** argv) {
     k_futex_wait(&p->exit_req, 0, 20);
   }
   if (!is_child) wprof_save(1);
+  wtrack_proc_exit(p); /* registro de esperas: as threads deste processo saem */
   wcon_flush();
   wgui_proc_exit();
   wlogx("ExitProcess ", (uint32_t)p->exit_code);

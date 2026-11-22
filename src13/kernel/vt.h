@@ -32,6 +32,15 @@ void vt_init(void);
 int vt_bg(void);
 /* Scancode (make, sem E0) com Ctrl apertado: indice da tela, ou -1. */
 int vt_hotkey(uint8_t sc);
+/* k_kbd_raw: o teclado cru (Ctrl+C vai ao programa) e de cada tela e vale
+ * so enquanto ela esta visivel (o WSL ao fundo no Ctrl+F10 nao prende o
+ * Ctrl+C das outras telas). */
+void vt_kbd_raw(int on);
+/* SET WSL=1: a VM do WSL (WSL.EXE run --service) sobe na tela Ctrl+F10. */
+void vt_wsl_check(void);
+/* SET SYSTEMLOG=1: o log do Ctrl+F12 vai para \LOG\CONSOLE.LOG a cada 5 min. */
+void syslog_service_check(void);
+void syslog_save_now(void);   /* REBOOT: grava ja se SYSTEMLOG=1 */
 /* Mostra a tela i e passa a ela o teclado. Volta quando esta tela for
  * mostrada de novo (ou, numa tela de texto, quando ela ganhar a vez ao fundo). */
 void vt_select(int i);

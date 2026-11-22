@@ -39,7 +39,8 @@ struct vq {
 
 #define VD_BLK 0
 #define VD_NET 1
-#define NVDEV 2
+#define VD_9P 2  /* as unidades do SODOS (p9.c), tag "sodos" */
+#define NVDEV 3
 
 /* Um dispositivo virtio-pci moderno: config PCI, BAR0 de 16 KB (common em
  * 0x0000, isr em 0x1000, config do dispositivo em 0x2000, notify em 0x3000) */
@@ -74,6 +75,7 @@ struct devs {
   struct vdev vd[NVDEV];
   struct cow cow;
   int net_up;
+  int p9_on;         /* virtio-9p ligado (p9_init deu certo) */
   uint64_t net_next; /* TSC da proxima leitura do NAT */
   uint8_t net_pend[1514];
   int net_pend_len;
@@ -509,11 +511,6 @@ static int blk_write(struct vm* vm, uint64_t off, const uint8_t* buf, uint32_t l
 #define VRING_DESC_F_NEXT 1
 #define VRING_DESC_F_WRITE 2
 
-struct seg {
-  uint8_t* p;
-  uint32_t len;
-  int w;
-};
 
 static void vdev_reset(struct vm* vm, struct vdev* v) {
   int i;
@@ -568,6 +565,36 @@ static void vq_used(struct vq* q, uint8_t* used, uint16_t head, uint32_t len) {
   memcpy(ue + 4, &len, 4);
   __asm__ volatile("" ::: "memory");
   *(volatile uint16_t*)(used + 2) = (uint16_t)(u + 1);
+}
+
+/* ---- virtio-9p: as unidades do SODOS (p9.c) ---- */
+static void v9p_process(struct vm* vm, struct vdev* v) {
+  struct vq* q = &v->q[0];
+  uint8_t *desc, *avail, *used;
+  uint16_t idx;
+  int did = 0;
+  if (!vq_rings(vm, q, &desc, &avail, &used)) return;
+  idx = *(volatile uint16_t*)(avail + 2);
+  while (q->last != idx) {
+    static struct seg sg[VIRTQ_SIZE];
+    uint16_t head = rd16(avail + 4 + 2 * (q->last % q->size));
+    int n = vq_chain(vm, q, desc, head, sg), k;
+    uint32_t len = 0, put = 0;
+    uint8_t* r = 0;
+    if (n > 0) len = p9_request(sg, n, &r);
+    /* resposta nos segmentos de escrita */
+    for (k = 0; k < n && put < len; k++) {
+      uint32_t t;
+      if (!sg[k].w) continue;
+      t = sg[k].len < len - put ? sg[k].len : len - put;
+      memcpy(sg[k].p, r + put, t);
+      put += t;
+    }
+    vq_used(q, used, head, put);
+    q->last++;
+    did = 1;
+  }
+  if (did) vdev_irq(vm, v);
 }
 
 /* ---- virtio-blk ---- */
@@ -794,6 +821,9 @@ static void dev_cfg_image(struct vm* vm, struct vdev* v, uint8_t* c) {
   if (v->kind == VD_BLK) {
     uint64_t cap = vm->disk_bytes / 512;
     memcpy(c, &cap, 8);
+  } else if (v->kind == VD_9P) {
+    c[0] = 5; /* tag_len */
+    memcpy(c + 2, "sodos", 5);
   } else {
     memcpy(c, nat_guest_mac, 6);
     c[6] = 1; /* status: link no ar */
@@ -835,6 +865,7 @@ int dev_mmio(struct vm* vm, uint64_t gpa, int size, int write, uint64_t* val) {
     } else {
       if (!write) *val = 0;
       else if (v->kind == VD_BLK) vblk_process(vm, v);
+      else if (v->kind == VD_9P) v9p_process(vm, v);
       else if ((*val & 0xFFFF) == 1) vnet_tx(vm, v);
       else vnet_rx(vm, v);
     }
@@ -907,6 +938,14 @@ static void pci_init(struct devs* d) {
   n->feat[0] = (1u << 5) | (1u << 16); /* MAC, STATUS */
   n->feat[1] = 1u << 0;
   vdev_pci(n, 0x1041, 0x02, 0x00, 1, 0xE0004000u, 11);
+  {
+    struct vdev* f = &d->vd[VD_9P];
+    f->kind = VD_9P;
+    f->nq = 1;
+    f->feat[0] = 1u << 0; /* MOUNT_TAG */
+    f->feat[1] = 1u << 0; /* VERSION_1 */
+    vdev_pci(f, 0x1049, 0x00, 0x02, 9, 0xE0008000u, 10);
+  }
 }
 
 static uint8_t* pci_dev(struct devs* d) {
@@ -916,6 +955,7 @@ static uint8_t* pci_dev(struct devs* d) {
   case 0: return d->cfg_host;
   case 1: return d->vd[VD_BLK].cfg;
   case 2: return d->vd[VD_NET].cfg;
+  case 3: return d->p9_on ? d->vd[VD_9P].cfg : 0;
   }
   return 0;
 }
@@ -955,6 +995,7 @@ uint32_t dev_in(struct vm* vm, uint16_t port, int size) {
   struct devs* d = D(vm);
   uint64_t now = rdtsc_();
   if (port >= 0x3F8 && port <= 0x3FF) return uart_in(vm, port - 0x3F8);
+  if (port >= 0x2F8 && port <= 0x2FF) return chan_uart_in(vm, port - 0x2F8); /* ttyS1: comandos */
   if (port == 0xCF8 && size == 4) return d->cf8;
   if (port >= 0xCFC && port <= 0xCFF) return pci_cfg_read(d, port - 0xCFC, size);
   switch (port) {
@@ -984,6 +1025,10 @@ void dev_out(struct vm* vm, uint16_t port, int size, uint32_t v) {
   uint64_t now = rdtsc_();
   if (port >= 0x3F8 && port <= 0x3FF) {
     uart_out(vm, port - 0x3F8, (uint8_t)v);
+    return;
+  }
+  if (port >= 0x2F8 && port <= 0x2FF) {
+    chan_uart_out(vm, port - 0x2F8, (uint8_t)v);
     return;
   }
   if (port == 0xCF8 && size == 4) {
@@ -1056,6 +1101,7 @@ void dev_poll(struct vm* vm, uint64_t now) {
     d->net_next = now + vm->tsc_hz / 1000;
     vnet_rx(vm, &d->vd[VD_NET]);
   }
+  chan_poll(vm); /* WSL=1: comandos da caixa (chan.c) */
   uart_update(vm);
 }
 
@@ -1063,7 +1109,7 @@ uint64_t dev_next_event(struct vm* vm) {
   struct devs* d = D(vm);
   struct pit_ch* c = &d->pit[0];
   uint64_t n = c->armed ? c->next : ~0ull;
-  if (rx_avail(vm)) return 0;
+  if (rx_avail(vm) || chan_pending()) return 0;
   if (d->net_up && d->net_next < n) n = d->net_next;
   return n;
 }
@@ -1083,6 +1129,8 @@ void dev_init(struct vm* vm) {
   pci_init(d);
   vdev_reset(vm, &d->vd[VD_BLK]);
   vdev_reset(vm, &d->vd[VD_NET]);
+  vdev_reset(vm, &d->vd[VD_9P]);
+  d->p9_on = p9_init() == 0;
   while (cap < vm->cow_max_chunks * 2u) cap <<= 1;
   d->cow.cap = cap;
   d->cow.keys = (uint64_t*)k_hmalloc((uint64_t)cap * 8, 4096);

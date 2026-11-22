@@ -378,6 +378,7 @@ static WINAPI void EnterCriticalSection(struct critsec* c) {
       if (v != 2) v = __sync_lock_test_and_set(&c->lock, 2);
       uint64_t t0 = wnow_ms();
       int noted = 0;
+      if (v != 0) wwait_begin("secao critica", c, (uint64_t)c->owner, 0, __builtin_return_address(0));
       while (v != 0) {
         if (wine_debug >= 2) {
           k_futex_wait(&c->lock, 2, 5000);
@@ -390,6 +391,7 @@ static WINAPI void EnterCriticalSection(struct critsec* c) {
         }
         v = __sync_lock_test_and_set(&c->lock, 2);
       }
+      wwait_end();
     }
   }
   c->owner = me;
@@ -452,6 +454,7 @@ static WINAPI void AcquireSRWLockExclusive(void** l) {
   if (__sync_val_compare_and_swap(v, 0, -1) != 0) {
     uint64_t t0 = wnow_ms();
     int noted = 0, spins = 0;
+    wwait_begin("SRW exclusivo", l, 0, 0, __builtin_return_address(0));
     for (;;) {
       intptr_t cur = *v;
       if (cur == 0 && __sync_val_compare_and_swap(v, 0, -1) == 0) break;
@@ -465,6 +468,7 @@ static WINAPI void AcquireSRWLockExclusive(void** l) {
       }
       wsrw_wait(v, cur);
     }
+    wwait_end();
   }
   wsrw_note(l, __builtin_return_address(0));
 }

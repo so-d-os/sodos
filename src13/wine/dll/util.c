@@ -482,3 +482,204 @@ void* wheap_realloc(void* p, size_t n) {
   wheap_free(p);
   return q;
 }
+
+/* ---------- registro de esperas (dump no REBOOT) ----------
+ * O WINE.DLL e uma imagem so para todos os processos do Windows: esta tabela
+ * ve as threads de todos. Cada espera bloqueante (objetos, secao critica,
+ * SRW, variavel de condicao, WaitOnAddress, porta de conclusao, pipe, Sleep)
+ * marca a vaga da thread na entrada e limpa na saida. Corrida inofensiva:
+ * "what" e gravado por ultimo e e so diagnostico. */
+#define WTRK_MAX 2048
+struct wtrk {
+  struct wproc* p;
+  uint8_t* teb;
+  uint32_t pid, tid;
+  const char* volatile what;   /* 0 = rodando */
+  const char* detail;
+  uint64_t obj, owner, since;
+  void* caller;
+  int used;
+  int wide;                    /* detail e wchar16 (nome de pipe) */
+};
+static struct wtrk wtrk[WTRK_MAX];
+static volatile int wtrk_lk;
+
+void wtrack_thread(struct wobj* t) {
+  int i;
+  if (!t || t->wslot) return;
+  while (__sync_lock_test_and_set(&wtrk_lk, 1)) __builtin_ia32_pause();
+  for (i = 0; i < WTRK_MAX; i++) {
+    if (wtrk[i].used) continue;
+    wtrk[i].p = wp();
+    wtrk[i].teb = t->teb;
+    wtrk[i].pid = wp()->pid;
+    wtrk[i].tid = t->tid;
+    wtrk[i].what = 0;
+    wtrk[i].used = 1;
+    t->wslot = i + 1;
+    break;
+  }
+  __sync_lock_release(&wtrk_lk);
+}
+
+void wtrack_exit(struct wobj* t) {
+  if (!t || !t->wslot) return;
+  wtrk[t->wslot - 1].used = 0;
+  t->wslot = 0;
+}
+
+void wtrack_proc_exit(struct wproc* p) {
+  int i;
+  for (i = 0; i < WTRK_MAX; i++)
+    if (wtrk[i].used && wtrk[i].p == p) wtrk[i].used = 0;
+}
+
+static struct wtrk* wtrk_cur(void) {
+  uint8_t* teb = wteb();
+  struct wobj* t;
+  if (!teb || *(uint8_t**)(teb + 0x30) != teb) return 0; /* fora de thread do Windows */
+  t = *(struct wobj**)(teb + TEB_WTHREAD);
+  if (!t || !t->wslot || t->wslot > WTRK_MAX) return 0;
+  return &wtrk[t->wslot - 1];
+}
+
+void wwait_begin(const char* what, const void* obj, uint64_t owner_teb, const char* detail, void* caller) {
+  struct wtrk* w = wtrk_cur();
+  if (!w) return;
+  w->obj = (uint64_t)(uintptr_t)obj;
+  w->owner = owner_teb;
+  w->detail = detail;
+  w->wide = 0;
+  w->caller = caller;
+  w->since = wnow_ms();
+  __atomic_store_n(&w->what, what, __ATOMIC_RELEASE);
+}
+
+void wwait_begin_w(const char* what, const void* obj, const wchar16* detail, void* caller) {
+  struct wtrk* w = wtrk_cur();
+  if (!w) return;
+  w->obj = (uint64_t)(uintptr_t)obj;
+  w->owner = 0;
+  w->detail = (const char*)detail;
+  w->wide = detail != 0;
+  w->caller = caller;
+  w->since = wnow_ms();
+  __atomic_store_n(&w->what, what, __ATOMIC_RELEASE);
+}
+
+void wwait_end(void) {
+  struct wtrk* w = wtrk_cur();
+  if (w) __atomic_store_n(&w->what, (const char*)0, __ATOMIC_RELEASE);
+}
+
+static char* dcat(char* o, char* end, const char* s) {
+  while (s && *s && o < end) *o++ = *s++;
+  return o;
+}
+static char* ddec(char* o, char* end, uint64_t v) {
+  char b[24];
+  int n = 0;
+  do { b[n++] = (char)('0' + v % 10); v /= 10; } while (v && n < 23);
+  while (n && o < end) *o++ = b[--n];
+  return o;
+}
+static char* dhex(char* o, char* end, uint64_t v) {
+  int i, started = 0;
+  if (o + 18 > end) return o;
+  *o++ = '0';
+  *o++ = 'x';
+  for (i = 15; i >= 0; i--) {
+    int d = (int)((v >> (i * 4)) & 15);
+    if (d || started || i == 0) {
+      *o++ = "0123456789abcdef"[d];
+      started = 1;
+    }
+  }
+  return o;
+}
+
+/* modulo+rva de um endereco, nos modulos do processo p (vivo: a vaga esta em uso) */
+static char* dwhere(char* o, char* end, struct wproc* p, uint64_t a) {
+  struct wmod* m;
+  extern const void* wine_driver(void);
+  for (m = p ? p->mods : 0; m; m = m->next) {
+    if (m->base && a >= (uint64_t)(uintptr_t)m->base && a < (uint64_t)(uintptr_t)m->base + m->size) {
+      o = dcat(o, end, m->name);
+      o = dcat(o, end, "+");
+      return dhex(o, end, a - (uint64_t)(uintptr_t)m->base);
+    }
+  }
+  o = dcat(o, end, "WINE.DLL+");
+  return dhex(o, end, a - (uint64_t)(uintptr_t)wine_driver);
+}
+
+/* Chamado pelo kernel (REBOOT, kernel/wine.c) na tarefa do mundo: so le a
+ * tabela e escreve na serial. Uma linha por thread do Windows. */
+void wine_dump(void) {
+  uint64_t now = wnow_ms();
+  int i, n = 0, nw = 0;
+  k_dbg("[wine-dump] threads do Windows e o que esperam\n", 47);
+  for (i = 0; i < WTRK_MAX; i++) {
+    struct wtrk* w = &wtrk[i];
+    const char* what;
+    char line[300], *o = line, *end = line + sizeof(line) - 2;
+    if (!w->used) continue;
+    what = __atomic_load_n(&w->what, __ATOMIC_ACQUIRE);
+    n++;
+    o = dcat(o, end, "[wine-dump] pid ");
+    o = ddec(o, end, w->pid);
+    o = dcat(o, end, " tid ");
+    o = dhex(o, end, w->tid);
+    if (!what) {
+      o = dcat(o, end, ": rodando (ou espera nao marcada)");
+    } else {
+      int j;
+      nw++;
+      o = dcat(o, end, ": ");
+      o = dcat(o, end, what);
+      if (w->detail) {
+        o = dcat(o, end, " \"");
+        if (w->wide) {
+          const wchar16* d16 = (const wchar16*)w->detail;
+          int k;
+          for (k = 0; k < 120 && d16[k] && o < end; k++) *o++ = d16[k] < 128 ? (char)d16[k] : '?';
+        } else {
+          o = dcat(o, end, w->detail);
+        }
+        o = dcat(o, end, "\"");
+      }
+      o = dcat(o, end, " obj ");
+      o = dhex(o, end, w->obj);
+      if (w->owner) {
+        o = dcat(o, end, " dono ");
+        for (j = 0; j < WTRK_MAX; j++)
+          if (wtrk[j].used && (uint64_t)(uintptr_t)wtrk[j].teb == w->owner) break;
+        if (j < WTRK_MAX) {
+          o = dcat(o, end, "pid ");
+          o = ddec(o, end, wtrk[j].pid);
+          o = dcat(o, end, " tid ");
+          o = dhex(o, end, wtrk[j].tid);
+        } else {
+          o = dcat(o, end, "teb ");
+          o = dhex(o, end, w->owner);
+        }
+      }
+      o = dcat(o, end, " ha ");
+      o = ddec(o, end, w->since > now ? 0 : now - w->since); /* comecou durante o dump */
+      o = dcat(o, end, " ms, de ");
+      o = dwhere(o, end, w->p, (uint64_t)(uintptr_t)w->caller);
+    }
+    *o++ = '\n';
+    k_dbg(line, (int)(o - line));
+  }
+  {
+    char line[96], *o = line, *end = line + sizeof(line) - 2;
+    o = dcat(o, end, "[wine-dump] fim: ");
+    o = ddec(o, end, (uint64_t)n);
+    o = dcat(o, end, " threads, ");
+    o = ddec(o, end, (uint64_t)nw);
+    o = dcat(o, end, " esperando\n");
+    k_dbg(line, (int)(o - line));
+  }
+}
+

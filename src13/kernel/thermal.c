@@ -4,7 +4,7 @@
  * pesada (WINE + Claude nas 8 CPUs) o PC ja desligou sem CRASH.LOG, o que
  * parece corte por temperatura (THERMTRIP) ou de energia. Esta thread le o
  * sensor a cada 10 s, escreve "[temp]" na serial (vai para o SERIAL.LOG) e
- * grava D:\LOG\TEMP.LOG a cada 60 s (a cada 10 s quando passa de 90 C).
+ * grava D:\LOG\TEMP.LOG a cada 60 s (a cada 2 s quando passa de TEMPMAX).
  * O arquivo e acrescentado, nao sobrescrito: depois de um desligamento, o
  * boot seguinte ainda mostra as ultimas leituras do anterior.
  *
@@ -29,8 +29,10 @@
 #include "mm.h"
 #include "smp.h"
 #include "xhci.h"   /* pci_mmio_map */
+#include "smuprobe.h"
 
 int rtc_time(void);
+int serial_log_save(void);
 uint32_t net_ms(void);
 
 enum { TS_NONE, TS_AMD_SMN, TS_INTEL_PKG, TS_INTEL_CORE };
@@ -59,7 +61,23 @@ static void pci00_write(uint8_t off, uint32_t v) {
   outl_t(0xCFC, v);
 }
 
-static uint32_t ts_fam, ts_bridge;
+static uint32_t ts_fam, ts_model, ts_bridge;
+/* AMD: sensores por CCD (como o k10temp), ultimo valor cru e "parado". */
+static uint32_t ts_ccd_base, ts_ccd_mask;
+static uint32_t ts_raw, ts_raw_ccd;       /* Tctl cru; soma dos CCD crus */
+static int ts_tctl = HW_NONE, ts_ccd = HW_NONE;
+static uint32_t ts_change_ms;             /* ultima vez que a leitura mudou */
+static int ts_seen;
+static int ts_stale;                      /* 1 = sensor parado (nao confiar) */
+
+/* Registrador SMN pelo indice/dado 0x60/0x64 do 0:0.0 (com o BKL). */
+static uint32_t smn_read(uint32_t addr) {
+  uint32_t save = pci00_read(0x60), v;
+  pci00_write(0x60, addr);
+  v = pci00_read(0x64);
+  pci00_write(0x60, save);
+  return v;
+}
 static char ts_vendor[13];
 
 static void ts_detect(void) {
@@ -69,11 +87,27 @@ static void ts_detect(void) {
   cpuid(1, &a, &b, &c, &d);
   { int i; for (i = 0; i < 4; i++) { ts_vendor[i] = (char)(vb >> (8 * i)); ts_vendor[4 + i] = (char)(vd >> (8 * i)); ts_vendor[8 + i] = (char)(vc >> (8 * i)); } ts_vendor[12] = 0; }
   fam = (a >> 8) & 0xF;
-  if (fam == 0xF) fam += (a >> 20) & 0xFF;
+  ts_model = (a >> 4) & 0xF;
+  if (fam == 0xF) {
+    fam += (a >> 20) & 0xFF;
+    ts_model |= ((a >> 16) & 0xF) << 4;
+  }
   ts_fam = fam;
   ts_bridge = pci00_read(0);
   if (vb == 0x68747541u && vd == 0x69746E65u && vc == 0x444D4163u) {   /* AuthenticAMD */
-    if (fam >= 0x17 && (ts_bridge & 0xFFFFu) == 0x1022u) ts_kind = TS_AMD_SMN;
+    if (fam >= 0x17 && (ts_bridge & 0xFFFFu) == 0x1022u) {
+      uint32_t m = ts_model, i;
+      ts_kind = TS_AMD_SMN;
+      /* deslocamento dos CCD como no k10temp (Zen2/3: 0x154; Zen4+: 0x300) */
+      if (fam == 0x17) ts_ccd_base = (m >= 0x30 && m <= 0x3F) || m == 0x71 || m == 0x01 || m == 0x08 || m == 0x11 || m == 0x18 ? 0x59954u : 0;
+      else if (fam == 0x19) {
+        if ((m >= 0x10 && m <= 0x1F) || (m >= 0x60 && m <= 0x7F) || (m >= 0xA0 && m <= 0xAF))
+          ts_ccd_base = 0x59800u + (m >= 0x60 && m <= 0x7F ? 0x308u : 0x300u);
+        else ts_ccd_base = 0x59954u;            /* Zen3: 5825U (modelo 0x50) etc. */
+      } else if (fam == 0x1A) ts_ccd_base = 0x59B08u;
+      for (i = 0; ts_ccd_base && i < 8; i++)
+        if (smn_read(ts_ccd_base + 4u * i) & 0x800u) ts_ccd_mask |= 1u << i;
+    }
     return;
   }
   if (vb == 0x756E6547u && vd == 0x49656E69u && vc == 0x6C65746Eu && maxleaf >= 6) {  /* GenuineIntel */
@@ -90,13 +124,38 @@ static void ts_detect(void) {
 /* Graus C (inteiro); -1000 se nao deu para ler. Com o BKL. */
 static int ts_read(void) {
   if (ts_kind == TS_AMD_SMN) {
-    uint32_t save = pci00_read(0x60), v, mc;
-    pci00_write(0x60, 0x00059800u);
-    v = pci00_read(0x64);
-    pci00_write(0x60, save);
+    uint32_t v = smn_read(0x00059800u), mc, i, sum = 0;
+    int t, best = HW_NONE;
     mc = ((v >> 21) & 0x7FFu) * 125u;            /* 0,125 C por unidade */
-    if (v & 0x80000u) return (int)(mc / 1000u) - 49;   /* faixa -49..206 */
-    return (int)(mc / 1000u);
+    t = (int)(mc / 1000u);
+    if (v & 0x80000u) t -= 49;                   /* faixa -49..206 */
+    for (i = 0; i < 8; i++) {
+      uint32_t r;
+      int c;
+      if (!((ts_ccd_mask >> i) & 1u)) continue;
+      r = smn_read(ts_ccd_base + 4u * i);
+      sum += r;
+      if (!(r & 0x800u)) continue;
+      c = (int)((r & 0x7FFu) * 125u / 1000u) - 49;
+      if (c > 0 && c < 150 && c > best) best = c;
+    }
+    /* sensor parado: o Tctl cru e os CCD sem mudar nada por 60 s */
+    {
+      /* O "| 1" antigo (para 0 nao valer "nunca") punha change = agora + 1:
+       * agora - change dava 0xFFFFFFFF e o sensor aparecia PARADO logo
+       * depois de mudar (build 36: SENSOR PARADO piscando, CPUs caindo a 4). */
+      uint32_t now = net_ms();
+      if (v != ts_raw || sum != ts_raw_ccd || !ts_seen) {
+        ts_change_ms = now;
+        ts_seen = 1;
+      }
+      ts_stale = (int32_t)(now - ts_change_ms) >= 60000;
+    }
+    ts_raw = v;
+    ts_raw_ccd = sum;
+    ts_tctl = t;
+    ts_ccd = best;
+    return best > t ? best : t;                  /* o pior dos dois */
   }
   if (ts_kind == TS_INTEL_PKG || ts_kind == TS_INTEL_CORE) {
     uint64_t s = rdmsr(ts_kind == TS_INTEL_PKG ? 0x1B1 : 0x19C);
@@ -349,65 +408,232 @@ static void sample(void) {
   if (hw.hist_n < HW_HIST) hw.hist_n++;
 }
 
-static int thermal_thread(void* arg) {
-  int ticks = 0, last_logged = HW_NONE;
-  (void)arg;
-  for (;;) {
-    char line[320];
-    int t, hot, g;
-    kt_bkl_enter_kernel();
-    sample();
-    t = hw.cpu_c;
-    hot = t >= 90;
-    line[0] = 0;
-    s_cat(line, "[temp] ");
-    s_hms(line);
-    if (t != HW_NONE) {
-      s_cat(line, " CPU ");
-      s_num(line, t, 1);
-      s_cat(line, " C (max ");
-      s_num(line, hw.cpu_max_c, 1);
-      s_cat(line, ")");
-    } else {
-      s_cat(line, " CPU sem sensor");
+/* ---- protecao termica ----
+ * O SODOS nao tem P-states nem ACPI _TZ: com WINE+Claude e Firefox nas 8 CPUs
+ * o notebook desligou sozinho. A causa era o SMU parado por IPI broadcast
+ * (smp.c); com o SMU vivo o firmware baixa o clock sozinho e isto e so o
+ * ultimo recurso: a cada 2 s, a partir de TEMPMAX (95 C) as CPUs de cima
+ * ficam estacionadas em hlt (kt_set_cpu_cap), sem descer de THERMMIN (4);
+ * abaixo de TEMPMAX-8 voltam uma por vez a cada 10 s. SMU morto (Tctl e
+ * RAPL parados): limite THERMSAFE (4), piso 2. SET THERMCAP=n fixa um
+ * maximo; SET THERMCAP=0 desliga a protecao. */
+#define TH_MAX_DEF 95                     /* 5825U: Tjmax 95; o SMU ja segura antes */
+static int th_max_c = TH_MAX_DEF, th_cap_env = -1, th_safe = 4, th_min = 4, th_cap;
+
+static int env_int(const char* name, int def) {
+  const char* e = env_get(name);
+  int v = 0;
+  if (!e || !*e) return def;
+  while (*e >= '0' && *e <= '9') v = v * 10 + (*e++ - '0');
+  return v;
+}
+
+static void s_hex8(char* d, uint32_t v) {
+  static const char hx[] = "0123456789ABCDEF";
+  int i;
+  while (*d) d++;
+  for (i = 7; i >= 0; i--) *d++ = hx[(v >> (4 * i)) & 15];
+  *d = 0;
+}
+
+/* ---- potencia (RAPL) ----
+ * AMD Zen: MSR 0xC0010299 (unidade: 1/2^ESU J, bits 12:8) e 0xC001029B
+ * (energia do pacote, 32 bits). O contador e mantido pelo SMU, como o Tctl:
+ * se os dois param, o SMU parou (sem ele o EC nao ve a temperatura e a
+ * ventoinha nao sobe). Em 2026-11-21 o Tctl ficou parado no notebook
+ * (828B0000) e o PC resetou com 4 CPUs. So liga com CPUID 0x80000007 EDX
+ * bit 14: sem ele o rdmsr daria #GP (o KVM nao mostra). */
+static int rapl_ok;
+static uint32_t rapl_esu, rapl_last, rapl_last_ms, rapl_change_ms;
+static int rapl_mw = HW_NONE;            /* potencia do pacote, mW */
+static int rapl_stale;
+
+static void rapl_detect(void) {
+  uint32_t a, b, c, d;
+  if (ts_kind != TS_AMD_SMN) return;
+  cpuid(0x80000000u, &a, &b, &c, &d);
+  if (a < 0x80000007u) return;
+  cpuid(0x80000007u, &a, &b, &c, &d);
+  if (!(d & (1u << 14))) return;
+  rapl_esu = (uint32_t)(rdmsr(0xC0010299u) >> 8) & 0x1Fu;
+  rapl_last = (uint32_t)rdmsr(0xC001029Bu);
+  rapl_last_ms = rapl_change_ms = net_ms();
+  rapl_ok = 1;
+}
+
+static void rapl_sample(void) {
+  uint32_t e, now, dt, de;
+  if (!rapl_ok) return;
+  e = (uint32_t)rdmsr(0xC001029Bu);
+  now = net_ms();
+  dt = now - rapl_last_ms;
+  if (dt < 500u) return;
+  de = e - rapl_last;
+  if (de) rapl_change_ms = now;
+  rapl_stale = now - rapl_change_ms >= 10000u;
+  rapl_mw = (int)((((uint64_t)de * 1000000u) >> rapl_esu) / dt);
+  rapl_last = e;
+  rapl_last_ms = now;
+}
+
+/* Novo limite de CPUs para a temperatura t; devolve 1 se mudou. */
+static int th_guard(int t, int full_step) {
+  int n = kt_online_count(), lim = n, cap = th_cap ? th_cap : n, floor, smu_dead;
+  if (full_step) {                    /* SET em execucao vale em ate 10 s */
+    th_max_c = env_int("TEMPMAX", TH_MAX_DEF);
+    if (th_max_c < 60 || th_max_c > 100) th_max_c = TH_MAX_DEF;
+    th_cap_env = env_int("THERMCAP", -1);
+    th_safe = env_int("THERMSAFE", 4);
+    th_min = env_int("THERMMIN", 4);
+  }
+  if (th_cap_env == 0) {              /* protecao desligada: tudo liberado */
+    if (th_cap == n) return 0;
+    th_cap = n;
+    kt_set_cpu_cap(KT_CPU_MAX);
+    return 1;
+  }
+  /* SMU morto (Tctl parado e RAPL parado ou ausente): ninguem mais segura
+   * a temperatura, entao THERMSAFE e piso de 2. SMU vivo: o firmware ja
+   * baixa o clock perto do limite; aqui so um ultimo recurso, sem descer de
+   * THERMMIN (4) - com 2 CPUs o Claude (Electron/WINE) passava metade da
+   * CPU1 trocando de thread (build 36, PROF 12:40). */
+  smu_dead = ts_stale && (!rapl_ok || rapl_stale);
+  floor = smu_dead ? 2 : th_min;
+  if (floor < 2) floor = 2;
+  if (th_cap_env > 0 && th_cap_env < lim) lim = th_cap_env;
+  if (smu_dead && th_safe > 0 && th_safe < lim) lim = th_safe;
+  if (lim < 2) lim = n < 2 ? n : 2;
+  if (floor > lim) floor = lim;
+  if (t != HW_NONE && !ts_stale) {
+    if (t >= th_max_c + 5) cap = floor;
+    else if (t >= th_max_c) cap -= 2;
+    else if (t <= th_max_c - 8 && full_step) cap++;
+  } else if (full_step) {
+    cap++;
+  }
+  if (cap < floor) cap = floor;
+  if (cap > lim) cap = lim;
+  if (cap == th_cap) return 0;
+  th_cap = cap;
+  kt_set_cpu_cap(cap);
+  return 1;
+}
+
+static void th_line(char* line, int t) {
+  int g;
+  line[0] = 0;
+  s_cat(line, "[temp] ");
+  s_hms(line);
+  if (t != HW_NONE) {
+    s_cat(line, " CPU ");
+    s_num(line, t, 1);
+    s_cat(line, " C (max ");
+    s_num(line, hw.cpu_max_c, 1);
+    s_cat(line, ")");
+    if (ts_kind == TS_AMD_SMN) {
+      s_cat(line, " Tctl ");
+      s_num(line, ts_tctl, 1);
+      if (ts_ccd != HW_NONE) {
+        s_cat(line, " CCD ");
+        s_num(line, ts_ccd, 1);
+      }
+      s_cat(line, " [");
+      s_hex8(line, ts_raw);
+      s_cat(line, "]");
+      if (ts_stale) s_cat(line, " SENSOR PARADO");
     }
-    if (hw.ssd_c != HW_NONE) {
-      s_cat(line, " SSD ");
-      s_num(line, hw.ssd_c, 1);
+  } else {
+    s_cat(line, " CPU sem sensor");
+  }
+  if (rapl_ok) {
+    if (rapl_stale) {
+      s_cat(line, " RAPL PARADO");
+    } else if (rapl_mw != HW_NONE) {
+      s_cat(line, " pacote ");
+      s_num(line, rapl_mw / 1000, 1);
+      s_cat(line, ",");
+      s_num(line, rapl_mw % 1000 / 100, 1);
+      s_cat(line, " W");
+    }
+    if (ts_stale && rapl_stale) s_cat(line, " SMU PARADO?");
+  }
+  if (hw.ssd_c != HW_NONE) {
+    s_cat(line, " SSD ");
+    s_num(line, hw.ssd_c, 1);
+    s_cat(line, " C");
+  }
+  for (g = 0; g < hw.gpu_n; g++) {
+    s_cat(line, " GPU");
+    s_num(line, g, 1);
+    s_cat(line, " ");
+    s_cat(line, hw.gpu_name[g]);
+    s_cat(line, " ");
+    if (hw.gpu_c[g] == HW_NONE) {
+      s_cat(line, "--");
+    } else {
+      s_num(line, hw.gpu_c[g], 1);
       s_cat(line, " C");
     }
-    for (g = 0; g < hw.gpu_n; g++) {
-      s_cat(line, " GPU");
-      s_num(line, g, 1);
-      s_cat(line, " ");
-      s_cat(line, hw.gpu_name[g]);
-      s_cat(line, " ");
-      if (hw.gpu_c[g] == HW_NONE) {
-        s_cat(line, "--");
-      } else {
-        s_num(line, hw.gpu_c[g], 1);
-        s_cat(line, " C");
-        if (hw.gpu_c[g] >= 90) hot = 1;
+  }
+  s_cat(line, " carga ");
+  s_num(line, hw.load_pct, 1);
+  s_cat(line, "% mem livre ");
+  s_gb(line, hw.mem_free_mb);
+  s_cat(line, "/");
+  s_gb(line, hw.mem_total_mb);
+  s_cat(line, " GB cpus ");
+  s_num(line, kt_cpu_cap(), 1);
+  s_cat(line, "/");
+  s_num(line, kt_online_count(), 1);
+  s_cat(line, t != HW_NONE && t >= th_max_c ? " QUENTE\n" : "\n");
+}
+
+#define TH_FAST 2                         /* segundos entre checagens */
+
+static int thermal_thread(void* arg) {
+  int ticks = 0, sub = 0, last_logged = HW_NONE, was_stale = 0, was_rstale = 0;
+  (void)arg;
+  for (;;) {
+    char line[384];
+    int t, hot, g, full = sub == 0, changed;
+    kt_bkl_enter_kernel();
+    if (full) {
+      sample();
+      t = hw.cpu_c;
+    } else {
+      t = ts_kind ? ts_read() : HW_NONE;  /* so a CPU, sem historico */
+      if (t != HW_NONE) {
+        hw.cpu_c = t;
+        if (t > hw.cpu_max_c) hw.cpu_max_c = t;
       }
     }
-    s_cat(line, " carga ");
-    s_num(line, hw.load_pct, 1);
-    s_cat(line, "% mem livre ");
-    s_gb(line, hw.mem_free_mb);
-    s_cat(line, "/");
-    s_gb(line, hw.mem_total_mb);
-    s_cat(line, hot ? " GB QUENTE\n" : " GB\n");
-    /* serial: a cada 60 s, ou na hora se subiu/caiu 5 C ou esta quente */
-    if (ticks % 6 == 0 || hot || t - last_logged >= 5 || last_logged - t >= 5) {
-      serial_puts(line);
-      tl_add(line + 7);                         /* sem o "[temp] " no arquivo */
-      last_logged = t;
+    rapl_sample();
+    changed = th_guard(t, full);
+    hot = t != HW_NONE && t >= th_max_c;
+    if (full)
+      for (g = 0; g < hw.gpu_n; g++)
+        if (hw.gpu_c[g] != HW_NONE && hw.gpu_c[g] >= 90) hot = 1;
+    if (ts_stale != was_stale || rapl_stale != was_rstale) changed = 1;
+    was_stale = ts_stale;
+    was_rstale = rapl_stale;
+    if (full || changed) {
+      th_line(line, t);
+      /* serial: a cada 60 s, ou na hora se mudou 5 C, esta quente ou o
+       * limite de CPUs mudou */
+      if (changed || (full && (ticks % 6 == 0 || hot || t - last_logged >= 5 || last_logged - t >= 5))) {
+        serial_puts(line);
+        tl_add(line + 7);                       /* sem o "[temp] " no arquivo */
+        last_logged = t;
+      }
+      if (changed || hot || (full && ticks % 6 == 0))
+        if (drives_is_mounted('D')) (void)file_save("D:\\LOG\\TEMP.LOG", tlog, tlog_n);
     }
-    if (hot || ticks % 6 == 0)
-      if (drives_is_mounted('D')) (void)file_save("D:\\LOG\\TEMP.LOG", tlog, tlog_n);
+    /* SERIAL.LOG a cada 30 s: num reset o arquivo ficava minutos atrasado */
+    if (full && ticks % 3 == 2) (void)serial_log_save();
     kt_bkl_leave();
-    ticks++;
-    kt_futex_wait(&th_word, 0, HW_STEP * 1000);
+    if (full) ticks++;
+    if (++sub >= HW_STEP / TH_FAST) sub = 0;
+    kt_futex_wait(&th_word, 0, TH_FAST * 1000);
   }
   return 0;
 }
@@ -434,16 +660,21 @@ int thermal_stat(struct k_hwstat* out) {
 /* Fim do boot (D: ja montado, AUTOEXEC ja rodou). */
 void thermal_start(void) {
   const char* e = env_get("TEMPLOG");
-  char line[96];
+  char line[192];
   int n, t;
   hw.cpu_c = hw.cpu_max_c = hw.cpu_min_c = HW_NONE;
   hw.ssd_c = hw.ssd_max_c = HW_NONE;
   hw.step_s = HW_STEP;
+  th_max_c = env_int("TEMPMAX", TH_MAX_DEF);
+  if (th_max_c < 60 || th_max_c > 100) th_max_c = TH_MAX_DEF;
+  th_cap_env = env_int("THERMCAP", -1);
+  th_safe = env_int("THERMSAFE", 4);
   if (e && e[0] == '0') return;
   kt_bkl_enter_kernel();
   ts_detect();
   hw.sensor = ts_kind == TS_AMD_SMN ? 1 : ts_kind ? 2 : 0;
   t = ts_kind ? ts_read() : HW_NONE;
+  rapl_detect();
   (void)load_now();                             /* zera a base da carga */
   gpu_walk(0, 0);                               /* RX 4xx/5xx e NVIDIA Pascal+ */
   kt_bkl_leave();
@@ -468,11 +699,48 @@ void thermal_start(void) {
     s_num(line, t, 1);
     s_cat(line, " C");
   }
-  s_cat(line, " =====\n");
+  if (ts_kind == TS_AMD_SMN) {
+    s_cat(line, " fam ");
+    s_hex8(line, ts_fam << 8 | ts_model);
+    s_cat(line, " CCD ");
+    s_hex8(line, ts_ccd_base);
+    s_cat(line, "/");
+    s_num(line, (int)ts_ccd_mask, 1);
+  }
+  s_cat(line, rapl_ok ? " RAPL" : " sem RAPL");
+  s_cat(line, " limite ");
+  s_num(line, th_max_c, 1);
+  s_cat(line, " C =====\n");
   serial_puts("[temp] ");
   serial_puts(line);
   tl_add(line);
   /* sem sensor da CPU a thread sobe assim mesmo: SSD, carga e memoria */
   if (kt_thread_create(thermal_thread, 0, 16384, ~1u) <= 0)
     serial_puts("[temp] nao criou a thread\n");
+}
+
+/* Etapa do boot: o SMU ainda conta energia? (smuprobe.h) Vai para a serial,
+ * ou seja, para o comeco do D:\\LOG\\SERIAL.LOG. */
+void smu_mark(const char* stage) {
+  struct smu_probe p;
+  smu_probe_run(&p);
+  if (!p.ok) return;
+  serial_puts("[smu] ");
+  serial_puts(stage);
+  serial_puts(": energia +");
+  serial_hex32(p.de);
+  serial_puts(p.de ? "" : " PARADO");
+  serial_puts(" Tctl ");
+  serial_hex32(p.tctl);
+  serial_puts("\n");
+}
+
+/* Uma linha avulsa no TEMP.LOG, gravada na hora (REBOOT usa). */
+void thermal_note(const char* line) {
+  if (!tlog_n && drives_is_mounted('D')) {
+    int n = file_load("D:\\LOG\\TEMP.LOG", tlog, TLOG_MAX);
+    tlog_n = n > 0 ? n : 0;
+  }
+  tl_add(line);
+  if (drives_is_mounted('D')) (void)file_save("D:\\LOG\\TEMP.LOG", tlog, tlog_n);
 }

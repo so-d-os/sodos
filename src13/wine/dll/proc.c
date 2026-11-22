@@ -27,7 +27,12 @@ struct inh_spec {
   DWORD count;
 };
 
-static HANDLE spawn(const char* cmdline, DWORD* err, const struct inh_spec* spec, char* env, char* dir) {
+/* std: hStdInput/Output/Error do STARTUPINFO (0 = sem). Vao para p->spawn_std
+ * so depois de pegar a vez: antes, um CreateProcess de outra thread (o Claude
+ * Code abre git, bash e "claude.exe --files" em paralelo) trocava os handles
+ * do pedido que ainda esperava, e a saida do filho ia para o lugar errado. */
+static HANDLE spawn(const char* cmdline, DWORD* err, const struct inh_spec* spec, char* env, char* dir,
+                    const HANDLE* std) {
   struct wproc* p = wp();
   struct wobj* o;
   HANDLE h;
@@ -54,6 +59,8 @@ static HANDLE spawn(const char* cmdline, DWORD* err, const struct inh_spec* spec
     }
     k_thread_yield();
   }
+  if (std) memcpy(p->spawn_std, std, sizeof(p->spawn_std));
+  else memset(p->spawn_std, 0, sizeof(p->spawn_std));
   p->spawn_obj = o;
   p->spawn_cmd = c;
   /* ja aqui: o Chromium fecha handles do filho logo que o CreateProcess volta */
@@ -676,6 +683,14 @@ static struct wobj* spawn_std_obj(struct wproc* p, int i) {
     return p->spawn_inh[(v - 0x200) / 4];
   return wh_get((HANDLE)v, 0);
 }
+static int is_git_exe(const char* path) {
+  const char* b = path;
+  const char* q;
+  for (q = path; *q; q++)
+    if (*q == '\\' || *q == '/' || *q == ':') b = q + 1;
+  return (b[0] | 0x20) == 'g' && (b[1] | 0x20) == 'i' && (b[2] | 0x20) == 't' &&
+         (b[3] == '.' || b[3] == 0);
+}
 static int run_sodos_child(struct wproc* p, const char* path, int argc, char** argv) {
   char old[300];
   char* out;
@@ -688,10 +703,11 @@ static int run_sodos_child(struct wproc* p, const char* path, int argc, char** a
   out = (char*)k_malloc((unsigned)max);
   if (!out) return 1;
   argv[0] = (char*)path;
-  {
+  if (is_git_exe(path)) {
     /* o Claude Desktop passa ~20 "-c chave=valor" antes do comando do git e o
      * SODOS so leva 31 argumentos a um programa (o comando ficava de fora e
-     * o git mostrava a ajuda): as configuracoes de uma vez so saem daqui */
+     * o git mostrava a ajuda): as configuracoes de uma vez so saem daqui.
+     * So no git: no bash.exe "-c -l comando" e "-c env" sao o proprio pedido. */
     int k = 1, j, opts = 1;
     for (j = 1; j < argc; j++) {
       if (opts && strcmp(argv[j], "-c") == 0 && j + 1 < argc) {
@@ -716,10 +732,27 @@ static int run_sodos_child(struct wproc* p, const char* path, int argc, char** a
     snprintf(b, sizeof(b), "%d bytes, codigo %d", len, rc);
     wlog("programa do SODOS (saida no pipe): ", b);
   }
+  if (rc != 0 && len > 0) {
+    /* codigo de erro: o comeco da saida no log (bash do Claude Code etc.) */
+    char b[260];
+    int k = len < 255 ? len : 255;
+    memcpy(b, out, (size_t)k);
+    b[k] = 0;
+    wlog("programa do SODOS saiu com erro, saida: ", b);
+  }
   if (len > 0) {
     DWORD done = 0;
     if (so && so->type == OBJ_PIPE) wpipe_write(so, out, (DWORD)len, &done, 0);
-    else if (!so) wcon_write(out, (DWORD)len);
+    else if (!so) {
+      /* sem stdout do pai (STARTUPINFO sem handles): vai ao console */
+      if (p->spawn_std[1]) wlogx("programa do SODOS: handle de stdout nao achado ", (uint64_t)(uintptr_t)p->spawn_std[1]);
+      wcon_write(out, (DWORD)len);
+    } else if (so->type == OBJ_FILE) {
+      /* Bash do Claude Code: stdout vai para tasks\*.output (arquivo) */
+      if (!wfile_write(so, out, (DWORD)len, &done, 0)) wlog("programa do SODOS: escrita no arquivo de stdout falhou", "");
+    } else {
+      wlogx("programa do SODOS: stdout nao e pipe, tipo ", (uint64_t)so->type);
+    }
   }
   k_free(out);
   return rc;
@@ -916,16 +949,14 @@ static WINAPI BOOL CreateProcessW(const wchar16* app, wchar16* cmd, void* pa, vo
         dirs = s;
       }
     }
+    HANDLE std[3] = {0, 0, 0};
     if (si && (*(const DWORD*)((const uint8_t*)si + 60) & 0x100u)) { /* STARTF_USESTDHANDLES */
-      struct wproc* me = wp();
-      me->spawn_std[0] = *(HANDLE const*)((const uint8_t*)si + 80);
-      me->spawn_std[1] = *(HANDLE const*)((const uint8_t*)si + 88);
-      me->spawn_std[2] = *(HANDLE const*)((const uint8_t*)si + 96);
-      if (wine_debug) wlogx("CreateProcess: stdio do filho, stdout ", (uint64_t)(uintptr_t)me->spawn_std[1]);
-    } else {
-      memset(wp()->spawn_std, 0, sizeof(wp()->spawn_std));
+      std[0] = *(HANDLE const*)((const uint8_t*)si + 80);
+      std[1] = *(HANDLE const*)((const uint8_t*)si + 88);
+      std[2] = *(HANDLE const*)((const uint8_t*)si + 96);
+      if (wine_debug) wlogx("CreateProcess: stdio do filho, stdout ", (uint64_t)(uintptr_t)std[1]);
     }
-    h = line[0] ? spawn(line, &err, &spec, envs, dirs) : 0;
+    h = line[0] ? spawn(line, &err, &spec, envs, dirs, std) : 0;
     if (!line[0]) {
       if (envs) k_free_shared(envs);
       if (dirs) k_free_shared(dirs);
@@ -1055,7 +1086,7 @@ static WINAPI BOOL ShellExecuteExW(struct shexinfo* i) {
         strncat(line, " ", sizeof(line) - strlen(line) - 1);
         strncat(line, par, sizeof(line) - strlen(line) - 1);
       }
-      h = spawn(line, &err, 0, 0, 0); /* ShellExecute: nada herdado */
+      h = spawn(line, &err, 0, 0, 0, 0); /* ShellExecute: nada herdado */
     } else {
       wlog("ShellExecute: nao e um programa (ignorado): ", f);
       err = ERROR_FILE_NOT_FOUND;

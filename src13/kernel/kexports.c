@@ -514,9 +514,47 @@ static uint32_t blink_pid;
 /* Teclado cru (terminal do WSL): ate o programa que pediu terminar. */
 static uint32_t kbdraw_pid;
 static void k_kbd_raw(int on) {
-  kbd_raw_set(on);
+  vt_kbd_raw(on);   /* da tela do programa; vale quando ela esta visivel */
   kbdraw_pid = on ? mod_current_pid() : 0;
 }
+
+/* Registro de nomes -> ponteiro (memoria k_malloc_shared), para um programa
+ * achar o servico de outro: o WSL.EXE publica "WSL" (caixa de comandos da
+ * VM) e o WSL exec / BASH.EXE do Claude Code acham por aqui. p = 0 tira. */
+#define SVC_MAX 8
+static struct { char name[16]; void* p; } svc_tab[SVC_MAX];
+static int svc_eq(const char* a, const char* b) {
+  int i;
+  for (i = 0; i < 15 && a[i] && a[i] == b[i]; i++) { }
+  return i == 15 || a[i] == b[i];
+}
+static int k_svc_set(const char* name, void* p) {
+  int i, free_i = -1;
+  if (!name || !name[0]) return -1;
+  for (i = 0; i < SVC_MAX; i++) {
+    if (svc_tab[i].name[0] && svc_eq(svc_tab[i].name, name)) {
+      svc_tab[i].p = p;
+      if (!p) svc_tab[i].name[0] = 0;
+      return 0;
+    }
+    if (!svc_tab[i].name[0] && free_i < 0) free_i = i;
+  }
+  if (!p) return 0;
+  if (free_i < 0) return -1;
+  for (i = 0; i < 15 && name[i]; i++) svc_tab[free_i].name[i] = name[i];
+  svc_tab[free_i].name[i] = 0;
+  svc_tab[free_i].p = p;
+  return 0;
+}
+static void* k_svc_get(const char* name) {
+  int i;
+  if (!name) return 0;
+  for (i = 0; i < SVC_MAX; i++)
+    if (svc_tab[i].name[0] && svc_eq(svc_tab[i].name, name)) return svc_tab[i].p;
+  return 0;
+}
+/* 1 se o programa roda numa tela de texto ao fundo (nao a visivel). */
+static int k_vt_bg(void) { return vt_bg(); }
 
 static int k_blink(int on) {
   /* A janela sempre mostra o fundo claro: nada a trocar. */
@@ -968,7 +1006,7 @@ void kexp_release_pid(uint32_t pid) {
     tap_pid = 0;
   }
   if (kbdraw_pid == pid) {
-    kbd_raw_set(0);
+    vt_kbd_raw(0);
     kbdraw_pid = 0;
   }
   if (blink_pid == pid) {
@@ -1565,6 +1603,9 @@ static const struct kexp table[] = {
   EXP(k_nvme_raw_read),
   EXP(k_nvme_raw_sectors),
   EXP(k_kbd_raw),
+  EXP(k_svc_set),
+  EXP(k_svc_get),
+  EXP(k_vt_bg),
   EXP(k_net_tap_open),
   EXP(k_net_tap_close),
   EXP(k_net_tap_recv),

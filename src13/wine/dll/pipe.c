@@ -475,9 +475,13 @@ static WINAPI BOOL ConnectNamedPipe(HANDLE h, struct overlapped* ov) {
   {
     uint64_t t0 = wnow_ms();
     int noted = 0;
+    wwait_begin_w("ConnectNamedPipe (espera cliente)", pi, pi->name, __builtin_return_address(0));
     for (;;) { /* sincrono: espera o cliente */
       int g = wine_gen;
-      if (pi->connected) return 1;
+      if (pi->connected) {
+        wwait_end();
+        return 1;
+      }
       if (wine_debug >= 2 && !noted && wnow_ms() - t0 > 5000) {
         noted = 1;
         wwait_note("ConnectNamedPipe", __builtin_return_address(0), wnow_ms() - t0);
@@ -602,6 +606,7 @@ int wpipe_read(struct wobj* o, void* buf, DWORD len, DWORD* done, void* ovp) {
       pi->rd[x].used = 1;
       pi->rd[x].owner = wp();
       wunlock();
+      wwait_begin_w(x ? "ReadFile pipe (cliente)" : "ReadFile pipe (servidor)", pi, pi->name, __builtin_return_address(0));
       for (;;) {
         int g2 = wine_gen;
         if (__atomic_load_n(&sov.internal, __ATOMIC_ACQUIRE) != ST_PENDING) break;
@@ -611,6 +616,7 @@ int wpipe_read(struct wobj* o, void* buf, DWORD len, DWORD* done, void* ovp) {
         }
         k_futex_wait(&wine_gen, g2, 100);
       }
+      wwait_end();
       if (done) *done = (DWORD)sov.internal_high;
       plog(x ? "ler (cliente)" : "ler (servidor)", pi, sov.internal_high);
       if (sov.internal == ST_MORE) {

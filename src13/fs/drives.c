@@ -2003,6 +2003,44 @@ int drives_items(const char* path, struct dir_item* out, int max) {
   fs_unlock();
   return r;
 }
+/* Como file_list, com o nome longo inteiro de cada item ("nome\n", pasta
+ * com "\\" no fim): o file_list da o apelido 8.3 (NOME~1) para nome maior
+ * que 31. Usado pelo desktop do WIN. Bytes escritos; -1 se nao e pasta. */
+#define FLL_MAX 256
+int file_list_long(const char* path, char* out, int max) {
+  struct dir_item* it;
+  char full[DRV_PATH + 40];
+  char longn[FAT_NAME_MAX];
+  int n, i, pos = 0, pl = 0, k;
+  if (!path || !out || max < 2) return -1;
+  out[0] = 0;
+  it = (struct dir_item*)kmalloc(FLL_MAX * (uint32_t)sizeof(struct dir_item));
+  if (!it) return -1;
+  fs_lock();
+  n = drives_items_u(path, it, FLL_MAX);
+  while (path[pl] && pl < DRV_PATH - 1) {
+    full[pl] = path[pl];
+    pl++;
+  }
+  if (pl && full[pl - 1] != '\\') full[pl++] = '\\';
+  for (i = 0; i < n; i++) {
+    const char* nm = it[i].name;
+    for (k = 0; it[i].name[k] && it[i].name[k] != '~'; k++) { }
+    if (it[i].name[k] == '~') {
+      int q = pl;
+      for (k = 0; it[i].name[k] && q < (int)sizeof(full) - 1; k++) full[q++] = it[i].name[k];
+      full[q] = 0;
+      if (drives_long_name_u(full, longn, (int)sizeof(longn)) == 0 && longn[0]) nm = longn;
+    }
+    for (k = 0; nm[k] && pos < max - 3; k++) out[pos++] = nm[k];
+    if (it[i].dir && pos < max - 2) out[pos++] = '\\';
+    if (pos < max - 1) out[pos++] = '\n';
+  }
+  out[pos < max ? pos : max - 1] = 0;
+  fs_unlock();
+  kfree(it);
+  return n < 0 ? -1 : pos;
+}
 int drives_long_name(const char* path, char* out, int max) {
   int r;
   fs_lock();

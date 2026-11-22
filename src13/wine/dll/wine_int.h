@@ -146,6 +146,7 @@ struct wobj {
   void* start;
   void* param;
   volatile int suspend;
+  int wslot;                    /* vaga no registro de esperas (util.c), 1.. */
   /* iocp */
   struct iocp_ent* q;
   int qhead, qn, qcap;
@@ -330,6 +331,8 @@ uint64_t wine_call_on_stack(void* fn, void* arg, void* stack_top);
 /* ---------- proc.c ---------- */
 void wspawn_world_service(void);
 /* ---------- file.c ---------- */
+struct overlapped;
+BOOL wfile_write(struct wobj* f, const void* buf, DWORD n, DWORD* done, struct overlapped* ov); /* file.c */
 void wfile_proc_exit(void);                        /* solta os temporarios em RAM do processo */
 
 /* ---------- exc.c ---------- */
@@ -385,4 +388,13 @@ int wpick_folder(const char* title, const char* init, char* out, int max);
 int wpicker_create(const void* clsid, void** out); /* CLSID_FileOpenDialog */
 void wurl_world_service(void); /* proc.c: abre o navegador pedido por ShellExecute */
 void wwait_note(const char* what, void* caller, uint64_t waited_ms); /* util.c */
+/* Registro de esperas (util.c): cada thread do Windows tem uma vaga com o que
+ * esta esperando agora; o REBOOT do SODOS chama wine_dump e tudo vai para a
+ * serial ("[wine-dump]"), para achar travamentos sem depurador. */
+void wtrack_thread(struct wobj* t);
+void wtrack_exit(struct wobj* t);
+void wtrack_proc_exit(struct wproc* p);
+void wwait_begin(const char* what, const void* obj, uint64_t owner_teb, const char* detail, void* caller);
+void wwait_begin_w(const char* what, const void* obj, const wchar16* detail, void* caller);
+void wwait_end(void);
 void wstack_note(const char* what, const uint64_t* sp);

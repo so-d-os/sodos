@@ -245,15 +245,18 @@ struct glibc_dirent64 {
   char d_name[256];
 };
 
+/* posix-lite: nome longo inteiro + tipo (o d_type do dirent so vale ate 31) */
+const char* __so_readdir_long(DIR* d, unsigned char* type);
 struct glibc_dirent64* readdir64(DIR* d) {
   static struct glibc_dirent64 e;
-  struct dirent* r = readdir(d);
-  if (!r) return NULL;
+  unsigned char t = DT_UNKNOWN;
+  const char* nm = __so_readdir_long(d, &t);
+  if (!nm) return NULL;
   memset(&e, 0, sizeof(e));
   e.d_ino = 1;
   e.d_reclen = sizeof(e);
-  e.d_type = r->d_type;
-  strncpy(e.d_name, r->d_name, sizeof(e.d_name) - 1);
+  e.d_type = t;
+  strncpy(e.d_name, nm, sizeof(e.d_name) - 1);
   return &e;
 }
 
@@ -1331,6 +1334,61 @@ void sodos_dump_stack(void) {
   }
   crash_nstk = shown;
   crash_log(crash_first_set && crash_first ? "MOZ_CRASH" : crash_first_set ? "abort" : "erro fatal");
+}
+
+/* ---- falta de CPU (SIGSEGV/SIGBUS/SIGILL/SIGFPE) ------------------------
+ * Sem handler, a falta vai para a tela EXCEPTION do kernel e o SODOS para
+ * inteiro. O MOZ_CRASH escreve em NULL antes do abort(): com o WINE ativo
+ * (mm_null_guard) a pagina 0 sai do mapa e todo MOZ_CRASH virava isso.
+ * Aqui a falta vira registro no FIREFOX.LOG (com o gMozCrashReason) e so o
+ * Firefox fecha. O wasm do SpiderMonkey instala o dele depois e repassa
+ * para este as faltas que nao sao dele. */
+#include <ucontext.h>
+extern const char* gMozCrashReason __attribute__((weak));
+static char fault_why[192];
+
+static void sodos_fault_handler(int sig, siginfo_t* si, void* ctx) {
+  ucontext_t* uc = (ucontext_t*)ctx;
+  /* raise() pode chamar sem siginfo/contexto: usa a pilha daqui */
+  uintptr_t rip = uc ? (uintptr_t)uc->uc_mcontext.gregs[REG_RIP] : 0;
+  uintptr_t* sp = uc ? (uintptr_t*)(uintptr_t)uc->uc_mcontext.gregs[REG_RSP]
+                     : (uintptr_t*)__builtin_frame_address(0);
+  uintptr_t addr = si ? (uintptr_t)si->si_addr : (uintptr_t)-1;
+  uintptr_t base = (uintptr_t)__executable_start;
+  const char* moz = &gMozCrashReason ? gMozCrashReason : NULL;
+  int is_moz = moz && sig == SIGSEGV && addr < 0x1000;
+  int i, shown = 0;
+  static int busy;
+  if (busy++) k_exit(139);
+  if (!crash_first_set) {
+    if (is_moz) {
+      sodos_crash_reason(moz);
+    } else {
+      snprintf(fault_why, sizeof fault_why, "falta de CPU: sinal %d, endereco %lx, rip +%lx", sig,
+               (unsigned long)addr, (unsigned long)(rip - base));
+      sodos_crash_reason(fault_why);
+    }
+  }
+  fprintf(stderr, "[stk] falta: sinal %d addr %lx rip +%lx\n", sig, (unsigned long)addr,
+          (unsigned long)(rip - base));
+  if ((char*)rip >= __executable_start && (char*)rip < etext) crash_stk[shown++] = rip;
+  for (i = 0; i < 2048 && shown < 40; i++) {
+    uintptr_t v = sp[i];
+    if ((char*)v >= __executable_start && (char*)v < etext) crash_stk[shown++] = v;
+  }
+  crash_nstk = shown;
+  crash_log(is_moz ? "MOZ_CRASH" : "falta de CPU");
+  k_exit(139);
+}
+
+__attribute__((constructor(103))) static void sodos_fault_install(void) {
+  static const int sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE};
+  struct sigaction sa;
+  unsigned i;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_sigaction = sodos_fault_handler;
+  sa.sa_flags = SA_SIGINFO;
+  for (i = 0; i < sizeof sigs / sizeof sigs[0]; i++) sigaction(sigs[i], &sa, NULL);
 }
 
 /* ---- simbolos do Rust ---------------------------------------------------- */

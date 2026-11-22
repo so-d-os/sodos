@@ -58,6 +58,7 @@ const char* sodos_version(void);
 void version_boot_log(void);
 void version_print(int full);
 int cmd_ver(int argc, char** argv);
+int cmd_reboot(int argc, char** argv);
 
 const struct executable_entry* find_executable(const char* name) {
   for (int i = 0; i < executable_count; i++) {
@@ -665,8 +666,17 @@ int serial_log_save(void) {
   static char out[192u * 1024u + sizeof(mark) + 1024u * 1024u];
   uint32_t n, t, skipped = 0;
   const char* s = serial_log(&n);
+  static int old_done;
   if (!drives_is_mounted('D')) return -1;
   (void)drives_mkdir("D:\\LOG");
+  /* Primeira gravacao deste boot: o log do boot anterior vira SERIAL.OLD.
+   * Sem isto um reboot apagava o que aconteceu antes dele (o Explorer que
+   * nao abriu na build 36 sumiu assim). */
+  if (!old_done) {
+    int k = file_load("D:\\LOG\\SERIAL.LOG", out, (int)sizeof(out));
+    old_done = 1;
+    if (k > 0) (void)file_save("D:\\LOG\\SERIAL.OLD", out, k);
+  }
   for (t = 0; t < n; t++) out[t] = s[t];
   t = serial_log_tail(out + n + sizeof(mark) - 1, 1024u * 1024u, &skipped);
   if (t) {
@@ -1571,16 +1581,20 @@ void shell_read_line(char* buf, int max) {
 }
 
 // Command table (cmd_entry, cmd_fn, commands, cmd_count, register_builtin em shell.h)
-struct cmd_entry commands[48];
+struct cmd_entry commands[CMD_MAX];
 int cmd_count = 0;
 
 int register_builtin(const char* name, cmd_fn fn) {
-  if (cmd_count < (int)(sizeof(commands)/sizeof(commands[0]))) {
+  if (cmd_count < CMD_MAX) {
     commands[cmd_count].name = name;
     commands[cmd_count].fn = fn;
     cmd_count++;
     return 0;
   }
+  /* Antes sumia calado: com 48 lugares o "reboot" (build 35) tirou o "ver". */
+  serial_puts("[shell] tabela de comandos cheia (CMD_MAX): ficou de fora ");
+  serial_puts(name);
+  serial_puts("\n");
   return -1;
 }
 
@@ -2196,6 +2210,7 @@ void kmain(const struct BootInfo* bi) {
   register_builtin("kill", cmd_kill);
   register_builtin("killall", cmd_killall);
   register_builtin("shutdown", cmd_shutdown);
+  register_builtin("reboot", cmd_reboot);
   register_builtin("set", cmd_set);
   register_builtin("ver", cmd_ver);
 

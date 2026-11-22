@@ -161,6 +161,19 @@ static int wanted(void) {
 
 int wine_loaded(void) { return w_ops != 0; }
 
+/* REBOOT (version.c): o WINE.DLL lista na serial o que cada thread do Windows
+ * esta esperando ("[wine-dump]"), para achar travamentos depois do boot. */
+void wine_dump_waits(void) {
+  void (*fn)(void);
+  if (!w_handle || !w_ops) return;
+  fn = (void (*)(void))mod_dll_sym(w_handle, "wine_dump");
+  if (!fn) {
+    serial_puts("[wine-dump] este WINE.DLL nao tem o wine_dump\n");
+    return;
+  }
+  fn();
+}
+
 static void unload_now(void) {
   if (w_handle) {
     mod_dll_free(w_handle);

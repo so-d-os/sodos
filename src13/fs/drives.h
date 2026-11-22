@@ -105,6 +105,8 @@ int drives_glob(const char* spec, drives_glob_fn fn, void* ctx);
 int drives_items(const char* path, struct dir_item* out, int max);
 /* Nome longo inteiro de path (o ultimo nome). 0 achou; -1 nao. */
 int drives_long_name(const char* path, char* out, int max);
+/* file_list com os nomes longos inteiros (o desktop do WIN). */
+int file_list_long(const char* path, char* out, int max);
 void drives_list(char letter);
 int drives_names(char letter, char out[][32], int max);
 char path_letter(const char* path);

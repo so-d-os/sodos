@@ -129,15 +129,15 @@ static int cmd_info(void) {
 
 static int cmd_dir(const char* arg) {
   char p[PATH_LEN];
-  struct k_dirent* e;
+  struct k_direntl* e; /* nome longo inteiro (k_dir_long) */
   int n, i;
   unsigned long long sum = 0;
   if (!(letter = find_letter(0))) return 1;
   on_pen(arg ? arg : "", p);
   strip_slash(p);
-  e = (struct k_dirent*)k_malloc(MAX_DIRENT * (unsigned)sizeof(struct k_dirent));
+  e = (struct k_direntl*)k_malloc(MAX_DIRENT * (unsigned)sizeof(struct k_direntl));
   if (!e) return 1;
-  n = k_dir(p, e, MAX_DIRENT);
+  n = k_dir_long(p, e, MAX_DIRENT);
   if (n < 0) {
     printf("Nao e pasta: %s\n", p);
     k_free(e);
@@ -200,7 +200,7 @@ static int copy_file(const char* src, const char* dst) {
 }
 
 static void copy_tree(const char* src, const char* dst, int depth) {
-  struct k_dirent* e;
+  struct k_direntl* e; /* nome longo inteiro (k_dir_long) */
   int n, i;
   if (depth > MAX_DEPTH) return;
   if (k_mkdir(dst) < 0) {
@@ -209,9 +209,9 @@ static void copy_tree(const char* src, const char* dst, int depth) {
     return;
   }
   n_dirs++;
-  e = (struct k_dirent*)k_malloc(MAX_DIRENT * (unsigned)sizeof(struct k_dirent));
+  e = (struct k_direntl*)k_malloc(MAX_DIRENT * (unsigned)sizeof(struct k_direntl));
   if (!e) return;
-  n = k_dir(src, e, MAX_DIRENT);
+  n = k_dir_long(src, e, MAX_DIRENT);
   for (i = 0; i < n; i++) {
     char s[PATH_LEN], d[PATH_LEN];
     if (strlen(src) + strlen(e[i].name) + 2 >= PATH_LEN ||

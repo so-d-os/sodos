@@ -10,7 +10,8 @@ struct cmd_entry {
   cmd_fn fn;
 };
 
-extern struct cmd_entry commands[48];
+#define CMD_MAX 64  /* comandos internos; o register_builtin avisa na serial se faltar lugar */
+extern struct cmd_entry commands[CMD_MAX];
 extern int cmd_count;
 int register_builtin(const char* name, cmd_fn fn);
 

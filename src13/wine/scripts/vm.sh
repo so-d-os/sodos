@@ -32,7 +32,12 @@ case "$1" in
       cp os.img "$V/os.img"
     fi
     I="$V/disk.img@@512"
-    if [ "$2" = win ]; then printf 'api start\r\nwin\r\n' > "$V/AUTOEXEC.BAT"; else printf 'api start\r\n' > "$V/AUTOEXEC.BAT"; fi
+    # AUTOEXEC_PRE="SET WSL=1;SET SYSTEMLOG=1": linhas antes do resto (sobrevivem a um novo boot)
+    : > "$V/AUTOEXEC.BAT"
+    if [ -n "$AUTOEXEC_PRE" ]; then
+      printf '%s\n' "$AUTOEXEC_PRE" | tr ';' '\n' | while IFS= read -r l; do printf '%s\r\n' "$l"; done >> "$V/AUTOEXEC.BAT"
+    fi
+    if [ "$2" = win ]; then printf 'api start\r\nwin\r\n' >> "$V/AUTOEXEC.BAT"; else printf 'api start\r\n' >> "$V/AUTOEXEC.BAT"; fi
     mcopy -o -i "$I" "$V/AUTOEXEC.BAT" ::/AUTOEXEC.BAT </dev/null
     mdir -i "$I" ::/SODOS/DRV >/dev/null 2>&1 </dev/null || mmd -i "$I" ::/SODOS/DRV </dev/null
     mcopy -o -i "$I" wine/build/WINE.DLL ::/SODOS/DRV/WINE.DLL </dev/null
@@ -44,7 +49,8 @@ case "$1" in
     # NETFWD=",hostfwd=tcp::9223-:9222": mais portas (DevTools do Chromium)
     # MEM=14000: mais RAM (3 claude.exe de 372 MB + ramdisk nao cabem em 8 GB)
     # QEMU_EXTRA="-s": gdb do QEMU na porta 1234 (watchpoints de hardware)
-    setsid qemu-system-x86_64 -accel kvm -cpu host -m ${MEM:-8192} -smp 4 -usb -device usb-tablet -vga std $DISP $QEMU_EXTRA \
+    # SVM=1: AMD-V aninhado (o WSL.EXE do SODOS sobe a VM do Linux)
+    setsid qemu-system-x86_64 -accel kvm -cpu host${SVM:+,+svm} -m ${MEM:-8192} -smp 4 -usb -device usb-tablet -vga std $DISP $QEMU_EXTRA \
       -monitor "unix:$MON,server,nowait" -serial "file:$V/serial.log" \
       -netdev user,id=n0,hostfwd=tcp::$PORT-:8797$NETFWD -device ne2k_pci,netdev=n0 -boot order=c \
       -drive format=raw,file="$V/os.img",if=ide,index=0 \

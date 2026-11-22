@@ -5,6 +5,7 @@
  * SSE/x87 nao sao salvos na troca: ela so ocorre dentro de uma chamada
  * (XMM e caller-saved na ABI SysV) e o kernel e compilado -mno-sse. */
 #pragma once
+#include <stdint.h>
 
 void sched_set_idle(void (*fn)(void));
 void (*sched_get_idle(void))(void);
@@ -13,6 +14,9 @@ int sched_in_yield(void);
 void sched_yield(void);
 /* 1 se um programa grafico cedeu o turno ao desktop. Definido em visual.c. */
 int gui_coop_pause(void);
+/* Futex do mundo dentro de uma tarefa do WIN: cede sem pedir CPU ate *addr
+ * mudar ou ms passarem (visual.c). 0 = fora do WIN. */
+int gui_coop_wait(volatile int* addr, int val, uint32_t ms);
 /* fn devolve 1 quando a tarefa acabou. No maximo uma por yield. */
 int sched_post(int (*fn)(void*), void* arg);
 /* Excecao fatal: sched_yield nao faz mais nada (ver isr.c). */

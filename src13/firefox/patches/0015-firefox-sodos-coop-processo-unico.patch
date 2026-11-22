@@ -1,0 +1,37 @@
+Fase: navegacao. COOP/COEP sem troca de processo nao derruba o Firefox.
+Arquivo: dom/base/Document.cpp
+web.whatsapp.com manda Cross-Origin-Opener-Policy: same-origin +
+Cross-Origin-Embedder-Policy: require-corp. O Gecko normal abre um
+BrowsingContext novo em outro processo; no SODOS (processo unico) o mesmo
+contexto tentava virar REQUIRE_CORP, CanSet(OpenerPolicy) recusava e
+Transaction::Commit dava MOZ_CRASH "CanSet failed for field(s): OpenerPolicy"
+(#PF escrevendo em 0, CRASH.LOG em FIREFOX.EXE+0x5DD4611).
+Agora a politica cai para same-origin (sem crossOriginIsolated).
+Teste: abrir https://web.whatsapp.com e navegar dele para outro site.
+
+--- a/dom/base/Document.cpp
++++ b/dom/base/Document.cpp
+@@ -3527,6 +3527,23 @@
+       docShell->GetBrowsingContext()) {
+     CheckIsBadPolicy(policy, docShell->GetBrowsingContext(), aChannel);
+ 
++#if defined(__SODOS__)
++    // SODOS roda em um processo so: o Gecko nao troca o BrowsingContext
++    // quando a pagina pede isolamento (COOP same-origin + COEP require-corp,
++    // ex. web.whatsapp.com), e CanSet(OpenerPolicy) recusa entrar ou sair de
++    // REQUIRE_CORP no mesmo contexto -> MOZ_CRASH "CanSet failed" em
++    // Transaction::Commit. Fica sem crossOriginIsolated, mas nao derruba.
++    {
++      auto requireCORP =
++          nsILoadInfo::OPENER_POLICY_SAME_ORIGIN_EMBEDDER_POLICY_REQUIRE_CORP;
++      auto cur = docShell->GetBrowsingContext()->GetOpenerPolicy();
++      if (cur != policy && (cur == requireCORP || policy == requireCORP)) {
++        policy = cur == requireCORP ? cur
++                                    : nsILoadInfo::OPENER_POLICY_SAME_ORIGIN;
++      }
++    }
++#endif
++
+     // Setting the opener policy on a discarded context has no effect.
+     (void)docShell->GetBrowsingContext()->SetOpenerPolicy(policy);
+   }

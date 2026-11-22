@@ -91,11 +91,13 @@ int dlg_list(const char* title, const char** items, int n, int cur);
 void dlg_note(const char* title, const char* msg);
 
 /* ---------- panel.c ---------- */
-#define PATH_MAX_MC 128
+/* nomes longos (FAT LFN, k_dir_long): ate 255 + caminho de 260 */
+#define PATH_MAX_MC 260
+#define NAME_MAX_MC 256
 #define ENT_MAX 512
 
 struct ent {
-  char name[32];
+  char name[NAME_MAX_MC];
   unsigned size;
   unsigned short date;
   unsigned short time;

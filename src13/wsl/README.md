@@ -22,6 +22,64 @@ VM roda, o teclado fica "cru" (`k_kbd_raw`): Ctrl+C e as outras Ctrl+letra vão
 para o Linux em vez de parar o `WSL.EXE`. Com a saída desviada (WIN, API), as
 sequências são retiradas e só o texto passa.
 
+## Imagem própria (PC sem Windows)
+
+Num PC só com Linux (sem NTFS) o WSL usa a distro **SODOS-Debian**, em
+`D:\WSL\` (`SET WSLDIR` muda a pasta), que vira a padrão quando existe:
+
+```
+D:\WSL\DEBIAN.IMG   ext4 com Debian 12 mínimo (bash, git, curl, python3, ...)
+D:\WSL\VMLINUZ      kernel (o do Linux que gerou a imagem)
+D:\WSL\INITRD.IMG   initrd pequeno: busybox + virtio_blk, monta /dev/vda
+```
+
+Gerada sem root por `sh wsl/scripts/build-image.sh` (Linux Debian 12 com o
+mesmo kernel; `MB=` tamanho, menor que 2048 porque o `k_fsize` do SODOS é
+`int`; `OUT=` outra pasta). O script desempacota os pacotes com
+`mmdebstrap --mode=chrootless --variant=extract` dentro do `fakeroot`, grava
+o ext4 com `mke2fs -d` num `unshare -r` e termina a instalação (`dpkg -i`)
+num boot da própria imagem no QEMU. O init é `/sbin/sodos-init`: monta
+`/proc` etc., carrega o `virtio_net`, configura a rede pelo `sodos.ip=` da
+linha do kernel e roda o bash no console.
+
+`WSL list/info/ls/cat/cp/run` usam a imagem; `-d NOME` escolhe uma distro do
+Windows. `wsl --list [--verbose]` (sintaxe do `wsl.exe` do Windows) responde
+em UTF-16LE, como o original. A imagem é lida em blocos de 2 MB guardados em
+RAM alta; o que o Linux grava fica na camada em RAM, como no vhdx.
+
+## Ao fundo: SET WSL=1, WSL exec e o bash do Claude Code
+
+`SET WSL=1` sobe `WSL.EXE run --service` na tela **Ctrl+F10**: a VM fica
+ligada, o console do Linux aparece no Ctrl+F10 (o `exit` do bash só abre
+outro) e `SET WSL=0` desliga. Comandos de qualquer tela ou programa:
+
+```
+WSL exec uname -a          roda no Linux e devolve a saída e o código
+WSL status                 serviço, agente e a serial de comandos
+D:\WINE\BIN\BASH.EXE -c "cmd"   o mesmo WSL.EXE com o nome BASH.EXE: o bash
+                           do Claude Code (-c, -l, -lc, --login)
+```
+
+Se o serviço não estiver ligado, o primeiro `WSL exec`/`BASH.EXE` faz o
+`SET WSL=1` e espera o Linux subir (~8 s no QEMU). Por dentro: o kernel
+guarda a caixa de comandos (`wslbox.h`, memória `k_malloc_shared`) no
+registro de nomes (`k_svc_set "WSL"`); a thread da CPU da VM passa os
+pedidos pela segunda serial (ttyS1, `vmm/chan.c`) ao
+`/usr/local/sbin/sodos-agent` (Python) da imagem, que roda `bash -c` e
+devolve stdout, stderr e o código. Ainda sem o D:/Z: dentro do Linux: o
+comando roda em `/mnt/<unidade>/...` (a pasta atual do SODOS).
+
+### As unidades do SODOS no Linux (virtio-9p)
+
+O `WSL.EXE` tem um servidor 9P2000.L (`vmm/p9.c`, virtio-9p, tag `sodos`):
+o `sodos-init` monta em `/mnt/sodos` e cria `/mnt/d`, `/mnt/z`, `/mnt/u`...
+(uma por unidade montada), como no WSL. Leitura, escrita (o arquivo aberto
+fica em RAM e vai inteiro ao disco no close/fsync, porque o `k_fsave` grava
+o arquivo todo), criar, apagar, renomear, `mkdir`/`rmdir`, `df` e `git`
+funcionam. Datas são as do FAT (sem mudar mtime), dono root, sem links.
+O `BASH.EXE` traduz caminhos do Windows no comando: `D:\WINE\TEMP` vira
+`/mnt/d/WINE/TEMP` (o Claude Code passa caminhos assim).
+
 ## Como funciona
 
 ```

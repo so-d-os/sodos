@@ -77,7 +77,64 @@ void wsl_usage(void) {
          "  WSL cat /caminho       mostra arquivo\n"
          "  WSL cp /caminho DEST   copia arquivo do Ubuntu para o SODOS\n"
          "  WSL run [opcoes]       sobe o Ubuntu numa VM (AMD-V)\n"
-         "  -d NOME                escolhe a distro (prefixo da pasta)\n");
+         "  -d NOME                escolhe a distro (prefixo da pasta)\n"
+         "  WSL exec comando...    roda no Linux da VM ao fundo (liga com SET WSL=1)\n"
+         "  SET WSL=1 / SET WSL=0  VM ao fundo (console no Ctrl+F10) / desliga\n"
+         "  BASH.EXE -c \"cmd\"     o WSL.EXE com esse nome: bash do Claude Code\n");
+}
+
+/* ls/cat/cp num ext4 ja montado (distro do Windows ou a imagem propria). */
+int wsl_cli_ext4(int argc, char** argv, ext4_fs* fs, wsl_save_fn save) {
+  const char* cmd = argv[1];
+  int rc = 0;
+  {
+    ext4_inode in;
+    const char* path = argc > 2 ? argv[2] : "/";
+    if (!fs) {
+      printf("WSL: ext4 ilegivel: %s\n", wsl_err);
+      rc = 1;
+    } else if (ext4_lookup(fs, path, 1, &in)) {
+      printf("WSL: %s\n", wsl_err);
+      rc = 1;
+    } else if (!strcmp(cmd, "ls")) {
+      if ((in.mode & EXT4_S_IFMT) == EXT4_S_IFDIR) rc = ext4_readdir(fs, &in, ls_cb, fs) < 0;
+      else ls_cb(fs, path, in.ino, 0);
+    } else if ((in.mode & EXT4_S_IFMT) != EXT4_S_IFREG) {
+      printf("WSL: %s nao e arquivo\n", path);
+      rc = 1;
+    } else if (!strcmp(cmd, "cat")) {
+      static char buf[65536];
+      uint64_t off = 0;
+      while (off < in.size) {
+        uint32_t n = in.size - off > sizeof buf ? (uint32_t)sizeof buf : (uint32_t)(in.size - off);
+        if (ext4_pread(fs, &in, off, buf, n)) {
+          printf("\nWSL: %s\n", wsl_err);
+          rc = 1;
+          break;
+        }
+        fwrite(buf, 1, n, stdout);
+        off += n;
+      }
+    } else {
+      char* b;
+      if (argc < 4) {
+        printf("uso: WSL cp /caminho DESTINO\n");
+        rc = 1;
+      } else if (in.size > 0x7FFFFFFF || !(b = (char*)malloc((size_t)in.size + 1))) {
+        printf("WSL: arquivo grande demais\n");
+        rc = 1;
+      } else {
+        if (ext4_pread(fs, &in, 0, b, (uint32_t)in.size) || save(argv[3], b, (uint32_t)in.size)) {
+          printf("WSL: falhou: %s\n", wsl_err);
+          rc = 1;
+        } else {
+          printf("%s -> %s (%llu bytes)\n", path, argv[3], (unsigned long long)in.size);
+        }
+        free(b);
+      }
+    }
+  }
+  return rc;
 }
 
 int wsl_cli_read(int argc, char** argv, const wsl_io* disk, wsl_save_fn save) {
@@ -129,51 +186,7 @@ int wsl_cli_read(int argc, char** argv, const wsl_io* disk, wsl_save_fn save) {
       printf("  ext4: %s\n", wsl_err);
     }
   } else if (!strcmp(cmd, "ls") || !strcmp(cmd, "cat") || !strcmp(cmd, "cp")) {
-    ext4_inode in;
-    const char* path = argc > 2 ? argv[2] : "/";
-    if (!st.fs) {
-      printf("WSL: ext4 ilegivel: %s\n", wsl_err);
-      rc = 1;
-    } else if (ext4_lookup(st.fs, path, 1, &in)) {
-      printf("WSL: %s\n", wsl_err);
-      rc = 1;
-    } else if (!strcmp(cmd, "ls")) {
-      if ((in.mode & EXT4_S_IFMT) == EXT4_S_IFDIR) rc = ext4_readdir(st.fs, &in, ls_cb, st.fs) < 0;
-      else ls_cb(st.fs, path, in.ino, 0);
-    } else if ((in.mode & EXT4_S_IFMT) != EXT4_S_IFREG) {
-      printf("WSL: %s nao e arquivo\n", path);
-      rc = 1;
-    } else if (!strcmp(cmd, "cat")) {
-      static char buf[65536];
-      uint64_t off = 0;
-      while (off < in.size) {
-        uint32_t n = in.size - off > sizeof buf ? (uint32_t)sizeof buf : (uint32_t)(in.size - off);
-        if (ext4_pread(st.fs, &in, off, buf, n)) {
-          printf("\nWSL: %s\n", wsl_err);
-          rc = 1;
-          break;
-        }
-        fwrite(buf, 1, n, stdout);
-        off += n;
-      }
-    } else {
-      char* b;
-      if (argc < 4) {
-        printf("uso: WSL cp /caminho DESTINO\n");
-        rc = 1;
-      } else if (in.size > 0x7FFFFFFF || !(b = (char*)malloc((size_t)in.size + 1))) {
-        printf("WSL: arquivo grande demais\n");
-        rc = 1;
-      } else {
-        if (ext4_pread(st.fs, &in, 0, b, (uint32_t)in.size) || save(argv[3], b, (uint32_t)in.size)) {
-          printf("WSL: falhou: %s\n", wsl_err);
-          rc = 1;
-        } else {
-          printf("%s -> %s (%llu bytes)\n", path, argv[3], (unsigned long long)in.size);
-        }
-        free(b);
-      }
-    }
+    rc = wsl_cli_ext4(argc, argv, st.fs, save);
   } else {
     wsl_usage();
     rc = 1;

@@ -22,6 +22,8 @@
 #include "module.h"
 #include "irq.h"
 #include "sched.h"
+#include "vt.h"
+int fs_held_by_me(void); /* kexports.c */
 
 void con_break_poll(void);
 void mod_exit(int code);
@@ -113,6 +115,11 @@ struct cpu {
 static struct cpu cpus[KT_CPU_MAX];
 static volatile uint32_t online_mask = 1;
 static volatile int n_online = 1;
+/* Limite termico (kt_set_cpu_cap): CPUs de indice >= cpu_cap ficam
+ * "estacionadas" em hlt, sem threads. A CPU0 (o mundo) nunca para. */
+static volatile int cpu_cap = KT_CPU_MAX;
+static inline int parked(const struct cpu* c) { return c->index != 0 && c->index >= cpu_cap; }
+static struct cpu* pick_cpu(uint32_t mask);
 static struct task world;
 static struct task idle_t[KT_CPU_MAX];
 static struct task kts[KT_MAX];
@@ -328,6 +335,11 @@ static void kt_schedule(void) {
 
   if (stop_here()) {
     for (;;) __asm__ volatile ("cli; hlt");
+  }
+  if (parked(c) && prev->kind == K_THREAD && prev->migrate_to < 0 &&
+      (prev->state == T_RUNNING || prev->state == T_READY)) {
+    struct cpu* d = pick_cpu(prev->mask);
+    if (d != c && !parked(d)) prev->migrate_to = d->index;
   }
   spin_lock(&c->lock);
   c->need_resched = 0;
@@ -624,6 +636,18 @@ int kt_world_here(void) { return !kt_up || cur() == &world; }
 int kt_cpu_index(void) { return this_cpu()->index; }
 int kt_stopping(void) { return stop_here(); }
 int kt_online_count(void) { return n_online; }
+
+/* Limite termico: so as CPUs 0..n-1 rodam threads (n >= 1). */
+void kt_set_cpu_cap(int n) {
+  int i;
+  if (n < 1) n = 1;
+  if (n > KT_CPU_MAX) n = KT_CPU_MAX;
+  if (n == cpu_cap) return;
+  cpu_cap = n;
+  for (i = 1; i < KT_CPU_MAX; i++)       /* as estacionadas saem das threads; */
+    if (cpus[i].online) resched_cpu(&cpus[i]);   /* as liberadas puxam trabalho */
+}
+int kt_cpu_cap(void) { return cpu_cap < n_online ? cpu_cap : n_online; }
 uint32_t kt_cur_pid(void) { return cur()->pid; }
 
 int kt_cpu_idle(int idx) {
@@ -678,7 +702,7 @@ static struct cpu* find_idle(uint32_t mask, const struct cpu* not_this) {
   int i;
   for (i = 0; i < KT_CPU_MAX; i++) {
     struct cpu* d = &cpus[i];
-    if (!d->online || d == not_this || !((mask >> i) & 1u)) continue;
+    if (!d->online || d == not_this || !((mask >> i) & 1u) || parked(d)) continue;
     if (d->curr == d->idle && d->nr == 0) return d;
   }
   return 0;
@@ -700,10 +724,11 @@ static void kt_wake(struct task* t) {
     irq_restore(fl);
     return;
   }
-  if (t->kind == K_THREAD && (c->curr != c->idle || c->nr > 0 || !((t->mask >> c->index) & 1u))) {
+  if (t->kind == K_THREAD && (parked(c) || c->curr != c->idle || c->nr > 0 || !((t->mask >> c->index) & 1u))) {
     struct cpu* d = find_idle(t->mask, c);
     if (d) dest = d;
     else if (!((t->mask >> c->index) & 1u)) dest = &cpus[first_cpu(t->mask)];
+    if (t->kind == K_THREAD && parked(dest)) dest = pick_cpu(t->mask);
   }
   if (dest == c) {
     rq_push(c, t);
@@ -722,6 +747,7 @@ static int move_one(struct cpu* src, struct cpu* dst) {
   struct cpu* a = src->index < dst->index ? src : dst;
   struct cpu* b = src->index < dst->index ? dst : src;
   struct task* t;
+  if (parked(dst)) return 0;
   spin_lock(&a->lock);
   spin_lock(&b->lock);
   for (t = src->qhead; t; t = t->qnext)
@@ -739,7 +765,7 @@ static int move_one(struct cpu* src, struct cpu* dst) {
 static int kt_pull(struct cpu* c) {
   struct cpu* busiest = 0;
   int bl = 1, i;
-  if (n_online < 2) return 0;
+  if (n_online < 2 || parked(c)) return 0;
   for (i = 0; i < KT_CPU_MAX; i++) {
     struct cpu* d = &cpus[i];
     int l;
@@ -760,7 +786,7 @@ static void kt_push(struct cpu* c) {
   if (n_online < 2) return;
   for (i = 0; i < KT_CPU_MAX && c->nr > 0; i++) {
     struct cpu* d = &cpus[i];
-    if (!d->online || d == c) continue;
+    if (!d->online || d == c || parked(d)) continue;
     if (d->curr != d->idle || d->nr != 0) continue;
     if (move_one(c, d)) resched_cpu(d);
   }
@@ -890,7 +916,19 @@ static int world_wait(volatile int* addr, int val, int timeout_ms) {
       if ((uint32_t)timeout_ms - el < lim) lim = (uint32_t)timeout_ms - el;
     }
     con_break_poll();                 /* Ctrl+C no console: pode nao voltar */
-    if (gui_coop_pause()) continue;   /* dentro do WIN: o desktop roda */
+    /* dentro do WIN: o desktop roda; a tarefa volta quando *addr mudar ou
+     * o prazo vencer, sem contar como "calculando" (laco do WIN faz hlt) */
+    if (gui_coop_wait(addr, val, lim)) continue;
+    /* Tela de texto esperando (WSL exec esperando a VM, por exemplo): as
+     * outras telas andam - as de fundo se esta e a visivel (o servico WSL na
+     * Ctrl+F10, o DISKSYNC), a visivel se esta e de fundo. Antes o futex
+     * prendia o mundo inteiro e o servico nunca subia. Nao no meio de uma
+     * operacao de disco (dona da trava do FS), como no sched_yield. */
+    if (!fs_held_by_me()) {
+      if (vt_bg()) vt_yield_poll();   /* ao fundo: a tela visivel anda */
+      else vt_idle();
+    }
+    if (*addr != val) return 0;
     world_lend(addr, val, lim);
   }
 }
@@ -1059,12 +1097,17 @@ static struct cpu* pick_cpu(uint32_t mask) {
     int k = i % KT_CPU_MAX;
     struct cpu* d = &cpus[k];
     int l;
-    if (!d->online || !((mask >> k) & 1u)) continue;
+    if (!d->online || !((mask >> k) & 1u) || parked(d)) continue;
     l = load_of(d);
     if (l < bl) {
       best = d;
       bl = l;
     }
+  }
+  if (!best && (mask & 1u)) best = &cpus[0];
+  if (!best) {                       /* a afinidade so tem CPUs estacionadas */
+    for (i = 1; i < KT_CPU_MAX; i++)
+      if (cpus[i].online && ((mask >> i) & 1u)) return &cpus[i];
   }
   return best ? best : &cpus[0];
 }
@@ -1299,6 +1342,13 @@ static void tick_common(struct cpu* c, int ms) {
     for (;;) __asm__ volatile ("cli; hlt");
   }
   if (t->kind == K_THREAD) t->slice_ms += (uint32_t)ms;
+  if (parked(c)) {                   /* limite termico: esvazia esta CPU */
+    int i;
+    for (i = 0; i < KT_CPU_MAX && c->nr > 0; i++)
+      if (cpus[i].online && !parked(&cpus[i]) && &cpus[i] != c && move_one(c, &cpus[i]))
+        resched_cpu(&cpus[i]);
+    if (t->kind == K_THREAD) c->need_resched = 1;
+  }
   if (c->nr > 0) kt_push(c);
   c->bal_ms += (uint32_t)ms;
   if (c->bal_ms >= BAL_MS) {

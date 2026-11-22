@@ -51,6 +51,8 @@ void wine_env_changed(void);
 int wine_reset_if_idle(void);
 /* Para o comando WINE/diagnostico: 1 se o DLL esta na memoria. */
 int wine_loaded(void);
+/* REBOOT: o que cada thread do Windows esta esperando, na serial. */
+void wine_dump_waits(void);
 
 /* KUSER_SHARED_DATA: pagina fixa em 0x7FFE0000 de onde o codigo do Windows le
  * o relogio sem chamar ninguem (o runtime do Go, por exemplo). So existe

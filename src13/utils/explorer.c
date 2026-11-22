@@ -30,16 +30,16 @@
 
 #define MAXENT  512
 #define MAXHIST 32
-#define PATHMAX 160
+#define PATHMAX 260 /* caminho com nomes longos (era 160) */
 
-static struct k_dirent g_ent[MAXENT];
+static struct k_direntl g_ent[MAXENT]; /* nome inteiro, ate 255 */
 static int g_idx[MAXENT];   /* todas as entradas, ordenadas */
 static int g_n;
 /* lista mostrada (filtro aplicado): -1 = "..", senao indice em g_ent.
  * g_sel, g_top, g_ren sao posicoes nesta lista. */
 static int g_vis[MAXENT + 1];
 static int g_nv;
-static struct k_dirent g_up_ent;   /* a linha ".." */
+static struct k_direntl g_up_ent;   /* a linha ".." */
 
 static char g_path[PATHMAX];
 static char g_hist[MAXHIST][PATHMAX];
@@ -357,8 +357,8 @@ static void go_up(void) {
 
 /* --------------------------------------------------------------- listagem */
 static int cmp_entries(int a, int b) {
-  struct k_dirent* x = &g_ent[a];
-  struct k_dirent* y = &g_ent[b];
+  struct k_direntl* x = &g_ent[a];
+  struct k_direntl* y = &g_ent[b];
   int c = 0;
   /* pastas sempre antes, em qualquer ordem */
   if (x->dir != y->dir) return x->dir ? -1 : 1;
@@ -535,7 +535,7 @@ static void name_set(const char* s) {
 
 static void load_dir(const char* p) {
   int i;
-  g_n = k_dir(p, g_ent, MAXENT);
+  g_n = k_dir_long(p, g_ent, MAXENT);
   if (g_n < 0) {
     g_n = 0;
     set_status("erro ao listar a pasta");
@@ -566,19 +566,19 @@ static void load_dir(const char* p) {
 
 static int is_up_row(int i) { return i >= 0 && i < g_nv && g_vis[i] < 0; }
 
-static struct k_dirent* row_ent(int i) {
+static struct k_direntl* row_ent(int i) {
   if (i < 0 || i >= g_nv) return 0;
   return g_vis[i] < 0 ? &g_up_ent : &g_ent[g_vis[i]];
 }
 
 /* item marcado; a linha ".." nao conta (nao se exclui nem renomeia) */
-static struct k_dirent* sel_ent(void) {
+static struct k_direntl* sel_ent(void) {
   return is_up_row(g_sel) ? 0 : row_ent(g_sel);
 }
 
 /* Abre a pasta ou executa o arquivo selecionado. */
 static void open_sel(void) {
-  struct k_dirent* e = sel_ent();
+  struct k_direntl* e = sel_ent();
   char full[PATHMAX];
   if (is_up_row(g_sel)) {
     go_up();
@@ -664,7 +664,7 @@ static int select_name(const char* name) {
 
 /* Poe o nome do item selecionado em edicao (todo marcado). */
 static void start_rename(void) {
-  struct k_dirent* e = sel_ent();
+  struct k_direntl* e = sel_ent();
   if (!e) return;
   g_ren = g_sel;
   gui_edit_set(&g_ren_edit, e->name);
@@ -676,8 +676,8 @@ static void cancel_rename(void) { g_ren = -1; }
 
 /* Enter: grava o novo nome. Nao substitui arquivo que ja exista. */
 static void commit_rename(void) {
-  struct k_dirent* e;
-  char nm[64];
+  struct k_direntl* e;
+  char nm[256];
   char from[PATHMAX];
   char to[PATHMAX];
   int i, n = 0, rc;
@@ -696,8 +696,8 @@ static void commit_rename(void) {
     set_status("nome mantido");
     return;
   }
-  if (n > 31) {
-    set_status("nome longo demais (max 31)");
+  if (n > 255) {
+    set_status("nome longo demais (max 255)");
     return;
   }
   for (i = 0; i < n; i++) {
@@ -759,7 +759,7 @@ static void make_dir(void) {
 }
 
 static void delete_sel(void) {
-  struct k_dirent* e = sel_ent();
+  struct k_direntl* e = sel_ent();
   char full[PATHMAX];
   int rc;
   if (!e) {
@@ -830,7 +830,7 @@ static int desktop_dir(char* out, int max) {
 /* Botao direito > Criar atalho: grava NOME.LNK (texto com o caminho do .EXE)
  * na pasta do desktop. O WIN abre o .EXE ao clicar no icone. */
 static void make_shortcut(void) {
-  struct k_dirent* e = sel_ent();
+  struct k_direntl* e = sel_ent();
   char target[PATHMAX];
   char dir[PATHMAX];
   char base[9];
@@ -906,7 +906,7 @@ static void make_shortcut(void) {
 }
 
 static void ctx_open_at(int x, int y, int on_item) {
-  struct k_dirent* e = sel_ent();
+  struct k_direntl* e = sel_ent();
   g_ctx_n = 0;
   if (on_item && e) {
     g_ctx_item[g_ctx_n++] = CTX_OPEN;
@@ -998,7 +998,7 @@ static int in_rect(int* r, int x, int y) {
 }
 
 static void draw_ask(int sw, int sh) {
-  struct k_dirent* e = sel_ent();
+  struct k_direntl* e = sel_ent();
   char q[200];
   int w, h, x, y, ch = gui_char_h();
   if (!g_ask_del) return;
@@ -1279,7 +1279,7 @@ static int draw_file_list(int x, int y, int w, int h, int* out_rows) {
     int iy = y + 1 + i * rh;
     int sel, up;
     unsigned fg, bg;
-    struct k_dirent* e;
+    struct k_direntl* e;
     if (idx >= g_nv) break;
     e = row_ent(idx);
     up = g_vis[idx] < 0;
@@ -1355,7 +1355,7 @@ static int drive_lines(char* out, int max, int* offsets, int maxoff) {
 /* Pasta que o botao Selecionar devolve: a marcada na lista, senao a aberta.
  * Sem a barra do fim (menos na raiz "D:\\"). */
 static void pick_target(char* out, int max) {
-  struct k_dirent* e = sel_ent();
+  struct k_direntl* e = sel_ent();
   int l;
   copy_str(out, g_path, max);
   if (e && e->dir) cat_str(out, e->name, max);

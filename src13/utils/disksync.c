@@ -12,8 +12,8 @@
  * entao o de Z: e apagado. Pastas ficam. Sem pendrive (U: nao montado) os
  * arquivos esperam em Z:.
  *
- * Nomes maiores que 31 caracteres chegam aqui como o apelido 8.3 (k_dirent)
- * e vao assim para o pendrive.
+ * A pasta e lida com k_dir_long: o nome longo inteiro (ate 255) vai para o
+ * pendrive. Antes, nome maior que 31 ia como o apelido 8.3 (NOME~1).
  *
  * Tecla Q (com a tela Ctrl+F12 visivel) tambem para o servico.
  */
@@ -153,12 +153,12 @@ out:
 
 /* Marca/atualiza os arquivos de dir (recursivo). */
 static void scan(const char* dir, int depth) {
-  struct k_dirent* ents;
+  struct k_direntl* ents;
   int n, i;
   if (depth > MAX_DEPTH) return;
-  ents = (struct k_dirent*)k_malloc(MAX_DIRENT * (unsigned)sizeof(struct k_dirent));
+  ents = (struct k_direntl*)k_malloc(MAX_DIRENT * (unsigned)sizeof(struct k_direntl));
   if (!ents) return;
-  n = k_dir(dir, ents, MAX_DIRENT);
+  n = k_dir_long(dir, ents, MAX_DIRENT);
   for (i = 0; i < n; i++) {
     char p[PATH_LEN];
     struct track* t;

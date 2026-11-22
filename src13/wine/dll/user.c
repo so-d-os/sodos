@@ -359,7 +359,9 @@ intptr_t wsend(struct wwin* w, DWORD m, uintptr_t wp_, intptr_t lp) {
   g->sent = &s;
   wunlock();
   wsignal_global();
+  wwait_begin("SendMessage (espera a thread da janela)", w, 0, 0, __builtin_return_address(0));
   while (!s.done && !p->exit_req && !w->destroyed) k_futex_wait(&s.done, 0, 20);
+  wwait_end();
   if (!s.done) { /* a janela morreu: tira da fila */
     struct sentmsg** pp;
     wlock();
@@ -400,7 +402,9 @@ static int world_request(struct wgui* g, int req) {
   g->req = req;
   __sync_fetch_and_add(&wine_gen, 1);
   k_futex_wake(&p->exit_req, -1);
+  wwait_begin("pedido a tarefa do WINE (janela)", (void*)(uintptr_t)req, 0, 0, __builtin_return_address(0));
   while (!g->req_done && !p->exit_req) k_futex_wait(&g->req_done, 0, 20);
+  wwait_end();
   return g->req_rc;
 }
 
@@ -1634,11 +1638,19 @@ BOOL WINAPI wGetMessageW(struct msg* m, HANDLE h, DWORD lo, DWORD hi) {
   struct wproc* p = wp();
   (void)lo;
   (void)hi;
+  int marked = 0;
   if (!g) return -1;
   for (;;) {
     uint64_t until, now;
     int gen = wine_gen;
-    if (next_message(g, m, h, 1, &until)) return m->message != WM_QUIT;
+    if (next_message(g, m, h, 1, &until)) {
+      if (marked) wwait_end();
+      return m->message != WM_QUIT;
+    }
+    if (!marked) {
+      marked = 1;
+      wwait_begin("GetMessage (fila de mensagens)", h, 0, 0, __builtin_return_address(0));
+    }
     now = wnow_ms();
     if (p->exit_req) k_thread_exit(0);
     k_futex_wait(&wine_gen, gen, until > now ? (int)(until - now) : 1);
@@ -1659,7 +1671,9 @@ static WINAPI BOOL WaitMessage(void) {
   int gen = wine_gen;
   if (!g || next_message(g, &m, 0, 0, &until)) return 1;
   now = wnow_ms();
+  wwait_begin("WaitMessage", 0, 0, 0, __builtin_return_address(0));
   k_futex_wait(&wine_gen, gen, until > now ? (int)(until - now) : 1);
+  wwait_end();
   return 1;
 }
 static WINAPI BOOL TranslateMessage(const struct msg* m) {
@@ -1718,7 +1732,17 @@ static WINAPI BOOL SendNotifyMessageW(HANDLE h, DWORD m, uintptr_t wp_, intptr_t
 static WINAPI intptr_t CallWindowProcW(wndproc_fn f, HANDLE h, DWORD m, uintptr_t wp_, intptr_t lp) {
   return f ? f(h, m, wp_, lp) : 0;
 }
+static DWORD msgwait_in(DWORD n, const HANDLE* hs, DWORD ms, DWORD mask, DWORD fl);
 static WINAPI DWORD MsgWaitForMultipleObjectsEx(DWORD n, const HANDLE* hs, DWORD ms, DWORD mask, DWORD fl) {
+  DWORD r;
+  if (!ms) return msgwait_in(n, hs, ms, mask, fl);
+  wwait_begin(n ? "MsgWaitForMultipleObjects (objetos + mensagens)" : "MsgWaitForMultipleObjects (mensagens)",
+              n ? wh_get(hs[0], 0) : 0, 0, 0, __builtin_return_address(0));
+  r = msgwait_in(n, hs, ms, mask, fl);
+  wwait_end();
+  return r;
+}
+static DWORD msgwait_in(DWORD n, const HANDLE* hs, DWORD ms, DWORD mask, DWORD fl) {
   struct wgui* g = gui_get();
   struct wproc* p = wp();
   uint64_t t0 = wnow_ms();

@@ -2,6 +2,7 @@
 #include "kthread.h"
 #include <stdint.h>
 #include "vt.h"
+#include "reboot.h"  /* kbd_raw: teclado cru da tela visivel */
 #include "mm.h"
 #include "module.h"
 #include "sched.h"
@@ -40,6 +41,7 @@ struct vt {
   int cur_hidden;
   int back;          /* WIN: tela que volta quando ele fecha */
   uint32_t poll_t;   /* tick+1 em que cedeu sem tecla (k_trygetc): ver vt_idle */
+  int kraw;          /* k_kbd_raw desta tela (vale quando ela esta visivel) */
 };
 
 void ctx_switch(uint64_t* save_rsp, uint64_t next_rsp);
@@ -382,6 +384,203 @@ static void vt_log_entry(void) {
   }
 }
 
+/* ---- servico WSL (SET WSL=1) ----
+ * WSL.EXE run --service na tela Ctrl+F10: a VM do Linux fica ligada ao
+ * fundo, recebe comandos (WSL exec, BASH.EXE do Claude Code) pela segunda
+ * serial e o console dela aparece no Ctrl+F10. SET WSL=0: o proprio WSL.EXE
+ * desliga a VM e sai; a tela fica livre. */
+#define VT_WSL 8                   /* Ctrl+F10 */
+static char wsl_exe[DRV_PATH];
+
+static int wsl_wanted(void) {
+  const char* v = env_get("WSL");
+  return v && v[0] == '1';
+}
+
+static void vt_wsl_entry(void) {
+  char line[DRV_PATH + 24];
+  int i, k;
+  puts_k("SO DOS - WSL (Linux) ao fundo. SET WSL=0 desliga.\n\n");
+  for (i = 0; wsl_exe[i] && i < DRV_PATH; i++) line[i] = wsl_exe[i];
+  for (k = 0; " run --service"[k]; k++) line[i++] = " run --service"[k];
+  line[i] = 0;
+  shell_exec_quiet(line);
+  serial_puts("[vt] WSL terminou\n");
+  vts[vt_cur].state = VS_DEAD;
+  if (vt_fg == vt_cur) vt_select(0);
+  else vt_switch_to(vt_fg);
+  for (;;) __asm__ volatile ("hlt");
+}
+
+void vt_wsl_check(void) {
+  static const char* const dirs[] = { "D:\\WSL.EXE", "D:\\SODOS\\WSL.EXE", "Z:\\SODOS\\WSL.EXE" };
+  unsigned d;
+  if (!vt_on || !wsl_wanted()) return;
+  if (vts[VT_WSL].state != VS_FREE && vts[VT_WSL].state != VS_DEAD) return;  /* ja roda (ou prompt) */
+  env_sodos_path("WSL.EXE", wsl_exe, (int)sizeof(wsl_exe));
+  for (d = 0; file_size(wsl_exe) <= 0 && d < sizeof(dirs) / sizeof(dirs[0]); d++) {
+    int k = 0;
+    while (dirs[d][k] && k < (int)sizeof(wsl_exe) - 1) {
+      wsl_exe[k] = dirs[d][k];
+      k++;
+    }
+    wsl_exe[k] = 0;
+  }
+  if (file_size(wsl_exe) <= 0 && mod_find_exe("WSL", wsl_exe, (int)sizeof(wsl_exe)) != 0) {
+    serial_puts("[vt] SET WSL=1, mas WSL.EXE nao foi achado\n");
+    return;
+  }
+  if (vts[VT_WSL].state == VS_DEAD) {
+    if (vts[VT_WSL].stack) kfree(vts[VT_WSL].stack);
+    vts[VT_WSL].stack = 0;
+    vts[VT_WSL].state = VS_FREE;
+  }
+  if (vt_new(VT_WSL, VT_STACK, vt_wsl_entry) != 0) return;
+  vts[VT_WSL].cpu.bkl = 1;   /* pode vir de um k_setenv (BKL pego pelo thunk) */
+  serial_puts("[vt] WSL na tela Ctrl+F10: ");
+  serial_puts(wsl_exe);
+  serial_puts("\n");
+}
+
+/* ---- SET SYSTEMLOG=1: o log do Ctrl+F12 em \LOG\CONSOLE.LOG ----
+ * Uma thread do kernel (fora da CPU0) grava o que entrou no anel desde a
+ * ultima vez: ao ligar e a cada 5 minutos (e no REBOOT). O arquivo e
+ * acrescentado (um cabecalho por boot) e guarda os ultimos 2 MB. D:, ou U:
+ * sem D:. SET SYSTEMLOG=0 para. */
+#define CLOG_MAX (2u * 1024u * 1024u)
+#define CLOG_EVERY_MS (5u * 60u * 1000u)
+uint32_t net_ms(void);
+int rtc_date(void);
+const char* sodos_version(void);
+static uint32_t clog_saved;   /* slog_w ja gravado */
+static int clog_boot_done;
+static volatile int clog_word; /* 1 = gravar ja (SET SYSTEMLOG=1, REBOOT) */
+static int clog_thread_on;
+
+static int clog_wanted(void) {
+  const char* v = env_get("SYSTEMLOG");
+  return v && v[0] == '1';
+}
+
+static void cat_num(char* d, int* n, unsigned v, int w) {
+  char b[12];
+  int k = 0;
+  do { b[k++] = (char)('0' + v % 10); v /= 10; } while (v && k < 11);
+  while (k < w) b[k++] = '0';
+  while (k) d[(*n)++] = b[--k];
+}
+
+/* Com o BKL. 0 ok; -1 sem D:/U:, -2 sem memoria, -3 erro gravando. */
+int syslog_save_file(void) {
+  char path[24] = "D:\\LOG\\CONSOLE.LOG";
+  char dir[8] = "D:\\LOG";
+  uint32_t w = slog_w, from = clog_saved, lost = 0, i;
+  char* buf;
+  int n;
+  if (!drives_is_mounted('D')) {
+    if (!drives_is_mounted('U')) return -1;
+    path[0] = dir[0] = 'U';
+  }
+  if (w == from && clog_boot_done) return 0;
+  if (w - from > SLOG_SZ) {
+    lost = w - from - SLOG_SZ;
+    from = w - SLOG_SZ;
+  }
+  /* 2 MB: o kmalloc nao tem; arena de baixo (DMA do disco), dono 0 = kernel */
+  buf = (char*)umalloc_owned(CLOG_MAX + SLOG_SZ + 512, 0);
+  if (!buf) return -2;
+  (void)drives_mkdir(dir);
+  n = file_load(path, buf, (int)CLOG_MAX);
+  if (n < 0) n = 0;
+  if (!clog_boot_done) {
+    const char* v = sodos_version();
+    int t = rtc_time(), d = rtc_date();
+    static const char h[] = "\n===== boot ";
+    static const char h2[] = " - CONSOLE.LOG ligado em ";
+    for (i = 0; h[i]; i++) buf[n++] = h[i];
+    for (i = 0; v && v[i] && i < 80; i++) buf[n++] = v[i];
+    for (i = 0; h2[i]; i++) buf[n++] = h2[i];
+    if (d > 0) {
+      cat_num(buf, &n, (unsigned)(d / 10000), 4); buf[n++] = '-';
+      cat_num(buf, &n, (unsigned)(d / 100 % 100), 2); buf[n++] = '-';
+      cat_num(buf, &n, (unsigned)(d % 100), 2); buf[n++] = ' ';
+    }
+    if (t >= 0) {
+      cat_num(buf, &n, (unsigned)(t / 10000), 2); buf[n++] = ':';
+      cat_num(buf, &n, (unsigned)(t / 100 % 100), 2); buf[n++] = ':';
+      cat_num(buf, &n, (unsigned)(t % 100), 2); buf[n++] = ' ';
+    }
+    if (n && buf[n - 1] == ' ') n--;
+    for (i = 0; " =====\n"[i]; i++) buf[n++] = " =====\n"[i];
+    clog_boot_done = 1;
+  }
+  if (lost) {
+    static const char m[] = "[log: bytes perdidos (o anel de 64 KB encheu): ";
+    for (i = 0; m[i]; i++) buf[n++] = m[i];
+    cat_num(buf, &n, lost, 1);
+    buf[n++] = ']';
+    buf[n++] = '\n';
+  }
+  for (i = from; i != w; i++) buf[n++] = slog[i % SLOG_SZ];
+  if ((uint32_t)n > CLOG_MAX) { /* fica o fim, a partir de uma linha inteira */
+    uint32_t cut = (uint32_t)n - CLOG_MAX, k;
+    while (cut < (uint32_t)n && buf[cut - 1] != '\n') cut++;
+    for (k = cut; k < (uint32_t)n; k++) buf[k - cut] = buf[k];
+    n -= (int)cut;
+  }
+  i = file_save(path, buf, n) < 0;
+  ufree(buf);
+  if (i) return -3;
+  clog_saved = w;
+  return 0;
+}
+
+static int clog_thread(void* arg) {
+  uint32_t last = 0;
+  (void)arg;
+  for (;;) {
+    kt_futex_wait(&clog_word, 0, 10000);
+    if (!clog_wanted()) {
+      clog_word = 0;
+      last = 0;
+      continue;
+    }
+    if (clog_word || !last || net_ms() - last >= CLOG_EVERY_MS) {
+      clog_word = 0;
+      kt_bkl_enter_kernel();
+      {
+        int rc = syslog_save_file();
+        if (rc == -1) serial_puts("[syslog] CONSOLE.LOG nao gravado: sem D: nem U:\n");
+        else if (rc == -2) serial_puts("[syslog] CONSOLE.LOG nao gravado: sem memoria\n");
+        else if (rc) serial_puts("[syslog] CONSOLE.LOG nao gravado: erro de disco\n");
+      }
+      kt_bkl_leave();
+      last = net_ms() | 1u;
+    }
+  }
+  return 0;
+}
+
+/* SET SYSTEMLOG mudou (ou boot): liga a thread e pede uma gravacao. */
+void syslog_service_check(void) {
+  if (!clog_wanted()) return;
+  if (!clog_thread_on) {
+    if (kt_thread_create(clog_thread, 0, 16384, ~1u) <= 0) {
+      serial_puts("[syslog] thread do CONSOLE.LOG nao criada\n");
+      return;
+    }
+    clog_thread_on = 1;
+    serial_puts("[syslog] SET SYSTEMLOG=1: log do Ctrl+F12 em \\LOG\\CONSOLE.LOG a cada 5 min\n");
+  }
+  clog_word = 1;
+  kt_futex_wake(&clog_word, 1);
+}
+
+/* REBOOT: grava ja, na tarefa de quem chamou (com o BKL). */
+void syslog_save_now(void) {
+  if (clog_wanted()) (void)syslog_save_file();
+}
+
 void vt_service_check(void) {
   int i;
   if (!vt_on || !svc_wanted()) return;
@@ -435,10 +634,21 @@ void vt_init(void) {
   vts[VT_WIN].back = -1;
   vt_on = 1;
   vt_service_check();   /* SET DISKSYNC=1 do AUTOEXEC (antes das telas existirem) */
+  vt_wsl_check();       /* SET WSL=1 do AUTOEXEC */
+  syslog_service_check(); /* SET SYSTEMLOG=1 do AUTOEXEC */
 }
 
 int vt_bg(void) {
   return vt_on && vt_cur != vt_fg;
+}
+
+void vt_kbd_raw(int on) {
+  if (!vt_on) {
+    kbd_raw_set(on);
+    return;
+  }
+  vts[vt_cur].kraw = on ? 1 : 0;
+  if (vt_cur == vt_fg) kbd_raw_set(on);
 }
 
 /* Ctrl+Fn: as doze combinacoes sao do SO e nenhum programa as recebe.
@@ -474,6 +684,8 @@ void vt_select(int i) {
     vts[old].state = (old == VT_WIN) ? VS_GFX : VS_RUN;
   }
   vt_fg = i;
+  /* teclado cru e da tela: o WSL no Ctrl+F10 nao leva o Ctrl+C das outras */
+  if (kbd_raw() != vts[i].kraw) kbd_raw_set(vts[i].kraw);
   screen_in(i);
   /* Quem chamou ja nao esta na tela: a copia passa a ser a dele. */
   vga_text = (vt_cur == i) ? vt_hw : vts[vt_cur].cells;

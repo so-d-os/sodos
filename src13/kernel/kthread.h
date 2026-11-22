@@ -26,6 +26,10 @@ void kt_ap_enter(int idx);
 /* A CPU0 ja tem LAPIC/timer: libera o balanceamento entre CPUs. */
 void kt_set_online(int idx);
 int kt_online_count(void);
+/* Limite termico: so as CPUs 0..n-1 rodam threads; as outras ficam em hlt.
+ * kt_cpu_cap = CPUs liberadas agora. */
+void kt_set_cpu_cap(int n);
+int kt_cpu_cap(void);
 
 /* Ticks: LAPIC (APs) e PIT (CPU0, a cada 1 ms). IRQs desligadas, EOI feito. */
 void kt_tick_lapic(int ms);

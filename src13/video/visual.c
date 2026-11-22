@@ -4835,7 +4835,7 @@ static void wm_run_status(struct wm_win* w, int rc) {
  * devolve o turno ao desktop; um clique traz essa janela para a frente. */
 #define GUI_MAX 16
 #define GUI_Q 64   /* com entrada crua cada tecla sao 2+ bytes */
-#define TASK_MAX 16   /* Claude (WINE) sozinho abre 6+ processos; + navegador do login */
+#define TASK_MAX 32   /* Claude (WINE): Electron + claude-code abrem 17+ processos em paralelo */
 #define TASK_STACK (48 * 1024)
 #define TASK_ARGC 16
 #define TASK_ARGBUF 192
@@ -4844,6 +4844,9 @@ static void wm_run_status(struct wm_win* w, int rc) {
 #define WAKE_POLL  2
 #define WAKE_BLOCK 3
 #define WAKE_DEAD  4
+/* Esperando *wait_addr mudar (futex do mundo) ou o prazo vencer: nao pede
+ * CPU, o laco do WIN pode fazer hlt (gui_coop_wait). */
+#define WAKE_WAIT  5
 
 struct gui_win {
   int open;
@@ -4897,6 +4900,9 @@ struct gui_task {
   uint8_t* stack;
   uint8_t* xs_raw;     /* SSE/AVX salvos na preempcao (kmalloc, alinhado em uso) */
   uint32_t poll_t;     /* tick+1 do ultimo k_trygetc vazio (0 = nenhum): ver gui_coop_pause */
+  volatile int* wait_addr; /* WAKE_WAIT: volta quando *wait_addr != wait_val */
+  int wait_val;
+  uint32_t wait_until;     /* ... ou quando irq_ticks passar disto */
   char path[80];
   char args[TASK_ARGBUF]; /* argc textos seguidos, cada um com o seu NUL */
 };
@@ -5947,6 +5953,32 @@ int gui_coop_pause(void) {
   return 1;
 }
 
+/* Espera de futex de uma tarefa do WIN (world_wait no kthread.c): cede como
+ * WAKE_WAIT ate *addr != val ou ms passarem. Antes cedia como WAKE_BUSY, e
+ * cada processo do WINE (o laco do start() espera o ExitProcess de 20 em
+ * 20 ms) contava como "calculando": o laco do WIN nunca chegava ao hlt e a
+ * CPU0 ficava em 100% com o Claude parado (~15 W, ~82 C no notebook). */
+int gui_coop_wait(volatile int* addr, int val, uint32_t ms) {
+  struct gui_task* t;
+  if (task_cur < 0 || !host_on || kt_in_thread()) return 0;
+  t = &gtasks[task_cur];
+  t->poll_t = 0;
+  t->wait_addr = addr;
+  t->wait_val = val;
+  t->wait_until = (uint32_t)irq_ticks() + (ms ? ms : 1u);
+  gui_yield(WAKE_WAIT);
+  t = &gtasks[task_cur];
+  t->wait_addr = 0;
+  return 1;
+}
+
+/* WAKE_WAIT pronta: o valor mudou ou o prazo venceu */
+static int task_wait_ready(const struct gui_task* t) {
+  if (!t->wait_addr) return 1;
+  if (*t->wait_addr != t->wait_val) return 1;
+  return (int32_t)((uint32_t)irq_ticks() - t->wait_until) >= 0;
+}
+
 /* ---------- preempcao das janelas de programa ----------
  * As tarefas do WIN sao cooperativas: um programa que calcula sem ceder a vez
  * (layout/JS do Firefox, por exemplo) prendia o laco do WIN, e com ele o
@@ -6747,6 +6779,7 @@ static int task_pick(void) {
     i = (task_rr + n) % TASK_MAX;
     if (!gtasks[i].used) continue;
     if (gtasks[i].wake == WAKE_BUSY || gtasks[i].wake == WAKE_POLL) return i;
+    if (gtasks[i].wake == WAKE_WAIT && task_wait_ready(&gtasks[i])) return i;
   }
   return -1;
 }
@@ -7001,7 +7034,7 @@ static void wm_exec(struct wm_win* wins, int* focus, int big, const char* path) 
 /* Atalho gravado em D:\... e o arquivo ficou no pendrive: procura o mesmo
  * caminho em U: e depois so o nome na raiz de U:. 1 achou (caminho em out). */
 static int desk_find(const char* path, char* out, int max) {
-  char alt[96];
+  char alt[300]; /* caminho com nome longo */
   const char* leaf;
   char L;
   int i, j;
@@ -7054,9 +7087,14 @@ static int desk_find(const char* path, char* out, int max) {
 #define DESK_MAX 24
 #define DESK_ROOT "D:\\user\\default\\desktop\\"
 #define DESK_ROOT_USB "U:\\user\\default\\desktop\\"
+/* Nome longo inteiro (FAT LFN, ate 255): antes so 8.3 (nome de mais de 12
+ * nem aparecia). O rotulo e encurtado so na hora de desenhar (desk_short). */
+#define DESK_NAME 256
+#define DESK_LABEL 12 /* letras no rotulo (= label_w do desk_place); o resto vira ".." */
+#define DESK_PATH 300
 struct desk_item {
-  char name[16];
-  char path[48];
+  char name[DESK_NAME];
+  char path[DESK_PATH];
   int image;
   int dir;
   int lnk;   /* NOME.LNK: atalho, o conteudo e o caminho do programa */
@@ -7070,7 +7108,7 @@ static int desk_n;
  * tela. As posicoes ficam em D:\SODOS\DESKPOS.CFG ("NOME x y" por linha). */
 #define DESK_POS_CFG "D:\\SODOS\\DESKPOS.CFG"
 #define DESK_POS_MAX 64
-static struct { char name[16]; int16_t x, y; } desk_pos[DESK_POS_MAX];
+static struct { char name[DESK_NAME]; int16_t x, y; } desk_pos[DESK_POS_MAX];
 static int desk_pos_n;
 static int desk_press = -1;          /* icone com o botao apertado em cima */
 static int desk_press_mx, desk_press_my, desk_press_ox, desk_press_oy;
@@ -7080,8 +7118,13 @@ static int desk_soltou = -1;         /* soltou sem arrastar: abre este */
 
 static int desk_nome_eq(const char* a, const char* b) {
   int i = 0;
-  while (a[i] && a[i] == b[i]) i++;
-  return a[i] == 0 && b[i] == 0;
+  for (;; i++) {
+    char x = a[i], y = b[i];
+    if (x >= 'a' && x <= 'z') x = (char)(x - 32);
+    if (y >= 'a' && y <= 'z') y = (char)(y - 32);
+    if (x != y) return 0;
+    if (!x) return 1;
+  }
 }
 
 /* posicao gravada do item i; 0 = segue a grade */
@@ -7096,36 +7139,54 @@ static int desk_pos_de(int i, int* x, int* y) {
   return 0;
 }
 
+/* Le os dois numeros do fim de b[s..e) (x y); e passa a apontar para o fim
+ * do nome. 0 se nao achou os dois. */
+static int desk_pos_nums(const char* b, int s, int* e, int v[2]) {
+  int c, q = *e;
+  for (c = 1; c >= 0; c--) {
+    int d = 1, val = 0, any = 0;
+    while (q > s && b[q - 1] == ' ') q--;
+    while (q > s && b[q - 1] >= '0' && b[q - 1] <= '9') {
+      val += (b[q - 1] - '0') * d;
+      d *= 10;
+      q--;
+      any = 1;
+    }
+    if (!any) return 0;
+    if (q > s && b[q - 1] == '-') {
+      val = -val;
+      q--;
+    }
+    v[c] = val;
+  }
+  while (q > s && b[q - 1] == ' ') q--;
+  *e = q;
+  return 1;
+}
+
 static void desk_pos_load(void) {
-  char b[2048];
+  static char b[DESK_POS_MAX * (DESK_NAME + 16)];
   int n = file_load(DESK_POS_CFG, b, (int)sizeof(b) - 1), i = 0;
   desk_pos_n = 0;
   if (n <= 0) return;
   b[n] = 0;
   while (i < n && desk_pos_n < DESK_POS_MAX) {
-    int k = 0, v[2] = { 0, 0 }, c, neg;
+    int s, e, k, v[2] = { 0, 0 };
     while (i < n && (b[i] == '\r' || b[i] == '\n' || b[i] == ' ')) i++;
-    while (i < n && b[i] != ' ' && b[i] != '\r' && b[i] != '\n' && k < 15)
-      desk_pos[desk_pos_n].name[k++] = b[i++];
+    s = i;
+    while (i < n && b[i] != '\r' && b[i] != '\n') i++;
+    e = i;
+    if (!desk_pos_nums(b, s, &e, v) || e <= s) continue;
+    for (k = 0; s + k < e && k < DESK_NAME - 1; k++) desk_pos[desk_pos_n].name[k] = b[s + k];
     desk_pos[desk_pos_n].name[k] = 0;
-    for (c = 0; c < 2; c++) {
-      while (i < n && b[i] == ' ') i++;
-      neg = i < n && b[i] == '-';
-      if (neg) i++;
-      while (i < n && b[i] >= '0' && b[i] <= '9') v[c] = v[c] * 10 + (b[i++] - '0');
-      if (neg) v[c] = -v[c];
-    }
-    while (i < n && b[i] != '\n') i++;
-    if (k > 0) {
-      desk_pos[desk_pos_n].x = (int16_t)v[0];
-      desk_pos[desk_pos_n].y = (int16_t)v[1];
-      desk_pos_n++;
-    }
+    desk_pos[desk_pos_n].x = (int16_t)v[0];
+    desk_pos[desk_pos_n].y = (int16_t)v[1];
+    desk_pos_n++;
   }
 }
 
 static void desk_pos_save(void) {
-  char b[DESK_POS_MAX * 28];
+  static char b[DESK_POS_MAX * (DESK_NAME + 16)];
   int n = 0, k, j;
   for (k = 0; k < desk_pos_n; k++) {
     int c;
@@ -7154,7 +7215,7 @@ static void desk_pos_set(int i, int x, int y) {
     if (desk_nome_eq(desk_pos[k].name, desk_items[i].name)) break;
   if (k == desk_pos_n) {
     if (desk_pos_n >= DESK_POS_MAX) return;
-    for (int j = 0; j < 16; j++) desk_pos[k].name[j] = desk_items[i].name[j];
+    for (int j = 0; j < DESK_NAME; j++) desk_pos[k].name[j] = desk_items[i].name[j];
     desk_pos_n++;
   }
   desk_pos[k].x = (int16_t)x;
@@ -7164,17 +7225,17 @@ static void desk_pos_set(int i, int x, int y) {
 static volatile int desk_dirty;   /* win_desk_touch: rele no proximo quadro */
 /* Renomear no desktop (depois de Nova pasta): indice, texto e nome antigo */
 static int desk_ren = -1;
-static char desk_ren_buf[13];
+static char desk_ren_buf[DESK_NAME];
 static int desk_ren_len;
 static int desk_ren_all;   /* nome todo marcado: digitar substitui */
-static char desk_ren_old[16];
+static char desk_ren_old[DESK_NAME];
 /* Icone marcado pelo ultimo clique: so o rotulo dele tem fundo (os outros sao
  * transparentes). -1 nenhum, 0..desk_n-1 itens da pasta (desk_mark_name
  * guarda o nome para achar de novo quando a pasta e relida), DESK_MARK_FIXED
  * + 0..3 os fixos DOS/ARQ/WEB/CMD. */
 #define DESK_MARK_FIXED 0x1000
 static int desk_mark = -1;
-static char desk_mark_name[16];
+static char desk_mark_name[DESK_NAME];
 
 static void desk_free(void) {
   int i;
@@ -7212,7 +7273,7 @@ static int desk_is_video(const char* name) {
 }
 
 static void desk_load_thm(struct desk_item* it) {
-  char thm[48];
+  char thm[DESK_PATH];
   int i, n = 0, dot = -1, sz, w, h;
   uint8_t* b;
   while (it->path[n]) n++;
@@ -7245,25 +7306,25 @@ static void desk_load_thm(struct desk_item* it) {
   it->px = b;
 }
 
-#define DESK_LIST 1024
+#define DESK_LIST 8192 /* 24 itens com nome longo */
 static char desk_last[DESK_LIST];
 static int desk_last_n = -1;
 
 static int desk_read_list(char* list, const char** prefix) {
   int n;
   *prefix = DESK_ROOT;
-  n = drives_is_mounted('D') ? file_list(DESK_ROOT, list, DESK_LIST) : -1;
+  n = drives_is_mounted('D') ? file_list_long(DESK_ROOT, list, DESK_LIST) : -1;
   if (n <= 0) {
     /* sem D: (notebook com boot pelo GRUB): a mesma pasta no pendrive */
     *prefix = DESK_ROOT_USB;
     if (!drives_is_mounted('U') && drives_mount_usb() != 0) return -1;
-    n = file_list(*prefix, list, DESK_LIST);
+    n = file_list_long(*prefix, list, DESK_LIST);
   }
   return n;
 }
 
 static void desk_load(void) {
-  char list[DESK_LIST];
+  static char list[DESK_LIST]; /* 8 KB: fora da pilha */
   int n, p;
   const char* prefix;
   int plen = 0;
@@ -7291,13 +7352,10 @@ static void desk_load(void) {
     while (e > s && list[e - 1] == ' ') e--;
     if (e <= s) continue;
     k = e - s;
-    if (k > 12) continue;
+    if (k >= DESK_NAME) continue;
     it = &desk_items[desk_n];
-    for (i = 0; i < k; i++) {
-      char c = list[s + i];
-      if (c >= 'a' && c <= 'z') c = (char)(c - 32);
-      it->name[i] = c;
-    }
+    /* nome como esta no disco (com minusculas): o 8.3 ja vem em maiusculas */
+    for (i = 0; i < k; i++) it->name[i] = list[s + i];
     it->name[k] = 0;
     if (!dir && desk_ext_is(it->name, "THM")) continue;
     if (plen + k >= (int)sizeof(it->path)) continue;
@@ -7319,8 +7377,8 @@ static void desk_load(void) {
     int i, j;
     desk_ren = -1;
     for (i = 0; i < desk_n; i++) {
-      for (j = 0; desk_items[i].name[j] && desk_items[i].name[j] == desk_ren_old[j]; j++) { }
-      if (!desk_items[i].name[j] && !desk_ren_old[j]) desk_ren = i;
+      (void)j;
+      if (desk_nome_eq(desk_items[i].name, desk_ren_old)) desk_ren = i;
     }
   }
   if (desk_mark >= 0 && desk_mark < DESK_MARK_FIXED) {
@@ -7328,8 +7386,8 @@ static void desk_load(void) {
     int i, j;
     desk_mark = -1;
     for (i = 0; i < desk_n && desk_mark_name[0]; i++) {
-      for (j = 0; desk_items[i].name[j] && desk_items[i].name[j] == desk_mark_name[j]; j++) { }
-      if (!desk_items[i].name[j] && !desk_mark_name[j]) desk_mark = i;
+      (void)j;
+      if (desk_nome_eq(desk_items[i].name, desk_mark_name)) desk_mark = i;
     }
   }
 }
@@ -7347,7 +7405,7 @@ static void desk_mark_item(int i) {
 /* Depois de um comando: rele as miniaturas so se a lista de arquivos mudou.
  * 1 se mudou (o desktop precisa de um quadro inteiro). */
 static int desk_refresh(void) {
-  char list[DESK_LIST];
+  static char list[DESK_LIST];
   const char* prefix;
   int n = desk_read_list(list, &prefix);
   int i;
@@ -7392,7 +7450,7 @@ static int desk_ensure_root(char* out, int max) {
   char L;
   {
     /* a pasta que o desktop ja mostra (D: com itens, ou a do pendrive) */
-    char list[DESK_LIST];
+    static char list[DESK_LIST];
     const char* pre;
     if (desk_read_list(list, &pre) > 0) {
       wm_copy_str(out, max, pre);
@@ -7421,7 +7479,7 @@ static int desk_ensure_root(char* out, int max) {
 static void desk_ren_start(int i) {
   int k;
   if (i < 0 || i >= desk_n) return;
-  for (k = 0; desk_items[i].name[k] && k < 12; k++) desk_ren_buf[k] = desk_items[i].name[k];
+  for (k = 0; desk_items[i].name[k] && k < DESK_NAME - 1; k++) desk_ren_buf[k] = desk_items[i].name[k];
   desk_ren_buf[k] = 0;
   desk_ren_len = k;
   desk_ren_all = 1;
@@ -7431,7 +7489,7 @@ static void desk_ren_start(int i) {
 
 static void desk_ren_commit(void) {
   struct desk_item* it;
-  char to[64];
+  char to[DESK_PATH];
   int plen, nlen, i, same = 1;
   if (desk_ren < 0 || desk_ren >= desk_n) {
     desk_ren = -1;
@@ -7471,7 +7529,7 @@ static void desk_ren_commit(void) {
 static void desk_ren_key(int c) {
   if (desk_ren_all && c != '\r' && c != '\n' && c != 27) {
     desk_ren_all = 0;
-    if (c == 8 || (c > 32 && c < 127)) {
+    if (c == 8 || (c >= 32 && c < 127)) {
       desk_ren_len = 0;
       desk_ren_buf[0] = 0;
       if (c == 8) return;
@@ -7481,9 +7539,9 @@ static void desk_ren_key(int c) {
   else if (c == 27) desk_ren = -1;
   else if (c == 8) {
     if (desk_ren_len > 0) desk_ren_buf[--desk_ren_len] = 0;
-  } else if (c > 32 && c < 127 && desk_ren_len < 12 && c != '\\' && c != '/' && c != ':' &&
-             c != '*' && c != '?' && c != '"' && c != '<' && c != '>' && c != '|') {
-    if (c >= 'a' && c <= 'z') c -= 32;
+  } else if (c >= 32 && c < 127 && desk_ren_len < DESK_NAME - 1 && c != '\\' && c != '/' &&
+             c != ':' && c != '*' && c != '?' && c != '"' && c != '<' && c != '>' && c != '|') {
+    /* nome longo: aceita espaco e minusculas (antes so 8.3 em maiusculas) */
     desk_ren_buf[desk_ren_len++] = (char)c;
     desk_ren_buf[desk_ren_len] = 0;
   }
@@ -7531,7 +7589,7 @@ static void desk_new_folder(void) {
 
 /* Atalho .LNK: primeira linha do arquivo e o caminho do .EXE. */
 static int desk_lnk_target(const char* lnk, char* out, int max) {
-  char buf[96];
+  char buf[300]; /* alvo com nome longo */
   int n = file_load(lnk, buf, (int)sizeof(buf));
   int i, j = 0;
   if (n <= 0) return 0;
@@ -7763,27 +7821,38 @@ static void desk_draw(int icon, int ch, int scale, int sw, int sh, int bar_h,
     if (i == desk_ren) {
       int bw = 12 * FONT_W * scale + 8;
       int bh = (vga_bios_font_ok ? FONT_H : 8) * scale + 4;
-      int tw = desk_ren_len * FONT_W * scale;
+      /* caixa de 12 letras: nome maior rola, mostrando o fim (onde se digita) */
+      const char* vis = desk_ren_len > 12 ? desk_ren_buf + desk_ren_len - 12 : desk_ren_buf;
+      int tw = (desk_ren_len > 12 ? 12 : desk_ren_len) * FONT_W * scale;
       fill_rect(x - 2, y + icon, bw, bh, col_black);
       fill_rect(x - 1, y + icon + 1, bw - 2, bh - 2, col_white);
       if (desk_ren_all) {
         uint32_t sel = desk_color(32, 96, 200);
         fill_rect(x + 2, y + icon + 2, tw, bh - 4, sel);
-        draw_string_scaled(x + 2, y + icon + 2, desk_ren_buf, col_white, sel, scale);
+        draw_string_scaled(x + 2, y + icon + 2, vis, col_white, sel, scale);
       } else
-        draw_string_scaled(x + 2, y + icon + 2, desk_ren_buf, col_black, col_white, scale);
+        draw_string_scaled(x + 2, y + icon + 2, vis, col_black, col_white, scale);
       fill_rect(x + 2 + tw, y + icon + 2, scale > 1 ? 2 : 1, bh - 4, col_black);
-    } else if (it->lnk) {
-      char lab[16];
-      int k = 0;
-      while (it->name[k] && it->name[k] != '.' && k < 15) {
-        lab[k] = it->name[k];
-        k++;
+    } else {
+      /* rotulo: o .LNK sem a extensao; nome longo encurtado com ".." para
+       * nao invadir os vizinhos (o nome inteiro continua no item) */
+      char lab[24];
+      int k = 0, n = 0, last = -1;
+      while (it->name[n]) n++;
+      if (it->lnk)
+        for (k = 0; k < n; k++)
+          if (it->name[k] == '.') last = k;
+      if (last > 0) n = last;
+      if (n > DESK_LABEL) {
+        for (k = 0; k < DESK_LABEL - 2; k++) lab[k] = it->name[k];
+        lab[k++] = '.';
+        lab[k++] = '.';
+      } else {
+        for (k = 0; k < n; k++) lab[k] = it->name[k];
       }
       lab[k] = 0;
       desk_label(x, icon, y + icon + 2, lab, i == desk_mark, col_white, col_black, scale);
-    } else
-      desk_label(x, icon, y + icon + 2, it->name, i == desk_mark, col_white, col_black, scale);
+    }
   }
 }
 
@@ -10973,8 +11042,8 @@ static int win_wm_run(void) {
                 focus = nw;
               }
             } else if (desk_items[desk_i].lnk) {
-              char tgt[64];
-              char exe[64];
+              char tgt[DESK_PATH];
+              char exe[DESK_PATH];
               if (desk_lnk_target(desk_items[desk_i].path, tgt, (int)sizeof(tgt))) {
                 if (!desk_find(tgt, exe, (int)sizeof(exe)))
                   wm_copy_str(exe, (int)sizeof(exe), tgt);
@@ -10989,7 +11058,7 @@ static int win_wm_run(void) {
             else if (desk_items[desk_i].image == 2)
               wm_open_video(wins, &focus, big, desk_items[desk_i].path);
             else if (app_is_prog(desk_items[desk_i].name)) {
-              char exe[48];
+              char exe[DESK_PATH];
               if (!desk_find(desk_items[desk_i].path, exe, (int)sizeof(exe)))
                 wm_copy_str(exe, (int)sizeof(exe), desk_items[desk_i].path);
               wm_exec(wins, &focus, big, exe);
@@ -11848,7 +11917,7 @@ static void win_load_wall(void) {
 }
 
 static void win_load_cfg(void) {
-  static char cfg[256];
+  static char cfg[1024]; /* wall= com nome longo (ate 255) */
   int n, i, mode = 0, wall = 0;
   uint32_t bg = 0;
   gpu_cfg_line(0, 0);

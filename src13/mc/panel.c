@@ -6,7 +6,7 @@ struct panel pan[2];
 int act;
 int today;
 
-static struct k_dirent kd[ENT_MAX];
+static struct k_direntl* kd; /* nomes inteiros (k_dir_long), alocado uma vez */
 static int sort_mode;
 
 static const char* months[12] = {
@@ -127,7 +127,8 @@ void panel_load(struct panel* p) {
     p->e[0].up = 1;
     p->n = 1;
   }
-  n = k_dir(p->path, kd, ENT_MAX - 1);
+  if (!kd) kd = (struct k_direntl*)malloc(sizeof(struct k_direntl) * ENT_MAX);
+  n = kd ? k_dir_long(p->path, kd, ENT_MAX - 1) : -1;
   if (n < 0) {
     p->bad = 1;
     n = 0;
@@ -155,7 +156,7 @@ static void panel_goto_name(struct panel* p, const char* name) {
 }
 
 void panel_reload(struct panel* p) {
-  char keep[32];
+  char keep[NAME_MAX_MC];
   int old = p->cur;
   keep[0] = 0;
   if (p->cur < p->n) strcpy(keep, p->e[p->cur].name);
@@ -181,7 +182,7 @@ void panel_chdir(struct panel* p, const char* path) {
 }
 
 void panel_up(struct panel* p) {
-  char child[32];
+  char child[NAME_MAX_MC];
   int n = (int)strlen(p->path);
   if (is_root(p->path)) return;
   while (n > 0 && p->path[n - 1] != '\\') n--;
@@ -404,7 +405,17 @@ void panel_draw(struct panel* p, int active) {
     char sz[16];
     if (e->dir) strcpy(sz, e->up ? "UP--DIR" : "<DIR>");
     else fmt_size(sz, e->size);
-    scr_textw(21, x + 1, e->name, 38, C_PANEL);
+    {
+      /* nome longo: corta com ~ antes do tamanho (nao escreve por cima) */
+      char nb[NAME_MAX_MC];
+      int w = 38 - (int)strlen(sz) - 1, l = (int)strlen(e->name);
+      strcpy(nb, e->name);
+      if (l > w && w > 1) {
+        nb[w - 1] = '~';
+        nb[w] = 0;
+      }
+      scr_textw(21, x + 1, nb, w + 1, C_PANEL);
+    }
     put_right(21, x + 38 - (int)strlen(sz), (int)strlen(sz), sz, C_PANEL);
   } else {
     scr_fill(21, x + 1, 1, 38, ' ', C_PANEL);

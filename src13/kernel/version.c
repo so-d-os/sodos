@@ -12,6 +12,7 @@
 #include "smp.h"
 #include "kexports.h"
 #include "drives.h"
+#include "vt.h"
 
 const char* sodos_version(void) { return SODOS_VERSION; }
 int sodos_build(void) { return SODOS_VER_BUILD; }
@@ -50,13 +51,23 @@ static void cat_u(char* d, int max, unsigned v, int digits) {
   }
 }
 
-/* "build N" da ultima linha do log; -1 se nao achar. */
+/* "build N" da ultima linha de boot do log (pula as linhas de reboot);
+ * -1 se nao achar. */
+static int last_build_line(const char* buf, int st, int end);
 static int last_build(const char* buf, int len) {
-  int end = len;
-  int i, st;
-  while (end > 0 && (buf[end - 1] == '\n' || buf[end - 1] == '\r')) end--;
-  st = end;
-  while (st > 0 && buf[st - 1] != '\n') st--;
+  int end = len, st, v;
+  for (;;) {
+    while (end > 0 && (buf[end - 1] == '\n' || buf[end - 1] == '\r')) end--;
+    if (end <= 0) return -1;
+    st = end;
+    while (st > 0 && buf[st - 1] != '\n') st--;
+    v = last_build_line(buf, st, end);
+    if (v >= 0) return v;
+    end = st;
+  }
+}
+static int last_build_line(const char* buf, int st, int end) {
+  int i;
   for (i = st; i + 6 < end; i++) {
     if (buf[i] == 'b' && buf[i + 1] == 'u' && buf[i + 2] == 'i' && buf[i + 3] == 'l' &&
         buf[i + 4] == 'd' && buf[i + 5] == ' ') {
@@ -205,4 +216,68 @@ int cmd_ver(int argc, char** argv) {
   (void)argv;
   version_print(1);
   return 0;
+}
+
+/* REBOOT [motivo]: registra no BOOT.LOG, no TEMP.LOG e no SERIAL.LOG e
+ * reinicia como o Ctrl+Alt+Del (sys_reboot). Assim, num desligamento sem
+ * explicacao, da para ver se o boot anterior terminou por este comando. */
+#include "reboot.h"
+uint32_t net_ms(void);
+int serial_log_save(void);
+void thermal_note(const char* line);
+void wine_dump_waits(void);
+void puts_k(const char* s);
+
+int cmd_reboot(int argc, char** argv) {
+  static const char order[] = {'D', 'U', 'Z'};
+  char line[200];
+  int d = rtc_date(), t = rtc_time(), i;
+  uint32_t up = net_ms() / 1000u;
+  line[0] = 0;
+  if (d > 0) {
+    cat_u(line, (int)sizeof line, (unsigned)(d / 10000), 4);
+    cat(line, (int)sizeof line, "-");
+    cat_u(line, (int)sizeof line, (unsigned)(d / 100 % 100), 2);
+    cat(line, (int)sizeof line, "-");
+    cat_u(line, (int)sizeof line, (unsigned)(d % 100), 2);
+  } else {
+    cat(line, (int)sizeof line, "sem data RTC");
+  }
+  cat(line, (int)sizeof line, " ");
+  if (t >= 0) {
+    cat_u(line, (int)sizeof line, (unsigned)(t / 10000), 2);
+    cat(line, (int)sizeof line, ":");
+    cat_u(line, (int)sizeof line, (unsigned)(t / 100 % 100), 2);
+    cat(line, (int)sizeof line, ":");
+    cat_u(line, (int)sizeof line, (unsigned)(t % 100), 2);
+  }
+  cat(line, (int)sizeof line, " UTC  REBOOT pelo comando, no ar ha ");
+  cat_u(line, (int)sizeof line, up / 60u, 1);
+  cat(line, (int)sizeof line, " min ");
+  cat_u(line, (int)sizeof line, up % 60u, 2);
+  cat(line, (int)sizeof line, " s");
+  if (argc > 1) {
+    cat(line, (int)sizeof line, ":");
+    for (i = 1; i < argc; i++) {
+      cat(line, (int)sizeof line, " ");
+      cat(line, (int)sizeof line, argv[i]);
+    }
+  }
+  cat(line, (int)sizeof line, "\r\n");
+  puts_k("Registrando e reiniciando...\n");
+  serial_puts("[reboot] ");
+  serial_puts(line);
+  for (i = 0; i < (int)sizeof order; i++)
+    if (try_log(order[i], line) == 0) break;
+  thermal_note(line + 11);              /* sem a data: o TEMP.LOG so tem hora */
+  wine_dump_waits();                    /* [wine-dump]: esperas do Claude etc. */
+  syslog_stamp();
+  {
+    const char* r = line;                /* so "REBOOT ...": o log ja poe a hora */
+    while (*r && !(r[0] == 'R' && r[1] == 'E' && r[2] == 'B')) r++;
+    syslog_puts(*r ? r : line);
+  }
+  syslog_save_now();                    /* SET SYSTEMLOG=1: CONSOLE.LOG ja */
+  (void)serial_log_save();
+  sys_reboot();
 }

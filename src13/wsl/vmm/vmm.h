@@ -25,13 +25,17 @@ typedef struct {
   const uint8_t* kernel; /* bzImage */
   uint32_t kernel_len;
   const char* cmdline;
-  wsl_io disk;           /* disco virtual (vhdx) */
+  const uint8_t* initrd; /* initrd (0 = sem); vai para o topo da RAM da VM */
+  uint32_t initrd_len;
+  wsl_io disk;           /* disco virtual (vhdx ou a imagem propria D:\WSL\DEBIAN.IMG) */
   int cpu;               /* CPU do SODOS dedicada a VM (-1 = ultima) */
   uint32_t timeout_s;    /* 0 = sem limite */
   const char* input;     /* digitado no console depois do boot (pode ser 0) */
   const char* input_after; /* espera este texto na saida antes de digitar */
   int verbose;
   int net;               /* 1 = placa virtio-net com NAT (nat_init ja ligou) */
+  struct wslbox* box;    /* WSL=1: caixa de comandos (segunda serial) */
+  int service;           /* WSL=1: sai quando SET WSL=0; ao fundo nao prende a CPU0 */
 } vmm_config;
 
 /* Checa AMD-V. 0 ok; senao preenche why. */
@@ -112,5 +116,23 @@ static inline uint8_t* gpa_ptr(struct vm* vm, uint64_t gpa, uint64_t len) {
 }
 
 void vm_log(struct vm* vm, const char* fmt, ...);
+
+/* Segmento de uma cadeia do virtio (dev.c) */
+struct seg {
+  uint8_t* p;
+  uint32_t len;
+  int w;
+};
+/* Servidor 9P2000.L (p9.c): as unidades do SODOS no Linux. */
+int p9_init(void);
+uint32_t p9_request(const struct seg* sg, int n, uint8_t** resp);
+
+/* Canal de comandos (chan.c): segunda serial (0x2F8, IRQ 3) <-> wslbox. */
+struct wslbox;
+void chan_attach(struct wslbox* box);
+void chan_poll(struct vm* vm);
+int chan_pending(void);
+uint8_t chan_uart_in(struct vm* vm, int r);
+void chan_uart_out(struct vm* vm, int r, uint8_t v);
 
 #endif

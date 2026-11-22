@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "vmm.h"
+#include "../wslbox.h"
 #include "../sodos_api.h"
 #include "term.h"
 
@@ -261,6 +262,23 @@ static int load_linux(struct vm* vm, const vmm_config* c, uint64_t* entry) {
   *(uint32_t*)(bp + 0x228) = G_CMDLINE;
   *(uint32_t*)(bp + 0x218) = 0; /* sem initrd */
   *(uint32_t*)(bp + 0x21C) = 0;
+  if (c->initrd && c->initrd_len) {
+    /* no topo da RAM, abaixo do initrd_addr_max do kernel e acima dele */
+    uint64_t top = vm->ram_size, max = rd32(k + 0x22C);
+    uint64_t at;
+    if (!max || ver < 0x203) max = 0x37FFFFFF;
+    if (top > max + 1) top = max + 1;
+    if (top > 0xFFFFF000ull) top = 0xFFFFF000ull;
+    at = (top - c->initrd_len) & ~0xFFFull;
+    if (c->initrd_len >= top || at < load + init_size) {
+      vm_log(vm, "WSL: RAM da VM pequena para o initrd\n");
+      return -1;
+    }
+    memcpy(vm->ram + at, c->initrd, c->initrd_len);
+    *(uint32_t*)(bp + 0x218) = (uint32_t)at;
+    *(uint32_t*)(bp + 0x21C) = c->initrd_len;
+    vm_log(vm, "WSL: initrd %u KB em %llx\n", c->initrd_len >> 10, (unsigned long long)at);
+  }
   cl_max = rd32(k + 0x238);
   if (!cl_max || cl_max > 4095) cl_max = 4095;
   {
@@ -902,10 +920,21 @@ static void console_loop(struct vm* vm, const vmm_config* cfg) {
   size_t matched = 0;
   int typed = cfg->input ? 0 : 1;
   const char* inp = cfg->input;
+  unsigned env_t = k_ms();
   term_init(term_reply, vm);
   k_kbd_raw(1); /* Ctrl+C e Ctrl+letra vao para o Linux */
   while (!vm->stop || vm->tx_tail != vm->tx_head) {
     int any = 0, ch;
+    if (cfg->box) cfg->box->beat = k_ms();
+    if (cfg->service && !vm->stop && k_ms() - env_t > 500) {
+      /* SET WSL=0: desliga */
+      char v[8];
+      env_t = k_ms();
+      if (k_getenv("WSL", v, (int)sizeof v) <= 0 || v[0] != '1') {
+        snprintf(vm->stop_why, sizeof vm->stop_why, "SET WSL=0");
+        vm->stop = 1;
+      }
+    }
     while (vm->tx_tail != vm->tx_head) {
       uint8_t c = vm->tx[vm->tx_tail % UART_RING];
       vm->tx_tail++;
@@ -954,7 +983,9 @@ static void console_loop(struct vm* vm, const vmm_config* cfg) {
       }
       any = 1;
     }
-    if (!any) k_futex_wait(&g_wake, 0, 10);
+    /* Ao fundo (Ctrl+F10 escondida) o k_trygetc ja cedeu a vez ate o proximo
+     * tick; esperar aqui prenderia a tela visivel. */
+    if (!any && !k_vt_bg()) k_futex_wait(&g_wake, 0, 10);
   }
   k_kbd_raw(0);
   term_end();
@@ -1090,6 +1121,14 @@ int vmm_run(const vmm_config* cfg) {
   vm_log(vm, "WSL: VM com %u MB, disco %llu MB, CPU %d do SODOS; Ctrl+] encerra\n", cfg->ram_mb,
          (unsigned long long)(vm->disk_bytes >> 20), rc.cpu);
   vm_log(vm, "WSL: linha de comando: %s\n", cfg->cmdline);
+  if (cfg->box) {
+    /* WSL=1: a caixa de comandos vai pela segunda serial (chan.c) */
+    cfg->box->wake = &g_wake;
+    cfg->box->ready = 0;
+    chan_attach(cfg->box);
+    cfg->box->beat = k_ms();
+    cfg->box->alive = 1;
+  }
   tid = k_thread_create(vcpu_thread, &rc, 1u << 20, 1u << rc.cpu);
   if (tid <= 0) {
     printf("WSL: nao consegui criar a thread da VM\n");
@@ -1097,6 +1136,23 @@ int vmm_run(const vmm_config* cfg) {
   }
   console_loop(vm, cfg);
   k_thread_join(tid, 0);
+  if (cfg->box) {
+    /* quem esperava um comando recebe 255 */
+    int i;
+    struct wslbox* b = cfg->box;
+    b->alive = 0;
+    b->ready = 0;
+    chan_attach(0);
+    for (i = 0; i < WSLB_SLOTS; i++) {
+      struct wslb_slot* s = &b->slot[i];
+      if (s->state == SL_POSTED || s->state == SL_SENT) {
+        s->exit_code = 255;
+        s->state = SL_DONE;
+        s->seq++;
+        k_futex_wake(&s->seq, -1);
+      }
+    }
+  }
   vm_log(vm, "\nWSL: VM encerrada: %s\n", vm->stop_why[0] ? vm->stop_why : "?");
   /* a RAM da VM fica com o programa e e solta quando ele sai */
   return vm->exit_code;

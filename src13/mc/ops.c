@@ -29,13 +29,13 @@ static int ask_error(const char* what, const char* name) {
 }
 
 /* Lista uma pasta em memoria nova (a recursao nao pode usar buffer fixo). */
-static struct k_dirent* list_dir(const char* path, int* n) {
-  struct k_dirent* d = (struct k_dirent*)malloc(sizeof(struct k_dirent) * ENT_MAX);
+static struct k_direntl* list_dir(const char* path, int* n) {
+  struct k_direntl* d = (struct k_direntl*)malloc(sizeof(struct k_direntl) * ENT_MAX);
   if (!d) {
     *n = -1;
     return 0;
   }
-  *n = k_dir(path, d, ENT_MAX);
+  *n = k_dir_long(path, d, ENT_MAX);
   return d;
 }
 
@@ -73,7 +73,7 @@ static int copy_file(const char* src, const char* dst) {
 }
 
 static int copy_tree(const char* src, const char* dst, int depth) {
-  struct k_dirent* d;
+  struct k_direntl* d;
   int n, i, rc = 0;
   char a[PATH_MAX_MC], b[PATH_MAX_MC];
   if (depth > DEPTH_MAX) return ask_error("Pastas fundas demais", src);
@@ -99,7 +99,7 @@ static int copy_tree(const char* src, const char* dst, int depth) {
 }
 
 static int delete_tree(const char* path, int depth, int ask) {
-  struct k_dirent* d;
+  struct k_direntl* d;
   int n, i, rc = 0;
   char a[PATH_MAX_MC];
   char m[200];
@@ -254,7 +254,7 @@ void op_delete(void) {
 
 void op_mkdir(void) {
   struct panel* p = &pan[act];
-  char name[64], path[PATH_MAX_MC];
+  char name[NAME_MAX_MC], path[PATH_MAX_MC];
   int rc, k;
   name[0] = 0;
   if (!dlg_input("Criar pasta", "Nome da nova pasta:", name, sizeof(name)) || !name[0]) return;
