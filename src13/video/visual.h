@@ -89,6 +89,7 @@ int win_shot_api(int x, int y, int w, int h, void* rgba);
 int win_activate_api(int id);
 /* 1 enquanto o Alt do Alt+Tab continua apertado; tabs = Tabs ate agora. */
 int alttab_api(int* tabs);
+int alttab_wait_api(int seq, int ms);
 /* Janela sem titulo nem moldura no retangulo (painel do WINTAB). */
 int gui_panel_open(const char* title, int x, int y, int w, int h);
 /* Injeta uma tecla ASCII na janela GUI com foco (automacao/testes). */

@@ -423,6 +423,9 @@ int k_win_thumb(int i, void* rgba, int w, int h);
 int k_win_shot(int x, int y, int w, int h, void* rgba);
 int k_win_activate(int id);
 int k_alttab(int* tabs);
+/* WINTAB residente: espera o proximo Alt+Tab (o contador sair de seq) ate ms.
+ * Devolve o contador; -1 = nao esta no WIN (sair). seq = -1, ms = 0: so le. */
+int k_alttab_wait(int seq, int ms);
 int k_win_size(int* w, int* h);
 /* Tela principal (a primeira da tela estendida). */
 int k_win_primary(int* w, int* h);

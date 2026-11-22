@@ -590,7 +590,7 @@ static void mod_fs_write(uint64_t v) {
 /* Programas rodando agora (um por mod_exec em andamento). Uma tarefa do WIN
  * encerrada a forca (Ctrl+Backspace, Sair) nunca volta ao fim do mod_exec:
  * mod_kill faz por ela a mesma limpeza. prev = programa que a chamou. */
-#define LIVE_MAX 32
+#define LIVE_MAX 4096 /* = TASK_MAX do WIN (video/visual.c) */
 static struct {
   uint32_t pid;
   uint32_t prev;

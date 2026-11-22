@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 /* Um programa ELF traz varias bibliotecas (.so); cada programa tem as suas copias. */
-#define MOD_MAX 96
+#define MOD_MAX 512 /* EXEs + DLLs carregados ao mesmo tempo (era 96; 2026-11-22) */
 
 /* Executa um .EXE: carrega, resolve DLLs, chama _start(argc, argv) numa pilha
  * propria e libera tudo ao voltar. Devolve o codigo de saida, ou

@@ -1,7 +1,9 @@
 /* wintab.c - WINTAB.EXE: a pilha do Alt+Tab do WIN.
  *
- * O WIN abre este programa (D:\SODOS\WINTAB.EXE) quando o Alt+Tab comeca e ele
- * termina assim que o Alt e solto: fora disso nao fica nada carregado. As
+ * O WIN abre este programa (D:\SODOS\WINTAB.EXE) no primeiro Alt+Tab. Depois
+ * de cada escolha o painel fecha mas o programa fica na memoria, parado em
+ * k_alttab_wait (sem CPU), e o proximo Alt+Tab so o acorda: nada de ler o
+ * EXE e a LIBC.DLL do disco de novo. As
  * janelas e as miniaturas vem do kernel (k_win_list/k_win_thumb, tiradas no
  * momento do Alt+Tab). O painel fica na esquerda, por cima do que estava na
  * tela (k_win_shot) escurecido, como um vidro.
@@ -214,17 +216,26 @@ static int hit(int px, int py) {
   return -1;
 }
 
-int main(void) {
+/* Um Alt+Tab: do aperto ate a escolha. */
+static void session(void) {
   int tabs = 0, base = 0, sel, alt, i, pick = -1;
+  g_top = 0;
+  g_bg = 0;
+  g_frame = 0;
+  for (i = 0; i < MAXW; i++) g_th[i] = 0;
   g_n = k_win_list(g_w, MAXW);
-  if (g_n < 2) return 0;
+  if (g_n > MAXW) g_n = MAXW;
+  if (g_n < 2) return;
   alt = k_alttab(&tabs);
   if (!alt) {
     /* Alt+Tab rapido: nem mostra, so troca */
     k_win_activate(g_w[mod(tabs, g_n)].id);
-    return 0;
+    return;
   }
-  if (k_win_size(&g_sw, &g_sh) != 0) return 1;
+  if (k_win_size(&g_sw, &g_sh) != 0) {
+    k_win_activate(g_w[mod(tabs, g_n)].id);
+    return;
+  }
   k_gui_font(&g_cw, &g_chh);
   if (g_cw < 1) g_cw = 8;
   if (g_chh < 1) g_chh = 16;
@@ -237,21 +248,25 @@ int main(void) {
   g_frame = (unsigned char*)malloc((size_t)g_pw * g_ph * 4);
   if (!g_frame) {
     k_win_activate(g_w[mod(tabs, g_n)].id);
-    return 1;
+    free(g_bg);
+    return;
   }
   layout();
   if (k_gui_panel("Alt+Tab", 0, 0, g_pw, g_ph) != 0) {
     k_win_activate(g_w[mod(tabs, g_n)].id);
-    return 1;
+    pick = -2;
   }
   sel = mod(tabs, g_n);
-  draw(sel);
-  for (;;) {
+  if (pick == -1) draw(sel);
+  for (; pick == -1;) {
     int ev[4], t, now;
     t = k_gui_event(ev, 15);
     if (t == EV_CLOSE || t < 0) break;
     if (t == EV_KEY) {
-      if (ev[3] == 27) break;
+      if (ev[3] == 27) {
+        pick = 0; /* desiste: a janela da frente de antes volta ao foco */
+        break;
+      }
       if (ev[3] == KEY_UP) base--;
       else if (ev[3] == KEY_DOWN) base++;
       else if (ev[3] == '\r' || ev[3] == '\n' || ev[3] == ' ') {
@@ -277,9 +292,22 @@ int main(void) {
     }
   }
   if (pick >= 0) k_win_activate(g_w[pick].id);
-  k_gui_close();
+  if (pick != -2) k_gui_close();
   for (i = 0; i < g_n; i++) free(g_th[i]);
   free(g_frame);
   free(g_bg);
-  return 0;
+}
+
+int main(void) {
+  int seq = k_alttab_wait(-1, 0); /* o Alt+Tab que abriu o programa */
+  for (;;) {
+    int s;
+    session();
+    if (seq < 0) return 0;      /* fora do WIN: so este Alt+Tab */
+    do {
+      s = k_alttab_wait(seq, 60000);
+      if (s < 0) return 0;
+    } while (s == seq);
+    seq = s;
+  }
 }

@@ -1168,6 +1168,7 @@ static int k_win_shot(int x, int y, int w, int h, void* rgba) {
 }
 static int k_win_activate(int id) { return kt_in_thread() ? -1 : win_activate_api(id); }
 static int k_alttab(int* tabs) { return alttab_api(tabs); }
+static int k_alttab_wait(int seq, int ms) { return kt_in_thread() ? -1 : alttab_wait_api(seq, ms); }
 static int k_win_size(int* w, int* h) { return win_screen_size(w, h) ? 0 : -1; }
 static int k_win_primary(int* w, int* h) { return win_primary_size(w, h) ? 0 : -1; }
 static int k_gui_panel(const char* title, int x, int y, int w, int h) {
@@ -1723,6 +1724,7 @@ static const struct kexp table[] = {
   EXP(k_win_size),
   EXP(k_gui_panel),
   EXP(k_exec_capture),
+  EXP(k_alttab_wait),
 };
 
 #define NEXP (sizeof(table) / sizeof(table[0]))

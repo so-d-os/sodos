@@ -4835,7 +4835,14 @@ static void wm_run_status(struct wm_win* w, int rc) {
  * devolve o turno ao desktop; um clique traz essa janela para a frente. */
 #define GUI_MAX 16
 #define GUI_Q 64   /* com entrada crua cada tecla sao 2+ bytes */
-#define TASK_MAX 32   /* Claude (WINE): Electron + claude-code abrem 17+ processos em paralelo */
+#define TASK_MAX 4096 /* Claude (WINE): Electron + claude-code abrem 17+ processos em paralelo */
+/* Tarefas: a tabela, a pilha, a tela de texto e o SSE/AVX salvo saem da arena
+ * alta (umalloc_top). A do kernel (kmalloc) tem so 2 MB e acabava com ~20
+ * programas abertos ("Sem vaga para outro programa", 2026-11-22). As voltas
+ * pela tabela vao so ate task_n (a maior vaga ja usada + 1). */
+static int task_n;
+#define task_mem(n) umalloc_top((uint32_t)(n))
+#define task_free(p) ufree(p)
 #define TASK_STACK (48 * 1024)
 #define TASK_ARGC 16
 #define TASK_ARGBUF 192
@@ -5216,7 +5223,7 @@ static int gui_ensure(void) {
     if (gwins) gui_zero(gwins, (uint32_t)sizeof(struct gui_win) * GUI_MAX);
   }
   if (!gtasks) {
-    gtasks = (struct gui_task*)kmalloc((uint32_t)sizeof(struct gui_task) * TASK_MAX);
+    gtasks = (struct gui_task*)task_mem(sizeof(struct gui_task) * TASK_MAX);
     if (gtasks) gui_zero(gtasks, (uint32_t)sizeof(struct gui_task) * TASK_MAX);
   }
   return gwins && gtasks;
@@ -6115,7 +6122,7 @@ static void gui_preempt_tick(uint64_t rip) {
   if (xs_mode < 0) xs_probe();
   /* Fora da pilha do programa: a de uma thread do Firefox pode ser pequena.
    * Uma area por tarefa basta: ela so e preemptada uma vez de cada vez. */
-  if (!t->xs_raw) t->xs_raw = (uint8_t*)kmalloc(XS_MAX + 64);
+  if (!t->xs_raw) t->xs_raw = (uint8_t*)task_mem(XS_MAX + 64);
   if (!t->xs_raw) return;
   xs = (uint8_t*)(((uintptr_t)t->xs_raw + 63) & ~(uintptr_t)63);
   if (xs_mode) {
@@ -6409,13 +6416,13 @@ static void task_reap(int ti) {
     gui_ix = save;
   }
   if (t->con) cmd_refocus(t->con);
-  if (t->stack) kfree(t->stack);
+  if (t->stack) task_free(t->stack);
   t->stack = 0;
-  if (t->xs_raw) kfree(t->xs_raw);
+  if (t->xs_raw) task_free(t->xs_raw);
   t->xs_raw = 0;
   if (t->tty) {
     if (t->con && t->con->tty == t->tty) t->con->tty = 0;
-    kfree(t->tty);
+    task_free(t->tty);
   }
   t->tty = 0;
   t->run = 0;
@@ -6462,7 +6469,7 @@ static void killq_service(void) {
     /* ninguem abriu nada ainda: tudo o que roda e do inicio */
     if (!mod_boot_mark()) mod_mark_boot();
     mark = mod_boot_mark();
-    for (i = 0; i < TASK_MAX; i++) {
+    for (i = 0; i < task_n; i++) {
       uint32_t pid, root;
       if (!gtasks[i].used || i == task_cur) continue;
       pid = gtasks[i].cpu.pid;
@@ -6475,7 +6482,7 @@ static void killq_service(void) {
   }
   for (k = 0; k < killq_n; k++) {
     uint32_t want = killq[k];
-    for (i = 0; i < TASK_MAX; i++)
+    for (i = 0; i < task_n; i++)
       if (gtasks[i].used && gtasks[i].cpu.pid && mod_chain_has(gtasks[i].cpu.pid, want))
         n += task_force_kill(i);
   }
@@ -6511,7 +6518,7 @@ static int name_match(const char* path, const char* name) {
 int win_task_pids(const char* name, uint32_t* out, int max) {
   int i, n = 0;
   if (!host_on || !gtasks || !name) return -1;
-  for (i = 0; i < TASK_MAX && n < max; i++)
+  for (i = 0; i < task_n && n < max; i++)
     if (gtasks[i].used && gtasks[i].cpu.pid && name_match(gtasks[i].path, name)) out[n++] = gtasks[i].cpu.pid;
   return n;
 }
@@ -6520,7 +6527,7 @@ int win_task_pids(const char* name, uint32_t* out, int max) {
 int win_task_list(char (*names)[32], uint32_t* pids, int max) {
   int i, n = 0, k;
   if (!host_on || !gtasks) return 0;
-  for (i = 0; i < TASK_MAX && n < max; i++) {
+  for (i = 0; i < task_n && n < max; i++) {
     const char* b;
     const char* q;
     if (!gtasks[i].used || !gtasks[i].cpu.pid) continue;
@@ -6698,12 +6705,13 @@ static int task_spawn(struct wm_win* wins, int* focus, int big, const char* path
   int ti, i = -1;
   struct gui_task* t;
   if (!gui_ensure()) return -1;
-  for (ti = 0; ti < TASK_MAX; ti++)
+  for (ti = 0; ti < task_n; ti++)
     if (!gtasks[ti].used) break;
   if (ti >= TASK_MAX) {
     serial_puts("[visual] janelas de programa cheias\n");
     return -1;
   }
+  if (ti >= task_n) task_n = ti + 1;
   t = &gtasks[ti];
   t->used = 1;
   t->wake = WAKE_NONE;
@@ -6720,7 +6728,7 @@ static int task_spawn(struct wm_win* wins, int* focus, int big, const char* path
   t->rsp = 0;
   t->xs_raw = 0;
   if (con) {
-    t->tty = (struct con_tty*)kmalloc((uint32_t)sizeof(struct con_tty));
+    t->tty = (struct con_tty*)task_mem(sizeof(struct con_tty));
     if (t->tty) {
       gui_zero(t->tty, (uint32_t)sizeof(struct con_tty));
       t->tty->cols = 80;
@@ -6728,9 +6736,9 @@ static int task_spawn(struct wm_win* wins, int* focus, int big, const char* path
       con->tty = t->tty;
     }
   }
-  t->stack = (uint8_t*)kmalloc(TASK_STACK);
+  t->stack = (uint8_t*)task_mem(TASK_STACK);
   if (!t->stack) {
-    if (t->tty) kfree(t->tty);
+    if (t->tty) task_free(t->tty);
     if (con) con->tty = 0;
     t->tty = 0;
     t->used = 0;
@@ -6767,7 +6775,7 @@ static int task_has_event(int ti) {
 static int task_pick(void) {
   int i, n, best = -1, bz = -1;
   if (!gtasks || !gwins) return -1;
-  for (i = 0; i < TASK_MAX; i++) {
+  for (i = 0; i < task_n; i++) {
     if (!task_has_event(i)) continue;
     if (gwins[gtasks[i].gid].z >= bz) {
       bz = gwins[gtasks[i].gid].z;
@@ -6775,8 +6783,8 @@ static int task_pick(void) {
     }
   }
   if (best >= 0) return best;
-  for (n = 0; n < TASK_MAX; n++) {
-    i = (task_rr + n) % TASK_MAX;
+  for (n = 0; n < task_n; n++) {
+    i = (task_rr + n) % task_n;
     if (!gtasks[i].used) continue;
     if (gtasks[i].wake == WAKE_BUSY || gtasks[i].wake == WAKE_POLL) return i;
     if (gtasks[i].wake == WAKE_WAIT && task_wait_ready(&gtasks[i])) return i;
@@ -6788,7 +6796,7 @@ static int task_pick(void) {
 static int tasks_want_cpu(void) {
   int i;
   if (!gtasks || !gwins) return 0;
-  for (i = 0; i < TASK_MAX; i++) {
+  for (i = 0; i < task_n; i++) {
     if (!gtasks[i].used) continue;
     if (task_has_event(i) || gtasks[i].wake == WAKE_BUSY) return 1;
   }
@@ -6808,7 +6816,7 @@ static void tasks_shutdown(void) {
     host_on = 0;
     return;
   }
-  for (i = 0; i < TASK_MAX; i++) {
+  for (i = 0; i < task_n; i++) {
     if (!gtasks[i].used) continue;
     if (gtasks[i].gid >= 0 && gtasks[i].gid < GUI_MAX && gwins[gtasks[i].gid].open)
       gq_push(&gwins[gtasks[i].gid], GUI_EV_CLOSE, 0, 0, 0);
@@ -6820,8 +6828,8 @@ static void tasks_shutdown(void) {
       /* Nao terminou sozinho (o Firefox demora a fechar): o mod_exec dele
        * nunca volta, entao a memoria do programa sai aqui. */
       if (gtasks[i].wake != WAKE_NONE) mod_kill(gtasks[i].cpu.pid);
-      if (gtasks[i].stack) kfree(gtasks[i].stack);
-      if (gtasks[i].xs_raw) kfree(gtasks[i].xs_raw);
+      if (gtasks[i].stack) task_free(gtasks[i].stack);
+      if (gtasks[i].xs_raw) task_free(gtasks[i].xs_raw);
       gtasks[i].used = 0;
       gtasks[i].stack = 0;
       gtasks[i].xs_raw = 0;
@@ -6841,7 +6849,7 @@ static void tasks_shutdown(void) {
 static void task_forget_win(struct wm_win* w) {
   int i;
   if (!gtasks || !w) return;
-  for (i = 0; i < TASK_MAX; i++) {
+  for (i = 0; i < task_n; i++) {
     if (gtasks[i].run == w) gtasks[i].run = 0;
     if (w->kind == WM_KIND_CMD && w->st && gtasks[i].con == (struct cmd_con*)w->st) {
       if (gtasks[i].tty) gtasks[i].tty->gone = 1;
@@ -8256,11 +8264,15 @@ static int c_icon, c_icon2_y, c_icon3_y, c_icon4_y;
 static uint32_t c_desk, c_win, c_title, c_bar, c_white, c_black, c_btn, c_inactive;
 
 /* A janela de texto do .EXE fica escondida enquanto a janela grafica dele esta aberta. */
+static int at_res_alive(void);
+static int at_res_task = -1; /* WINTAB.EXE residente, esperando o proximo Alt+Tab */
+
 static int run_hidden(struct wm_win* w) {
   int i;
   if (!w || !gtasks || !gwins || w->kind != WM_KIND_RUN) return 0;
-  for (i = 0; i < TASK_MAX; i++) {
+  for (i = 0; i < task_n; i++) {
     if (!gtasks[i].used || gtasks[i].run != w) continue;
+    if (i == at_res_task && at_res_alive()) return 1; /* WINTAB parado: sem janela */
     if (gtasks[i].gid >= 0 && gtasks[i].gid < GUI_MAX && gwins[gtasks[i].gid].open) return 1;
   }
   return 0;
@@ -8780,6 +8792,8 @@ static void paint_stacked(struct wm_win* wins, int title_h, int scale, uint32_t 
  * Ao apertar, cada janela e desenhada sozinha no quadro e reduzida para uma
  * miniatura (a de tras aparece inteira, sem o que a cobre); o quadro inteiro
  * sai de novo logo depois. Sem o WINTAB.EXE, Alt+Tab so passa para a proxima.
+ * O primeiro Alt+Tab carrega o WINTAB.EXE; depois ele fica na memoria, parado
+ * em k_alttab_wait (sem CPU), e os seguintes so o acordam (at_seq).
  * ------------------------------------------------------------------------- */
 #define AT_MAX (WM_MAX + GUI_MAX)
 #define AT_TW 360
@@ -8804,6 +8818,20 @@ static int at_gid = -1;  /* janela (painel) do WINTAB */
 static int at_act = -1;  /* janela pedida por k_win_activate */
 static uint32_t at_t0;
 static int at_held;      /* Alt apertado, pelos bytes que o WIN ja leu */
+static volatile int at_seq; /* +1 a cada Alt+Tab com miniaturas prontas */
+static int at_res_pid = -1;
+
+/* O WINTAB residente ainda e a mesma tarefa (nao saiu nem foi morto). */
+static int at_res_alive(void) {
+  struct gui_task* t;
+  if (at_res_task < 0 || at_res_task >= TASK_MAX || !gtasks) return 0;
+  t = &gtasks[at_res_task];
+  if (!t->used || t->wake == WAKE_DEAD || (int)t->cpu.pid != at_res_pid) {
+    at_res_task = -1;
+    return 0;
+  }
+  return 1;
+}
 
 /* Pixel do quadro em 0xRRGGBB (get_pixel devolve no formato do PIXA). */
 static uint32_t at_rgb(int x, int y) {
@@ -9000,6 +9028,16 @@ int win_activate_api(int id) {
 int alttab_api(int* tabs) {
   if (tabs) *tabs = at_tabs;
   return at_on && at_alt;
+}
+
+/* WINTAB residente: marca a tarefa e espera at_seq sair de seq (ou ms).
+ * Devolve at_seq; -1 fora de uma tarefa do WIN (ai o WINTAB sai). */
+int alttab_wait_api(int seq, int ms) {
+  if (!gtasks || task_cur < 0 || !host_on || kt_in_thread()) return -1;
+  at_res_task = task_cur;
+  at_res_pid = (int)gtasks[task_cur].cpu.pid;
+  if (seq == at_seq && ms > 0) gui_coop_wait(&at_seq, seq, (uint32_t)ms);
+  return at_seq;
 }
 
 /* Janela sem barra de titulo nem moldura, no retangulo pedido (painel). */
@@ -9360,7 +9398,7 @@ static void tb_key_wm(const struct wm_win* w, char* key) {
 
 static void tb_key_gui(int g, char* key) {
   int t;
-  for (t = 0; gtasks && t < TASK_MAX; t++)
+  for (t = 0; gtasks && t < task_n; t++)
     if (gtasks[t].used && gtasks[t].gid == g && gtasks[t].path[0]) {
       tb_cp(key, gtasks[t].path, TB_KEY);
       return;
@@ -10259,8 +10297,13 @@ static int win_wm_run(void) {
       need_draw = 1;
       if (at_n < 2) {
         at_end();
+      } else if (at_res_alive()) {
+        at_seq++; /* WINTAB ja na memoria: so acorda */
       } else if (desk_find("D:\\SODOS\\WINTAB.EXE", exe, (int)sizeof(exe))) {
+        at_seq++;
+        autostart_launch = 1; /* nao conta como abertura do usuario (KILLALL) */
         wm_exec(wins, &focus, big, exe);
+        autostart_launch = 0;
       } else {
         /* sem o WINTAB: so passa para a janela de tras */
         at_act = at_list[1].id;
