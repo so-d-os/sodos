@@ -583,7 +583,12 @@ static void compose(struct wgui* g) {
   if (!g->canvas_open || !g->canvas.px) return;
   n = visible_tops(g, v, 32);
   layout(g);
-  surf_fill(&g->canvas, 0, 0, g->canvas.w, g->canvas.h, sys_color(15));
+  /* Fundo cinza so se a principal nao cobre o canvas todo (o Claude e
+   * outros apps ocupam a tela toda: pintar de cinza e cobrir de novo
+   * custava uma copia a mais por quadro). */
+  if (!n || v[0] != g->canvas_main || v[0]->cx > 0 || v[0]->cy > 0 || v[0]->cx + v[0]->s.w < g->canvas.w ||
+      v[0]->cy + v[0]->s.h < g->canvas.h)
+    surf_fill(&g->canvas, 0, 0, g->canvas.w, g->canvas.h, sys_color(15));
   for (i = 0; i < n; i++) {
     struct wwin* w = v[i];
     if (w->framed) {
@@ -609,14 +614,26 @@ static void compose(struct wgui* g) {
 /* Mandar para a tela recompoe o desktop com a trava do kernel: limitado a
  * ~1/4 do tempo (se custou 40 ms, a proxima so sai 120 ms depois); o que
  * chegar antes sai pelo laco de mensagens. */
+/* Um present por vez: o Chromium tem varias threads com laco de mensagens
+ * e todas chamam paint_dirty/present. Duas juntas = uma pintava o canvas de
+ * cinza (compose) enquanto a outra mandava o mesmo canvas para a tela: o
+ * Claude piscava com faixas cinza (#F0F0F0) no lugar do conteudo. Quem chega
+ * com outro present em andamento so marca present_pending (sai na proxima
+ * volta do laco). */
 static void present_now(struct wgui* g) {
-  uint64_t t0 = wnow_ms();
+  uint64_t t0;
+  if (__sync_lock_test_and_set(&g->presenting, 1)) {
+    g->present_pending = 1;
+    return;
+  }
+  t0 = wnow_ms();
+  g->present_pending = 0;
   compose(g);
   k_gui_pixels(0, 0, g->canvas.w, g->canvas.h, g->canvas.px, g->canvas.w * 4);
   k_gui_present();
   g->present_cost = (uint32_t)(wnow_ms() - t0);
   g->present_at = wnow_ms();
-  g->present_pending = 0;
+  __sync_lock_release(&g->presenting);
 }
 static uint64_t present_next(struct wgui* g) {
   uint32_t gap = g->present_cost * 3u;

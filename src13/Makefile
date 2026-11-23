@@ -45,7 +45,10 @@ QEMU_CPU ?= $(if $(filter kvm,$(QEMU_ACCEL)),host,max)
 # Placa de rede do QEMU: virtio-net (DMA, rapida no KVM). NIC=ne2k_pci volta
 # para a NE2000 (E/S por porta, ~centenas de saidas da VM por quadro).
 NIC ?= virtio-net-pci
-QEMU=qemu-system-x86_64 -accel $(QEMU_ACCEL) -cpu $(QEMU_CPU) -m 8192 -smp $(SMP) -usb -device usb-tablet
+# MEM: RAM da VM em MB. O Claude Desktop (RODACLAU) abre ate 3 claude.exe de
+# 372 MB + ramdisk Z: de 1 GB e nao cabe em 8 GB: make run MEM=14000 SMP=8
+MEM ?= 8192
+QEMU=qemu-system-x86_64 -accel $(QEMU_ACCEL) -cpu $(QEMU_CPU) -m $(MEM) -smp $(SMP) -usb -device usb-tablet
 
 # VirtualBox (Windows/WSL).  wslpath/cygpath convertem o caminho para o
 # PowerShell; em Linux nativo o alvo vbox avisa que nao ha suporte.

@@ -252,6 +252,7 @@ struct wgui {
   uint64_t present_at;
   uint32_t present_cost;
   int present_pending;
+  volatile int presenting;    /* present_now em andamento (uma thread por vez) */
   volatile int req, req_done;
   int req_rc, req_w, req_h;
   char req_title[96];
