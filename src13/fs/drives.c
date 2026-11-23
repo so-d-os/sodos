@@ -8,6 +8,7 @@ void dstat_path(const char* p);   /* disks/cmd_dstat.c */
 #include "nvme.h"
 #include "fsdrv.h"
 #include "env.h"
+#include "serial.h"
 
 extern void fat_set_drive(uint32_t drive);
 extern void fat_set_partition_offset(uint32_t offset);
@@ -974,6 +975,26 @@ static int file_save_u(const char* path, const char* data, int size) {
   if (L == 'D')
     return d_write(name, data, size);
   return write_mem_bytes(name, data, size);
+}
+
+/* Trecho no lugar (FAT32.DLL abi 7): -9 = esta unidade nao sabe, quem chama
+ * grava o arquivo inteiro com file_save. */
+static int file_write_at_u(const char* path, uint32_t off, const char* data, int len, uint32_t nsize) {
+  char L;
+  char name[DRV_PATH];
+  int idx;
+  const struct fsdrv_ops* o;
+  uint16_t fd = 0, ft = 0;
+  if (!path || len < 0 || (len && !data)) return -1;
+  path_parse(path, &L, name, sizeof(name));
+  if (name[0] == '\0') return -1;
+  idx = letter_idx(L);
+  if (!drv_ready(idx)) return -2;
+  if (drv_kind[idx] != DRV_EXT) return -9;
+  o = drv_ops[idx];
+  if (o->abi < FSDRV_ABI_ENTRY || o->ext != FSDRV_EXT_WRITEAT || !o->write_at) return -9;
+  fat_now(&fd, &ft);
+  return o->write_at(drv_vol[idx], name, off, data, (uint32_t)len, nsize, fd, ft);
 }
 
 static int push_name(char out[][32], int n, int max, const char* name) {
@@ -1979,6 +2000,14 @@ int file_save(const char* path, const char* data, int size) {
   fs_unlock();
   return r;
 }
+int file_write_at(const char* path, uint32_t off, const char* data, int len, uint32_t nsize) {
+  int r;
+  fs_lock();
+  dstat_path(path);
+  r = file_write_at_u(path, off, data, len, nsize);
+  fs_unlock();
+  return r;
+}
 int file_list(const char* path, char* out, int max) {
   int r;
   fs_lock();
@@ -2164,6 +2193,17 @@ int drives_rename(const char* from, const char* to) {
   dstat_path(from);
   r = drives_rename_u(from, to);
   fs_unlock();
+  if (r < 0 && r != -5 && r != -6 && r != -7) {
+    /* -5/-6/-7: quem chama copia e apaga (outra unidade, sem rename) */
+    char num[4] = {'-', (char)('0' + (-r % 10)), 0, 0};
+    serial_puts("[fs] rename falhou ");
+    serial_puts(num);
+    serial_puts(": ");
+    serial_puts(from);
+    serial_puts(" -> ");
+    serial_puts(to);
+    serial_puts("\n");
+  }
   return r;
 }
 int drives_space(char letter, uint32_t* total_kb, uint32_t* free_kb) {

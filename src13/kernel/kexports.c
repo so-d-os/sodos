@@ -297,6 +297,16 @@ static int k_fsave(const char* path, const char* data, int size) {
   win_desk_touch(path);
   return rc;
 }
+/* Trecho no lugar (k_dl_sym(0, "k_fwrite_at", 0) nos programas): 0 ok; -9 a
+ * unidade nao sabe, grave o arquivo inteiro com k_fsave. */
+static int k_fwrite_at(const char* path, uint32_t off, const char* data, int len, uint32_t nsize) {
+  int rc;
+  fs_enter();
+  rc = file_write_at(path, off, data, len, nsize);
+  fs_leave();
+  if (rc == 0) win_desk_touch(path);
+  return rc;
+}
 static int k_drive(void) { return drives_current(); }
 static int k_set_drive(int letter) { return drives_set_current((char)letter); }
 /* Unidade do .EXE em execucao (para achar D:\LOG, D:\omni.ja, ...). */
@@ -1580,6 +1590,7 @@ static const struct kexp table[] = {
   EXP(k_fload),
   EXP(k_fread),
   EXP(k_fsave),
+  EXP(k_fwrite_at),
   EXP(k_flist),
   EXP(k_dirlist),
   EXP(k_pwd),

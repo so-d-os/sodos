@@ -591,6 +591,16 @@ int remove(const char* path) {
 /* k_frename troca so a entrada de diretorio (mesmo disco FAT). Entre
  * unidades, ou numa unidade sem rename, copia o arquivo inteiro e apaga o
  * antigo. */
+/* SET SODOS_IOLOG=1: cada rename vai para a serial com o codigo do kernel. */
+static void rn_note(const char* from, const char* to, int r) {
+  char b[600];
+  int n;
+  const char* e = getenv("SODOS_IOLOG");
+  if (!e || *e != '1') return;
+  n = snprintf(b, sizeof b, "[io] rename %s -> %s = %d\n", from, to, r);
+  if (n > 0) k_dbg(b, n < (int)sizeof b ? n : (int)sizeof b - 1);
+}
+
 int rename(const char* ufrom, const char* uto) {
   int sz, r;
   char* buf;
@@ -603,6 +613,7 @@ int rename(const char* ufrom, const char* uto) {
   dos_path(ufrom, from);
   dos_path(uto, to);
   r = k_frename(from, to);
+  rn_note(from, to, r);
   if (r == 0) return 0;
   if (r != -5 && r != -6 && r != -7) {
     errno = r == -1 ? ENOENT : r == -3 ? EISDIR : r == -2 ? EINVAL : EACCES;

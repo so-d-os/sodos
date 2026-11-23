@@ -1,0 +1,21 @@
+Fase: video. FFmpeg ligado no FIREFOX.EXE (H.264/HEVC/AAC/VP9) pelo caminho do ffvpx.
+Arquivo: dom/media/platforms/ffmpeg/ffvpx/FFVPXRuntimeLinker.cpp
+Sem dladdr nem .so no SODOS, GetLibraryFilePathname devolvia vazio e o ffvpx nunca
+ligava. Um caminho fixo basta: o dlopen do port (sodos_extra.c) reconhece
+"mozavcodec"/"mozavutil" pelo nome e o dlsym usa a tabela de build-ffmpeg.sh.
+Teste: <video src=mp4 H.264>, MSE H.264+AAC e YouTube (avc1 720p) no QEMU.
+
+--- a/dom/media/platforms/ffmpeg/ffvpx/FFVPXRuntimeLinker.cpp
++++ b/dom/media/platforms/ffmpeg/ffvpx/FFVPXRuntimeLinker.cpp
+@@ -98,6 +98,11 @@
+   // so let's use libmozglue instead to find the base pathname.
+   PathString path = GetLibraryFilePathname(
+       MOZ_DLL_PREFIX "mozglue" MOZ_DLL_SUFFIX, (PRFuncPtr)&malloc);
++#elif defined(__SODOS__)
++  // SODOS: o FFmpeg esta ligado dentro do FIREFOX.EXE (sem dladdr nem .so);
++  // o dlopen do port reconhece "mozavcodec"/"mozavutil" pelo nome.
++  PathString path;
++  path.AssignLiteral("/D/FIREFOX/" XUL_DLL);
+ #else
+   PathString path =
+       GetLibraryFilePathname(XUL_DLL, (PRFuncPtr)&FFVPXRuntimeLinker::Init);

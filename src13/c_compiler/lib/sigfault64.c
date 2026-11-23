@@ -48,8 +48,41 @@ enum { F_R11, F_R10, F_R9, F_R8, F_RDI, F_RSI, F_RBP, F_RBX, F_RDX, F_RCX,
        F_RAX, F_VEC, F_ERR, F_RIP, F_CS, F_RFLAGS, F_RSP, F_SS };
 
 
-static int fault_depth;
 static int fault_armed;
+
+/* Estado da entrega POR THREAD (k_thread_*): com varias threads, um trap de
+ * wasm num worker durante o handler de outro trap na thread principal era
+ * visto como "falta dentro do handler" e desligava a entrada (o SO parava com
+ * #UD ao abrir o TikTok). A libc nao tem TLS: tabela pelo id da thread. */
+struct fault_tls {
+  int tid;                      /* k_thread_self() + 1; 0 = livre */
+  int depth;
+  const uint64_t* fr;
+  uint64_t cr2;
+  struct so_fault_save* save;
+  int sig;
+};
+#define FAULT_TLS_N 256
+static struct fault_tls fault_tls[FAULT_TLS_N];
+
+static struct fault_tls* fault_me(void) {
+  int tid = k_thread_self() + 1;
+  unsigned i, h = (unsigned)tid * 2654435761u;
+  for (i = 0; i < FAULT_TLS_N; i++) {
+    struct fault_tls* t = &fault_tls[(h + i) % FAULT_TLS_N];
+    int cur = __atomic_load_n(&t->tid, __ATOMIC_ACQUIRE);
+    if (cur == tid) return t;
+    if (cur == 0) {
+      int z = 0;
+      if (__atomic_compare_exchange_n(&t->tid, &z, tid, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        t->depth = 0;
+        return t;
+      }
+      if (z == tid) return t;
+    }
+  }
+  return 0;
+}
 
 void __so_fault_entry(void);
 int __so_fault_dispatch(const uint64_t* fr, uint64_t cr2, struct so_fault_save* s);
@@ -105,11 +138,6 @@ static void fill_ctx(const uint64_t* fr, uint64_t cr2, struct so_fault_save* s) 
   s->iret[4] = fr[F_SS];
 }
 
-/* Entrega em andamento (para raise() durante o handler). */
-static const uint64_t* cur_fr;
-static uint64_t cur_cr2;
-static struct so_fault_save* cur_save;
-static int cur_sig;
 
 void __so_fault_resume(struct so_fault_save* s) __attribute__((noreturn));
 
@@ -118,10 +146,11 @@ void __so_fault_resume(struct so_fault_save* s) __attribute__((noreturn));
  * entrada de falhas, e o kernel mostra a EXCEPTION/CRASH.LOG com o RIP de
  * verdade. Usado pelo nsProfileLock::FatalSignalHandler do Firefox. */
 int __so_fault_raise(int sig) {
-  if (fault_depth <= 0 || sig != cur_sig || !cur_save) return 0;
+  struct fault_tls* t = fault_me();
+  if (!t || t->depth <= 0 || sig != t->sig || !t->save) return 0;
   fault_disarm();
-  fill_ctx(cur_fr, cur_cr2, cur_save);
-  __so_fault_resume(cur_save);
+  fill_ctx(t->fr, t->cr2, t->save);
+  __so_fault_resume(t->save);
 }
 
 int __so_fault_dispatch(const uint64_t* fr, uint64_t cr2, struct so_fault_save* s) {
@@ -129,6 +158,7 @@ int __so_fault_dispatch(const uint64_t* fr, uint64_t cr2, struct so_fault_save* 
   greg_t* g = uc->uc_mcontext.gregs;
   struct sigaction* a;
   siginfo_t si;
+  struct fault_tls* t;
   int sig, code = 0;
   void* addr = (void*)(uintptr_t)fr[F_RIP];
 
@@ -153,22 +183,19 @@ int __so_fault_dispatch(const uint64_t* fr, uint64_t cr2, struct so_fault_save* 
   si.si_addr = addr;
 
   a = __so_sig_act(sig);
-  if (fault_depth > 0 || !a ||
+  t = fault_me();
+  if (!t || t->depth > 0 || !a ||
       ((a->sa_flags & SA_SIGINFO) ? !a->sa_sigaction
                                   : (a->sa_handler == SIG_DFL || a->sa_handler == SIG_IGN))) {
     /* Sem quem trate: a mesma instrucao falha de novo, agora sem entrada. */
     fault_disarm();
   } else {
     struct sigaction h = *a;
-    const uint64_t* pfr = cur_fr;
-    uint64_t pcr2 = cur_cr2;
-    struct so_fault_save* ps = cur_save;
-    int psig = cur_sig;
-    cur_fr = fr;
-    cur_cr2 = cr2;
-    cur_save = s;
-    cur_sig = sig;
-    fault_depth++;
+    t->fr = fr;
+    t->cr2 = cr2;
+    t->save = s;
+    t->sig = sig;
+    t->depth++;
     if (h.sa_flags & SA_RESETHAND) {
       a->sa_handler = SIG_DFL;
       a->sa_sigaction = 0;
@@ -178,12 +205,12 @@ int __so_fault_dispatch(const uint64_t* fr, uint64_t cr2, struct so_fault_save* 
       h.sa_sigaction(sig, &si, uc);
     else
       h.sa_handler(sig);
-    fault_depth--;
-    cur_fr = pfr;
-    cur_cr2 = pcr2;
-    cur_save = ps;
-    cur_sig = psig;
+    t->depth--;
+    t->save = 0;
   }
+  /* Slot so vive durante a entrega: ids de thread se repetem e o Firefox cria
+   * centenas de threads numa sessao. */
+  if (t && t->depth == 0) __atomic_store_n(&t->tid, 0, __ATOMIC_RELEASE);
 
   s->iret[0] = (uint64_t)g[REG_RIP];
   s->iret[1] = fr[F_CS];

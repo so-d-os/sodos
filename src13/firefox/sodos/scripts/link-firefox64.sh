@@ -31,8 +31,17 @@ add_list browser/app/firefox.list
 add_list toolkit/library/build/libxul_so.list
 add_list js/src/build/libjs_static_a.list
 add_list config/external/gkcodecs/libgkcodecs_so.list
-add_list media/ffvpx/libavcodec/libmozavcodec_so.list
-add_list media/ffvpx/libavutil/libmozavutil_so.list
+# Video: o FFmpeg completo (H.264/HEVC/AAC, sodos/scripts/build-ffmpeg.sh)
+# substitui o ffvpx (mesma revisao); sem ele, o ffvpx de sempre (so VP8/VP9).
+FFM=${FFMPEG_BUILD:-$HOME/ffsrc/ffmpeg/build}
+if [ -f "$FFM/sodos_av_syms.o" ]; then
+  echo "ffmpeg: $FFM"
+  FFMPEG_LIBS="$FFM/sodos_av_syms.o $FFM/libavcodec/libavcodec.a $FFM/libavutil/libavutil.a"
+else
+  FFMPEG_LIBS=
+  add_list media/ffvpx/libavcodec/libmozavcodec_so.list
+  add_list media/ffvpx/libavutil/libmozavutil_so.list
+fi
 add_list config/external/lgpllibs/liblgpllibs_so.list
 add_list config/external/sqlite/libmozsqlite3_so.list
 add_list security/nss/lib/nss/nss_nss3/libnss3_so.list
@@ -67,5 +76,5 @@ MESA=${MESA_OBJ:-$HOME/ffsrc/mesa-build/mesa_sodos.o}
 
 export PATH="$S/toolchain/bin:$PATH"
 x86_64-sodos-g++64 -o "${FIREFOX_OUT:-$O/dist/bin/FIREFOX.EXE}" "@$T/objs.list" \
-  $MESA "$O/x86_64-sodos/release/libgkrust.a" "$O/build/pure_virtual/libpure_virtual.a"
+  $MESA $FFMPEG_LIBS "$O/x86_64-sodos/release/libgkrust.a" "$O/build/pure_virtual/libpure_virtual.a"
 ls -la "${FIREFOX_OUT:-$O/dist/bin/FIREFOX.EXE}"

@@ -50,8 +50,12 @@ static inline void px_guard_end_(int* p) {
 #define LIST_MAX 16384
 #define FILE_CAP (64 * 1024 * 1024)
 
-/* Um arquivo aberto: os bytes ficam na memoria e o fsync/close grava o
- * arquivo inteiro (k_fsave). Todos os fds do mesmo caminho dividem o mesmo
+/* Um arquivo aberto: os bytes ficam na memoria e o fsync/close grava no
+ * disco so as paginas de 4 KB que mudaram (k_fwrite_at, FAT32.DLL), ou o
+ * arquivo inteiro (k_fsave) onde a unidade nao sabe gravar um trecho (FAT16,
+ * kernel antigo). Antes era sempre o arquivo inteiro: com o perfil do
+ * Firefox no disco cada commit do SQLite regravava o banco todo (114 MB em
+ * 6 min no QEMU, com o BKL preso). Todos os fds do mesmo caminho dividem o mesmo
  * objeto. Antes cada open tinha a sua copia: o SQLite abre o mesmo banco em
  * varias conexoes (places, favicons, leitura assincrona), cada uma gravava a
  * sua copia por cima da outra e o banco ficava "malformed". */
@@ -59,6 +63,11 @@ struct fobj {
   int refs;          /* fds que apontam para ele; 0 = livre */
   int size;
   int dirty;
+  int disk_size;     /* tamanho no disco (ultimo load/flush); -1 = nao sei */
+  int all;           /* grava inteiro no proximo flush (sem mapa) */
+  int nopatch;       /* a unidade nao grava trecho: sempre inteiro */
+  unsigned char* pmap; /* paginas de 4 KB sujas, 1 bit cada */
+  int pmap_n;        /* bytes em pmap */
   int gone;          /* unlink com o arquivo aberto: nao grava mais */
   char path[PATH_MAX];
   char* data;
@@ -123,6 +132,7 @@ static struct fobj* fobj_new(const char* full) {
     if (fobjs[i].refs == 0) {
       memset(&fobjs[i], 0, sizeof(fobjs[i]));
       strncpy(fobjs[i].path, full, PATH_MAX - 1);
+      fobjs[i].disk_size = -1;
       return &fobjs[i];
     }
   }
@@ -144,13 +154,106 @@ static void io_note(const char* op, const char* path, int size, unsigned t0) {
   if (n > 0) k_dbg(b, n < (int)sizeof(b) ? n : (int)sizeof(b) - 1);
 }
 
+#define PG_SHIFT 12
+/* Bytes [a, b) mudaram na memoria. */
+static void fobj_mark(struct fobj* o, int a, int b) {
+  int p0, p1, need, i;
+  o->dirty = 1;
+  if (o->all || b <= a) return;
+  p0 = a >> PG_SHIFT;
+  p1 = (b - 1) >> PG_SHIFT;
+  need = (p1 >> 3) + 1;
+  if (need > o->pmap_n) {
+    int n = o->pmap_n ? o->pmap_n : 16;
+    unsigned char* nm;
+    while (n < need) n *= 2;
+    nm = (unsigned char*)realloc(o->pmap, (size_t)n);
+    if (!nm) {
+      o->all = 1;  /* sem memoria para o mapa: grava inteiro */
+      return;
+    }
+    memset(nm + o->pmap_n, 0, (size_t)(n - o->pmap_n));
+    o->pmap = nm;
+    o->pmap_n = n;
+  }
+  for (i = p0; i <= p1; i++) o->pmap[i >> 3] |= (unsigned char)(1u << (i & 7));
+}
+
+static void fobj_clean(struct fobj* o) {
+  if (o->pmap) memset(o->pmap, 0, (size_t)o->pmap_n);
+  o->all = 0;
+  o->dirty = 0;
+  o->disk_size = o->size;
+}
+
+/* k_fwrite_at do kernel (k_dl_sym: kernel antigo nao tem e o programa ainda
+ * carrega). 0 ok; -9 a unidade nao sabe. */
+typedef int (*kwa_fn)(const char*, unsigned, const char*, int, unsigned);
+extern void* k_dl_sym(int h, const char* name, const void* caller);
+static kwa_fn kwa_get(void) {
+  static int tried;
+  static kwa_fn f;
+  if (!tried) {
+    f = (kwa_fn)k_dl_sym(0, "k_fwrite_at", 0);
+    tried = 1;
+  }
+  return f;
+}
+
+/* So as paginas sujas, no lugar. 0 ok; <0 nao deu (quem chama grava inteiro). */
+static int fobj_patch(struct fobj* o, unsigned t0) {
+  kwa_fn wa = kwa_get();
+  int npg, pg, cur, bytes = 0, r;
+  if (!wa || o->nopatch || o->all || o->disk_size < 0) return -1;
+  /* o que passou do tamanho antigo e novo no disco */
+  if (o->size > o->disk_size) fobj_mark(o, o->disk_size, o->size);
+  if (o->all) return -1;
+  cur = o->disk_size;
+  npg = (o->size + (1 << PG_SHIFT) - 1) >> PG_SHIFT;
+  for (pg = 0; pg < npg && (pg >> 3) < o->pmap_n;) {
+    int a, b;
+    if (!(o->pmap[pg >> 3] & (1u << (pg & 7)))) {
+      pg++;
+      continue;
+    }
+    a = pg;
+    while (pg < npg && (pg >> 3) < o->pmap_n && (o->pmap[pg >> 3] & (1u << (pg & 7)))) pg++;
+    b = pg;
+    {
+      int off = a << PG_SHIFT, end = b << PG_SHIFT;
+      if (end > o->size) end = o->size;
+      if (off > cur) return -1;  /* buraco: nao deveria acontecer */
+      r = wa(o->path, (unsigned)off, o->data + off, end - off, ~0u);
+      if (r == -9) o->nopatch = 1;
+      if (r < 0) return -1;
+      bytes += end - off;
+      if (end > cur) cur = end;
+    }
+  }
+  if (o->size != cur) {
+    /* encolheu (ftruncate, O_TRUNC) */
+    r = wa(o->path, (unsigned)(o->size < cur ? o->size : cur), "", 0, (unsigned)o->size);
+    if (r == -9) o->nopatch = 1;
+    if (r < 0) return -1;
+  }
+  io_note("patch", o->path, bytes, t0);
+  return 0;
+}
+
 static int fobj_flush(struct fobj* o) {
   unsigned t0;
   if (!o->dirty || o->gone) return 0;
   t0 = k_ms();
-  if (k_fsave(o->path, o->data ? o->data : "", o->size) < 0) return -1;
+  if (fobj_patch(o, t0) == 0) {
+    fobj_clean(o);
+    return 0;
+  }
+  if (k_fsave(o->path, o->data ? o->data : "", o->size) < 0) {
+    io_note("save-ERRO", o->path, o->size, t0);
+    return -1;
+  }
   io_note("save", o->path, o->size, t0);
-  o->dirty = 0;
+  fobj_clean(o);
   return 0;
 }
 
@@ -158,6 +261,9 @@ static void fobj_release(struct fobj* o) {
   if (--o->refs > 0) return;
   free(o->data);
   o->data = 0;
+  free(o->pmap);
+  o->pmap = 0;
+  o->pmap_n = 0;
   o->refs = 0;
 }
 
@@ -519,7 +625,7 @@ static int fd_alloc(void) {
 __export int open(const char* path, int flags, ...) {
   PX_GUARD;
   char full[PATH_MAX];
-  int fd, sz, mode = 0;
+  int fd, sz, dsz, mode = 0;
   struct fd_ent* e;
   struct fobj* o;
   if (!path) {
@@ -569,7 +675,7 @@ __export int open(const char* path, int flags, ...) {
     if ((flags & O_TRUNC) && (flags & (O_WRONLY | O_RDWR))) {
       o->size = 0;
       if (o->data) o->data[0] = 0;
-      o->dirty = 1;
+      o->dirty = 1;  /* o flush encolhe o arquivo no disco */
     }
     e->pos = (flags & O_APPEND) ? o->size : 0;
     errno = 0;
@@ -595,6 +701,7 @@ __export int open(const char* path, int flags, ...) {
     }
     sz = 0;
   }
+  dsz = sz;
   if ((flags & O_TRUNC) && (flags & (O_WRONLY | O_RDWR))) sz = 0;
   if (sz > FILE_CAP) {
     errno = EIO;
@@ -623,6 +730,7 @@ __export int open(const char* path, int flags, ...) {
   }
   o->data[sz] = 0;
   o->size = sz;
+  o->disk_size = dsz;
   o->dirty = (flags & O_TRUNC) && (flags & (O_WRONLY | O_RDWR));
   o->refs = 1;
   e = &fds[fd];
@@ -847,10 +955,10 @@ __export ssize_t write(int fd, const void* buf, size_t n) {
   /* escrever alem do fim deixa um buraco de zeros, como no Unix */
   if (e->pos > o->size) memset(o->data + o->size, 0, (size_t)(e->pos - o->size));
   memcpy(o->data + e->pos, buf, n);
+  fobj_mark(o, e->pos < o->size ? e->pos : o->size, e->pos + (int)n);
   e->pos += (int)n;
   if (e->pos > o->size) o->size = e->pos;
   o->data[o->size] = 0;
-  o->dirty = 1;
   return (ssize_t)n;
 }
 
@@ -919,6 +1027,7 @@ __export int ftruncate(int fd, off_t len) {
       return -1;
     }
     memset(o->data + o->size, 0, (size_t)(len - o->size));
+    fobj_mark(o, o->size, (int)len);
   }
   o->size = (int)len;
   o->data[len] = 0;

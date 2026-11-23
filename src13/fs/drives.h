@@ -50,6 +50,9 @@ int file_load(const char* path, char* buf, int max_size);
 /* Trecho binario a partir de offset. Nao acrescenta NUL. */
 int file_read_at(const char* path, uint32_t offset, char* buf, int len);
 int file_save(const char* path, const char* data, int size);
+/* len bytes em off no lugar; o tamanho fica nsize (~0u = cresce se preciso).
+ * 0 ok; -9 a unidade nao sabe (use file_save); outros < 0 erro. */
+int file_write_at(const char* path, uint32_t off, const char* data, int len, uint32_t nsize);
 /* Tamanho em bytes; <0 se nao existe. */
 int file_size(const char* path);
 /* Lista a pasta. Linha terminada em \ e diretorio. -1 se nao e pasta. */

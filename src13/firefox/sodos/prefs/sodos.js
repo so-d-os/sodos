@@ -76,6 +76,14 @@ pref("browser.safebrowsing.phishing.enabled", false);
 // Perfil e cache ficam na pasta do SET FIREFOX_WORKFOLDER (AUTOEXEC.BAT) ou,
 // sem ele, no Z: (ramdisk, some no reboot). Downloads vao para o
 // disco (/D/ e a unidade do .EXE quando nao ha D:) para nao se perderem.
+// O cache HTTP (cache2) vai sempre para o Z: (ramdisk), mesmo com o perfil
+// no disco: era o que mais gravava (78 MB em 6 min com o WhatsApp no QEMU) e
+// nao precisa sobreviver ao boot. Login, cookies e IndexedDB ficam no perfil.
+// Para o cache no disco: user_pref("browser.cache.disk.parent_directory", "")
+// no user.js do perfil.
+pref("browser.cache.disk.parent_directory", "/Z/TEMP/FFCACHE");
+// Sessao (sessionstore.jsonlz4) a cada 60 s em vez de 15 s.
+pref("browser.sessionstore.interval", 60000);
 pref("browser.download.folderList", 2);
 pref("browser.download.dir", "/D/USER/DEFAULT/DOWNLOADS");
 // Sem fork(): o Gecko tenta lancar "utility processes" (validador de JS do ORB
@@ -92,6 +100,15 @@ pref("browser.backup.scheduled.enabled", false);
 pref("browser.backup.archive.enabled", false);
 // Audio: so ha o backend nulo do SODOS (cubeb_sodos.c), sem som por enquanto.
 pref("media.cubeb.backend", "sodos");
+// Video: o FFmpeg completo esta dentro do FIREFOX.EXE no lugar do ffvpx
+// (sodos/scripts/build-ffmpeg.sh), com H.264/HEVC/AAC alem de VP8/VP9/MP3.
+// So o caminho "FFVPX" e usado; o de biblioteca do sistema (libavcodec.so)
+// nao existe e so geraria o aviso de "FFmpeg nao encontrado".
+pref("media.ffmpeg.enabled", false);
+// Decodificacao so em CPU: H.264 e o formato mais leve. Sem AV1 e sem VP9 no
+// MSE o YouTube manda H.264 + AAC (MP4), como o Instagram e o TikTok.
+pref("media.av1.enabled", false);
+pref("media.mediasource.vp9.enabled", false);
 // WebGL em GL de software (Mesa ligado no FIREFOX.EXE, docs/07-webgl.md). Sem
 // GPU o gfxInfo marcaria FORBID_HARDWARE e o caminho EGL so tenta o display
 // de software do GTK; force-enabled usa o display EGL padrao (surfaceless).

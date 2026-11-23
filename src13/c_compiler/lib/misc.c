@@ -254,7 +254,7 @@ char* realpath(const char* path, char* out) {
   char tmp[260];
   char res[260];
   char* parts[64];
-  int np = 0, i, n = 0;
+  int np = 0, i, n = 0, unix_form = 0;
   char* p;
   if (!path) {
     errno = EINVAL;
@@ -270,6 +270,7 @@ char* realpath(const char* path, char* out) {
      * (o HOME do Firefox e /D/USER/DEFAULT). Sem isto virava C:\D\USER. */
     tmp[0] = (char)unix_drive(path[1]);
     tmp[1] = ':';
+    unix_form = 1;
     strncpy(tmp + 2, path + 2, sizeof(tmp) - 3);
     tmp[sizeof(tmp) - 1] = 0;
   } else {
@@ -298,14 +299,23 @@ char* realpath(const char* path, char* out) {
     }
     if (np < 64) parts[np++] = s;
   }
-  res[0] = tmp[0];
-  res[1] = ':';
+  /* Caminho Unix entra, caminho Unix sai ("/E/A/B"): o nsLocalFile do Firefox
+   * (Normalize) procura '/' para achar a pasta-mae. Com "E:\A\B" o MoveTo
+   * do prefs.js falhava sempre e o Firefox regravava o prefs-N.js sem parar
+   * (centenas de vezes por minuto, sem nunca atualizar o prefs.js). */
+  if (unix_form) {
+    res[0] = '/';
+    res[1] = tmp[0];
+  } else {
+    res[0] = tmp[0];
+    res[1] = ':';
+  }
   n = 2;
-  if (!np) res[n++] = '\\';
+  if (!np) res[n++] = unix_form ? '/' : '\\';
   for (i = 0; i < np; i++) {
     size_t l = strlen(parts[i]);
     if (n + 1 + (int)l >= (int)sizeof(res)) break;
-    res[n++] = '\\';
+    res[n++] = unix_form ? '/' : '\\';
     memcpy(res + n, parts[i], l);
     n += (int)l;
   }

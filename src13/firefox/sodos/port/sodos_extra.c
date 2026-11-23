@@ -126,6 +126,12 @@ extern const void* FREEBL_GetVector(void) __attribute__((weak));
  * o eglGetProcAddress do Mesa acha as funcoes EGL e GL. */
 #define DL_MESA ((void*)4)
 extern void* sodos_mesa_eglGetProcAddress(const char*) __attribute__((weak));
+/* FFmpeg (video H.264/HEVC/AAC/VP9, sodos/scripts/build-ffmpeg.sh): o
+ * FFVPXRuntimeLinker abre libmozavutil.so e libmozavcodec.so e procura cada
+ * funcao por nome; a tabela gerada (sodos_av_syms.c) responde. */
+#define DL_AVUTIL ((void*)5)
+#define DL_AVCODEC ((void*)6)
+extern void* sodos_av_dlsym(const char*) __attribute__((weak));
 
 void* dlopen(const char* f, int m) {
   (void)m;
@@ -134,6 +140,8 @@ void* dlopen(const char* f, int m) {
   if (strstr(f, "freebl") && FREEBL_GetVector) return DL_FREEBL;
   if ((strstr(f, "libEGL") || strstr(f, "libGLESv2")) && sodos_mesa_eglGetProcAddress)
     return DL_MESA;
+  if (sodos_av_dlsym && strstr(f, "mozavutil")) return DL_AVUTIL;
+  if (sodos_av_dlsym && strstr(f, "mozavcodec")) return DL_AVCODEC;
   return 0;
 }
 
@@ -151,6 +159,7 @@ void* dlsym(void* h, const char* n) {
     return 0;
   }
   if (h == DL_MESA) return sodos_mesa_eglGetProcAddress(n);
+  if (h == DL_AVUTIL || h == DL_AVCODEC) return sodos_av_dlsym(n);
   if (h == DL_FREEBL) {
     if (!strcmp(n, "FREEBL_GetVector")) return (void*)FREEBL_GetVector;
     return 0;

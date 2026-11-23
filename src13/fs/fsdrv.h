@@ -25,6 +25,10 @@
 #define FSDRV_ABI_RMDIR 5 /* ops->abi 5: tambem remove pasta vazia */
 #define FSDRV_ABI_RENAME 4 /* ops->abi 4: tambem renomeia/move sem copiar */
 #define FSDRV_ABI_ENTRY 6 /* ops->abi 6: entrada de um arquivo so (entry) */
+/* write_at: o kernel antigo recusa ops->abi > 6, entao o DLL continua com 6
+ * e diz que tem write_at com ops->ext = FSDRV_EXT_WRITEAT (campo depois de
+ * entry; um DLL antigo nao tem esse campo, por isso o valor magico). */
+#define FSDRV_EXT_WRITEAT 0x54415257u /* "WRAT" */
 #define FSDRV_SYM "fs_driver"
 
 /* Igual a struct dir_item de drives.h (k_dirent dos programas). */
@@ -103,6 +107,14 @@ struct fsdrv_ops {
    * ou pasta), achada com uma busca so, sem listar a pasta inteira (o stat()
    * do Firefox fazia isso para cada arquivo do cache). 0 achou; -1 nao. */
   int (*entry)(void* vol, const char* path, struct fsdrv_entry* out);
+  uint32_t ext;  /* FSDRV_EXT_WRITEAT se write_at existe (so com abi >= 6) */
+  /* So com ext == FSDRV_EXT_WRITEAT. Grava len bytes em off num arquivo que
+   * ja existe, no lugar, e deixa o tamanho em nsize (~0u = o maior entre o
+   * atual e off+len; menor encolhe). off <= tamanho atual, off+len <= nsize.
+   * A entrada da pasta so e regravada se o tamanho muda (date 0 = mantem a
+   * data). 0 ok; -1 invalido ou nao existe; -2 disco cheio; -3 erro. */
+  int (*write_at)(void* vol, const char* path, uint32_t off, const void* data, uint32_t len,
+                  uint32_t nsize, uint16_t date, uint16_t time);
 };
 
 typedef const struct fsdrv_ops* (*fsdrv_entry_fn)(void);

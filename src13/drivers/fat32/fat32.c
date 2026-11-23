@@ -1255,6 +1255,163 @@ out:
   return err;
 }
 
+/* Grava len bytes em off no arquivo que ja existe, no lugar (sem copiar o
+ * resto), e deixa o tamanho em nsize (~0u: o maior entre o atual e off+len).
+ * A cadeia cresce ou encolhe; a entrada da pasta so e regravada quando o
+ * tamanho ou o primeiro cluster mudam. off nao pode passar do tamanho atual
+ * e off+len nao pode passar de nsize. Bytes novos que a escrita nao cobre
+ * (nsize > off+len) ficam zerados. 0 ok; -1 invalido/nao existe; -2 disco
+ * cheio; -3 erro de disco. */
+static int f_write_at(void* p, const char* path, uint32_t off, const void* data, uint32_t len,
+                      uint32_t nsize, uint16_t date, uint16_t time) {
+  struct vol* v = (struct vol*)p;
+  const uint8_t* src = (const uint8_t*)data;
+  struct ent e;
+  uint8_t* sbuf;
+  uint32_t size, end, fin, nc, wc0, wc1, idx, clus, prev = 0, first, old_nc, walk;
+  int err = 0, fat_changed = 0;
+  if (!v || !path || (len && !data)) return -1;
+  if (lookup(v, path, &e) != 0 || (e.attr & 0x10) || (e.attr & 0x01)) return -1;
+  size = e.size;
+  first = e.clus;
+  end = off + len;
+  if (end < off || off > size) return -1;
+  fin = nsize == ~0u ? (end > size ? end : size) : nsize;
+  if (fin < end) return -1;
+  nc = (fin + v->csize - 1) / v->csize;
+  old_nc = (size + v->csize - 1) / v->csize;
+  if (len) {
+    wc0 = off / v->csize;
+    wc1 = (end - 1) / v->csize;
+  } else {
+    wc0 = 1;
+    wc1 = 0;  /* nada a gravar */
+  }
+  sbuf = (uint8_t*)v->h->alloc(512);
+  if (!sbuf) return -3;
+  pos_clear(v);
+  /* ate onde andar: o fim da escrita, e o fim da cadeia se o tamanho muda */
+  walk = len ? wc1 + 1 : 0;
+  if (fin != size && nc > walk) walk = nc;
+  if (fin != size && old_nc > walk) walk = old_nc;
+  clus = valid_clus(v, first) ? first : 0;
+  for (idx = 0; idx < walk && idx < nc; idx++) {
+    int fresh = 0;
+    if (!clus) {
+      /* cluster novo no fim da cadeia (sem zerar: e preenchido abaixo) */
+      clus = clus_free_find(v, &err);
+      if (!clus) goto fail;
+      if (fat_set(v, clus, 0x0FFFFFFFu, sbuf) != 0 || (prev && fat_set(v, prev, clus, sbuf) != 0)) {
+        err = -3;
+        goto fail;
+      }
+      if (!prev) first = clus;
+      if (v->free_clus != 0xFFFFFFFFu && v->free_clus) v->free_clus--;
+      v->next_free = clus + 1 < v->nclus + 2 ? clus + 1 : 2;
+      fresh = 1;
+      fat_changed = 1;
+    }
+    {
+      uint32_t cs = idx * v->csize, ce = cs + v->csize;
+      /* W: o que a escrita cobre neste cluster; Z: bytes que passam a existir
+       * sem dado (entre o tamanho antigo e nsize) e precisam ficar zerados */
+      uint32_t w0 = 0, w1 = 0, z0, z1;
+      if (idx >= wc0 && idx <= wc1) {
+        w0 = off > cs ? off : cs;
+        w1 = end < ce ? end : ce;
+      }
+      z0 = size > end ? size : end;
+      if (z0 < cs) z0 = cs;
+      z1 = fin < ce ? fin : ce;
+      if (w0 == cs && w1 == ce && (uintptr_t)(src + (cs - off)) >= 0x100000u) {
+        /* cluster inteiro: direto do buffer (e os seguidos de uma vez) */
+        uint32_t n = 1, c = clus, nx;
+        while (idx + n <= wc1 && (idx + n + 1) * v->csize <= end && n * v->csize < RUN_MAX &&
+               (nx = fat_next(v, c)) == c + 1) {
+          c = nx;
+          n++;
+        }
+        if (v->h->write(v->disk, clus_lba(v, clus), n * v->spc, src + (cs - off)) != 0) {
+          err = -3;
+          goto fail;
+        }
+        v->cbuf_clus = 0;
+        idx += n - 1;
+        clus = c;
+      } else if (fresh || w1 > w0 || z1 > z0) {
+        if (fresh) {
+          mzero(v->cbuf, v->csize);
+          v->cbuf_clus = 0;
+        } else if (load_clus(v, clus) != 0) {
+          err = -3;
+          goto fail;
+        }
+        if (z1 > z0) mzero(v->cbuf + (z0 - cs), z1 - z0);
+        if (w1 > w0) mcopy(v->cbuf + (w0 - cs), src + (w0 - off), w1 - w0);
+        if (v->h->write(v->disk, clus_lba(v, clus), v->spc, v->cbuf) != 0) {
+          v->cbuf_clus = 0;
+          err = -3;
+          goto fail;
+        }
+        v->cbuf_clus = clus;
+      }
+    }
+    prev = clus;
+    clus = fat_next(v, clus);
+    v->h->yield();
+  }
+  /* encolheu: corta a cadeia depois do ultimo cluster que fica */
+  if (fin < size) {
+    if (nc == 0) {
+      if (valid_clus(v, first)) chain_free(v, first, sbuf);
+      first = 0;
+    } else if (prev && clus) {
+      if (fat_set(v, prev, 0x0FFFFFFFu, sbuf) != 0) {
+        err = -3;
+        goto fail;
+      }
+      chain_free(v, clus, sbuf);
+    }
+    fat_changed = 1;
+  }
+  if (fat_changed && fat_flush(v) != 0) {
+    err = -3;
+    goto fail;
+  }
+  if (fin != size || first != e.clus) {
+    if (load_clus(v, e.pos_clus) != 0) {
+      err = -3;
+      goto fail;
+    }
+    {
+      uint8_t* d = v->cbuf + e.pos_off;
+      d[11] = (uint8_t)((d[11] & 0x06) | 0x20);
+      if (date) {
+        wr16(d + 18, date);
+        wr16(d + 22, time);
+        wr16(d + 24, date);
+      }
+      wr16(d + 20, (uint16_t)(first >> 16));
+      wr16(d + 26, (uint16_t)first);
+      wr32(d + 28, fin);
+    }
+    if (v->h->write(v->disk, clus_lba(v, e.pos_clus) + e.pos_off / 512u, 1,
+                    v->cbuf + (e.pos_off & ~511u)) != 0) {
+      v->cbuf_clus = 0;
+      err = -3;
+      goto fail;
+    }
+  }
+fail:
+  /* Um erro no meio deixa o que ja foi gravado (como um write() do Unix que
+   * para no meio); a FAT suja vai ao disco para nao vazar clusters. */
+  fat_flush(v);
+  if (fat_changed) fsinfo_save(v, sbuf);
+  v->h->free(sbuf);
+  pos_clear(v);
+  return err;
+}
+
 /* Marca como livres as entradas de e (LFN + 8.3). 0 ok; -5 erro de disco. */
 static int ent_unlink(struct vol* v, const struct ent* e) {
   uint32_t clus = e->first_clus, off = e->first_off, i;
@@ -1395,7 +1552,7 @@ static int f_rmdir(void* p, const char* path) {
 
 static const struct fsdrv_ops ops = {
   FSDRV_ABI_ENTRY, FAT32_NAME, f_probe, f_mount, f_umount, f_stat, f_read, f_items, f_long_name,
-  f_space, f_mkdir, f_write, f_remove, f_rename, f_rmdir, f_entry,
+  f_space, f_mkdir, f_write, f_remove, f_rename, f_rmdir, f_entry, FSDRV_EXT_WRITEAT, f_write_at,
 };
 
 const struct fsdrv_ops* fs_driver(void) { return &ops; }
