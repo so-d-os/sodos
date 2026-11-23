@@ -450,6 +450,13 @@ isr_ret_t isr_dispatch(isr_frame_t* f) {
     kt_ipi_resched();
     return isr_ret0;
   }
+  if (f->int_no == 0xF5) {          /* MSI do xHCI: acorda a RIT */
+    void rit_irq(void);
+    smp_ipi_ack();
+    rit_irq();
+    kt_ipi_resched();
+    return isr_ret0;
+  }
   if (f->int_no == 0xF4) {
     smp_ipi_ack();
     kt_ipi_tlb();

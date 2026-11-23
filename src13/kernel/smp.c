@@ -196,6 +196,12 @@ static void ipi_others(uint32_t cmd) {
   }
 }
 
+/* APIC id da CPU (para MSI); 0xFFFFFFFF se ela nao subiu. */
+uint32_t smp_apic_id(int cpu) {
+  if (cpu < 0 || cpu >= ncpu || (cpu > 0 && !ap_up[cpu])) return 0xFFFFFFFFu;
+  return ids[cpu];
+}
+
 void smp_send_ipi(int cpu, uint8_t vec) {
   if (cpu < 0 || cpu >= ncpu || (cpu > 0 && !ap_up[cpu])) return;
   ipi(ids[cpu], vec);

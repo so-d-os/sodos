@@ -32,6 +32,7 @@ int smp_run(int cpu, void (*fn)(void*), void* arg);
 
 /* IPIs (vetores do kthread.c: 0xF3 reschedule, 0xF4 TLB). */
 void smp_send_ipi(int cpu, uint8_t vec);
+uint32_t smp_apic_id(int cpu);
 void smp_ipi_others(uint8_t vec);
 void smp_nmi_others(void);
 /* Timer local da CPU corrente (LAPIC, periodico, vetor 0xF2). */

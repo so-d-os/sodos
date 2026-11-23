@@ -47,3 +47,12 @@ int xhci_describe(char* out, int max);
 
 /* Mapeia um BAR de PCI em identidade, sem cache (outros drivers usam). 0 = ok. */
 int pci_mmio_map(uint64_t phys, uint64_t len);
+
+/* RIT (video/visual.c): le os relatorios sem esperar nada; 0 = nada ou o
+ * driver ocupado. xhci_mouse_maint faz o resto (reset, portas) pelo mundo. */
+int xhci_rit_poll(int* dx, int* dy, int* dz, int* btn);
+void xhci_mouse_maint(void);
+int xhci_rit_wanted(void);
+/* MSI ao LAPIC apic no vetor vec (0 = sem MSI); xhci_rit_ack na interrupcao. */
+int xhci_rit_irq(uint32_t apic, uint8_t vec);
+void xhci_rit_ack(void);

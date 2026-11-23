@@ -20,7 +20,10 @@ void ps2in_inject(uint8_t b);       /* byte de teclado vindo do USB (xhci.c) */
 /* 1 com o byte em *b (e o tick em que chegou em *t, se t != 0); 0 se vazia. */
 int ps2in_kbd(uint8_t* b, uint32_t* t);
 int ps2in_aux(uint8_t* b, uint32_t* t);
-int ps2in_pending(void);            /* 1 se ha byte de teclado ou de mouse */
+int ps2in_pending(void);
+int ps2in_aux_pop(uint8_t* b, uint32_t* t);   /* RIT: so a fila do mouse */
+int ps2in_kbd_has(void);                      /* RIT: tecla na fila? */
+extern void (*volatile ps2in_kick)(void);     /* RIT: chamada na IRQ1/IRQ12 */            /* 1 se ha byte de teclado ou de mouse */
 int ps2in_kbd_pending(void);
 void ps2in_flush(void);             /* descarta tudo (entrada no WIN etc.) */
 

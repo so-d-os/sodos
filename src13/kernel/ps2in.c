@@ -101,12 +101,18 @@ static void drain_locked(void) {
   }
 }
 
+/* RIT (video/visual.c): chamada na IRQ1/IRQ12 depois de encher a fila. */
+void (*volatile ps2in_kick)(void);
+
 void ps2in_isr(void) {
+  void (*k)(void);
   ps2_irqs++;
   if (ps2_raw_depth) return;   /* alguem conversa direto com o 8042 */
   lk_take();
   drain_locked();
   lk_drop();
+  k = ps2in_kick;
+  if (k) k();
 }
 
 /* Byte de teclado que nao veio do 8042 (teclado USB, xhci.c): mesma fila e o
@@ -239,6 +245,14 @@ int ps2in_aux(uint8_t* b, uint32_t* t) {
   if (q_pop(&aq, b, t)) return 1;
   ps2in_pump();
   return q_pop(&aq, b, t);
+}
+
+/* Para a RIT: so a fila, sem ps2in_pump (que pode esperar o xHCI). */
+int ps2in_aux_pop(uint8_t* b, uint32_t* t) {
+  return q_pop(&aq, b, t);
+}
+int ps2in_kbd_has(void) {
+  return q_has(&kq);
 }
 
 int ps2in_kbd_pending(void) {

@@ -232,6 +232,7 @@ void fs_force_release(void) {
 /* Tela de EXCEPTION (isr.c, CRASH.LOG): o mundo vai parar; grava sem trava. */
 volatile int fs_panic;
 /* Publica (drives.h): o drives.c pega a trava em toda entrada; recursiva. */
+void dstat_path(const char* p);   /* disks/cmd_dstat.c */
 void fs_lock(void) {
   int me;
   uint64_t t0;
@@ -260,6 +261,7 @@ void fs_lock(void) {
 void fs_unlock(void) {
   if (fs_panic || fs_owner != fs_me()) return; /* a trava foi retomada de quem chama */
   if (fs_depth > 0 && --fs_depth == 0) {
+    dstat_path(0);
     fs_owner = 0;
     fs_gen++;
     kt_futex_wake(&fs_gen, -1);

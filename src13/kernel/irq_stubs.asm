@@ -51,6 +51,13 @@ resched_ipi_stub:
   push qword 0xF3
   jmp isr_common
 
+; RIT: MSI do xHCI (video/visual.c rit_irq).
+global rit_irq_stub
+rit_irq_stub:
+  push qword 0
+  push qword 0xF5
+  jmp isr_common
+
 global tlb_ipi_stub
 tlb_ipi_stub:
   push qword 0

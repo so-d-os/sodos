@@ -48,6 +48,13 @@ void mod_set_err(const char* a, const char* b) { set_err(a, b); }
 
 const char* mod_last_error(void) { return last_err; }
 uint32_t mod_current_pid(void) { return cur_pid; }
+/* Nome do EXE do pid (0 se nao ha modulo: tarefa do WIN sem SOX, WINE). */
+const char* mod_pid_name(uint32_t pid) {
+  int i;
+  for (i = 0; i < MOD_MAX; i++)
+    if (mods[i].used && !mods[i].is_dll && mods[i].pid == pid) return mods[i].name;
+  return pid ? "pid?" : "kernel";
+}
 char mod_exe_drive(void) { return exe_drive; }
 
 static uint64_t mod_fs_read(void);

@@ -185,6 +185,7 @@ int cmd_kill(int argc, char** argv);
 int cmd_killall(int argc, char** argv);
 int cmd_df(int argc, char** argv);
 int cmd_dstat(int argc, char** argv);
+int cmd_rit(int argc, char** argv);      /* video/visual.c */
 int cmd_visual(int argc, char** argv);
 int cmd_mouse(int argc, char** argv);
 int cmd_usb(int argc, char** argv);

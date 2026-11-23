@@ -79,6 +79,7 @@ struct task {
   uint32_t slice_ms;
   struct mod_tsave msave;
   uint64_t teb;             /* TEB do Windows (WINE.DLL); 0 = nao e thread Windows */
+  int rt;                   /* tempo real (a RIT): fila na frente, CPU propria */
 };
 
 /* self e curr nos offsets 0 e 0x18: lidos com um mov %gs:N (atomico frente a
@@ -119,6 +120,17 @@ static volatile int n_online = 1;
  * "estacionadas" em hlt, sem threads. A CPU0 (o mundo) nunca para. */
 static volatile int cpu_cap = KT_CPU_MAX;
 static inline int parked(const struct cpu* c) { return c->index != 0 && c->index >= cpu_cap; }
+/* CPUs reservadas a tarefas de tempo real (a RIT, video/visual.c): as
+ * outras threads saem delas, para que a RIT nunca espere uma thread que
+ * esta no kernel com o BKL (que nao e preemptavel). */
+static volatile uint32_t rt_mask;
+/* Boost do primeiro plano (como o do Windows): threads do programa que
+ * acabou de receber entrada passam na frente por boost_until. */
+static volatile uint32_t boost_pid, boost_until;
+static volatile int world_idle_word;   /* kt_world_idle / kt_world_kick */
+static inline int boosted(const struct task* t) {
+  return boost_pid && t->pid == boost_pid && (int32_t)(boost_until - (uint32_t)irq_ticks()) > 0;
+}
 static struct cpu* pick_cpu(uint32_t mask);
 static struct task world;
 static struct task idle_t[KT_CPU_MAX];
@@ -283,11 +295,18 @@ static void rq_remove(struct cpu* c, struct task* t) {
   c->nr--;
 }
 
-/* O mundo (shell/WIN) primeiro: e quem atende teclado, mouse e tela. */
+/* O mundo (shell/WIN) primeiro: e quem atende teclado, mouse e tela. Depois
+ * a tempo real (RIT) e as threads do programa com boost de primeiro plano. */
 static struct task* rq_pick(struct cpu* c) {
   struct task* t;
   for (t = c->qhead; t; t = t->qnext)
     if (t->kind == K_WORLD) break;
+  if (!t)
+    for (t = c->qhead; t; t = t->qnext)
+      if (t->rt) break;
+  if (!t && boost_pid)
+    for (t = c->qhead; t; t = t->qnext)
+      if (boosted(t)) break;
   if (!t) t = c->qhead;
   if (t) rq_remove(c, t);
   return t;
@@ -336,7 +355,7 @@ static void kt_schedule(void) {
   if (stop_here()) {
     for (;;) __asm__ volatile ("cli; hlt");
   }
-  if (parked(c) && prev->kind == K_THREAD && prev->migrate_to < 0 &&
+  if (parked(c) && prev->kind == K_THREAD && !prev->rt && prev->migrate_to < 0 &&
       (prev->state == T_RUNNING || prev->state == T_READY)) {
     struct cpu* d = pick_cpu(prev->mask);
     if (d != c && !parked(d)) prev->migrate_to = d->index;
@@ -649,6 +668,20 @@ void kt_set_cpu_cap(int n) {
 }
 int kt_cpu_cap(void) { return cpu_cap < n_online ? cpu_cap : n_online; }
 uint32_t kt_cur_pid(void) { return cur()->pid; }
+void* kt_cur_task(void) { return kt_up ? (void*)cur() : (void*)1; }   /* nunca 0 */
+/* Funcao de entrada da thread do kernel em curso; 0 no mundo e em
+ * threads de programa. DSTAT usa para dizer qual servico mexe no disco. */
+void* kt_cur_fn(void) {
+  struct task* t;
+  if (!kt_up) return 0;
+  t = cur();
+  {
+    extern char __bss_start[];
+    /* so codigo do kernel (texto abaixo do .bss); threads de programa nao */
+    uintptr_t f = (uintptr_t)t->fn;
+    return (t->kind == K_THREAD && f && f < (uintptr_t)__bss_start) ? (void*)t->fn : 0;
+  }
+}
 
 int kt_cpu_idle(int idx) {
   if (idx < 0 || idx >= KT_CPU_MAX) return 1;
@@ -724,7 +757,7 @@ static void kt_wake(struct task* t) {
     irq_restore(fl);
     return;
   }
-  if (t->kind == K_THREAD && (parked(c) || c->curr != c->idle || c->nr > 0 || !((t->mask >> c->index) & 1u))) {
+  if (t->kind == K_THREAD && !t->rt && (parked(c) || c->curr != c->idle || c->nr > 0 || !((t->mask >> c->index) & 1u))) {
     struct cpu* d = find_idle(t->mask, c);
     if (d) dest = d;
     else if (!((t->mask >> c->index) & 1u)) dest = &cpus[first_cpu(t->mask)];
@@ -739,7 +772,10 @@ static void kt_wake(struct task* t) {
     rq_push(dest, t);
     spin_unlock(&dest->lock);
   }
-  if (t->kind == K_WORLD || dest->curr == dest->idle) resched_cpu(dest);
+  /* tempo real e boost: tira da CPU quem roda la (se nao estiver no BKL) */
+  if (t->kind == K_WORLD || dest->curr == dest->idle || t->rt ||
+      (boosted(t) && dest->curr->kind == K_THREAD && !boosted(dest->curr)))
+    resched_cpu(dest);
   irq_restore(fl);
 }
 
@@ -897,8 +933,8 @@ static void world_lend(volatile int* addr, int val, uint32_t ms) {
 }
 
 /* Laco do WIN sem nada a fazer: empresta a CPU0 (e o BKL) as threads por
- * ate ms, em vez de girar. Fora do mundo nao faz nada. */
-static volatile int world_idle_word;
+ * ate ms, em vez de girar. Fora do mundo nao faz nada. (world_idle_word esta
+ * mais acima, com kt_world_kick.) */
 void kt_world_idle(uint32_t ms) {
   if (!kt_up || cur() != &world || bkl_owner != &world) return;
   world_lend(&world_idle_word, 0, ms);
@@ -1127,6 +1163,7 @@ int kt_thread_create(int (*fn)(void*), void* arg, uint32_t stack_size, uint32_t 
   if (!t) return E_AGAIN;
   mask = mask ? (mask & online_mask) : online_mask;
   if (!mask) return E_INVAL;
+  if (mask & ~rt_mask) mask &= ~rt_mask;  /* CPU da RIT so se nao ha outra */
   if (!stack_size) stack_size = STACK_DEF;
   if (stack_size < STACK_MIN) stack_size = STACK_MIN;
   stack_size = (stack_size + 15u) & ~15u;
@@ -1142,6 +1179,7 @@ int kt_thread_create(int (*fn)(void*), void* arg, uint32_t stack_size, uint32_t 
   fpu_init_area(t->xs);
   t->fs = fs_read();
   t->teb = 0;
+  t->rt = 0;
   t->drive = mod_exe_drive();
   t->kind = K_THREAD;
   t->fn = fn;
@@ -1208,10 +1246,54 @@ int kt_thread_affinity(int tid, uint32_t mask) {
   if (!t || t->kind != K_THREAD) return E_SRCH;
   mask &= online_mask;
   if (!mask) return E_INVAL;
+  if (!t->rt && (mask & ~rt_mask)) mask &= ~rt_mask;
   t->mask = mask;
   if (t->state == T_RUNNING && !((mask >> t->cpu) & 1u)) resched_cpu(&cpus[t->cpu]);
   if (t == cur() && !((mask >> this_cpu()->index) & 1u)) kt_thread_yield();
   return 0;
+}
+
+/* Thread do kernel de tempo real presa a CPU cpu: passa na frente na fila,
+ * nao e estacionada pelo limite termico e, com 3+ CPUs, a CPU fica so para
+ * ela (as outras threads saem na proxima troca). Devolve o tid. */
+int kt_thread_create_rt(int (*fn)(void*), void* arg, uint32_t stack_size, int cpu, int reserve) {
+  int tid, i;
+  struct task* t;
+  if (cpu <= 0 || cpu >= KT_CPU_MAX || !cpus[cpu].online) return E_INVAL;
+  tid = kt_thread_create(fn, arg, stack_size, 1u << cpu);
+  if (tid <= 0) return tid;
+  t = find_tid(tid);
+  if (!t) return E_SRCH;
+  t->mask = 1u << cpu;
+  t->rt = 1;
+  if (reserve && n_online >= 3) {
+    __atomic_or_fetch(&rt_mask, 1u << cpu, __ATOMIC_SEQ_CST);
+    for (i = 0; i < KT_MAX; i++) {
+      struct task* o = &kts[i];
+      if (o == t || o->state == T_FREE || o->kind != K_THREAD || o->rt) continue;
+      if (o->mask & ~rt_mask) o->mask &= ~rt_mask;
+    }
+    resched_cpu(&cpus[cpu]);
+  }
+  return tid;
+}
+
+/* CPUs reservadas (para o TOP e o comando RIT). */
+uint32_t kt_rt_mask(void) { return rt_mask; }
+
+/* Boost de primeiro plano: o programa pid recebeu entrada. */
+void kt_boost_pid(uint32_t pid, uint32_t ms) {
+  if (!pid) return;
+  boost_until = (uint32_t)irq_ticks() + ms;
+  boost_pid = pid;
+}
+
+/* Acorda o mundo se ele esta emprestando a CPU0 no laco ocioso do WIN
+ * (kt_world_idle): a entrada nao espera o fim do emprestimo. */
+void kt_world_kick(void) {
+  if (!kt_up) return;
+  if (world.state == T_BLOCKED && world.fw_addr == &world_idle_word)
+    kt_futex_wake(&world_idle_word, 1);
 }
 
 static void yield_raw(struct task* t) {
@@ -1347,7 +1429,7 @@ static void tick_common(struct cpu* c, int ms) {
     for (i = 0; i < KT_CPU_MAX && c->nr > 0; i++)
       if (cpus[i].online && !parked(&cpus[i]) && &cpus[i] != c && move_one(c, &cpus[i]))
         resched_cpu(&cpus[i]);
-    if (t->kind == K_THREAD) c->need_resched = 1;
+    if (t->kind == K_THREAD && !t->rt) c->need_resched = 1;
   }
   if (c->nr > 0) kt_push(c);
   c->bal_ms += (uint32_t)ms;

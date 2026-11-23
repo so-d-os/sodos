@@ -147,6 +147,38 @@ static struct xc xcs[XC_MAX];
 static int xc_n;
 static struct udev devs[UDEV_MAX];
 static int busy;
+/* Trava do driver: o anel de eventos tem um consumidor por vez. As entradas
+ * publicas a pegam (recursiva, por tarefa); a RIT (video/visual.c) so tenta
+ * (xl_try) e, se o driver esta ocupado, deixa para a proxima volta. */
+static void* volatile xl_owner;
+static int xl_depth;
+static void xl_enter(void) {
+  void* me = kt_cur_task();
+  if (__atomic_load_n(&xl_owner, __ATOMIC_ACQUIRE) == me) {
+    xl_depth++;
+    return;
+  }
+  for (;;) {
+    void* z = 0;
+    if (__atomic_compare_exchange_n(&xl_owner, &z, me, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) break;
+    __builtin_ia32_pause();
+  }
+  xl_depth = 1;
+}
+static int xl_try(void) {
+  void* me = kt_cur_task();
+  void* z = 0;
+  if (__atomic_load_n(&xl_owner, __ATOMIC_ACQUIRE) == me) {
+    xl_depth++;
+    return 1;
+  }
+  if (!__atomic_compare_exchange_n(&xl_owner, &z, me, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return 0;
+  xl_depth = 1;
+  return 1;
+}
+static void xl_leave(void) {
+  if (--xl_depth == 0) __atomic_store_n(&xl_owner, (void*)0, __ATOMIC_RELEASE);
+}
 static int ps2_hint = -1;  /* ultimo ps2_ok de xhci_mouse_init; -1 = nao sabido */
 
 /* Mouses: todos os que aparecerem valem. Um teclado gamer ou um receptor
@@ -894,7 +926,8 @@ static int hid_setup(int i, int m_if, int m_ep, int m_mps, int m_ival, int m_boo
    * SET_IDLE vai por ultimo: alguns dispositivos respondem STALL. Teclado com
    * idle 0: so manda relatorio quando algo muda (a repeticao e nossa). */
   if (m_if >= 0) {
-    if (m_boot) (void)ctrl(d, 0x21, 0x0B, 0, (uint16_t)m_if, 0);
+    /* m_boot < 0: tem boot, mas vai em report (para ter a roda) */
+    if (m_boot) (void)ctrl(d, 0x21, 0x0B, m_boot > 0 ? 0 : 1, (uint16_t)m_if, 0);
     (void)ctrl(d, 0x21, 0x0A, 0, (uint16_t)m_if, 0);
   }
   if (k_if >= 0) {
@@ -912,7 +945,7 @@ static int hid_setup(int i, int m_if, int m_ep, int m_mps, int m_ival, int m_boo
     ms_arm(d);
     xlog("[xhci] mouse USB pronto, porta ");
     xlog_hex((uint32_t)(d->port + 1));
-    xlog(m_boot ? " (boot)\n" : " (report)\n");
+    xlog(m_boot > 0 ? " (boot)\n" : " (report)\n");
   }
   if (k_if >= 0) {
     int j;
@@ -1376,7 +1409,7 @@ static int disk_try(int write, uint32_t lba, uint32_t n, volatile uint8_t* buf) 
 static int enumerate(struct xc* x, int port, uint32_t route, int speed, int parent, int hport) {
   int i, slot = 0, rc, total, k, cfg, hub = 0;
   int cur_cls = -1, cur_sub = 0, cur_proto = -1, cur_alt = 0, cur_if = -1, last_bulk = 0;
-  int m_if = -1, m_ep = -1, m_mps = 0, m_ival = 0, m_boot = 0;
+  int m_if = -1, m_ep = -1, m_mps = 0, m_ival = 0, m_boot = 0, m_rlen = 0;
   int k_if = -1, k_ep = -1, k_mps = 0, k_ival = 0;
   int s_if = -1, s_in = -1, s_out = -1, s_mps = 0, s_burst = 0;
   /* Interfaces HID sem protocolo boot de mouse/teclado: podem ser um mouse
@@ -1493,6 +1526,7 @@ static int enumerate(struct xc* x, int port, uint32_t route, int speed, int pare
         /* Mouse com protocolo boot (subclasse 1, protocolo 2). */
         m_if = cur_if;
         m_boot = 1;
+        m_rlen = cur_rlen;
         m_ep = addr & 0x0F;
         m_mps = mps;
         m_ival = d->buf[k + 6];
@@ -1529,6 +1563,27 @@ static int enumerate(struct xc* x, int port, uint32_t route, int speed, int pare
       cur_rlen = (int)d->buf[k + 7] | ((int)d->buf[k + 8] << 8);  /* report descriptor */
     }
     k += l;
+  }
+
+  /* Mouse com protocolo boot: o relatorio boot tem so botoes, X e Y (muitos
+   * mouses nao mandam a roda nele). Se o report descriptor descreve a roda,
+   * usa o protocolo report, como o usbhid do Linux. Sem roda ou sem descritor
+   * util, fica no boot. */
+  if (m_boot > 0 && m_rlen > 0 && ctrl(d, 0x00, 9, (uint16_t)cfg, 0, 0) == 0) {
+    int len = m_rlen > 1024 ? 1024 : m_rlen;
+    zero(d->buf, 1024u);
+    if (ctrl(d, 0x81, 6, 0x2200, (uint16_t)m_if, (uint16_t)len) == 0 &&
+        hid_mouse_layout(d, d->buf, len) && d->m_wsz > 0) {
+      m_boot = -1;
+      d->m_rep = 1;
+      xlog("[xhci] mouse boot com roda: protocolo report, id ");
+      xlog_hex((uint32_t)d->m_rid);
+      xlog(" roda ");
+      xlog_hex((uint32_t)((d->m_woff << 8) | d->m_wsz));
+      xlog("\n");
+    } else {
+      xlog("[xhci] mouse boot sem roda no report descriptor: fica no boot\n");
+    }
   }
 
   /* Mouse sem protocolo boot: le o report descriptor de cada interface HID
@@ -1753,7 +1808,7 @@ static int xc_up(int ps2_ok) {
   return up;
 }
 
-int xhci_mouse_init(int ps2_ok) {
+static int xhci_mouse_init_u(int ps2_ok) {
   ps2_hint = ps2_ok;
   if (ms_n) return 0;
   if (busy || !xc_up(ps2_ok)) return -1;
@@ -1762,7 +1817,7 @@ int xhci_mouse_init(int ps2_ok) {
   return ms_n ? 0 : -1;
 }
 
-int xhci_mouse_poll(int* dx, int* dy, int* dz, int* btn) {
+static int xhci_mouse_poll_u(int* dx, int* dy, int* dz, int* btn) {
   static uint32_t scan_ms;
   int i;
   uint32_t e[4];
@@ -1823,7 +1878,7 @@ static int irqs_on(void) {
 
 /* Boot UEFI: liga os controladores (o firmware deixa de emular PS/2 quando
  * eles sao nossos) e procura o teclado. 0 = teclado pronto. */
-int xhci_kbd_init(void) {
+static int xhci_kbd_init_u(void) {
   kb_on = 1;
   if (kb >= 0) return 0;
   if (busy || !xc_up(0)) return -1;
@@ -1840,7 +1895,7 @@ int xhci_kbd_ready(void) {
  * relatorios, repete a tecla segurada e, com interrupcoes ligadas, trata
  * teclado ligado depois do boot. Uma CPU por vez; nada se o driver ja esta
  * no meio de outra coisa (busy). */
-void xhci_kbd_pump(void) {
+static void xhci_kbd_pump_u(void) {
   static volatile int lk;
   static uint32_t scan_ms;
   uint32_t e[4];
@@ -1888,7 +1943,7 @@ void xhci_kbd_pump(void) {
   __atomic_store_n(&lk, 0, __ATOMIC_RELEASE);
 }
 
-int xhci_disk_init(void) {
+static int xhci_disk_init_u(void) {
   const struct BootInfo* bi = bootinfo_get();
   int ps2_ok;
   if (dk >= 0) return 0;
@@ -1916,7 +1971,7 @@ const char* xhci_disk_name(void) {
   return dk >= 0 && dk_name[0] ? dk_name : "pendrive";
 }
 
-int xhci_disk_read(uint32_t lba, void* buf) {
+static int xhci_disk_read_u(uint32_t lba, void* buf) {
   uint8_t* out = (uint8_t*)buf;
   volatile uint8_t* src;
   uint32_t i;
@@ -1942,7 +1997,7 @@ int xhci_disk_read(uint32_t lba, void* buf) {
   return 0;
 }
 
-int xhci_disk_write(uint32_t lba, const void* buf) {
+static int xhci_disk_write_u(uint32_t lba, const void* buf) {
   const uint8_t* in = (const uint8_t*)buf;
   uint32_t i;
   if (busy) return -1;
@@ -1998,7 +2053,7 @@ static int put_path(char* out, int pos, int max, const struct udev* d) {
   return pos;
 }
 
-int xhci_describe(char* out, int max) {
+static int xhci_describe_u(char* out, int max) {
   static const char* const spd[] = { "?", "FS", "LS", "HS", "SS", "SS+" };
   int i, j, pos = 0;
   if (!out || max < 2) return 0;
@@ -2062,4 +2117,218 @@ int xhci_describe(char* out, int max) {
     }
   }
   return pos;
+}
+
+/* ---------- entradas publicas (com a trava do driver) ---------- */
+int xhci_mouse_init(int ps2_ok) {
+  int r;
+  xl_enter();
+  r = xhci_mouse_init_u(ps2_ok);
+  xl_leave();
+  return r;
+}
+int xhci_mouse_poll(int* dx, int* dy, int* dz, int* btn) {
+  int r;
+  xl_enter();
+  r = xhci_mouse_poll_u(dx, dy, dz, btn);
+  xl_leave();
+  return r;
+}
+int xhci_kbd_init(void) {
+  int r;
+  xl_enter();
+  r = xhci_kbd_init_u();
+  xl_leave();
+  return r;
+}
+/* Sem esperar a trava: o pump tambem roda na IRQ0 (gui_preempt_tick ->
+ * ps2in_pending) e na CPU de quem segura a trava giraria para sempre. Se a
+ * RIT ou um disco esta no driver, os eventos ficam com eles. */
+void xhci_kbd_pump(void) {
+  if (!xl_try()) return;
+  xhci_kbd_pump_u();
+  xl_leave();
+}
+int xhci_disk_init(void) {
+  int r;
+  xl_enter();
+  r = xhci_disk_init_u();
+  xl_leave();
+  return r;
+}
+int xhci_disk_read(uint32_t lba, void* buf) {
+  int r;
+  xl_enter();
+  r = xhci_disk_read_u(lba, buf);
+  xl_leave();
+  return r;
+}
+int xhci_disk_write(uint32_t lba, const void* buf) {
+  int r;
+  xl_enter();
+  r = xhci_disk_write_u(lba, buf);
+  xl_leave();
+  return r;
+}
+int xhci_describe(char* out, int max) {
+  int r;
+  xl_enter();
+  r = xhci_describe_u(out, max);
+  xl_leave();
+  return r;
+}
+
+/* ---------- RIT (video/visual.c) ---------- */
+
+/* Sem esperar nada: recolhe os eventos (teclado vai para a fila do PS/2,
+ * mouse para ms_q), repete a tecla segurada e devolve um relatorio do mouse.
+ * 0 = nada (ou o driver esta ocupado: a RIT tenta de novo na proxima volta).
+ * Reset de endpoint, enumeracao e portas ficam com o mundo
+ * (xhci_mouse_maint / xhci_kbd_pump), que podem esperar comandos. */
+int xhci_rit_poll(int* dx, int* dy, int* dz, int* btn) {
+  uint64_t f;
+  uint32_t e[4];
+  int i, got = 0;
+  if (!xc_n) return 0;
+  __asm__ volatile ("pushfq; popq %0; cli" : "=r"(f) :: "memory");
+  if (!xl_try()) goto out;
+  if (busy) {
+    xl_leave();
+    goto out;
+  }
+  for (i = 0; i < xc_n; i++)
+    if (xcs[i].up)
+      while (evt_take(&xcs[i], e)) evt_other(&xcs[i], e);
+  if (kb_on && kb_rk && net_has_clock()) {
+    uint32_t now = net_ms();
+    if (now - kb_rt >= (kb_rn ? 33u : 500u)) {
+      kb_emit(kb_rk, 1);
+      kb_rt = now;
+      kb_rn = 1;
+    }
+  }
+  if (ms_qn) {
+    *dx = ms_q[ms_qh][0];
+    *dy = ms_q[ms_qh][1];
+    *dz = ms_q[ms_qh][2];
+    *btn = ms_q[ms_qh][3];
+    ms_qh = (ms_qh + 1) % MSQ;
+    ms_qn--;
+    got = 1;
+  }
+  xl_leave();
+out:
+  if (f & 0x200) __asm__ volatile ("sti" ::: "memory");
+  return got;
+}
+
+/* Com a RIT lendo os relatorios: o que xhci_mouse_poll fazia alem disso
+ * (endpoint parado, mouse ligado depois, portas). O mundo chama de vez em
+ * quando, com IF ligado. */
+void xhci_mouse_maint(void) {
+  static uint32_t scan_ms;
+  int i;
+  if (!xc_n) return;
+  xl_enter();
+  if (busy) {
+    xl_leave();
+    return;
+  }
+  if (ms_fix) {
+    int k;
+    ms_fix = 0;
+    for (k = 0; k < ms_n; k++) {
+      struct udev* d = &devs[msl[k]];
+      if (!d->m_fix) continue;
+      d->m_fix = 0;
+      if (++d->m_errs > 8) {
+        int j;
+        xlog("[xhci] mouse com erro, desligado\n");
+        if (d->kind == UD_MOUSE) d->kind = UD_OTHER;
+        for (j = k; j + 1 < ms_n; j++) msl[j] = msl[j + 1];
+        ms_n--;
+        k--;
+      } else {
+        ep_reset(d, d->dci_in, &d->rin);
+        ms_arm(d);
+      }
+    }
+  }
+  if (!ms_n && net_has_clock() && net_ms() - scan_ms >= 500u) {
+    scan_ms = net_ms();
+    for (i = 0; i < xc_n; i++) {
+      uint32_t p;
+      if (!xcs[i].up) continue;
+      for (p = 0; p < xcs[i].ports && p < 32; p++) {
+        uint32_t sc = r32(xcs[i].op, 0x400 + p * 0x10);
+        if ((sc & PORT_CCS) && (sc & PORT_CSC)) xcs[i].pchg |= 1u << p;
+      }
+    }
+  }
+  port_work();
+  xl_leave();
+}
+
+/* 1 se ha mouse ou teclado USB (a RIT precisa olhar o anel). */
+int xhci_rit_wanted(void) {
+  return xc_n > 0 && (ms_n > 0 || kb >= 0);
+}
+
+/* Interrupcao por MSI: cada evento novo manda o vetor vec ao LAPIC apic.
+ * Devolve quantos controladores ficaram com MSI (0 = so polling). */
+static uint8_t xc_msi[XC_MAX];
+int xhci_rit_irq(uint32_t apic, uint8_t vec) {
+  int i, n = 0;
+  xl_enter();
+  for (i = 0; i < xc_n; i++) {
+    struct xc* x = &xcs[i];
+    uint32_t st = pci_rd(x->bus, x->dev, x->fun, 0x04);
+    int ptr, guard = 0, msi = 0, msix = 0;
+    if (!x->up || !(st & (1u << 20))) continue;          /* sem lista de capacidades */
+    ptr = (int)(pci_rd(x->bus, x->dev, x->fun, 0x34) & 0xFCu);
+    while (ptr >= 0x40 && guard++ < 48) {
+      uint32_t h = pci_rd(x->bus, x->dev, x->fun, ptr);
+      if ((h & 0xFFu) == 0x05 && !msi) msi = ptr;
+      if ((h & 0xFFu) == 0x11 && !msix) msix = ptr;
+      ptr = (int)((h >> 8) & 0xFCu);
+    }
+    if (!msi) {
+      xlog("[xhci] sem MSI: a RIT le por polling\n");
+      continue;
+    }
+    if (msix) {                                           /* MSI-X desligado */
+      uint32_t h = pci_rd(x->bus, x->dev, x->fun, msix);
+      pci_wr(x->bus, x->dev, x->fun, msix, h & ~(1u << 31));
+    }
+    {
+      uint32_t h = pci_rd(x->bus, x->dev, x->fun, msi);
+      uint32_t ctl = h >> 16;
+      int is64 = (ctl & 0x80u) != 0;
+      pci_wr(x->bus, x->dev, x->fun, msi + 4, 0xFEE00000u | ((apic & 0xFFu) << 12));
+      if (is64) {
+        pci_wr(x->bus, x->dev, x->fun, msi + 8, 0);
+        pci_wr(x->bus, x->dev, x->fun, msi + 12, vec);
+      } else {
+        pci_wr(x->bus, x->dev, x->fun, msi + 8, vec);
+      }
+      ctl = (ctl & ~0x70u) | 1u;                          /* 1 vetor, ligado */
+      pci_wr(x->bus, x->dev, x->fun, msi, (h & 0xFFFFu) | (ctl << 16));
+    }
+    pci_wr(x->bus, x->dev, x->fun, 0x04, (st & 0xFFFFu) | (1u << 10));   /* sem INTx */
+    w32(x->rt, 0x20 + 0x04, 160u);                        /* IMOD: 40 us */
+    w32(x->rt, 0x20 + 0x00, 3u);                          /* IMAN: limpa IP, IE = 1 */
+    w32(x->op, 0x00, r32(x->op, 0x00) | 4u);              /* USBCMD.INTE */
+    xc_msi[i] = 1;
+    n++;
+    xlog("[xhci] MSI ligado: eventos acordam a RIT\n");
+  }
+  xl_leave();
+  return n;
+}
+
+/* Na interrupcao (qualquer CPU): limpa IMAN.IP. Os eventos a RIT le. */
+void xhci_rit_ack(void) {
+  int i;
+  for (i = 0; i < xc_n; i++)
+    if (xc_msi[i] && xcs[i].up) w32(xcs[i].rt, 0x20 + 0x00, 3u);
 }

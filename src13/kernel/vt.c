@@ -642,6 +642,11 @@ int vt_bg(void) {
   return vt_on && vt_cur != vt_fg;
 }
 
+/* O WIN e a tela visivel (ou nao ha telas): a RIT pode desenhar a seta. */
+int vt_win_fg(void) {
+  return !vt_on || vt_fg == VT_WIN;
+}
+
 void vt_kbd_raw(int on) {
   if (!vt_on) {
     kbd_raw_set(on);
@@ -679,6 +684,10 @@ void vt_select(int i) {
   serial_puts("[vt] tela ");
   serial_hex32((uint32_t)i);
   serial_puts("\n");
+  if (old == VT_WIN) {
+    void rit_vt_leave(void);           /* video/visual.c: a seta da RIT sai */
+    rit_vt_leave();
+  }
   if (vts[old].state != VS_DEAD) {
     screen_out(old);
     vts[old].state = (old == VT_WIN) ? VS_GFX : VS_RUN;

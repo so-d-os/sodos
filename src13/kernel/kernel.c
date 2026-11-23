@@ -357,10 +357,12 @@ static int ram_copy(uint32_t lba, uint32_t count, void* buffer, int write) {
   return 0;
 }
 
+void dstat_io(uint32_t drive, int write, uint32_t count);   /* disks/cmd_dstat.c */
 int disk_read_sectors(uint32_t drive, uint32_t lba, uint32_t count, void* buffer) {
   uint64_t fl;
   int rc;
   if (drive == DISK_RAM) return ram_copy(lba, count, buffer, 0);
+  dstat_io(drive, 0, count);
   __asm__ volatile ("pushfq; pop %0" : "=r"(fl));
   __asm__ volatile ("cli" ::: "memory");
   rc = disk_read_sectors_locked(drive, lba, count, buffer);
@@ -372,6 +374,7 @@ int disk_read_sector(uint32_t drive, uint32_t lba, void* buffer) {
   uint64_t fl;
   int rc;
   if (drive == DISK_RAM) return ram_copy(lba, 1, buffer, 0);
+  dstat_io(drive, 0, 1);
   __asm__ volatile ("pushfq; pop %0" : "=r"(fl));
   __asm__ volatile ("cli" ::: "memory");
   rc = disk_read_sector_locked(drive, lba, buffer);
@@ -485,6 +488,7 @@ int disk_write_sectors(uint32_t drive, uint32_t lba, uint32_t count, const void*
   uint64_t fl;
   int rc;
   if (drive == DISK_RAM) return ram_copy(lba, count, (void*)buffer, 1);
+  dstat_io(drive, 1, count);
   __asm__ volatile ("pushfq; pop %0" : "=r"(fl));
   __asm__ volatile ("cli" ::: "memory");
   rc = disk_write_sectors_locked(drive, lba, count, buffer);
@@ -496,6 +500,7 @@ int disk_write_sector(uint32_t drive, uint32_t lba, void* buffer) {
   uint64_t fl;
   int rc;
   if (drive == DISK_RAM) return ram_copy(lba, 1, buffer, 1);
+  dstat_io(drive, 1, 1);
   __asm__ volatile ("pushfq; pop %0" : "=r"(fl));
   __asm__ volatile ("cli" ::: "memory");
   rc = disk_write_sector_locked(drive, lba, buffer);
@@ -667,7 +672,14 @@ int serial_log_save(void) {
   uint32_t n, t, skipped = 0;
   const char* s = serial_log(&n);
   static int old_done;
+  static uint32_t saved_total = 0xFFFFFFFFu;
+  extern uint32_t serial_log_total(void);
+  uint32_t total = serial_log_total();
   if (!drives_is_mounted('D')) return -1;
+  /* Nada novo desde a ultima gravacao: nao regrava (eram ate 1,2 MB por vez,
+   * com o BKL, so para repetir o mesmo arquivo). */
+  if (total == saved_total) return 0;
+  saved_total = total;
   (void)drives_mkdir("D:\\LOG");
   /* Primeira gravacao deste boot: o log do boot anterior vira SERIAL.OLD.
    * Sem isto um reboot apagava o que aconteceu antes dele (o Explorer que
@@ -2209,6 +2221,7 @@ void kmain(const struct BootInfo* bi) {
   register_builtin("free", cmd_free);
   register_builtin("df", cmd_df);
   register_builtin("dstat", cmd_dstat);
+  register_builtin("rit", cmd_rit);
   register_builtin("ata", cmd_dstat);
   register_builtin("visual", cmd_visual);
   register_builtin("mouse", cmd_mouse);

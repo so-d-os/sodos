@@ -1540,7 +1540,29 @@ static int gfx_ram_ok(void) {
   return ok;
 }
 
+static int cursor_saved;             /* com o cursor, mais abaixo */
+static volatile int rc_hidden;
+static void rc_shown(void);
+static int rc_active(void);
+static uint64_t rc_take(void);
+static void rc_drop(uint64_t f);
+static volatile int rit_run;
+
+static void gfx_copy_back_raw(void);
 static void gfx_copy_back(void) {
+  uint64_t f;
+  if (!rit_run) {
+    gfx_copy_back_raw();
+    return;
+  }
+  /* a seta da RIT: a copia apaga a velha e rc_shown poe na posicao de agora */
+  f = rc_take();
+  gfx_copy_back_raw();
+  if (rc_active()) rc_shown();
+  rc_drop(f);
+}
+
+static void gfx_copy_back_raw(void) {
   uint32_t y;
   if (gfx_bochs) {
     for (y = 0; y < gfx_h; y++) {
@@ -1636,7 +1658,20 @@ int gfx_back_move(int to_heap) {
 }
 
 /* Desenha o quadro inteiro fora da tela e so depois troca a pagina visivel. */
+static void gfx_buf_init_u(void);
 static void gfx_buf_init(void) {
+  uint64_t f;
+  if (!rit_run) {
+    gfx_buf_init_u();
+    return;
+  }
+  f = rc_take();               /* a RIT nao desenha no meio da troca */
+  cursor_saved = 0;
+  rc_hidden = 1;
+  gfx_buf_init_u();
+  rc_drop(f);
+}
+static void gfx_buf_init_u(void) {
   gfx_tela_uma();
   gfx_draw_y0 = 0;
   gfx_front_y = 0;
@@ -1688,9 +1723,15 @@ static void gfx_gpu_frame(void);   /* abaixo, depois do cursor */
 
 static void gfx_frame_end(void) {
   if (gfx_dbuf) {
+    uint64_t f = 0;
+    if (rit_run) f = rc_take();
     bochs_vbe_write(VBE_DISPI_INDEX_Y_OFFSET, (uint16_t)gfx_draw_y0);
     gfx_front_y = gfx_draw_y0;
     gfx_draw_y0 = gfx_front_y;
+    if (rit_run) {
+      if (rc_active()) rc_shown();
+      rc_drop(f);
+    }
     return;
   }
   if (gfx_offscreen) {
@@ -2032,9 +2073,177 @@ static int cur_scale(void) {
   return (gfx_h >= 400u) ? 2 : 1;
 }
 
+/* ---------------------------------------------------------------------------
+ * Cursor da RIT (Raw Input Thread, mais abaixo). Com a RIT ligada no WIN, a
+ * seta mora so na pagina visivel e quem a move e a RIT, na CPU dela, assim
+ * que o mouse anda: o mundo pode estar desenhando, rodando um programa ou
+ * esperando o BKL que a seta nao para. Regras (rc_lk protege tudo):
+ * - quadro em montagem (back buffer ou a outra pagina) nao leva a seta;
+ *   gfx_copy_back / a troca de pagina a desenham em rit_x,rit_y (rc_shown);
+ * - fora de quadro o mundo segue o protocolo de sempre: cursor_restore antes
+ *   de desenhar na tela (rc_hidden = 1), cursor_redraw_at depois;
+ * - o arrasto rapido (dc_*) compoe a seta ele mesmo (rc_hidden ate o quadro).
+ * So com LFB de 32 bits sem driver de placa nem tela estendida; nos outros
+ * modos o cursor fica como era (o mundo desenha). SET RITCUR=0 desliga. */
+static volatile int rc_lk;
+static volatile int rc_hidden;          /* o mundo esta desenhando na tela */
+static volatile int rit_run;            /* RIT ligada (dentro do WIN) */
+static volatile int rit_cur_on;         /* a RIT move a seta (rc_ok no inicio) */
+static volatile int32_t rit_x, rit_y;   /* ponta da seta agora */
+static uint32_t rc_draws, rc_busy;
+int vt_win_fg(void);                    /* kernel/vt.c: o WIN e a tela visivel */
+
+static uint64_t rc_take(void) {
+  uint64_t f;
+  __asm__ volatile ("pushfq; popq %0; cli" : "=r"(f) :: "memory");
+  while (__atomic_exchange_n(&rc_lk, 1, __ATOMIC_ACQUIRE)) __builtin_ia32_pause();
+  return f;
+}
+static int rc_try(uint64_t* f) {
+  __asm__ volatile ("pushfq; popq %0; cli" : "=r"(*f) :: "memory");
+  if (!__atomic_exchange_n(&rc_lk, 1, __ATOMIC_ACQUIRE)) return 1;
+  if (*f & 0x200) __asm__ volatile ("sti" ::: "memory");
+  return 0;
+}
+static void rc_drop(uint64_t f) {
+  __atomic_store_n(&rc_lk, 0, __ATOMIC_RELEASE);
+  if (f & 0x200) __asm__ volatile ("sti" ::: "memory");
+}
+
+/* A RIT pode desenhar a seta neste modo de video? (com rc_lk) */
+static int rc_active(void) {
+  if (!(rit_run && rit_cur_on && gfx_live && gfx_bochs && gfx_lfb && gfx_w && gfx_h &&
+        !gpu_hwcur && !gfx_wide && vt_win_fg()))
+    return 0;
+  /* driver de placa (AMDGOP): o back buffer e a tela e o present copia para
+   * o LFB; sem ele: back buffer copiado ou pagina dupla do Bochs */
+  if (gpu_drv) return gfx_back && !gfx_dbuf;
+  return gfx_back || gfx_dbuf;
+}
+
+/* Com driver de placa o back buffer nunca tem a seta e e o que a tela
+ * mostra: o fundo da seta vem dele (sem copia guardada). */
+static int rc_from_back(void) {
+  return gpu_drv && gfx_back;
+}
+
+/* Pixel da pagina visivel, no formato de put_pixel/get_pixel. */
+static volatile uint8_t* rc_px(int x, int y) {
+  return gfx_lfb + ((uint32_t)y + gfx_front_y) * gfx_pitch_bytes + (uint32_t)x * 4u;
+}
+static void rc_put(int x, int y, uint32_t c) {
+  volatile uint8_t* p;
+  if (x < 0 || y < 0 || (uint32_t)x >= gfx_w || (uint32_t)y >= gfx_h) return;
+  p = rc_px(x, y);
+  p[0] = (uint8_t)((c >> 16) & 0xFFu);
+  p[1] = (uint8_t)((c >> 8) & 0xFFu);
+  p[2] = (uint8_t)(c & 0xFFu);
+  p[3] = (uint8_t)((c >> 24) & 0xFFu);
+}
+static uint32_t rc_get(int x, int y) {
+  volatile uint8_t* p;
+  if (x < 0 || y < 0 || (uint32_t)x >= gfx_w || (uint32_t)y >= gfx_h) return 0;
+  p = rc_px(x, y);
+  return (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | (uint32_t)p[2] | (uint32_t)p[3] << 24;
+}
+
+/* Tira a seta da pagina visivel (repoe o que estava embaixo). */
+static void rc_restore(void) {
+  int k = 0, dy, dx;
+  if (!cursor_saved) return;
+  if (rc_from_back()) {
+    for (dy = 0; dy < cur_bh; dy++) {
+      int y = old_my + dy;
+      if (y < 0 || (uint32_t)y >= gfx_h) continue;
+      for (dx = 0; dx < cur_bw; dx++) {
+        int x = old_mx + dx;
+        if (x < 0 || (uint32_t)x >= gfx_w) continue;
+        *(volatile uint32_t*)rc_px(x, y) = *(const uint32_t*)(gfx_back + ((uint32_t)y * gfx_w + (uint32_t)x) * 4u);
+      }
+    }
+    cursor_saved = 0;
+    return;
+  }
+  for (dy = 0; dy < cur_bh; dy++)
+    for (dx = 0; dx < cur_bw; dx++)
+      rc_put(old_mx + dx, old_my + dy, cursor_under[k++]);
+  cursor_saved = 0;
+}
+
+/* Desenha a seta em (mx,my) na pagina visivel, guardando o fundo. */
+static void rc_draw(int mx, int my) {
+  int scale = cur_scale();
+  int bw = CUR_W * scale, bh = CUR_H * scale;
+  int k = 0, dy, dx, ry, rx, oy, ox;
+  uint32_t black = PIXA(0, 0, 0), white = PIXA(255, 255, 255);
+  if (mx < 0) mx = 0;
+  if (my < 0) my = 0;
+  if ((uint32_t)mx >= gfx_w) mx = (int)gfx_w - 1;
+  if ((uint32_t)my >= gfx_h) my = (int)gfx_h - 1;
+  if (mx + bw > (int)gfx_w) bw = (int)gfx_w - mx;
+  if (my + bh > (int)gfx_h) bh = (int)gfx_h - my;
+  if (bw < 0) bw = 0;
+  if (bh < 0) bh = 0;
+  old_mx = mx;
+  old_my = my;
+  cur_bw = bw;
+  cur_bh = bh;
+  if (!rc_from_back())
+    for (dy = 0; dy < bh; dy++)
+      for (dx = 0; dx < bw; dx++)
+        cursor_under[k++] = rc_get(mx + dx, my + dy);
+  for (ry = 0; ry < CUR_H; ry++)
+    for (rx = 0; rx < CUR_W; rx++) {
+      char c = cur_row[ry][rx];
+      if (c == ' ') continue;
+      for (oy = 0; oy < scale; oy++)
+        for (ox = 0; ox < scale; ox++)
+          rc_put(mx + rx * scale + ox, my + ry * scale + oy, c == 'W' ? white : black);
+    }
+  cursor_saved = 1;
+  rc_draws++;
+}
+
+/* Quadro novo na tela (copia do back buffer ou troca de pagina): a seta
+ * velha sumiu com ele; desenha na posicao de agora. Com rc_lk. */
+static void rc_shown(void) {
+  cursor_saved = 0;
+  if (!rc_hidden) rc_draw((int)rit_x, (int)rit_y);
+}
+
+/* 1 se o mundo esta desenhando direto na pagina visivel (fora de quadro). */
+static int rc_world_on_front(void) {
+  return !gfx_offscreen && gfx_draw_y0 == gfx_front_y;
+}
+
+/* Arrasto rapido e saida da tela do WIN: a seta sai e a RIT para de
+ * desenhar ate o proximo quadro (cursor_redraw_at). keep = so marca. */
+static void rc_hide(int keep) {
+  uint64_t f = rc_take();
+  if (rc_active()) {
+    if (!keep) rc_restore();
+    else cursor_saved = 0;
+    rc_hidden = 1;
+  }
+  rc_drop(f);
+}
+
 static void cursor_restore(void) {
   int k = 0;
   int dy, dx;
+  if (rit_run) {
+    uint64_t f = rc_take();
+    if (rc_active()) {
+      /* em quadro a seta nao esta no back buffer: nada a tirar */
+      if (rc_world_on_front()) {
+        rc_restore();
+        rc_hidden = 1;
+      }
+      rc_drop(f);
+      return;
+    }
+    rc_drop(f);
+  }
   if (!cursor_saved) return;
   for (dy = 0; dy < cur_bh; dy++)
     for (dx = 0; dx < cur_bw; dx++)
@@ -2059,6 +2268,23 @@ static void cursor_redraw_at(int mx, int my, uint32_t cursor_color) {
   int k = 0;
   int dy, dx, ry, rx, oy, ox;
   uint32_t black = gfx_bochs ? PIXA(0, 0, 0) : 0u;
+  if (rit_run) {
+    uint64_t f = rc_take();
+    if (rc_active()) {
+      /* a seta vai na posicao da RIT (a de agora, nao a do evento); em
+       * quadro, quem desenha e gfx_copy_back / a troca de pagina */
+      if (rc_world_on_front()) {
+        rc_restore();
+        rc_hidden = 0;
+        rc_draw((int)rit_x, (int)rit_y);
+      } else {
+        rc_hidden = 0;
+      }
+      rc_drop(f);
+      return;
+    }
+    rc_drop(f);
+  }
   uint32_t white = gfx_bochs ? PIXA(255, 255, 255) : 15u;
   (void)cursor_color;
   if (mx < 0) mx = 0;
@@ -2132,7 +2358,17 @@ static void gfx_dmg_add(int x, int y, int w, int h) {
 static int win_api_dirty;   /* definida mais abaixo */
 
 static void gfx_gpu_show(const struct gpu_rect* r, int n) {
-  if (gpu_present(r, n) != 0) {
+  int rc = gpu_present(r, n);
+  if (rc == 0 && rit_run) {
+    /* o present pos o back buffer (sem a seta) por cima: a seta da RIT volta */
+    uint64_t f = rc_take();
+    if (rc_active()) {
+      rc_restore();
+      if (!rc_hidden) rc_draw((int)rit_x, (int)rit_y);
+    }
+    rc_drop(f);
+  }
+  if (rc != 0) {
     if (gfx_wide) {
       /* o fini do driver ja voltou o fb do GOP; o proximo quadro e inteiro */
       gfx_buf_init();
@@ -2233,13 +2469,22 @@ static void cursor_draw(int mx, int my, uint32_t cursor_color) {
 static int32_t sys_mx = -1, sys_my = -1;
 
 /* A ponta da seta pode ir ate o ultimo pixel. O desenho que sair da tela e cortado. */
-static void sys_mouse_place(int32_t x, int32_t y) {
+static void sys_mouse_set(int32_t x, int32_t y) {
   if (x < 0) x = 0;
   if (y < 0) y = 0;
   if (gfx_w > 0 && x >= (int32_t)gfx_w) x = (int32_t)gfx_w - 1;
   if (gfx_h > 0 && y >= (int32_t)gfx_h) y = (int32_t)gfx_h - 1;
   sys_mx = x;
   sys_my = y;
+}
+/* O mundo pondo o ponteiro num lugar (mouse_api, centralizar): a RIT segue
+ * dali. Os eventos da propria RIT entram por sys_mouse_set. */
+static void sys_mouse_place(int32_t x, int32_t y) {
+  sys_mouse_set(x, y);
+  if (rit_run) {
+    rit_x = sys_mx;
+    rit_y = sys_my;
+  }
 }
 
 static void sys_mouse_init(void) {
@@ -2739,6 +2984,402 @@ static int mouse_wheel(void) {
 /* Devolve 1 com pacote de rato em packet[3] (*abs=1 se a posicao ja e absoluta).
  * Devolve 0 e o scancode em *sc. Devolve -1 se nao ha nada.
  * Byte de teclado tem prioridade para nao perder tecla enquanto o rato anda. */
+/* ===========================================================================
+ * RIT - Raw Input Thread (como a do Windows: win32k!RawInputThread).
+ *
+ * Uma thread do kernel de tempo real, presa a ultima CPU (reservada para ela
+ * com 3+ CPUs; kt_thread_create_rt), que nunca pega o BKL. Ela:
+ * - acorda na hora pela IRQ1/IRQ12 (ps2in_kick) e pelo MSI do xHCI (vetor
+ *   0xF5); sem MSI olha o anel do xHCI e o tablet UHCI a cada 1 ms;
+ * - le o mouse (PS/2, tablet UHCI do QEMU, mouse USB) e as teclas USB (que
+ *   vao para a fila do PS/2, com a repeticao);
+ * - move a seta na tela ela mesma (rc_*, acima), sem esperar o mundo;
+ * - poe cada evento do mouse na rq (posicao absoluta, botoes, roda, tick de
+ *   chegada) e acorda o mundo (kt_world_kick; o laco do WIN preempta o
+ *   programa da vez quando ha entrada, gui_preempt_tick);
+ * - o mundo, ao tirar o evento (input_poll), da boost de primeiro plano as
+ *   threads do programa em foco (kt_boost_pid).
+ * SET RIT=0 desliga (volta o caminho antigo, o mundo le tudo); RIT mostra a
+ * latencia (chegada -> o WIN recebe) e os contadores.
+ * ------------------------------------------------------------------------- */
+static volatile uint32_t in_pend_t;   /* definida mais abaixo (gui_preempt_tick) */
+#define RQ_N 256
+struct rin {
+  int32_t x, y;
+  uint8_t btn;
+  int8_t dz;
+  uint16_t pad;
+  uint32_t t;       /* tick de chegada (IRQ ou leitura do relatorio) */
+};
+static struct rin rq[RQ_N];
+static volatile uint32_t rq_head, rq_tail;    /* produtor: RIT; consumidor: mundo */
+static volatile int rit_word, rit_busy;
+static int rit_tid, rit_cpu = -1, rit_msi, rit_tried;
+static int rit_btn;
+static uint8_t rit_pkt[3];
+static int rit_pkt_i;
+static uint32_t rit_wakes, rit_ev, rit_drop, rit_kicks, rit_irqs, rit_usb_t;
+/* latencia: chegada -> o mundo recebe (mouse e teclado), em ms */
+static uint32_t rl_n[2], rl_sum[2], rl_max[2], rl_hist[2][7];
+static uint32_t rit_focus_pid(void);   /* abaixo (gwins) */
+
+static void rl_note(int k, uint32_t t) {
+  static const uint32_t lim[6] = {1, 2, 5, 10, 20, 50};
+  uint32_t d;
+  int b = 0;
+  if (!t) return;
+  d = (uint32_t)irq_ticks() - t;
+  if (d > 100000u) return;
+  while (b < 6 && d >= lim[b]) b++;
+  rl_hist[k][b]++;
+  rl_n[k]++;
+  rl_sum[k] += d;
+  if (d > rl_max[k]) rl_max[k] = d;
+}
+
+static int rq_has(void) {
+  return __atomic_load_n(&rq_head, __ATOMIC_ACQUIRE) != rq_tail;
+}
+
+/* Novo estado do mouse: posicao (ja na tela), botoes, roda. */
+static void rit_emit(int32_t x, int32_t y, int btn, int dz, uint32_t t) {
+  uint32_t h = rq_head;
+  struct rin* e;
+  if (gfx_w && x >= (int32_t)gfx_w) x = (int32_t)gfx_w - 1;
+  if (gfx_h && y >= (int32_t)gfx_h) y = (int32_t)gfx_h - 1;
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  rit_x = x;
+  rit_y = y;
+  rit_btn = btn;
+  if (h - __atomic_load_n(&rq_tail, __ATOMIC_ACQUIRE) >= RQ_N) {
+    rit_drop++;            /* o mundo parado ha muito: a posicao segue no rit_x */
+    return;
+  }
+  e = &rq[h % RQ_N];
+  e->x = x;
+  e->y = y;
+  e->btn = (uint8_t)btn;
+  e->dz = (int8_t)(dz > 3 ? 3 : dz < -3 ? -3 : dz);
+  e->t = t ? t : 1u;
+  __atomic_store_n(&rq_head, h + 1, __ATOMIC_RELEASE);
+  rit_ev++;
+}
+
+/* A seta para rit_x,rit_y, se a RIT cuida dela e o mundo nao esta
+ * desenhando na tela. Ocupado (copia do quadro): o quadro a desenha. */
+static void rit_cursor(void) {
+  uint64_t f;
+  if (!rit_cur_on) return;
+  if (!rc_try(&f)) {
+    rc_busy++;
+    return;
+  }
+  if (rc_active() && !rc_hidden && (!cursor_saved || old_mx != rit_x || old_my != rit_y)) {
+    rc_restore();
+    rc_draw((int)rit_x, (int)rit_y);
+  }
+  rc_drop(f);
+}
+
+/* Tablet UHCI (QEMU -device usb-tablet): o relatorio do TD, se chegou. */
+static int rit_tablet(uint32_t now) {
+  struct uhci_td* td = tablet_td;
+  uint32_t sts;
+  int n, z = 0;
+  uint32_t x, y;
+  if (!mouse_abs_mode || !td) return 0;
+  sts = td->sts;
+  __asm__ volatile ("" ::: "memory");
+  if (sts & (1u << 23)) {
+    if (uhci_q && !usb_ctrl_busy && (uhci_q->elem & ~0xFu) != ((uint32_t)(uintptr_t)td & ~0xFu))
+      uhci_q->elem = (uint32_t)(uintptr_t)td;
+    return 0;
+  }
+  if (sts & ((1u << 22) | (1u << 21) | (1u << 20) | (1u << 18))) {
+    td->token &= ~(1u << 19);
+    tablet_rearm();
+    return 0;
+  }
+  n = (int)(sts & 0x7FFu) + 1;
+  if (n < 5 || gfx_w < 2 || gfx_h < 2) {
+    tablet_rearm();
+    return 0;
+  }
+  x = (uint32_t)usb_report[1] | ((uint32_t)usb_report[2] << 8);
+  y = (uint32_t)usb_report[3] | ((uint32_t)usb_report[4] << 8);
+  if (x > 32767u) x = 32767u;
+  if (y > 32767u) y = 32767u;
+  if (n >= 6) {
+    z = -(int)(int8_t)usb_report[5];
+    if (z >= 120) z = 1;
+    else if (z <= -120) z = -1;
+  }
+  rit_emit((int32_t)((x * (gfx_w - 1u)) / 32767u), (int32_t)((y * (gfx_h - 1u)) / 32767u),
+           usb_report[0] & 7, z, now);
+  tablet_rearm();
+  return 1;
+}
+
+/* Uma volta: tudo o que chegou vira evento; a seta anda; o mundo acorda. */
+static void rit_pump(void) {
+  uint32_t now = (uint32_t)irq_ticks();
+  uint32_t ev0 = rit_ev, t;
+  uint8_t b;
+  int dx, dy, dz, bt, key = ps2in_kbd_has();
+  /* mouse PS/2: pacotes de 3 bytes (9 bits de deslocamento) */
+  while (ps2in_aux_pop(&b, &t)) {
+    if (mouse_abs_mode) continue;          /* tablet USB manda; PS/2 e eco */
+    if (rit_pkt_i > 0) {
+      rit_pkt[rit_pkt_i++] = b;
+      if (rit_pkt_i < 3) continue;
+      rit_pkt_i = 0;
+      dx = (int)rit_pkt[1] - ((rit_pkt[0] & 0x10) ? 256 : 0);
+      dy = (int)rit_pkt[2] - ((rit_pkt[0] & 0x20) ? 256 : 0);
+      if (rit_pkt[0] & 0xC0) dx = dy = 0;  /* estouro: descarta o movimento */
+      rit_emit(rit_x + dx, rit_y - dy, rit_pkt[0] & 7, 0, t);
+      continue;
+    }
+    if (b & 0x08) {                        /* bit 3: primeiro byte */
+      rit_pkt[0] = b;
+      rit_pkt_i = 1;
+    }
+  }
+  (void)rit_tablet(now);
+  /* USB: relatorios do mouse; as teclas vao para a fila do PS/2 */
+  while (xhci_rit_poll(&dx, &dy, &dz, &bt)) {
+    rit_usb_t = now;
+    rit_emit(rit_x + dx, rit_y + dy, bt, -dz, now);
+  }
+  if (!key && ps2in_kbd_has()) key = 1;    /* tecla USB recem-chegada */
+  if (rit_ev != ev0) rit_cursor();
+  if (rit_ev != ev0 || key) {
+    if (!in_pend_t) in_pend_t = now ? now : 1;
+    rit_kicks++;
+    kt_world_kick();
+  }
+}
+
+/* IRQ1/IRQ12 (CPU0) e MSI do xHCI: acorda a RIT. */
+static void rit_kick(void) {
+  if (!rit_tid) return;
+  rit_word = 1;
+  kt_futex_wake(&rit_word, 1);
+}
+void rit_irq(void) {
+  rit_irqs++;
+  xhci_rit_ack();
+  rit_kick();
+}
+
+static int rit_main(void* arg) {
+  (void)arg;
+  for (;;) {
+    int ms;
+    if (!rit_run) {
+      kt_futex_wait(&rit_word, 0, 100);
+      rit_word = 0;
+      continue;
+    }
+    /* Sem MSI o anel do xHCI e o tablet so se veem olhando: 1 ms. Com MSI
+     * (ou so PS/2) a interrupcao acorda; 50 ms e so rede de seguranca. */
+    ms = ((!rit_msi && xhci_rit_wanted()) || mouse_abs_mode) ? 1 : 50;
+    if (!rit_word) kt_futex_wait(&rit_word, 0, ms);
+    rit_word = 0;
+    __atomic_store_n(&rit_busy, 1, __ATOMIC_SEQ_CST);
+    if (rit_run) {
+      rit_wakes++;
+      rit_pump();
+    }
+    __atomic_store_n(&rit_busy, 0, __ATOMIC_SEQ_CST);
+  }
+  return 0;
+}
+
+/* Entrada no WIN: liga (e cria, na primeira vez) a RIT. */
+static void rit_start(void) {
+  const char* e = env_get("RIT");
+  const char* ec = env_get("RITCUR");
+  int n = kt_online_count();
+  if (e && e[0] == '0') return;
+  if (!rit_tid && !rit_tried) {
+    rit_tried = 1;
+    if (n < 2) {
+      serial_puts("[rit] uma CPU so: o mundo le a entrada como antes\n");
+      return;
+    }
+    rit_cpu = n - 1;
+    {
+      const char* er = env_get("RITRES");   /* SET RITRES=0: CPU dividida */
+      rit_tid = kt_thread_create_rt(rit_main, 0, 16384, rit_cpu, !(er && er[0] == '0'));
+    }
+    if (rit_tid <= 0) {
+      rit_tid = 0;
+      serial_puts("[rit] thread nao criada: o mundo le a entrada como antes\n");
+      return;
+    }
+    ps2in_kick = rit_kick;
+    {
+      uint32_t apic = smp_apic_id(rit_cpu);
+      if (apic != 0xFFFFFFFFu) rit_msi = xhci_rit_irq(apic, 0xF5);
+    }
+    serial_puts("[rit] RIT na CPU ");
+    serial_hex32((uint32_t)rit_cpu);
+    serial_puts((kt_rt_mask() >> rit_cpu) & 1u ? " (reservada)" : " (dividida)");
+    serial_puts(rit_msi ? ", xHCI por MSI\n" : ", sem MSI (USB/tablet por polling de 1 ms, PS/2 pela IRQ)\n");
+  }
+  if (!rit_tid) return;
+  rq_tail = rq_head;
+  rit_pkt_i = 0;
+  rit_x = sys_mx < 0 ? 0 : sys_mx;
+  rit_y = sys_my < 0 ? 0 : sys_my;
+  rit_cur_on = !(ec && ec[0] == '0');
+  {
+    uint64_t f = rc_take();
+    cursor_saved = 0;          /* o que estava salvo era do mundo */
+    rc_hidden = 1;             /* ate o primeiro quadro */
+    rit_run = 1;
+    rc_drop(f);
+  }
+  rit_kick();
+}
+
+/* Saida do WIN (troca de modo, volta ao DOS): a seta e do mundo de novo. */
+static void rit_stop(void) {
+  uint64_t f;
+  uint32_t spins = 0;
+  if (!rit_run) return;
+  f = rc_take();
+  if (rc_active() && cursor_saved) rc_restore();
+  cursor_saved = 0;
+  rit_run = 0;
+  rc_drop(f);
+  while (__atomic_load_n(&rit_busy, __ATOMIC_SEQ_CST) && spins++ < 50000000u) __builtin_ia32_pause();
+}
+
+/* Ctrl+Fn saindo do WIN (kernel/vt.c): a seta sai antes da tela de texto. */
+void rit_vt_leave(void) {
+  if (rit_run) rc_hide(0);
+}
+
+int cmd_rit(int argc, char** argv) {
+  static const char* nm[2] = {"mouse  ", "teclado"};
+  static const char* bk[7] = {"<1", "<2", "<5", "<10", "<20", "<50", ">=50"};
+  char num[16];
+  int k, b;
+  (void)argc;
+  (void)argv;
+  if (!rit_tid) {
+    puts_k("RIT desligada (SET RIT=0, uma CPU so, ou o WIN ainda nao abriu)\n");
+    return 0;
+  }
+  puts_k("RIT: CPU ");
+  int32_to_string(rit_cpu, num, (int)sizeof num);
+  puts_k(num);
+  puts_k((kt_rt_mask() >> rit_cpu) & 1u ? " reservada" : " dividida");
+  puts_k(rit_msi ? ", xHCI por MSI"
+                 : ((xhci_rit_wanted() || mouse_abs_mode) ? ", USB/tablet por polling 1 ms"
+                                                           : ", PS/2 pela IRQ"));
+  puts_k(rit_run ? ", ligada" : ", parada (fora do WIN)");
+  puts_k(rit_cur_on ? ", seta da RIT\n" : ", seta do mundo\n");
+  {
+    /* por que a seta e (ou nao e) da RIT neste modo de video */
+    char m[96];
+    int i = 0;
+    const char* parts[9] = {gfx_live ? "" : " sem-gfx_live", gfx_bochs ? "" : " 8bits",
+                            gpu_drv ? " driver-placa" : "", gpu_hwcur ? " cursor-placa" : "",
+                            gfx_wide ? " tela-larga" : "", (gfx_back || gfx_dbuf) ? "" : " sem-back",
+                            vt_win_fg() ? "" : " WIN-ao-fundo", rc_hidden ? " escondida" : "",
+                            gfx_dbuf ? " pagina-dupla" : (gfx_back ? " back-buffer" : "")};
+    int k2, j;
+    m[0] = 0;
+    for (k2 = 0; k2 < 9; k2++)
+      for (j = 0; parts[k2][j] && i < (int)sizeof m - 1; j++) m[i++] = parts[k2][j];
+    m[i] = 0;
+    puts_k("  modo:");
+    puts_k(m[0] ? m : " ok");
+    puts_k("\n");
+  }
+  puts_k("  voltas=");
+  int32_to_string((int32_t)rit_wakes, num, (int)sizeof num);
+  puts_k(num);
+  puts_k(" eventos=");
+  int32_to_string((int32_t)rit_ev, num, (int)sizeof num);
+  puts_k(num);
+  puts_k(" perdidos=");
+  int32_to_string((int32_t)rit_drop, num, (int)sizeof num);
+  puts_k(num);
+  puts_k(" msi=");
+  int32_to_string((int32_t)rit_irqs, num, (int)sizeof num);
+  puts_k(num);
+  puts_k(" seta=");
+  int32_to_string((int32_t)rc_draws, num, (int)sizeof num);
+  puts_k(num);
+  puts_k(" seta-ocupada=");
+  int32_to_string((int32_t)rc_busy, num, (int)sizeof num);
+  puts_k(num);
+  puts_k("\n  latencia chegada -> WIN (ms):\n");
+  for (k = 0; k < 2; k++) {
+    puts_k("  ");
+    puts_k(nm[k]);
+    puts_k(" n=");
+    int32_to_string((int32_t)rl_n[k], num, (int)sizeof num);
+    puts_k(num);
+    puts_k(" media=");
+    int32_to_string(rl_n[k] ? (int32_t)(rl_sum[k] / rl_n[k]) : 0, num, (int)sizeof num);
+    puts_k(num);
+    puts_k(" max=");
+    int32_to_string((int32_t)rl_max[k], num, (int)sizeof num);
+    puts_k(num);
+    puts_k(" |");
+    for (b = 0; b < 7; b++) {
+      puts_k(" ");
+      puts_k(bk[b]);
+      puts_k(":");
+      int32_to_string((int32_t)rl_hist[k][b], num, (int)sizeof num);
+      puts_k(num);
+    }
+    puts_k("\n");
+  }
+  if (argc > 1 && (argv[1][0] == 'z' || argv[1][0] == 'Z')) {
+    for (k = 0; k < 2; k++) {
+      rl_n[k] = rl_sum[k] = rl_max[k] = 0;
+      for (b = 0; b < 7; b++) rl_hist[k][b] = 0;
+    }
+    puts_k("  (latencias zeradas)\n");
+  }
+  return 0;
+}
+
+/* O mundo tira um evento do mouse da RIT. Movimentos seguidos sem mudar
+ * botao nem roda viram um so (a posicao mais nova). */
+static int rit_take(uint8_t packet[3], int* abs_pos) {
+  uint32_t tl = rq_tail, hd = __atomic_load_n(&rq_head, __ATOMIC_ACQUIRE);
+  struct rin e;
+  if (tl == hd) return 0;
+  e = rq[tl % RQ_N];
+  tl++;
+  while (tl != hd && !e.dz) {
+    const struct rin* n = &rq[tl % RQ_N];
+    if (n->btn != e.btn || n->dz) break;
+    e.x = n->x;
+    e.y = n->y;
+    tl++;
+  }
+  __atomic_store_n(&rq_tail, tl, __ATOMIC_RELEASE);
+  rl_note(0, e.t);
+  sys_mouse_set(e.x, e.y);
+  tablet_btn = e.btn;
+  tablet_got = 1;
+  tablet_dz += e.dz;
+  packet[0] = e.btn;
+  packet[1] = 0;
+  packet[2] = 0;
+  *abs_pos = 1;
+  kt_boost_pid(rit_focus_pid(), 100);
+  return 1;
+}
+
 static int input_poll(uint8_t packet[3], int* pkt_idx, uint8_t* sc, int* abs_pos) {
   uint8_t data;
   *abs_pos = 0;
@@ -2769,9 +3410,28 @@ static int input_poll(uint8_t packet[3], int* pkt_idx, uint8_t* sc, int* abs_pos
      * byte de teclado nao entra mais no meio de um pacote do mouse. */
     uint32_t t;
     if (ps2in_kbd(&data, &t)) {
+      if (rit_run) {
+        rl_note(1, t);
+        kt_boost_pid(rit_focus_pid(), 100);
+      }
       in_note(t);
       *sc = data;
       return 0;
+    }
+    if (rit_run) {
+      /* RIT: o mouse ja foi lido, posto na tela e enfileirado por ela. O que
+       * pode esperar comando do xHCI (endpoint parado, portas) fica aqui. */
+      static uint32_t maint_t;
+      uint32_t now = (uint32_t)irq_ticks();
+      if (now - maint_t >= 100u) {
+        maint_t = now;
+        xhci_mouse_maint();
+      }
+      if (rit_take(packet, abs_pos)) {
+        in_note(0);
+        return 1;
+      }
+      return -1;
     }
     /* Pacote inteiro de uma vez se os 3 bytes ja chegaram. */
     while (ps2in_aux(&data, &t)) {
@@ -6040,6 +6700,7 @@ static void lat_put(const char* k, uint32_t v) {
 
 static int input_peek(void) {
   if (ps2in_pending()) return 1;
+  if (rit_run) return rq_has();
   if (mouse_abs_mode && tablet_td && !(tablet_td->sts & (1u << 23))) return 1;
   return 0;
 }
@@ -8515,6 +9176,7 @@ static void dc_present(int x, int y, int cx, int cy) {
   volatile uint8_t* base = gfx_lfb + gfx_front_y * gfx_pitch_bytes;
   uint32_t pitch = gfx_pitch_bytes;
   int cur_rows = gpu_hwcur ? 0 : chh;   /* cursor da placa: nao entra na imagem */
+  if (rit_run) rc_hide(1);              /* a seta vai na imagem do arrasto */
   dc_grow(&x0, &y0, &x1, &y1, dc.x, dc.y, dc.w, dc.h);
   dc_grow_sh(&x0, &y0, &x1, &y1, x, y);
   dc_grow_sh(&x0, &y0, &x1, &y1, dc.x, dc.y);
@@ -10132,7 +10794,21 @@ static int win_os_key(uint8_t sc) {
   return (k >= 0x3B && k <= 0x44) || k == 0x57 || k == 0x58;  /* F1..F12 */
 }
 
+static int win_wm_run_u(void);
 static int win_wm_run(void) {
+  int r;
+  rit_start();
+  r = win_wm_run_u();
+  rit_stop();
+  return r;
+}
+
+static uint32_t rit_focus_pid(void) {
+  if (!gwins || gui_focus < 0 || gui_focus >= GUI_MAX || !gwins[gui_focus].open) return 0;
+  return gwins[gui_focus].pid;
+}
+
+static int win_wm_run_u(void) {
   struct wm_win wins[WM_MAX];
   int focus = 0;
   int menu_open = 0;
@@ -10258,7 +10934,7 @@ static int win_wm_run(void) {
        * laco dava uma fatia inteira ao programa (Firefox) antes do proximo
        * byte. Com entrada chegando, so cede a cada 30 ms. */
       uint32_t now = (uint32_t)irq_ticks();
-      int pend = pkt_idx > 0 || ps2in_pending() || (now - in_ms) < 3;
+      int pend = pkt_idx > 0 || ps2in_pending() || rq_has() || (now - in_ms) < 3;
       if ((!pend || now - pump_ms >= 30) && task_pick() >= 0) {
         pump_ms = now;
         tasks_pump();
@@ -10405,7 +11081,7 @@ static int win_wm_run(void) {
     }
     /* Com entrada na fila, um quadro agora so mostraria uma posicao velha.
      * O limite garante um quadro mesmo com o mouse sem parar. */
-    if ((need_draw || dc.moved) && ps2in_pending() && ++draw_skip < 64) {
+    if ((need_draw || dc.moved) && (ps2in_pending() || rq_has()) && ++draw_skip < 64) {
       /* desenha depois de ler */
     } else if (dc.on) {
       draw_skip = 0;

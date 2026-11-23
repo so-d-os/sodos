@@ -1,4 +1,5 @@
 #include "drives.h"
+void dstat_path(const char* p);   /* disks/cmd_dstat.c */
 #include "shell.h"
 #include "mm.h"
 #include "disk.h"
@@ -1742,6 +1743,7 @@ static int drives_rename_u(const char* from, const char* to) {
 int drives_mkdir(const char* path) {
   int r;
   fs_lock();
+  dstat_path(path);
   r = dir_op(path, 1);
   fs_unlock();
   return r;
@@ -1749,6 +1751,7 @@ int drives_mkdir(const char* path) {
 int drives_rmdir(const char* path) {
   int r;
   fs_lock();
+  dstat_path(path);
   r = dir_op(path, 0);
   fs_unlock();
   return r;
@@ -1947,6 +1950,7 @@ static int drives_enum_paths_u(char out[][48], int max) {
 int file_read_at(const char* path, uint32_t offset, char* buf, int len) {
   int r;
   fs_lock();
+  dstat_path(path);
   r = file_read_at_u(path, offset, buf, len);
   fs_unlock();
   return r;
@@ -1954,6 +1958,7 @@ int file_read_at(const char* path, uint32_t offset, char* buf, int len) {
 int file_load(const char* path, char* buf, int max_size) {
   int r;
   fs_lock();
+  dstat_path(path);
   r = file_load_u(path, buf, max_size);
   fs_unlock();
   return r;
@@ -1961,6 +1966,7 @@ int file_load(const char* path, char* buf, int max_size) {
 int file_size(const char* path) {
   int r;
   fs_lock();
+  dstat_path(path);
   r = file_size_u(path);
   fs_unlock();
   return r;
@@ -1968,6 +1974,7 @@ int file_size(const char* path) {
 int file_save(const char* path, const char* data, int size) {
   int r;
   fs_lock();
+  dstat_path(path);
   r = file_save_u(path, data, size);
   fs_unlock();
   return r;
@@ -1975,6 +1982,7 @@ int file_save(const char* path, const char* data, int size) {
 int file_list(const char* path, char* out, int max) {
   int r;
   fs_lock();
+  dstat_path(path);
   r = file_list_u(path, out, max);
   fs_unlock();
   return r;
@@ -1982,18 +1990,21 @@ int file_list(const char* path, char* out, int max) {
 int drives_chdir(const char* spec) {
   int r;
   fs_lock();
+  dstat_path(spec);
   r = drives_chdir_u(spec);
   fs_unlock();
   return r;
 }
 void drives_dir(const char* spec, int flags, const char* order) {
   fs_lock();
+  dstat_path(spec);
   drives_dir_u(spec, flags, order);
   fs_unlock();
 }
 int drives_del(const char* spec) {
   int r;
   fs_lock();
+  dstat_path(spec);
   r = drives_del_u(spec);
   fs_unlock();
   return r;
@@ -2001,6 +2012,7 @@ int drives_del(const char* spec) {
 int drives_items(const char* path, struct dir_item* out, int max) {
   int r;
   fs_lock();
+  dstat_path(path);
   r = drives_items_u(path, out, max);
   fs_unlock();
   return r;
@@ -2019,6 +2031,7 @@ int file_list_long(const char* path, char* out, int max) {
   it = (struct dir_item*)kmalloc(FLL_MAX * (uint32_t)sizeof(struct dir_item));
   if (!it) return -1;
   fs_lock();
+  dstat_path(path);
   n = drives_items_u(path, it, FLL_MAX);
   while (path[pl] && pl < DRV_PATH - 1) {
     full[pl] = path[pl];
@@ -2131,6 +2144,7 @@ static int drives_entry_u(const char* path, struct dir_item_long* out) {
 int drives_entry(const char* path, struct dir_item_long* out) {
   int r;
   fs_lock();
+  dstat_path(path);
   r = drives_entry_u(path, out);
   fs_unlock();
   return r;
@@ -2139,6 +2153,7 @@ int drives_entry(const char* path, struct dir_item_long* out) {
 int drives_long_name(const char* path, char* out, int max) {
   int r;
   fs_lock();
+  dstat_path(path);
   r = drives_long_name_u(path, out, max);
   fs_unlock();
   return r;
@@ -2146,6 +2161,7 @@ int drives_long_name(const char* path, char* out, int max) {
 int drives_rename(const char* from, const char* to) {
   int r;
   fs_lock();
+  dstat_path(from);
   r = drives_rename_u(from, to);
   fs_unlock();
   return r;

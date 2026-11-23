@@ -23,6 +23,7 @@ extern void irq12_stub(void), irq13_stub(void), irq14_stub(void), irq15_stub(voi
 extern void smp_ipi_stub(void);
 extern void lapic_timer_stub(void);
 extern void resched_ipi_stub(void);
+extern void rit_irq_stub(void);
 extern void tlb_ipi_stub(void);
 extern void spurious_stub(void);
 
@@ -105,6 +106,7 @@ void idt_init(void) {
   set_gate(0xF2, (uint64_t)lapic_timer_stub, IDT_SEL_CODE, IDT_FLAGS);
   set_gate(0xF3, (uint64_t)resched_ipi_stub, IDT_SEL_CODE, IDT_FLAGS);
   set_gate(0xF4, (uint64_t)tlb_ipi_stub, IDT_SEL_CODE, IDT_FLAGS);
+  set_gate(0xF5, (uint64_t)rit_irq_stub, IDT_SEL_CODE, IDT_FLAGS);   /* MSI do xHCI -> RIT */
   set_gate(0xFF, (uint64_t)spurious_stub, IDT_SEL_CODE, IDT_FLAGS);
 
   idtp.limit = (uint16_t)(sizeof(idt) - 1);

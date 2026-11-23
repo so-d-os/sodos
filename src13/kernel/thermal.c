@@ -589,10 +589,19 @@ static void th_line(char* line, int t) {
 }
 
 #define TH_FAST 2                         /* segundos entre checagens */
+/* SET LOGEVERY=s: de quanto em quanto tempo o TEMP.LOG e o SERIAL.LOG vao
+ * para o disco (padrao 300 s; 30..3600). Antes eram 60 s e 30 s: o SERIAL.LOG
+ * (ate 1,2 MB) era regravado inteiro a cada 30 s segurando o BKL, e a luz do
+ * disco nao apagava. Evento do guarda termico grava na hora; quente, a cada
+ * 60 s no maximo. REBOOT e queda gravam como antes. */
+#define TH_LOG_DEF 300
 
 static int thermal_thread(void* arg) {
   int ticks = 0, sub = 0, last_logged = HW_NONE, was_stale = 0, was_rstale = 0;
+  int every = env_int("LOGEVERY", TH_LOG_DEF), tl_dirty = 0;
+  uint32_t tl_saved = 0, sl_saved = 0;
   (void)arg;
+  if (every < 30 || every > 3600) every = TH_LOG_DEF;
   for (;;) {
     char line[384];
     int t, hot, g, full = sub == 0, changed;
@@ -625,11 +634,25 @@ static int thermal_thread(void* arg) {
         tl_add(line + 7);                       /* sem o "[temp] " no arquivo */
         last_logged = t;
       }
-      if (changed || hot || (full && ticks % 6 == 0))
-        if (drives_is_mounted('D')) (void)file_save("D:\\LOG\\TEMP.LOG", tlog, tlog_n);
+      if (changed || (full && (ticks % 6 == 0 || hot || t - last_logged >= 5 || last_logged - t >= 5)))
+        tl_dirty = 1;
     }
-    /* SERIAL.LOG a cada 30 s: num reset o arquivo ficava minutos atrasado */
-    if (full && ticks % 3 == 2) (void)serial_log_save();
+    {
+      uint32_t now = net_ms();
+      uint32_t gap = now - tl_saved;
+      if (tl_dirty && (changed || (hot && gap >= 60000u) || gap >= (uint32_t)every * 1000u) &&
+          drives_is_mounted('D')) {
+        (void)file_save("D:\\LOG\\TEMP.LOG", tlog, tlog_n);
+        tl_dirty = 0;
+        tl_saved = now;
+      }
+      /* SERIAL.LOG: so se mudou (serial_log_save olha) e no maximo a cada
+       * LOGEVERY s; antes de programa rodar, o module.c grava tambem */
+      if (now - sl_saved >= (uint32_t)every * 1000u) {
+        (void)serial_log_save();
+        sl_saved = now;
+      }
+    }
     kt_bkl_leave();
     if (full) ticks++;
     if (++sub >= HW_STEP / TH_FAST) sub = 0;

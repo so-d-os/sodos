@@ -43,6 +43,14 @@ int kt_in_thread(void);
 /* 1 se o mundo esta rodando na CPU corrente. */
 int kt_world_here(void);
 void kt_world_idle(uint32_t ms); /* laco do WIN ocioso: empresta a CPU0 por ate ms */
+void kt_world_kick(void);        /* RIT: entrada chegou, o mundo para de emprestar */
+/* Tempo real (RIT): thread do kernel presa a cpu, na frente da fila; com 3+
+ * CPUs a cpu fica reservada (as outras threads saem dela). */
+int kt_thread_create_rt(int (*fn)(void*), void* arg, uint32_t stack_size, int cpu, int reserve);
+uint32_t kt_rt_mask(void);
+/* Boost do primeiro plano: threads do pid passam na frente por ms. */
+void kt_boost_pid(uint32_t pid, uint32_t ms);
+void* kt_cur_task(void);         /* dono de travas recursivas (xhci.c) */
 /* Indice da CPU corrente (0 antes do SMP). */
 int kt_cpu_index(void);
 /* pid do programa dono da thread corrente. */

@@ -56,6 +56,11 @@ uint32_t serial_log_tail(char* out, uint32_t max, uint32_t* skipped) {
   return have;
 }
 
+/* Bytes que ja passaram pelo log (cabeca + anel): muda = ha algo novo. */
+uint32_t serial_log_total(void) {
+  return slog_n + stail_n;
+}
+
 void serial_putc(char c) {
   volatile int spin = 100000;
   if (c != '\r') {
