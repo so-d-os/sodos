@@ -1,7 +1,7 @@
 Bem-vindo ao Sistema Operacional Minimalista!
 
-Este é um sistema operacional educacional desenvolvido para demonstrar
-conceitos básicos de sistemas operacionais.
+Este � um sistema operacional educacional desenvolvido para demonstrar
+conceitos b�sicos de sistemas operacionais.
 
 COMANDOS DISPONÍVEIS:
 - help     : Lista todos os comandos disponíveis
@@ -15,6 +15,6 @@ COMANDOS DISPONÍVEIS:
 EXEMPLOS:
   type exemplo.md
   type readme.txt
-  echo Olá, mundo!
+  echo Ol�, mundo!
 
 Desenvolvido para fins educacionais.
