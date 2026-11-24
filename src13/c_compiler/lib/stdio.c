@@ -30,6 +30,17 @@ static inline void io_guard_end_(int* p) {
 #define F_WRITE 2
 #define F_APPEND 4
 #define F_DIRTY 8
+#define F_NOSPILL 0x40 /* a unidade nao grava no meio (k_fwrite_at -9): tudo na memoria */
+
+/* Arquivo so de escrita, gravado em sequencia, passa a ir para o disco em
+ * partes quando o buffer chega a SPILL: o resto do arquivo nao fica na
+ * memoria. Antes o buffer dobrava com realloc e parava em 128 MiB (faltava
+ * um bloco contiguo do dobro abaixo de 4 GB). */
+#define SPILL (8u << 20)
+
+/* Do KERNEL.IMP (o cc chama k_* com a convencao do kernel). 0 ok; -9 a
+ * unidade nao sabe gravar no meio do arquivo. */
+int k_fwrite_at(const char* path, unsigned off, const char* data, int len, unsigned nsize);
 
 #define K_STDIN 0
 #define K_STDOUT 1
@@ -50,6 +61,7 @@ struct __so_file {
   struct __so_file* next;
   char path[FILENAME_MAX];
   int fd; /* K_RANDOM: fd da posix-lite que gera os bytes em cada read */
+  unsigned disk_off; /* bytes ja no disco antes de buf[0] (gravacao em partes) */
 };
 
 struct io_state {
@@ -131,13 +143,44 @@ void* __so_stdio_swap(void* st) {
 }
 
 static int mem_save(FILE* f) {
+  int rc;
   if (!(f->flags & F_DIRTY)) return 0;
   f->flags &= ~F_DIRTY;
-  if (k_fsave(f->path, f->buf ? f->buf : "", (int)f->size) < 0) {
+  if (f->disk_off == 0) {
+    rc = k_fsave(f->path, f->buf ? f->buf : "", (int)f->size) < 0 ? -1 : 0;
+  } else {
+    /* ja foi para o disco em partes: so o que esta no buffer, no fim */
+    rc = f->size ? k_fwrite_at(f->path, f->disk_off, f->buf, (int)f->size, ~0u) : 0;
+    if (rc == 0) {
+      f->disk_off += f->size;
+      f->size = f->pos = 0;
+    }
+  }
+  if (rc != 0) {
     f->err = 1;
     errno = EIO;
     return EOF;
   }
+  return 0;
+}
+
+/* Escrita em sequencia num arquivo so de escrita: o buffer vai para o disco
+ * e recomeca. 0 ok (ou nada a fazer); -1 erro de gravacao. */
+static int mem_spill(FILE* f) {
+  if ((f->flags & (F_READ | F_NOSPILL)) || f->pos != f->size || f->size < SPILL) return 0;
+  if (f->disk_off == 0) {
+    if (k_fsave(f->path, f->buf, (int)f->size) < 0) return -1;
+    /* a unidade grava no meio? (Z: em RAM e unidades antigas nao) */
+    if (k_fwrite_at(f->path, f->size, "", 0, ~0u) != 0) {
+      f->flags |= F_NOSPILL; /* fica tudo na memoria, como antes */
+      return 0;
+    }
+  } else if (k_fwrite_at(f->path, f->disk_off, f->buf, (int)f->size, ~0u) != 0) {
+    return -1;
+  }
+  f->disk_off += f->size;
+  f->size = f->pos = 0;
+  f->flags &= ~F_DIRTY;
   return 0;
 }
 
@@ -507,6 +550,11 @@ size_t fwrite(const void* buf, size_t sz, size_t n, FILE* f) {
   f->pos += total;
   if (f->pos > f->size) f->size = f->pos;
   f->flags |= F_DIRTY;
+  if (mem_spill(f) != 0) {
+    f->err = 1;
+    errno = EIO;
+    return 0;
+  }
   return n;
 }
 
@@ -539,10 +587,11 @@ int fseek(FILE* f, long off, int whence) {
   IO_GUARD;
   long base;
   if (!f || f->kind != K_MEM) return -1;
-  if (whence == SEEK_SET) base = 0;
+  if (whence == SEEK_SET) base = -(long)f->disk_off;
   else if (whence == SEEK_CUR) base = (long)f->pos;
   else if (whence == SEEK_END) base = (long)f->size;
   else return -1;
+  /* gravado em partes: o que ja foi para o disco nao volta ao buffer */
   if (base + off < 0) return -1;
   f->pos = (unsigned)(base + off);
   f->eof = 0;
@@ -553,7 +602,7 @@ int fseek(FILE* f, long off, int whence) {
 long ftell(FILE* f) {
   IO_GUARD;
   if (!f || f->kind != K_MEM) return -1;
-  return (long)f->pos - (f->unget >= 0 ? 1 : 0);
+  return (long)(f->disk_off + f->pos) - (f->unget >= 0 ? 1 : 0);
 }
 
 void rewind(FILE* f) {

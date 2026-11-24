@@ -232,6 +232,28 @@ static WINAPI void RtlInitUnicodeString(struct ustr* u, const wchar16* s) {
   u->max = (uint16_t)(s ? n * 2 + 2 : 0);
   u->buf = (wchar16*)s;
 }
+/* "\Registry\User\<SID>" do usuario sodos (a SID do sec.c). O chrome_elf do
+ * Chrome monta com isso o HKCU no registro nativo e devolve a memoria com
+ * RtlFreeUnicodeString, que libera no mesmo heap do programa. */
+static WINAPI long RtlFormatCurrentUserKeyPath(struct ustr* u) {
+  static const char p[] = "\\Registry\\User\\S-1-5-21-1329876819-1464486739-555819301-1000";
+  size_t n = sizeof(p) - 1, i;
+  wchar16* b;
+  if (!u) return (long)0xC000000DL; /* STATUS_INVALID_PARAMETER */
+  b = (wchar16*)wheap_alloc((n + 1) * 2);
+  if (!b) return (long)0xC0000017L; /* STATUS_NO_MEMORY */
+  for (i = 0; i <= n; i++) b[i] = (wchar16)(unsigned char)p[i];
+  u->buf = b;
+  u->len = (uint16_t)(n * 2);
+  u->max = (uint16_t)(n * 2 + 2);
+  return 0;
+}
+static WINAPI void RtlFreeUnicodeString(struct ustr* u) {
+  if (!u) return;
+  if (u->buf) wheap_free(u->buf);
+  u->buf = 0;
+  u->len = u->max = 0;
+}
 static WINAPI long NtQueryInformationProcess(HANDLE h, int cls, void* buf, DWORD len, DWORD* ret) {
   (void)h;
   memset(buf, 0, len);
@@ -720,6 +742,7 @@ const struct wine_sym misc_syms[] = {
     S(GetConsoleWindow), S(AttachConsole), S(AllocConsole), S(FreeConsole), S(SetStdHandle),
     S(FindResourceW), S(LoadResource),
     S(LockResource), S(SizeofResource), S(RtlInitUnicodeString), S(NtQueryInformationProcess),
+    S(RtlFormatCurrentUserKeyPath), S(RtlFreeUnicodeString),
     S(NtQuerySystemInformation), S(RtlNtStatusToDosErrorNoTeb), S(WinHttpOpen),
     S(WinHttpCloseHandle), S(WinHttpGetIEProxyConfigForCurrentUser), S(WinHttpGetProxyForUrl),
     S(WinHttpDetectAutoProxyConfigUrl), S(GetProfilesDirectoryW), S(GetUserNameExW),
