@@ -790,7 +790,7 @@ void con_break_poll(void) {
   if (!break_applies() || vt_bg()) return;
   /* So a fila do teclado: os bytes do mouse ficam na fila deles.
    * kbd_watch ja viu cada byte (na IRQ1 ou em ps2in_pump). */
-  while (ps2in_kbd(&sc, 0)) {
+  while (ps2in_kbd_hw(&sc, 0)) {
     if (break_hotkey(sc)) continue;
     if (((kb_head + 1) % KB_PEND) != kb_tail) {
       kb_pend[kb_head] = sc;
@@ -807,7 +807,7 @@ int shell_break(void) {
   brk_in = 1;
   if (!vt_bg()) {
     /* Como con_break_poll: o resto fica para get_char (digitar adiante). */
-    while (ps2in_kbd(&sc, 0)) {
+    while (ps2in_kbd_hw(&sc, 0)) {
       if (break_hotkey(sc)) continue;
       if (((kb_head + 1) % KB_PEND) != kb_tail) {
         kb_pend[kb_head] = sc;
@@ -1958,6 +1958,11 @@ static int exec_line(char* line, int history) {
     if (raw[0]) add_to_history(raw);
   }
   {
+    /* COMMAND e TECLA: a linha inteira, com | > < (cmd_ctrl.c) */
+    int rc;
+    if (shell_ctrl_raw(line, &rc)) return rc;
+  }
+  {
     char* bar = find_pipe(line);
     if (bar) {
       *bar = '\0';
@@ -2241,6 +2246,10 @@ void kmain(const struct BootInfo* bi) {
   register_builtin("set", cmd_set);
   register_builtin("ver", cmd_ver);
   register_builtin("relogio", cmd_relogio);
+  register_builtin("command", cmd_command);
+  register_builtin("prtsc", cmd_prtsc);
+  register_builtin("tecla", cmd_tecla);
+  register_builtin("janelas", cmd_janelas);
 
   drives_init();
   drives_automount();

@@ -2495,15 +2495,49 @@ static void sys_mouse_init(void) {
   sys_mouse_place((int32_t)(gfx_w / 2u), (int32_t)(gfx_h / 2u));
 }
 
-/* 1 = so move, 2 = botao desce, 3 = botao sobe no proximo poll. */
-static int api_arm;
-static int32_t api_x, api_y;
+/* Mouse pela API e pelo comando MOUSE: uma fila de pacotes (posicao e
+ * estado dos botoes: bit 0 esquerdo, 1 direito, 2 meio), um por volta do
+ * laco do WIN, para cada aperto e cada soltar virarem evento no lugar certo
+ * mesmo com varios pedidos seguidos (um BAT). O ultimo estado dos botoes
+ * vale para o proximo: MOUSE DESCE, MOUSE x y, MOUSE SOBE arrasta. */
+#define API_BQ 32
+static uint8_t api_bq[API_BQ];
+static int32_t api_qx[API_BQ], api_qy[API_BQ];
+static volatile uint32_t api_bh, api_bt;
+static uint8_t api_last;        /* botoes do ultimo pacote posto na fila */
+static int32_t api_lx, api_ly;  /* posicao do ultimo pacote posto na fila */
+
+int mouse_api_seq(int x, int y, int move, const uint8_t* btn, int n) {
+  int i, k = n > 0 ? n : 1;
+  uint32_t h = api_bh;
+  if ((uint32_t)k > API_BQ - (h - api_bt)) return -1;
+  if (h == api_bt) {            /* fila vazia: parte de onde o cursor esta */
+    api_lx = sys_mx;
+    api_ly = sys_my;
+  }
+  if (move) {
+    if (h == api_bt) sys_mouse_place(x, y); /* MOUSE POS ja mostra o lugar novo */
+    api_lx = x;
+    api_ly = y;
+  }
+  for (i = 0; i < k; i++) {
+    if (n > 0) api_last = btn[i];
+    api_bq[(h + (uint32_t)i) % API_BQ] = api_last;
+    api_qx[(h + (uint32_t)i) % API_BQ] = api_lx;
+    api_qy[(h + (uint32_t)i) % API_BQ] = api_ly;
+  }
+  __atomic_store_n(&api_bh, h + (uint32_t)k, __ATOMIC_RELEASE);
+  win_api_dirty = 1;
+  return 0;
+}
 
 void mouse_api(int x, int y, int click) {
-  sys_mouse_place(x, y);
-  api_x = sys_mx;
-  api_y = sys_my;
-  api_arm = click ? 2 : 1;
+  static const uint8_t c[2] = {1, 0};
+  mouse_api_seq(x, y, 1, c, click ? 2 : 0);
+}
+
+int mouse_api_busy(void) {
+  return (int)(api_bh - api_bt);
 }
 
 void mouse_api_pos(int* x, int* y) {
@@ -2514,6 +2548,16 @@ void mouse_api_pos(int* x, int* y) {
 int win_screen_size(int* w, int* h) {
   /* Uma tela do DOS rodando ao fundo do WIN nao esta no WIN. */
   if (!gfx_live || !gfx_w || !gfx_h || vt_bg()) return 0;
+  if (w) *w = (int)gfx_w;
+  if (h) *h = (int)gfx_h;
+  return 1;
+}
+
+/* PRTSC: o WIN e a tela que se ve agora, mesmo pedido de outra tela (PONTE,
+ * HTTP numa tela do DOS ao fundo). O win_screen_size responde pela tela de
+ * quem chama: de uma tela do DOS ao fundo dizia "sem WIN" e o print falhava. */
+int win_shown_size(int* w, int* h) {
+  if (!gfx_live || !gfx_w || !gfx_h || !vt_win_fg()) return 0;
   if (w) *w = (int)gfx_w;
   if (h) *h = (int)gfx_h;
   return 1;
@@ -3394,14 +3438,14 @@ static int input_poll(uint8_t packet[3], int* pkt_idx, uint8_t* sc, int* abs_pos
       net_poll();
     }
   }
-  if (api_arm) {
-    sys_mouse_place(api_x, api_y);
-    packet[0] = (api_arm == 2) ? 1 : 0;
+  if (api_bt != __atomic_load_n(&api_bh, __ATOMIC_ACQUIRE)) {
+    uint32_t t = api_bt % API_BQ;
+    sys_mouse_place(api_qx[t], api_qy[t]);
+    packet[0] = api_bq[t];
     packet[1] = 0;
     packet[2] = 0;
     *abs_pos = 1;
-    if (api_arm == 2) api_arm = 3;
-    else api_arm = 0;
+    __atomic_store_n(&api_bt, api_bt + 1, __ATOMIC_RELEASE);
     return 1;
   }
   {
@@ -4520,23 +4564,47 @@ static void cmd_hist(struct wm_win* w, int dir) {
   c->hist = n;
 }
 
+static void cmd_run_in(struct cmd_con* c, char* buf);
+
 static int cmd_enter(struct wm_win* w) {
   struct cmd_con* c = (struct cmd_con*)w->st;
-  char shown[CMD_COLS];
   char buf[CMD_IN];
-  char prompt[48];
-  int i, plen = 0;
+  int i;
   if (!c) return 0;
-  drives_prompt(prompt, (int)sizeof(prompt));
-  while (prompt[plen]) plen++;
-  for (i = 0; i < plen && i < CMD_COLS - 1; i++) shown[i] = prompt[i];
-  for (i = 0; i < c->inlen && plen + i < CMD_COLS - 1; i++) shown[plen + i] = c->in[i];
-  shown[plen + i] = '\0';
   if (cmd_is_exit(c->in)) return 1;
-  cmd_push(c, shown);
   for (i = 0; i < c->inlen && i < CMD_IN - 1; i++) buf[i] = c->in[i];
   buf[i] = '\0';
   cmd_set_input(c, "");
+  cmd_run_in(c, buf);
+  return 0;
+}
+
+/* COMMAND linha: a linha chega pronta e roda como se fosse digitada (pode ser
+ * maior que o campo de digitacao, CMD_IN). */
+static void cmd_type_line(struct wm_win* w, const char* line) {
+  struct cmd_con* c = (struct cmd_con*)w->st;
+  char buf[256];
+  int i;
+  if (!c || !line) return;
+  for (i = 0; line[i] && i < (int)sizeof(buf) - 1; i++) buf[i] = line[i];
+  buf[i] = '\0';
+  serial_puts("[visual] Command roda: ");
+  serial_puts(buf);
+  serial_puts("\n");
+  cmd_run_in(c, buf);
+}
+
+/* Mostra prompt + linha no Command e roda a linha nele. */
+static void cmd_run_in(struct cmd_con* c, char* buf) {
+  char shown[CMD_COLS];
+  char prompt[48];
+  int i, plen = 0;
+  drives_prompt(prompt, (int)sizeof(prompt));
+  while (prompt[plen]) plen++;
+  for (i = 0; i < plen && i < CMD_COLS - 1; i++) shown[i] = prompt[i];
+  for (i = 0; buf[i] && plen + i < CMD_COLS - 1; i++) shown[plen + i] = buf[i];
+  shown[plen + i] = '\0';
+  cmd_push(c, shown);
   c->ocol = 0;
   if (buf[0]) {
     cons_cap = c;
@@ -4558,7 +4626,6 @@ static int cmd_enter(struct wm_win* w) {
   cons_late = 0;
   if (cons_paint && !cons_painting) cons_paint();
   cons_cap = 0;
-  return 0;
 }
 
 static int cmd_plen(void) {
@@ -5048,13 +5115,13 @@ static int wm_alloc(struct wm_win* wins);
 static int wm_count_kind(struct wm_win* wins, int kind);
 static void wm_clamp_rect(int* x, int* y, int* w, int* h, int big);
 
-static void wm_open_command(struct wm_win* wins, int* focus, int big) {
+static int wm_open_command(struct wm_win* wins, int* focus, int big) {
   int i = wm_alloc(wins);
   int n;
   struct cmd_con* c;
-  if (i < 0) return;
+  if (i < 0) return -1;
   c = (struct cmd_con*)kmalloc(sizeof(struct cmd_con));
-  if (!c) return;
+  if (!c) return -1;
   cons_wipe(c);
   cmd_push(c, "SO DOS Command");
   cmd_push(c, "Mesmos comandos do DOS. HELP lista.");
@@ -5070,6 +5137,7 @@ static void wm_open_command(struct wm_win* wins, int* focus, int big) {
   wm_copy_str(wins[i].title, (int)sizeof(wins[i].title), "Command");
   wm_raise(&wins[i]);
   *focus = i;
+  return i;
 }
 
 static void title_max_btn(int x, int y, int s, int maxed);
@@ -7607,7 +7675,11 @@ static void wm_exec_arg(struct wm_win* wins, int* focus, int big, const char* pa
   struct wm_win* owner = app_win;
   if (!path) return;
   if (path_is_command(path)) {
-    wm_open_command(wins, focus, big);
+    /* COMMAND.EXE linha (comando COMMAND, k_win_launch): a linha roda no
+     * Command novo como se fosse digitada nele, com tela de texto e teclado
+     * proprios para o programa (TOP, AGENT2, EDIT...). */
+    i = wm_open_command(wins, focus, big);
+    if (i >= 0 && arg && arg[0]) cmd_type_line(&wins[i], arg);
     return;
   }
   /* file_load le no maximo max-1 bytes (poe um NUL no fim) */
@@ -12533,6 +12605,14 @@ int win_launch(const char* path) {
   launch_arg[0] = 0;
   launch_pending = 1;
   return 0;
+}
+
+/* COMMAND [linha] (shell, API): o WIN abre um Command novo e roda a linha
+ * nele, como se fosse digitada (no proximo quadro). 0 = pedido aceito; -1 o
+ * WIN nao esta aberto; -2 ja ha outro pedido de abertura na fila. */
+int win_command(const char* line) {
+  if (!c_wins) return -1;
+  return win_launch_arg("COMMAND.EXE", line ? line : "") == 0 ? 0 : -2;
 }
 
 /* LINKEXT.DLL: abrir exe com o arquivo (o laco do WIN executa no proximo quadro). */

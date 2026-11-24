@@ -361,21 +361,28 @@ static WINAPI HANDLE CreatePen(int style, int width, DWORD color) {
   }
   return b;
 }
+static void font_face_set(struct wgdi* f, const wchar16* face) {
+  int k;
+  for (k = 0; face && k < 31 && face[k]; k++) f->face[k] = face[k];
+  f->face[k] = 0;
+}
 static WINAPI HANDLE CreateFontIndirectW(const int32_t* lf) {
   struct wgdi* f = obj_new(G_FONT);
   if (f) {
     f->height = lf[0] < 0 ? -lf[0] : lf[0];
     f->bold = lf[4] >= 600;
+    font_face_set(f, (const wchar16*)((const uint8_t*)lf + 28)); /* lfFaceName */
   }
   return f;
 }
 static WINAPI HANDLE CreateFontW(int h, int w, int e, int o, int wt, DWORD i, DWORD u, DWORD so, DWORD cs, DWORD op,
                                  DWORD cp, DWORD q, DWORD pf, const wchar16* face) {
   struct wgdi* f = obj_new(G_FONT);
-  (void)w; (void)e; (void)o; (void)i; (void)u; (void)so; (void)cs; (void)op; (void)cp; (void)q; (void)pf; (void)face;
+  (void)w; (void)e; (void)o; (void)i; (void)u; (void)so; (void)cs; (void)op; (void)cp; (void)q; (void)pf;
   if (f) {
     f->height = h < 0 ? -h : h;
     f->bold = wt >= 600;
+    font_face_set(f, face);
   }
   return f;
 }
@@ -444,6 +451,8 @@ static WINAPI int GetObjectW(HANDLE h, int n, void* out) {
     memset(out, 0, (size_t)n);
     ((int32_t*)out)[0] = -(o->height ? o->height : 12);
     ((int32_t*)out)[4] = o->bold ? 700 : 400;
+    ((uint8_t*)out)[23] = 1; /* DEFAULT_CHARSET */
+    memcpy((uint8_t*)out + 28, o->face, sizeof(o->face)); /* lfFaceName (gfx::win::GetSystemFont) */
     return 92;
   }
   if (out && n >= 12) memset(out, 0, (size_t)n);

@@ -1,5 +1,16 @@
 PONTE - comandos do SODOS a partir da VM Linux do WSL
 
+Caminho mais curto (kernel e WSL.EXE de 24/11/2026 em diante): a API do
+SODOS responde de dentro da VM em 10.0.3.2:8797. Sem abrir nada no SODOS:
+    sh /d/WSL/SODOS ver
+    sh /d/WSL/SODOS prtsc
+    sh /d/WSL/SODOS command /d/DEVELOP/AGENT2/AGENT2.EXE
+    sh /d/WSL/SODOS 'tecla dir{ENTER}'
+    sh /d/WSL/SODOS mouse 640 400 click
+A linha roda no laco do WIN (o WIN espera ela acabar) e a saida volta ate
+32 KB. Veja src13/docs/CONTROLE.md. A PONTE continua util para comandos
+longos (make, cc) com a saida de volta, sem parar o WIN.
+
 Para que serve
   O bash do Claude Code e a VM Linux do WSL.EXE. Ela le e grava os discos do
   SODOS (/d = D:), mas nao roda programas do SODOS, e a API HTTP 8797 (/exec)

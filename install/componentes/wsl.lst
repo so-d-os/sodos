@@ -1,0 +1,13 @@
+# WSL: a VM Linux do SODOS (src13/wsl, veja src13/wsl/README.md)
+#
+# Sem build do WSL (src13/wsl/scripts/build-wsl.sh) so avisa.
+copia  src13/wsl/build/WSL.EXE  D:\WSL.EXE  opcional
+
+# Na VM, "sh /d/WSL/SODOS linha" roda a linha no prompt do SODOS pela API
+# (o Claude Code usa assim, veja src13/docs/CLAUDE-SODOS.md).
+copia  src13/wsl/scripts/sodos  D:\WSL\SODOS
+
+# A imagem do Linux (src13/wsl/scripts/build-image.sh) vai a mao: sao 2 GB, e
+# o DEBIAN.IMG e o disco da VM, que muda com o uso. Copiar de novo apagaria o
+# que foi instalado nele.
+confere  D:\WSL\DEBIAN.IMG  | sem D:\WSL\DEBIAN.IMG o WSL e o bash do Claude nao sobem; copie src13/wsl/build/image/* para D:\WSL (2 GB, a mao)

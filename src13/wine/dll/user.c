@@ -2006,6 +2006,31 @@ static WINAPI BOOL AdjustWindowRectEx(struct rect* r, DWORD st, BOOL menu, DWORD
   return 1;
 }
 static WINAPI BOOL AdjustWindowRect(struct rect* r, DWORD st, BOOL menu) { return AdjustWindowRectEx(r, st, menu, 0); }
+/* Fonte de interface do NONCLIENTMETRICS. No Windows o CSS `system-ui` do
+ * Chromium e a fonte do menu (lfMenuFont); com o nome vazio ele pulava
+ * para o proximo da lista do Claude ("Segoe UI" e recusado porque a face
+ * que o dwrite.c devolve se chama Inter) e caia em Roboto. Padrao: DejaVu
+ * Sans, a mesma do Claude no Linux; SET WINEUIFONT=<familia> troca. Se a
+ * familia nao estiver em \SODOS\FONTS o Chromium segue a lista como antes. */
+static void ncm_fonts(uint8_t* p, uint32_t sz) {
+  /* LOGFONTW (92 bytes) dentro do NONCLIENTMETRICSW: caption, smcaption, menu, status, message */
+  static const uint32_t at[] = {24, 124, 224, 316, 408};
+  char name[64];
+  int i, k, n;
+  if (k_getenv("WINEUIFONT", name, (int)sizeof(name)) <= 0) strcpy(name, "DejaVu Sans");
+  n = (int)strlen(name);
+  if (n > 31) n = 31;
+  for (i = 0; i < 5; i++) {
+    uint8_t* lf = p + at[i];
+    wchar16* face = (wchar16*)(lf + 28);
+    if (at[i] + 92 > sz) break;
+    *(int32_t*)lf = -12;          /* lfHeight: 9 pt a 96 dpi */
+    *(int32_t*)(lf + 16) = 400;   /* lfWeight: FW_NORMAL */
+    lf[23] = 1;                   /* lfCharSet: DEFAULT_CHARSET */
+    for (k = 0; k < n; k++) face[k] = (uint8_t)name[k];
+    face[n] = 0;
+  }
+}
 static WINAPI BOOL SystemParametersInfoW(DWORD a, DWORD b, void* p, DWORD f) {
   (void)b;
   (void)f;
@@ -2016,9 +2041,10 @@ static WINAPI BOOL SystemParametersInfoW(DWORD a, DWORD b, void* p, DWORD f) {
     r->bottom = GetSystemMetrics(1) - 40;
     return 1;
   }
-  if (a == 0x29 && p) { /* SPI_GETNONCLIENTMETRICS: fontes zeradas */
+  if (a == 0x29 && p) { /* SPI_GETNONCLIENTMETRICS: medidas zeradas, fontes com o nome da fonte de interface */
     uint32_t sz = *(uint32_t*)p;
     memset((uint8_t*)p + 4, 0, sz > 4 ? sz - 4 : 0);
+    ncm_fonts((uint8_t*)p, sz);
     return 1;
   }
   /* Suavizacao de fontes. O Chromium (gfx::FontRenderParams) so liga o

@@ -1,0 +1,4 @@
+# QEMU dentro do SODOS (src13/qemu): QEMU.EXE, firmware, guests de teste e os
+# .BAT em D:\UTILS\QEMU. Sem build do QEMU o script so avisa. Com o pendrive
+# SODOS conectado, ele leva a mesma pasta para U:\UTILS\QEMU.
+executa  src13/qemu/scripts/copy-qemu-disk.sh

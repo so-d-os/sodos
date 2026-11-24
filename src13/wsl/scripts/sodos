@@ -1,0 +1,40 @@
+#!/bin/sh
+# sodos - roda uma linha no prompt do SODOS a partir da VM Linux do WSL, pela
+# API HTTP do proprio SODOS (o NAT do WSL.EXE leva 10.0.3.2 ao SODOS).
+# No disco: D:\WSL\SODOS. Na VM:  sh /d/WSL/SODOS LINHA...
+#
+#   sh /d/WSL/SODOS ver
+#   sh /d/WSL/SODOS prtsc                     (print; mostra o caminho do PNG)
+#   sh /d/WSL/SODOS command /d/AGENT2.EXE     (programa de texto num Command)
+#   sh /d/WSL/SODOS 'tecla dir{ENTER}'        (digita na janela com foco)
+#   sh /d/WSL/SODOS mouse 640 400 click
+#   sh /d/WSL/SODOS janelas
+#
+# O BASH.EXE do Claude Code troca D:\X por /d/X: aqui volta (/d/x/y e
+# /mnt/d/x/y viram D:\x\y; opcoes como /w e /T ficam). -r manda sem trocar.
+# Prefira escrever /d/x/y: no sh, D:\x sem aspas perde a barra.
+# A linha vai inteira (com | > <) para o shell do SODOS e a saida volta aqui
+# (ate 32 KB). Ela roda no laco do WIN: o WIN para enquanto ela nao acaba.
+# Para programas longos ou interativos use COMMAND (abre um Command).
+# SODOS_API=ip:porta troca o destino; SODOS_T=segundos, a espera (120).
+[ $# -gt 0 ] || { sed -n '2,19p' "$0"; exit 2; }
+exec python3 -I -c '
+import os, re, sys, urllib.parse, urllib.request
+a = sys.argv[1:]
+raw = bool(a) and a[0] == "-r"
+line = " ".join(a[1:] if raw else a)
+if not raw:
+    def volta(m):
+        resto = re.sub(r"/+", "/", m.group(3)).lstrip("/").replace("/", "\\")
+        return m.group(1) + m.group(2).upper() + ":\\" + resto
+    line = re.sub(r"(^|[\s=])(?:/mnt)?/([a-zA-Z])/(\S*)", volta, line)
+api = os.environ.get("SODOS_API", "10.0.3.2:8797")
+espera = float(os.environ.get("SODOS_T", "120"))
+dados = urllib.parse.urlencode({"cmd": line}).encode()
+try:
+    with urllib.request.urlopen("http://" + api + "/exec", dados, timeout=espera) as r:
+        sys.stdout.buffer.write(r.read())
+except Exception as e:
+    print("sodos: a API do SODOS em %s nao respondeu (%s)" % (api, e), file=sys.stderr)
+    sys.exit(1)
+' "$@"

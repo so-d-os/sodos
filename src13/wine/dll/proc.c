@@ -306,7 +306,12 @@ static int explorer_target(int argc, char** argv, char* out, int max) {
  * pai pediu e herda os handles do pai nos mesmos numeros. Na saida, grava o
  * codigo no objeto de processo do pai e o acorda. Sem WIN no ar (ou com a
  * fila cheia por muito tempo), o filho roda aninhado como antes. */
-#define SPAWN_MAX 16
+/* Um lugar por filho vivo (o lugar so volta quando ele sai). Com 16 a tabela
+ * enchia: o Claude Desktop deixa ~11 filhos abertos (crashpad, gpu, rede,
+ * renderers, NodeService, audio, video) e cada sessao do Claude Code e mais
+ * um claude.exe. O 17o rodava aninhado, sem os pipes de stdin/stdout, e o
+ * claude.exe saia com 1 na hora ("Claude Code crashed"). */
+#define SPAWN_MAX 64
 struct spawnrec {
   volatile int used;
   int id;
@@ -610,6 +615,8 @@ static int spawn_async(struct wproc* p, struct wobj* o, const char* path, const 
     }
   if (!r) {
     sp_unlock();
+    wlogx("processo filho: tabela de filhos em paralelo cheia (SPAWN_MAX), roda aninhado e sem pipes; vivos ",
+          (uint64_t)SPAWN_MAX);
     return 0;
   }
   id = __sync_add_and_fetch(&spawn_seq, 1);
@@ -652,6 +659,7 @@ static int spawn_async(struct wproc* p, struct wobj* o, const char* path, const 
   }
   while (k_win_launch_arg(path, arg) != 0) {
     if (wnow_ms() - t0 > 3000) { /* WIN fora do ar ou fila presa */
+      wlog("processo filho: o WIN nao aceitou abrir em 3 s, roda aninhado e sem pipes: ", path);
       sp_lock();
       inh_drop(r->inh);
       r->inh = 0;

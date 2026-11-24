@@ -235,7 +235,74 @@ void ps2in_pump(void) {
   irq_restore(f);
 }
 
+/* ---------- teclas por comando (TECLA, API) ----------
+ * Bytes set 1, como os do 8042, que entram na fila do teclado um por vez e
+ * so quando quem le pede (ps2in_kbd com a fila vazia). O kbd_watch (Shift,
+ * Ctrl, AltGr, Ctrl+Alt+Del, Ctrl+F1...) ve cada byte na hora em que ele e
+ * lido, como numa tecla de verdade: com o grupo todo de uma vez o Shift ja
+ * estaria solto quando o leitor pedisse o caractere. Daqui em diante e o
+ * mesmo caminho de uma tecla apertada (PrtSc, Alt+Tab, Ctrl+F12...). */
+#define SQ 4096   /* potencia de 2 */
+static uint8_t sq[SQ];
+static volatile uint32_t sq_h, sq_t;
+
+int ps2in_type(const uint8_t* b, int n) {
+  uint64_t f;
+  int i;
+  if (n <= 0) return 0;
+  f = irq_save();
+  lk_take();
+  if ((uint32_t)n > SQ - (sq_h - sq_t)) {
+    lk_drop();
+    irq_restore(f);
+    return -1;
+  }
+  for (i = 0; i < n; i++) sq[(sq_h + (uint32_t)i) & (SQ - 1)] = b[i];
+  __atomic_store_n(&sq_h, sq_h + (uint32_t)n, __ATOMIC_RELEASE);
+  lk_drop();
+  irq_restore(f);
+  return 0;
+}
+
+int ps2in_type_left(void) {
+  return (int)(sq_h - sq_t);
+}
+
+/* Um byte da fila de comando para a do teclado, se ela estiver vazia. */
+static void syn_feed(void) {
+  uint64_t f;
+  if (__atomic_load_n(&sq_h, __ATOMIC_ACQUIRE) == sq_t) return;
+  f = irq_save();
+  lk_take();
+  if (sq_h != sq_t && !q_has(&kq)) {
+    uint8_t b = sq[sq_t & (SQ - 1)];
+    uint32_t now = (uint32_t)irq_ticks();
+    sq_t++;
+    if (!now) now = 1;
+    kbd_watch(b);
+    q_push(&kq, b, now);
+  }
+  lk_drop();
+  irq_restore(f);
+}
+
+static int syn_has(void) {
+  return __atomic_load_n(&sq_h, __ATOMIC_ACQUIRE) != sq_t;
+}
+
 int ps2in_kbd(uint8_t* b, uint32_t* t) {
+  if (q_pop(&kq, b, t)) return 1;
+  ps2in_pump();
+  if (q_pop(&kq, b, t)) return 1;
+  syn_feed();
+  return q_pop(&kq, b, t);
+}
+
+/* So as teclas de verdade: quem so procura o Ctrl+C no meio de um comando
+ * (shell_break, con_break_poll) nao pode puxar as do TECLA. Ele as guardava
+ * para "digitar adiante" e no WIN esse buffer e jogado fora no fim do
+ * comando: um "TECLA ver{ENTER}dir{ENTER}" perdia o dir. */
+int ps2in_kbd_hw(uint8_t* b, uint32_t* t) {
   if (q_pop(&kq, b, t)) return 1;
   ps2in_pump();
   return q_pop(&kq, b, t);
@@ -252,17 +319,17 @@ int ps2in_aux_pop(uint8_t* b, uint32_t* t) {
   return q_pop(&aq, b, t);
 }
 int ps2in_kbd_has(void) {
-  return q_has(&kq);
+  return q_has(&kq) || syn_has();
 }
 
 int ps2in_kbd_pending(void) {
-  if (q_has(&kq)) return 1;
+  if (q_has(&kq) || syn_has()) return 1;
   ps2in_pump();
   return q_has(&kq);
 }
 
 int ps2in_pending(void) {
-  if (q_has(&kq) || q_has(&aq)) return 1;
+  if (q_has(&kq) || q_has(&aq) || syn_has()) return 1;
   ps2in_pump();
   return q_has(&kq) || q_has(&aq);
 }

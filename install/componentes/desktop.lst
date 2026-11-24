@@ -1,0 +1,14 @@
+# Desktop do usuario padrao (D:\USER\DEFAULT\DESKTOP): os arquivos soltos de
+# src13/content e as pastas dele, com uma miniatura .THM para cada imagem.
+# As miniaturas saem do "make install-gerados" (o disk-files roda antes).
+copia  src13/content/*                D:\USER\DEFAULT\DESKTOP\
+copia  src13/content/cpp              D:\USER\DEFAULT\DESKTOP\CPP\         arvore
+copia  src13/content/exemplos         D:\USER\DEFAULT\DESKTOP\EXEMPLOS\    arvore
+copia  src13/content/mc               D:\USER\DEFAULT\DESKTOP\MC\          arvore
+copia  src13/c_compiler/build/install/desk/*.THM  D:\USER\DEFAULT\DESKTOP\  opcional | sem as miniaturas do desktop: rode "make install-gerados" em src13
+
+# A regra antiga do Makefile copiava todo o src13/content para o desktop, e
+# assim tambem entravam estes (LINKEXT.CFG vem pelo content/* de cima). Os
+# papeis de parede e os temas tem lugar proprio: veja aparencia.lst.
+copia  src13/content/wallpapers       D:\USER\DEFAULT\DESKTOP\WALLPAPERS\  arvore
+pasta  D:\USER\DEFAULT\DESKTOP\ICONS

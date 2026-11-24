@@ -1,0 +1,46 @@
+# Você está rodando dentro do SODOS
+
+Este Claude Code roda no SODOS (um sistema próprio, parecido com o DOS, com o desktop WIN) através do WINE. A ferramenta Bash não roda no SODOS: ela roda numa VM Linux (o WSL do SODOS). Na VM, as unidades do SODOS aparecem como `/d`, `/z`, `/u`... (`D:\X\Y` = `/d/X/Y`). As ferramentas Read, Write e Edit usam os caminhos do Windows (`D:\...`) direto.
+
+Este arquivo vem do repositório do SODOS (`src13/docs/CLAUDE-SODOS.md`) e o `make send` o sobrescreve a cada instalação. Para mudar o texto, mude no repositório.
+
+O que segue precisa do SODOS build 49 ou mais novo (o comando `ver` mostra o build) e do serviço do WSL ligado (`SET WSL=1`). Se `sh /d/WSL/SODOS ver` não responder, avise o usuário em vez de tentar outro caminho.
+
+## Rodar comandos do SODOS a partir do Bash
+
+O Linux não executa programas do SODOS. Para rodar uma linha do prompt do SODOS e ver a saída:
+
+```sh
+sh /d/WSL/SODOS <linha do prompt do SODOS>
+```
+
+O script manda a linha para a API do SODOS (10.0.3.2:8797) e devolve a saída, até 32 KB. Os caminhos `/d/x/y` viram `D:\x\y`; opções como `/w` não são alteradas. Escreva os caminhos como `/d/...`: no `sh`, um `D:\x` sem aspas perde a barra. `|`, `>` e `<` vão para o shell do SODOS. A linha tem no máximo 240 caracteres, e os pedidos são atendidos um por vez.
+
+Cuidado: a linha roda dentro do laço do WIN, e o desktop fica parado até ela terminar. Use para comandos rápidos (`dir`, `type`, `copy`, `cc` de um arquivo, os comandos abaixo). Programas longos ou interativos devem ir por `command`.
+
+## Comandar a tela, o teclado e o mouse
+
+| Linha | O que faz |
+|---|---|
+| `command PROG.EXE args` | Abre um Command no WIN e roda a linha nele. Programas de texto (TOP, MC, AGENT2, EDIT) e programas longos (make) ganham tela própria. Volta na hora; para ver o resultado, tire um print. |
+| `prtsc` | Print da tela à vista, pela mesma rotina da tecla PrtSc. Mostra o caminho do PNG em `D:\TEMP\printscreen-AAAAMMDD-HHMMSS.png`; abra com o Read. `prtsc /d/X.PNG` grava mais uma cópia ali. |
+| `janelas` | Janelas do WIN: título, x, y, largura e altura. `*` marca a que tem o foco. A tela é 1920x1080 e o print tem as mesmas coordenadas. |
+| `mouse X Y click` | Move e clica com o botão esquerdo. Também existem `direito`, `duplo`, `meio`, `desce`/`sobe` (arrastar) e `mouse pos`. Sem argumentos, `mouse` abre o teste interativo do mouse e trava: não use assim. |
+| `tecla texto{ENTER}` | Digita na janela com foco, como o teclado de verdade, acentos incluídos. Teclas: `{ENTER} {TAB} {ESC} {BS} {DEL} {CIMA} {BAIXO} {ESQ} {DIR} {HOME} {END} {PGUP} {PGDN} {F1}..{F12} {PRTSC}`, combinações `{CTRL+C} {ALT+TAB} {SHIFT+TAB}`, repetição `{TAB 3}` e caracteres literais `{>} {<} {|} {{} {}}`. |
+
+Um ciclo típico para testar um programa:
+
+```sh
+sh /d/WSL/SODOS command /d/DEVELOP/AGENT2/AGENT2.EXE
+sleep 2; sh /d/WSL/SODOS prtsc          # ver a tela (Read no PNG mostrado)
+sh /d/WSL/SODOS 'tecla oi{ENTER}'       # digitar no programa
+sh /d/WSL/SODOS 'tecla {F10}'           # sair
+```
+
+## Cuidados
+
+- `tecla` e `mouse` vão para a janela que tem o foco. Antes de digitar, confira com `janelas` ou clique na janela certa.
+- No desktop, sem janela com foco, `{ESC}` fecha o WIN inteiro. `{CTRL+ALT+DEL}` reinicia o computador. Não mande essas teclas sem necessidade.
+- A pasta atual do `sodos` é a do SODOS (vale para o sistema todo), não a do Linux: use caminhos completos ou mande antes `sh /d/WSL/SODOS cd /d/PASTA`.
+- Os programas do SODOS usam nomes 8.3 e texto em CP850. Para compilar: `sh /d/WSL/SODOS cc -I /d/ -L /d/ -o /d/PASTA/PROG.EXE /d/PASTA/PROG.C`.
+- Mais detalhes no repositório do SODOS: `src13/docs/CONTROLE.md`.

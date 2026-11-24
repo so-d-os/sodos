@@ -1,0 +1,12 @@
+# Claude Code dentro do SODOS (pelo WINE). Precisa tambem dos componentes
+# wine (GIT.EXE) e wsl (a VM Linux onde a ferramenta Bash roda).
+#
+# Instrucoes globais do Claude Code: a fonte e src13/docs/CLAUDE-SODOS.md, que
+# vai para o GitHub. Sempre sobrescreve, entao mude o texto no repositorio, nao
+# no D:. No repositorio o arquivo nao se chama CLAUDE.md para o Claude Code do
+# Linux nao carregar como instrucao dele.
+copia  src13/docs/CLAUDE-SODOS.md  D:\WINE\USERS\SODOS\.claude\CLAUDE.md
+
+# O bash do Claude Code e o WSL.EXE com outro nome: BASH.EXE -c ... roda a
+# linha no Linux da VM (o WSL.EXE liga o SET WSL=1 sozinho).
+copia  src13/wsl/build/WSL.EXE  D:\WINE\BIN\BASH.EXE  opcional

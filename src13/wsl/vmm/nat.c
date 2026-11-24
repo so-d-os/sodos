@@ -5,7 +5,13 @@
  * WSL.EXE responde ARP por qualquer IP e o ping para 10.0.3.2). Cada fluxo
  * TCP/UDP de saida ganha uma porta do SODOS em 30000-39999 (eco ICMP: o id) e
  * vai com o IP do SODOS (k_net_tap_send). O kernel desvia as respostas para
- * essas portas (k_net_tap_recv) e aqui elas voltam para a VM. */
+ * essas portas (k_net_tap_recv) e aqui elas voltam para a VM.
+ *
+ * TCP para 10.0.3.2 e o proprio SODOS (como o IP do Windows visto do WSL2):
+ * vai com destino ao IP do SODOS e o kernel entrega na propria pilha (o
+ * loopback do net.c), entao a API HTTP (porta 8797) responde de dentro da
+ * VM. A resposta volta com 10.0.3.2 de origem. Kernel antigo (sem loopback)
+ * manda para a placa e a conexao so nao abre. */
 #include <string.h>
 #include "nat.h"
 #include "../sodos_api.h"
@@ -18,6 +24,7 @@ static const uint8_t gw_mac[6] = {0x52, 0x54, 0x00, 0x57, 0x53, 0x02};
 
 struct slot {
   uint8_t used, proto;
+  uint8_t gw;        /* a VM pediu 10.0.3.2: e o proprio SODOS */
   uint16_t gport;    /* porta (ou id ICMP) da VM */
   uint32_t rip;      /* destino */
   uint16_t rport;
@@ -184,6 +191,19 @@ void nat_from_guest(const uint8_t* f, int len) {
   if ((ip[0] >> 4) != 4 || ihl < 20 || ihl > iplen) return;
   if (be16(ip + 2) < iplen) iplen = be16(ip + 2);
   dst = be32(ip + 16);
+  if (dst == NAT_GW_IP && ip[9] == 6 && up && iplen >= ihl + 20 && !(be16(ip + 6) & 0x3FFF)) {
+    /* TCP para o roteador = o SODOS (API em 10.0.3.2:8797) */
+    k = slot_for(6, be16(ip + ihl), NAT_GW_IP, be16(ip + ihl + 2));
+    if (k < 0) return;
+    slots[k].gw = 1;
+    wbe32(ip + 12, our_ip);
+    wbe32(ip + 16, our_ip);
+    wbe16(ip + ihl, (uint16_t)(PORT_LO + k));
+    ip_fix(ip);
+    l4_fix(ip, iplen);
+    k_net_tap_send(ip, iplen);
+    return;
+  }
   if (dst == NAT_GW_IP) {
     /* ping no roteador virtual */
     if (ip[9] == 1 && iplen >= ihl + 8 && ip[ihl] == 8) {
@@ -207,6 +227,7 @@ void nat_from_guest(const uint8_t* f, int len) {
     if (iplen < ihl + 8) return;
     k = slot_for(ip[9], be16(ip + ihl), dst, be16(ip + ihl + 2));
     if (k < 0) return;
+    slots[k].gw = 0;
     wbe32(ip + 12, our_ip);
     wbe16(ip + ihl, (uint16_t)(PORT_LO + k));
     ip_fix(ip);
@@ -236,6 +257,7 @@ static int from_tap(uint8_t* f, int n) {
     k = be16(l4 + 2) - PORT_LO;
     if (k < 0 || k >= NSLOT || !slots[k].used || slots[k].proto != ip[9]) return 0;
     slots[k].last_ms = k_ms();
+    if (slots[k].gw) wbe32(ip + 12, NAT_GW_IP); /* veio do proprio SODOS */
     wbe32(ip + 16, NAT_GUEST_IP);
     wbe16(l4 + 2, slots[k].gport);
     ip_fix(ip);

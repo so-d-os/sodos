@@ -9,3 +9,7 @@ int prtscr_save(char* out_path, int max);
 /* O mesmo para a tela de texto visivel (80x25, Ctrl+F1..F12): 640x400 com a
  * fonte atual. Mesmos retornos, sem o -1. */
 int prtscr_text_save(char* out_path, int max);
+
+/* Copia que o ultimo print deixou em D:\TEMP (SET PRTSCRCOPY); "" se nao
+ * houve copia. */
+const char* prtscr_last_copy(void);

@@ -1,0 +1,7 @@
+# Firefox: FIREFOX.EXE e a arvore de recursos em D:\FIREFOX, mais as prefs do
+# port. O script tem a regra propria (espaco livre, links de dist/bin) e so
+# avisa se o browser nao foi compilado (src13/firefox/sodos/scripts).
+executa  src13/firefox/sodos/scripts/copy-firefox-disk.sh
+
+# Atalho no desktop: o FFLAUNCH.EXE pede ao WIN o D:\FIREFOX\FIREFOX.EXE
+copia  src13/c_compiler/out/FFLAUNCH.EXE  D:\USER\DEFAULT\DESKTOP\FIREFOX.EXE

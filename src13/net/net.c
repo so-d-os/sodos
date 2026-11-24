@@ -15,6 +15,7 @@
 #include "env.h"
 #include "r8125.h"
 #include "virtio_net.h"
+#include "kthread.h"
 
 #define SLIRP_IP   0x0A00020Fu
 #define SLIRP_MASK 0xFFFFFF00u
@@ -541,15 +542,24 @@ static void arp_rx(const uint8_t* f, int len) {
     arp_send(2, f + 22, sip);
 }
 
+static int loop_out(const uint8_t* ip, int len);
+
 static int ip_send(uint32_t dst, uint8_t proto, const uint8_t* data, int len) {
   uint8_t* f = txframe;
   uint8_t hopmac[6];
   uint32_t hop;
   int total;
   int i;
+  /* Para o nosso proprio IP (a VM do WSL falando com a API, via NAT): nao sai
+   * pela placa, que nao devolve o quadro. loop_out entrega aqui dentro. */
+  int lo = our_ip != 0 && dst == our_ip;
   if (len < 0 || len > 1480) return -1;
-  hop = ((dst ^ our_ip) & our_mask) ? our_gw : dst;
-  if (arp_resolve(hop, hopmac) < 0) return -1;
+  if (lo) {
+    for (i = 0; i < 6; i++) hopmac[i] = our_mac[i];
+  } else {
+    hop = ((dst ^ our_ip) & our_mask) ? our_gw : dst;
+    if (arp_resolve(hop, hopmac) < 0) return -1;
+  }
   mem_set(f, 0, 14 + 20);
   for (i = 0; i < 6; i++) f[i] = hopmac[i];
   for (i = 0; i < 6; i++) f[6 + i] = our_mac[i];
@@ -565,6 +575,7 @@ static int ip_send(uint32_t dst, uint8_t proto, const uint8_t* data, int len) {
   wr32(f + 30, dst);
   wr16(f + 24, ip_checksum(f + 14, 20));
   for (i = 0; i < len; i++) f[34 + i] = data[i];
+  if (lo) return loop_out(f + 14, total);
   return ne_tx(f, 14 + total);
 }
 
@@ -1848,6 +1859,9 @@ static int sv_wait_una(uint32_t goal) {
     nic_poll();
     time_poll();
     if (ms_now - t0 > 3000u) return -1;
+    /* O ACK pode vir da VM do WSL (NAT no WSL.EXE, outra CPU), que precisa
+     * do BKL para entregar o pacote: preso aqui com ele, so via o fim dos 3 s. */
+    kt_bkl_breathe();
   }
   return 0;
 }
@@ -1990,12 +2004,56 @@ int net_tap_recv(uint8_t* buf, int cap) {
   return n;
 }
 
+/* ---- loopback: pacotes IP para o nosso proprio IP ----
+ * A placa nao devolve o que manda para si mesma. O que vai para o nosso IP
+ * (a resposta da API para a VM do WSL, o pedido dela entrando pelo NAT) fica
+ * nesta fila e o nic_poll entrega ao ip_rx; o que cai nas portas do NAT vai
+ * direto para a fila dele (tap). */
+#define LOOP_Q 64
+static uint8_t loop_buf[LOOP_Q][1500];
+static uint16_t loop_len[LOOP_Q];
+static uint32_t loop_h, loop_t;
+
+static int loop_put(const uint8_t* ip, int len) {
+  if (len < 20 || len > 1500) return -1;
+  if (loop_h - loop_t >= LOOP_Q) return -2;
+  tap_copy(loop_buf[loop_h % LOOP_Q], ip, len);
+  loop_len[loop_h % LOOP_Q] = (uint16_t)len;
+  loop_h++;
+  return 0;
+}
+
+static int loop_out(const uint8_t* ip, int len) {
+  if (tap_on && tap_match(ip, len)) {
+    if (tap_h - tap_t >= TAP_Q) return -2;
+    tap_copy(tap_buf[tap_h % TAP_Q], ip, len);
+    tap_len[tap_h % TAP_Q] = (uint16_t)len;
+    tap_h++;
+    return 0;
+  }
+  return loop_put(ip, len);
+}
+
+/* no nic_poll (com polling = 1): o que esta na fila do loopback entra na pilha */
+static void loop_drain(void) {
+  static uint8_t pkt[1500];
+  int n, k;
+  for (k = 0; k < 64 && loop_t != loop_h; k++) {
+    n = loop_len[loop_t % LOOP_Q];
+    tap_copy(pkt, loop_buf[loop_t % LOOP_Q], n);
+    loop_t++;
+    ip_rx(pkt, n);
+  }
+}
+
 int net_tap_send(const uint8_t* ip, int len) {
   static uint8_t f[1514];
   uint32_t dst, hop;
   int i;
   if (!tap_on || len < 20 || len > 1500) return -1;
   dst = rd32(ip + 16);
+  /* a VM falando com o proprio SODOS (API em 10.0.3.2 ou no nosso IP) */
+  if (our_ip && dst == our_ip) return loop_put(ip, len);
   hop = ((dst ^ our_ip) & our_mask) ? our_gw : dst;
   if (arp_resolve(hop, f) != 0) return -2;
   for (i = 0; i < 6; i++) f[6 + i] = our_mac[i];
@@ -2073,6 +2131,7 @@ static void nic_poll(void) {
   } else {
     while (n++ < 64 && ne_rx_one()) {}
   }
+  if (loop_t != loop_h) loop_drain();
   polling = 0;
   srv_pump();
   httpd_poll();

@@ -28,3 +28,11 @@ int keymap_kp_nav(uint8_t sc);
 int keymap_shift(void);
 /* Tecla que sobrou de uma combinacao que nao existe (0 = nenhuma). */
 int keymap_pending(void);
+
+/* O caminho inverso, para digitar por comando (TECLA): as teclas que dao o
+ * caractere CP850 ch no layout atual. Cada uma e sc[i] (make code sem E0)
+ * com mods[i] (KEYM_SHIFT, KEYM_ALTGR). Devolve quantas (1, ou 2 com tecla
+ * morta: ~ e a para o ã); 0 se o layout nao tem o caractere. */
+#define KEYM_SHIFT 1
+#define KEYM_ALTGR 2
+int keymap_keys(int ch, uint8_t* sc, uint8_t* mods, int max);

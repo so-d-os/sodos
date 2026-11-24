@@ -10,7 +10,7 @@ struct cmd_entry {
   cmd_fn fn;
 };
 
-#define CMD_MAX 64  /* comandos internos; o register_builtin avisa na serial se faltar lugar */
+#define CMD_MAX 80  /* comandos internos; o register_builtin avisa na serial se faltar lugar */
 extern struct cmd_entry commands[CMD_MAX];
 extern int cmd_count;
 int register_builtin(const char* name, cmd_fn fn);
@@ -194,4 +194,13 @@ int cmd_ping(int argc, char** argv);
 int cmd_net(int argc, char** argv);
 int cmd_api(int argc, char** argv);
 int cmd_dlls(int argc, char** argv);
+/* shell/cmd_ctrl.c: comandar o SODOS por linha de comando (Claude, API, BAT) */
+int cmd_command(int argc, char** argv);
+int cmd_prtsc(int argc, char** argv);
+int cmd_tecla(int argc, char** argv);
+int cmd_janelas(int argc, char** argv);
+int mouse_ctrl(int argc, char** argv);   /* MOUSE com argumentos */
+/* COMMAND e TECLA levam a linha crua, antes do shell separar | > <.
+ * 1 = a linha era de um deles (codigo em *rc). */
+int shell_ctrl_raw(const char* line, int* rc);
 int cmd_shutdown(int argc, char** argv);

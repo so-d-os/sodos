@@ -1,0 +1,13 @@
+# Temas (Configuracoes > Temas): D:\SODOS\ICONS\<TEMA> com TEMA.CFG,
+# LEIAME.TXT e cada icone em PNG (fonte) e ICN (o que o kernel le). Os .ICN
+# saem do "make install-gerados", so para os temas com icones=arquivo no
+# TEMA.CFG. A escolha do usuario (D:\SODOS\TEMA.CFG) nao esta aqui: nunca e
+# sobrescrita.
+copia  src13/content/icons                   D:\SODOS\ICONS\  arvore
+copia  src13/c_compiler/build/install/icons  D:\SODOS\ICONS\  arvore opcional | sem os .ICN dos temas: rode "make install-gerados" em src13
+
+# Papeis de parede
+copia  src13/content/wallpapers/*  D:\SODOS\WALLS\
+
+# Fontes TTF (titulos e rotulos do WIN, WINE): D:\SODOS\FONTS
+copia  src13/fonts/ship/*  D:\SODOS\FONTS\

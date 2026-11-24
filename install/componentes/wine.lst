@@ -1,0 +1,5 @@
+# WINE: programas do Windows no SODOS (Claude Desktop, Claude Code)
+#
+# O Claude Desktop procura o git.exe no PATH do WINE (D:\WINE\BIN). Este e o
+# GIT.EXE do SODOS, que o WINE.DLL roda com a saida no pipe.
+copia  src13/c_compiler/out/GIT.EXE  D:\WINE\BIN\GIT.EXE

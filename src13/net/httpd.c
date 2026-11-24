@@ -10,6 +10,12 @@
 #include "png.h"
 #include "serial.h"
 #include "mm.h"
+#include "kthread.h"
+
+int win_task_current(void); /* video/visual.c: tarefa do WIN rodando, -1 = o laco */
+
+/* Saida do /exec: ate 32 KB (antes 4,5 KB cortava um DIR ou um make). */
+#define CAP_MAX 32768
 
 static int listening;
 static int port_num;
@@ -110,7 +116,7 @@ static int q_int(const char* q, const char* key, int def) {
   return def;
 }
 
-static char cap_buf[4608];
+static char cap_buf[CAP_MAX];
 static int cap_n;
 
 static void cap_putc(char c) {
@@ -132,7 +138,7 @@ static int is_win_word(const char* s) {
 /* 1 = a conexao ainda e a mesma e a resposta pode sair. */
 static int run_cmd(const char* cmd, char* out, int* outn, int max) {
   char line[240];
-  static char saved[4608];
+  static char saved[CAP_MAX];
   int saved_n = 0;
   int i = 0;
   int gen;
@@ -197,12 +203,13 @@ static void add_num(char* d, int* n, int max, int v) {
 }
 
 static void reply(int code, const char* reason, const char* body, int blen, int head) {
-  char pkt[9000];
+  char pkt[512];
   int n = 0;
   char nb[16];
   int sendn;
   if (blen < 0) blen = 0;
   sendn = head ? 0 : blen;
+  if (!body) sendn = 0;
   add_str(pkt, &n, (int)sizeof(pkt), "HTTP/1.0 ");
   add_num(pkt, &n, (int)sizeof(pkt), code);
   add_str(pkt, &n, (int)sizeof(pkt), " ");
@@ -211,11 +218,12 @@ static void reply(int code, const char* reason, const char* body, int blen, int 
   int32_to_string(blen, nb, (int)sizeof(nb));
   add_str(pkt, &n, (int)sizeof(pkt), nb);
   add_str(pkt, &n, (int)sizeof(pkt), "\r\nConnection: close\r\n\r\n");
-  if (body) {
-    int i;
-    for (i = 0; i < sendn && n < (int)sizeof(pkt) - 1; i++) pkt[n++] = body[i];
+  if (sendn <= 0) {
+    net_srv_send(pkt, n);
+    return;
   }
-  net_srv_send(pkt, n);
+  /* cabecalho e corpo em escritas separadas: o corpo pode ter ate CAP_MAX */
+  if (net_srv_write(pkt, n, 0) == 0) net_srv_write(body, sendn, 1);
 }
 
 static const char PAGE[] =
@@ -389,7 +397,7 @@ static void handle(char* req) {
   char* q;
   char* body;
   int i, mi, head;
-  char out[6000];
+  static char out[CAP_MAX + 16];
   int outn = 0;
   for (i = 0; i < 7 && req[i] && req[i] != ' '; i++) {
     char c = req[i];
@@ -656,6 +664,11 @@ void httpd_poll(void) {
   static char req[8192];
   int n;
   if (!listening || poll_lock) return;
+  /* So no laco do WIN ou numa tela do DOS. Quem chama o nic_poll pode ser
+   * uma thread em outra CPU (a da VM do WSL, ao ler a fila do NAT) ou uma
+   * tarefa do WIN (o WINE mexendo em soquete): o pedido roda um comando e
+   * mexe na tela, entao espera o proximo poll de um desses dois. */
+  if (kt_in_thread() || win_task_current() >= 0) return;
   poll_lock = 1;
   n = net_srv_take(req, (int)sizeof(req));
   if (n > 0) handle(req);

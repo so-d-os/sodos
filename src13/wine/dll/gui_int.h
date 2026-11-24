@@ -121,6 +121,7 @@ struct wgdi {
   int stock;
   int bold;         /* fonte */
   int height;       /* fonte: altura pedida (px) */
+  wchar16 face[32]; /* fonte: lfFaceName pedido (o GetObject devolve; o Chromium le o system-ui por ai) */
   struct surf s;    /* bitmap */
   int rl, rt, rr, rb; /* regiao (so retangulo: o que o Chromium/Skia usa) */
 };

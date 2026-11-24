@@ -72,6 +72,18 @@ void gui_session(int allowed);
 /* API HTTP: move o cursor. click 1 gera o aperto e o soltar do botao esquerdo. */
 void mouse_api(int x, int y, int click);
 void mouse_api_pos(int* x, int* y);
+/* Comando MOUSE: move (move = 1) e poe na fila n estados dos botoes (bit 0
+ * esquerdo, 1 direito, 2 meio), um por volta do laco do WIN: {1, 0} clica,
+ * {2, 0} clica com o direito, {1} so aperta (arrastar). -1 = fila cheia.
+ * mouse_api_busy: estados ainda na fila. */
+int mouse_api_seq(int x, int y, int move, const uint8_t* btn, int n);
+int mouse_api_busy(void);
+/* 1 se o WIN e a tela que se ve agora (qualquer que seja a tela de quem
+ * pergunta, ao contrario do win_screen_size). */
+int win_shown_size(int* w, int* h);
+/* COMMAND [linha]: Command novo no WIN rodando a linha. 0 ok, -1 sem WIN,
+ * -2 outro pedido de abertura na fila. */
+int win_command(const char* line);
 /* 1 se o WIN (ou o modo grafico) esta na tela. */
 int win_screen_size(int* w, int* h);
 /* Tela principal (a primeira da tela estendida): SM_CXSCREEN do WINE. */

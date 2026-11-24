@@ -1,0 +1,9 @@
+# Arquivos de configuracao soltos
+
+# AGENT.EXE (agente de IA nativo): o AGENT.CFG tem a chave da API, entao fica
+# fora do git e so vai para o disco se existir em src13/AGENT.CFG.
+copia  src13/AGENT.CFG  D:\AGENT.CFG  opcional | sem src13/AGENT.CFG (chave da API, fora do git): D:\AGENT.CFG nao atualizado
+
+# WIFI.SIM: APs falsos para o "net wifi scan" rodar no QEMU (sem a placa).
+# So entra em acao quando a RTL8852BE nao esta no barramento.
+copia  src13/wifi/WIFI.SIM  D:\NET\WIFI.SIM

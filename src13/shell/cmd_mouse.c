@@ -47,9 +47,10 @@ static int ps2_mouse_init(void) {
 }
 
 int cmd_mouse(int argc, char** argv) {
-  (void)argc;
-  (void)argv;
   int ps2_ok;
+  /* MOUSE x y CLICK, MOUSE POS...: comanda o cursor do WIN (cmd_ctrl.c).
+   * Sem argumentos continua o teste do mouse. */
+  if (argc > 1) return mouse_ctrl(argc, argv);
   ps2in_raw(1);        /* o ACK do F4 e lido aqui, nao pela IRQ12 */
   ps2_ok = ps2_mouse_init();
   ps2in_raw(0);

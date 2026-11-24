@@ -16,9 +16,16 @@ void ps2in_init(void);              /* liga IRQ1/IRQ12 no 8042 e no PIC */
 void ps2in_isr(void);               /* chamada pela IRQ1 e pela IRQ12 */
 void ps2in_pump(void);              /* esvazia o controlador nas filas */
 void ps2in_inject(uint8_t b);       /* byte de teclado vindo do USB (xhci.c) */
+/* Teclas por comando (TECLA, API): bytes set 1 que entram na fila do teclado
+ * um por vez, quando o leitor pede, como se fossem apertadas. 0 ok; -1 nao
+ * cabem (a fila guarda 4 KB). ps2in_type_left: bytes ainda nao lidos. */
+int ps2in_type(const uint8_t* b, int n);
+int ps2in_type_left(void);
 
 /* 1 com o byte em *b (e o tick em que chegou em *t, se t != 0); 0 se vazia. */
 int ps2in_kbd(uint8_t* b, uint32_t* t);
+/* Igual, sem as teclas do TECLA (ps2in_type): para quem so olha o Ctrl+C. */
+int ps2in_kbd_hw(uint8_t* b, uint32_t* t);
 int ps2in_aux(uint8_t* b, uint32_t* t);
 int ps2in_pending(void);
 int ps2in_aux_pop(uint8_t* b, uint32_t* t);   /* RIT: so a fila do mouse */

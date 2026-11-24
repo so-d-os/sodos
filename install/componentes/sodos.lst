@@ -1,0 +1,22 @@
+# Programas do sistema em D:\SODOS (abertos pelo WIN, pelo menu Iniciar e
+# pelas Configuracoes). Todos tambem vao para a raiz do D: (programas.lst).
+copia  src13/c_compiler/out/FONTADV.EXE   D:\SODOS\
+copia  src13/c_compiler/out/VIDEOCFG.EXE  D:\SODOS\
+copia  src13/c_compiler/out/IMGBIG.DLL    D:\SODOS\
+copia  src13/c_compiler/out/AIPANEL.EXE   D:\SODOS\
+copia  src13/c_compiler/out/MENUCFG.EXE   D:\SODOS\
+# Configuracoes > Temas
+copia  src13/c_compiler/out/TEMAS.EXE     D:\SODOS\
+# Alt+Tab do WIN: o WIN abre o WINTAB.EXE so enquanto o Alt esta apertado
+copia  src13/c_compiler/out/WINTAB.EXE    D:\SODOS\
+# Servico SET DISKSYNC=1 (Z:\SAVE -> pendrive), aberto pelo kernel
+copia  src13/c_compiler/out/DISKSYNC.EXE  D:\SODOS\
+
+# Abrir com: LINKEXT.EXE (o LINKEXT.DLL esta em drivers.lst). O CFG de exemplo
+# so entra se o disco ainda nao tem um: o usuario edita pelo LINKEXT.EXE.
+copia  src13/c_compiler/out/LINKEXT.EXE   D:\SODOS\
+copia  src13/content/LINKEXT.CFG          D:\SODOS\LINKEXT.CFG   preserva
+
+# Os READMEs do repositorio (o tools/usb-docs.sh leva tambem para o pendrive)
+copia  README.md                          D:\SODOS\README.MD
+copia  README.pt-BR.md                    D:\SODOS\README.PT-BR.MD

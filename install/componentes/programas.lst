@@ -1,0 +1,38 @@
+# Programas, DLLs, compilador (cc + link), libc, headers e exemplos, todos na
+# raiz do D: em maiusculas (8.3: o mtools nao cria entrada de nome longo). Os
+# fontes do cc, do link e da libc vao junto para recompilar dentro do SODOS.
+# Os binarios saem do "make -C c_compiler all" (o disk-files roda antes).
+copia  src13/c_compiler/out/*.EXE          D:\   exceto=TEST.EXE
+copia  src13/c_compiler/out/*.DLL          D:\
+copia  src13/c_compiler/out/*.OBJ          D:\
+copia  src13/c_compiler/out/*.IMP          D:\
+
+# Headers. Os sys/*.h vao para D:\SYS (FAT 8.3; no SO o include path e plano).
+copia  src13/c_compiler/include/*.h        D:\
+copia  src13/c_compiler/include/sys/*.h    D:\SYS\
+
+# Fontes da libc, do cc, do link e das bibliotecas (TLS, GUI, IMG)
+copia  src13/c_compiler/lib/*.c            D:\
+copia  src13/c_compiler/cc/*.c             D:\
+copia  src13/c_compiler/cc/cc.h            D:\CC.H
+copia  src13/c_compiler/sox.h              D:\SOX.H
+copia  src13/c_compiler/link/link.c        D:\LINK.C
+copia  src13/c_compiler/tls/*.c            D:\
+copia  src13/c_compiler/tls/*.h            D:\
+copia  src13/c_compiler/gui/*.c            D:\
+copia  src13/c_compiler/img/*.c            D:\
+copia  src13/libs/posix-lite/posix.c       D:\POSIX.C
+
+# Browser de texto. O browser/main.c vai como BROWSER.C para nao colidir com
+# o MAIN.C do cc.
+copia  src13/c_compiler/browser/*.c        D:\   exceto=main.c
+copia  src13/c_compiler/browser/main.c     D:\BROWSER.C
+copia  src13/c_compiler/browser/*.cpp      D:\
+copia  src13/c_compiler/browser/*.h        D:\
+
+# Exemplos
+copia  src13/c_compiler/examples/*.c       D:\
+copia  src13/c_compiler/examples/*.h       D:\
+copia  src13/c_compiler/examples/*.cpp     D:\
+copia  src13/c_compiler/examples/*.bat     D:\
+copia  src13/utils/image_view.c            D:\IMAGEVW.C

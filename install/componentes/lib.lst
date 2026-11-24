@@ -1,0 +1,3 @@
+# Bibliotecas dinamicas ELF (make -C src13/libs/dso all cxx): D:\LIB e onde o
+# kernel procura. Os nomes (libc.so.6...) ficam como estao.
+copia  src13/libs/dso/build/sysroot/lib/*.so.*  D:\LIB\  nome-original opcional | libs/dso nao compilado: D:\LIB fica sem as bibliotecas dinamicas

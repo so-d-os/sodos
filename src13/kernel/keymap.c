@@ -221,3 +221,67 @@ int keymap_pending(void) {
   km_pending = 0;
   return p;
 }
+
+/* ---- caractere -> teclas (TECLA, API) ---- */
+
+/* Teclado numerico e o * dele ficam de fora: dependem do NumLock e um
+ * programa pode tratar a tecla como seta. */
+static int km_skip(int sc) {
+  return sc == 0x37 || (sc >= 0x47 && sc <= 0x53) || sc == 0x7E;
+}
+
+/* Tecla e modificadores que dao v (caractere ou DEAD|n) sem combinar. */
+static int km_find(uint16_t v, uint8_t* sc, uint8_t* mods) {
+  const uint16_t* norm = layout == KEYB_US ? us_norm : br_norm;
+  const uint16_t* shifted = layout == KEYB_US ? us_shift : br_shift;
+  int k, pass;
+  if (!v) return 0;
+  for (pass = 0; pass < 3; pass++) {
+    for (k = 1; k < 128; k++) {
+      uint16_t got;
+      uint8_t m;
+      if (km_skip(k)) continue;
+      if (pass == 0) {
+        got = norm[k];
+        m = 0;
+      } else if (pass == 1) {
+        got = shifted[k];
+        m = KEYM_SHIFT;
+      } else {
+        if (layout != KEYB_BR) return 0;
+        got = br_altgr[k];
+        m = KEYM_ALTGR;
+      }
+      if (got != v) continue;
+      /* Caps Lock ligado inverte o Shift das letras */
+      if (km_caps && m != KEYM_ALTGR && is_letter(norm[k])) m ^= KEYM_SHIFT;
+      *sc = (uint8_t)k;
+      *mods = m;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+int keymap_keys(int ch, uint8_t* sc, uint8_t* mods, int max) {
+  unsigned i;
+  int d;
+  ch &= 0xFF;
+  if (max < 1 || !ch) return 0;
+  if (km_find((uint16_t)ch, &sc[0], &mods[0])) return 1;
+  if (max < 2) return 0;
+  /* acento + letra (ã = ~ e a) */
+  for (i = 0; i < sizeof(dead_combo) / sizeof(dead_combo[0]); i++) {
+    if (dead_combo[i][2] != ch) continue;
+    if (km_find((uint16_t)(DEAD | dead_combo[i][0]), &sc[0], &mods[0]) &&
+        km_find(dead_combo[i][1], &sc[1], &mods[1]))
+      return 2;
+  }
+  /* o acento sozinho: acento + espaco */
+  for (d = 1; d < 6; d++) {
+    if (dead_alone[d] != ch) continue;
+    if (km_find((uint16_t)(DEAD | d), &sc[0], &mods[0]) && km_find(' ', &sc[1], &mods[1]))
+      return 2;
+  }
+  return 0;
+}

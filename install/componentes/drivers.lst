@@ -1,0 +1,9 @@
+# Drivers: as DLLs que o kernel carrega de D:\SODOS\DRV (o FAT32.DLL tambem
+# vem dentro do SODOS.PAK, para o boot sem D:).
+copia  src13/c_compiler/out/DRV/*.DLL  D:\SODOS\DRV\  opcional
+
+# Firmware das placas (src13/firmware/README.txt): o AMDSMC.DLL le
+# \SODOS\FW\P10KSMC.BIN.
+copia  src13/firmware/amdgpu/polaris10_k_smc.bin  D:\SODOS\FW\P10KSMC.BIN
+copia  src13/firmware/amdgpu/polaris10_sdma.bin   D:\SODOS\FW\P10SDMA.BIN
+copia  src13/firmware/amdgpu/LICENSE.amdgpu       D:\SODOS\FW\LICAMDGP.TXT

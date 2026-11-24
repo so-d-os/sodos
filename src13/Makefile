@@ -143,7 +143,7 @@ kernel/ap_blob.o: kernel/ap_blob.asm kernel/ap_tramp.bin
 	$(AS) -f elf64 kernel/ap_blob.asm -o $@
 
 # Comandos do shell (pasta shell/)
-SHELL_CMD_C = shell/cmd_help.c shell/cmd_keyb.c shell/cmd_more.c shell/cmd_echo.c shell/cmd_ls.c shell/cmd_clear.c shell/cmd_cls.c shell/cmd_history.c shell/cmd_type.c shell/cmd_find.c shell/cmd_tail.c shell/cmd_pause.c shell/cmd_load.c shell/cmd_edit.c shell/cmd_asm.c shell/cmd_free.c shell/cmd_smp.c shell/cmd_visual.c shell/cmd_mouse.c shell/cmd_usb.c shell/cmd_win.c shell/cmd_ping.c shell/cmd_dlls.c shell/cmd_net.c shell/cmd_api.c shell/cmd_kill.c
+SHELL_CMD_C = shell/cmd_help.c shell/cmd_keyb.c shell/cmd_more.c shell/cmd_echo.c shell/cmd_ls.c shell/cmd_clear.c shell/cmd_cls.c shell/cmd_history.c shell/cmd_type.c shell/cmd_find.c shell/cmd_tail.c shell/cmd_pause.c shell/cmd_load.c shell/cmd_edit.c shell/cmd_asm.c shell/cmd_free.c shell/cmd_smp.c shell/cmd_visual.c shell/cmd_mouse.c shell/cmd_usb.c shell/cmd_win.c shell/cmd_ping.c shell/cmd_dlls.c shell/cmd_net.c shell/cmd_api.c shell/cmd_kill.c shell/cmd_ctrl.c
 SHELL_CMD_O = $(SHELL_CMD_C:.c=.o)
 
 # Comandos de discos (pasta disks/)
@@ -231,6 +231,7 @@ kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c 
 	$(CC) $(CFLAGS) -c shell/cmd_net.c -o shell/cmd_net.o
 	$(CC) $(CFLAGS) -c shell/cmd_api.c -o shell/cmd_api.o
 	$(CC) $(CFLAGS) -c shell/cmd_kill.c -o shell/cmd_kill.o
+	$(CC) $(CFLAGS) -c shell/cmd_ctrl.c -o shell/cmd_ctrl.o
 	$(CC) $(CFLAGS) -c shell/cmd_dlls.c -o shell/cmd_dlls.o
 	$(AS) -f elf64 shell/cmd_shutdown.asm -o shell/cmd_shutdown.o
 	$(CC) $(CFLAGS) -c disks/cmd_mount.c -o disks/cmd_mount.o
@@ -554,196 +555,65 @@ grow-disk:
 	echo "Migrados: $$antes arquivos; no disco novo: $$depois. Antigo em disk-antigo.img."; \
 	if [ "$$antes" != "$$depois" ]; then echo "ATENCAO: as contagens diferem."; exit 1; fi
 
-# Copia compilador, linker, libc, headers e exemplos para a raiz do disk.img
-# (D: no SO). Formata antes se o disco ainda nao tiver FAT. Requer mtools.
-# Nomes em maiusculo 8.3 para o mtools nao criar entradas de nome longo.
-# Tudo vai para a raiz do D: em maiusculas: binarios, headers, fontes da libc,
-# exemplos e os fontes do proprio cc/link (para recompilar dentro do SO).
-# Fontes do MC em D:\SRC\MC, do TOP em D:\SRC\TOP e do git em D:\SRC\GIT, compilados no proprio SODOS por BUILD.BAT ou, com o MAKE.EXE, pelo MAKEFILE da pasta.
-MC_SRC = mc/mc.h mc/mc.c mc/scr.c mc/panel.c mc/ops.c mc/view.c mc/BUILD.BAT mc/MAKEFILE
-TOP_SRC = top/top.h top/top.c top/tela.c top/dados.c top/procs.c top/mapa.c top/video.c top/cpu.c top/temp.c top/BUILD.BAT top/MAKEFILE
-GIT_SRC = git/git.h git/git.c git/http.c git/pack.c git/sha1.c git/zinf.c git/BUILD.BAT git/GETSODOS.BAT git/MAKEFILE
-WIFI_SRC = wifi/wifi.cpp wifi/BUILD.BAT wifi/WIFI.SIM
-# Comandos externos (.EXE) com fonte em cmd/<nome>: fontes em D:\SRC\CMD\<NOME>.
-XCOPY_SRC = cmd/xcopy/xcopy.cpp cmd/xcopy/BUILD.BAT cmd/xcopy/MAKEFILE
-# Ferramentas de desenvolvimento (../develop, fora do src13): fontes em D:\DEVELOP\<ferramenta>.
-# O MAKE.EXE (port do pdpmake) vai para a raiz do D: com os outros .EXE.
-MAKE_SRC = ../develop/make/*.c ../develop/make/*.h ../develop/make/BUILD.BAT ../develop/make/MAKEFILE \
-	../develop/make/LEIA.TXT ../develop/make/LICENSE
-
-DISK_FILES = c_compiler/out/*.EXE c_compiler/out/*.DLL c_compiler/out/*.OBJ \
-	c_compiler/out/*.IMP c_compiler/include/*.h c_compiler/include/sys/*.h \
-	c_compiler/lib/*.c \
-	c_compiler/examples/*.c c_compiler/examples/*.h c_compiler/examples/*.cpp \
-	c_compiler/examples/*.bat \
-	c_compiler/cc/*.c c_compiler/cc/cc.h c_compiler/sox.h c_compiler/link/link.c \
-	c_compiler/tls/*.c c_compiler/tls/*.h c_compiler/gui/*.c \
-	c_compiler/img/*.c c_compiler/browser/*.c c_compiler/browser/*.cpp c_compiler/browser/*.h \
-	libs/posix-lite/posix.c
-# browser/main.c vai como BROWSER.C para nao colidir com o MAIN.C do cc
-# Headers sys/*.h vao para ::/SYS/ (FAT 8.3; no SO o include path e flat).
-disk-files: $(DISK)
+# Arquivos do D: (o disk.img do QEMU; a FAT32 do SSD no make send e no
+# sendpc). O que vai para onde esta nas listas da pasta install/ da raiz do
+# repositorio, uma por componente (install/README.md): programas e compilador,
+# desktop, \SODOS, drivers, temas e fontes, fontes em \SRC, Firefox, QEMU,
+# WINE, Claude Code, WSL. Aqui fica so o que compila: o c_compiler e os
+# arquivos gerados (install-gerados). Formata o disco antes se ele ainda nao
+# tiver FAT. Requer mtools.
+disk-files: $(DISK) install-gerados
 	@if pgrep -f "[q]emu-system.*file=$(DISK)" >/dev/null; then \
 	  echo "Feche o QEMU antes: o SO regrava a FAT e apaga o que o mcopy gravou."; exit 1; fi
 	$(MAKE) -C c_compiler all
 	@if ! mdir -i $(DISK)@@512 ::/ >/dev/null 2>&1; then $(MAKE) format-disk; fi
-	@for f in $$(ls $(DISK_FILES) | grep -v '/TEST.EXE$$'); do \
-	  case "$$f" in \
-	    */browser/main.c) n=BROWSER.C ;; \
-	    */include/sys/*) \
-	      if ! mdir -i $(DISK)@@512 ::/SYS >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SYS; fi; \
-	      n=SYS/$$(basename "$$f" | tr 'a-z' 'A-Z'); \
-	      mcopy -o -i $(DISK)@@512 "$$f" "::/$$n" || exit 1; \
-	      continue ;; \
-	    *) n=$$(basename "$$f" | tr 'a-z' 'A-Z') ;; \
-	  esac; \
-	  mcopy -o -i $(DISK)@@512 "$$f" "::/$$n" || exit 1; \
-	done
-	@mkdir -p c_compiler/build/desk
-	@gcc -O2 -D__export= -idirafter c_compiler/include -o c_compiler/build/mkthumb \
-	  c_compiler/img/img.c utils/mkthumb.c
-	@if ! mdir -i $(DISK)@@512 ::/USER >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/USER; fi
-	@if ! mdir -i $(DISK)@@512 ::/USER/DEFAULT >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/USER/DEFAULT; fi
-	@if ! mdir -i $(DISK)@@512 ::/USER/DEFAULT/DESKTOP >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/USER/DEFAULT/DESKTOP; fi
-	@for f in content/*; do \
-	  [ -e "$$f" ] || continue; \
-	  n=$$(basename "$$f" | tr 'a-z' 'A-Z'); \
-	  if [ -d "$$f" ]; then \
-	    if ! mdir -i $(DISK)@@512 "::/USER/DEFAULT/DESKTOP/$$n" >/dev/null 2>&1; then mmd -i $(DISK)@@512 "::/USER/DEFAULT/DESKTOP/$$n"; fi; \
-	    for g in "$$f"/*; do \
-	      [ -f "$$g" ] || continue; \
-	      gn=$$(basename "$$g" | tr 'a-z' 'A-Z'); \
-	      mcopy -o -i $(DISK)@@512 "$$g" "::/USER/DEFAULT/DESKTOP/$$n/$$gn" || exit 1; \
-	    done; \
-	  elif [ -f "$$f" ]; then \
-	    mcopy -o -i $(DISK)@@512 "$$f" "::/USER/DEFAULT/DESKTOP/$$n" || exit 1; \
-	    case "$$n" in \
-	      *.PNG|*.JPG|*.JPE|*.GIF|*.ICO|*.BMP) \
-	        b=$${n%.*}; \
-	        ./c_compiler/build/mkthumb "$$f" "c_compiler/build/desk/$$b.THM" || exit 1; \
-	        mcopy -o -i $(DISK)@@512 "c_compiler/build/desk/$$b.THM" "::/USER/DEFAULT/DESKTOP/$$b.THM" || exit 1; \
-	        ;; \
-	    esac; \
-	  fi; \
-	done
-	@mcopy -o -i $(DISK)@@512 utils/image_view.c ::/IMAGEVW.C
-	@# Bibliotecas dinamicas (make -C libs/dso all cxx): D:\LIB e onde o kernel procura.
-	@if ls libs/dso/build/sysroot/lib/*.so.* >/dev/null 2>&1; then \
-	  if ! mdir -i $(DISK)@@512 ::/LIB >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/LIB; fi; \
-	  for f in libs/dso/build/sysroot/lib/*.so.*; do \
-	    mcopy -o -i $(DISK)@@512 "$$f" "::/LIB/$$(basename "$$f")" || exit 1; \
-	  done; \
-	else echo "libs/dso nao compilado: D:\\LIB fica sem as bibliotecas dinamicas"; fi
-	@if ! mdir -i $(DISK)@@512 ::/SODOS >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS; fi
-	@if ! mdir -i $(DISK)@@512 ::/SODOS/FONTS >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS/FONTS; fi
-	@mcopy -o -i $(DISK)@@512 c_compiler/out/FONTADV.EXE ::/SODOS/FONTADV.EXE
-	@mcopy -o -i $(DISK)@@512 c_compiler/out/VIDEOCFG.EXE ::/SODOS/VIDEOCFG.EXE
-	@mcopy -o -i $(DISK)@@512 c_compiler/out/IMGBIG.DLL ::/SODOS/IMGBIG.DLL
-	@if ! mdir -i $(DISK)@@512 ::/SODOS/DRV >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS/DRV; fi
-	@for f in c_compiler/out/DRV/*.DLL; do [ -f "$$f" ] && mcopy -o -i $(DISK)@@512 "$$f" ::/SODOS/DRV/ || true; done
-	@# git.exe para os programas do Windows (Claude Desktop procura no PATH:
-	@# D:\WINE\BIN); e o GIT.EXE do SODOS, rodado pelo WINE.DLL com a saida no pipe
-	@if ! mdir -i $(DISK)@@512 ::/WINE >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/WINE; fi
-	@if ! mdir -i $(DISK)@@512 ::/WINE/BIN >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/WINE/BIN; fi
-	@mcopy -o -i $(DISK)@@512 c_compiler/out/GIT.EXE ::/WINE/BIN/GIT.EXE
-	@# WSL: o mesmo programa como D:\WSL.EXE e como o bash do Claude Code (BASH.EXE
-	@# -c ... roda no Linux da VM; SET WSL=1). A imagem D:\WSL\*.IMG (2 GB) vai a mao.
-	@if [ -f wsl/build/WSL.EXE ]; then mcopy -o -i $(DISK)@@512 wsl/build/WSL.EXE ::/WSL.EXE; \
-	  mcopy -o -i $(DISK)@@512 wsl/build/WSL.EXE ::/WINE/BIN/BASH.EXE; fi
-	@# Firmware das placas (firmware/README.txt): o AMDSMC.DLL le \SODOS\FW\P10KSMC.BIN.
-	@if ! mdir -i $(DISK)@@512 ::/SODOS/FW >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS/FW; fi
-	@mcopy -o -i $(DISK)@@512 firmware/amdgpu/polaris10_k_smc.bin ::/SODOS/FW/P10KSMC.BIN
-	@mcopy -o -i $(DISK)@@512 firmware/amdgpu/polaris10_sdma.bin ::/SODOS/FW/P10SDMA.BIN
-	@mcopy -o -i $(DISK)@@512 firmware/amdgpu/LICENSE.amdgpu ::/SODOS/FW/LICAMDGP.TXT
-	@mcopy -o -i $(DISK)@@512 c_compiler/out/AIPANEL.EXE ::/SODOS/AIPANEL.EXE
-	@mcopy -o -i $(DISK)@@512 c_compiler/out/MENUCFG.EXE ::/SODOS/MENUCFG.EXE
-	@# Temas (Configuracoes > Temas): TEMAS.EXE e \SODOS\ICONS\<TEMA> com
-	@# TEMA.CFG, LEIAME.TXT e cada icone em PNG (fonte) + ICN (o kernel le).
-	@# A escolha do usuario (D:\SODOS\TEMA.CFG) nunca e sobrescrita.
-	@mcopy -o -i $(DISK)@@512 c_compiler/out/TEMAS.EXE ::/SODOS/TEMAS.EXE
-	@# Alt+Tab do WIN: o WIN abre o WINTAB.EXE so enquanto o Alt esta apertado
-	@mcopy -o -i $(DISK)@@512 c_compiler/out/WINTAB.EXE ::/SODOS/WINTAB.EXE
-	@gcc -O2 -D__export= -idirafter c_compiler/include -o c_compiler/build/mkicon \
-	  c_compiler/img/img.c utils/mkicon.c
-	@if ! mdir -i $(DISK)@@512 ::/SODOS/ICONS >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS/ICONS; fi
-	@for d in content/icons/*/; do \
-	  t=$$(basename "$$d" | tr 'a-z' 'A-Z'); \
-	  mkdir -p "c_compiler/build/icons/$$t"; \
-	  if ! mdir -i $(DISK)@@512 "::/SODOS/ICONS/$$t" >/dev/null 2>&1; then mmd -i $(DISK)@@512 "::/SODOS/ICONS/$$t"; fi; \
-	  for f in "$$d"*; do \
-	    [ -f "$$f" ] || continue; \
-	    n=$$(basename "$$f" | tr 'a-z' 'A-Z'); \
-	    mcopy -o -i $(DISK)@@512 "$$f" "::/SODOS/ICONS/$$t/$$n" || exit 1; \
-	    case "$$n" in *.PNG) \
-	      b=$${n%.*}; \
-	      if grep -qi '^icones=arquivo' "$$d/TEMA.CFG"; then \
-	        ./c_compiler/build/mkicon "$$f" "c_compiler/build/icons/$$t/$$b.ICN" || exit 1; \
-	        mcopy -o -i $(DISK)@@512 "c_compiler/build/icons/$$t/$$b.ICN" "::/SODOS/ICONS/$$t/$$b.ICN" || exit 1; \
-	      fi;; \
-	    esac; \
-	  done; \
-	done
-	@# Abrir com (LINKEXT.EXE + LINKEXT.DLL em \SODOS\DRV); o CFG de exemplo so
-	@# entra se o disco ainda nao tem um (o usuario edita pelo LINKEXT.EXE).
-	@mcopy -o -i $(DISK)@@512 c_compiler/out/LINKEXT.EXE ::/SODOS/LINKEXT.EXE
-	@# Servico SET DISKSYNC=1 (Z:\SAVE -> pendrive), aberto pelo kernel
-	@mcopy -o -i $(DISK)@@512 c_compiler/out/DISKSYNC.EXE ::/SODOS/DISKSYNC.EXE
-	@if ! mdir -i $(DISK)@@512 ::/SODOS/LINKEXT.CFG >/dev/null 2>&1; then mcopy -i $(DISK)@@512 content/LINKEXT.CFG ::/SODOS/LINKEXT.CFG; fi
-	@# Os READMEs vao para \SODOS: no disk.img e no pendrive (U:), se conectado
-	@mcopy -o -i $(DISK)@@512 ../README.md ::/SODOS/README.MD
-	@mcopy -o -i $(DISK)@@512 ../README.pt-BR.md ::/SODOS/README.PT-BR.MD
-	@if ! mdir -i $(DISK)@@512 ::/SODOS/WALLS >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SODOS/WALLS; fi
-	@for f in content/wallpapers/*; do \
-	  [ -f "$$f" ] || continue; \
-	  n=$$(basename "$$f" | tr 'a-z' 'A-Z'); \
-	  mcopy -o -i $(DISK)@@512 "$$f" "::/SODOS/WALLS/$$n" || exit 1; \
-	done
-	@for f in fonts/ship/*; do \
-	  [ -f "$$f" ] || continue; \
-	  n=$$(basename "$$f" | tr 'a-z' 'A-Z'); \
-	  mcopy -o -i $(DISK)@@512 "$$f" "::/SODOS/FONTS/$$n" || exit 1; \
-	done
-	@if ! mdir -i $(DISK)@@512 ::/SRC >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SRC; fi
-	@if ! mdir -i $(DISK)@@512 ::/SRC/MC >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SRC/MC; fi
-	@for f in $(MC_SRC); do \
-	  mcopy -o -i $(DISK)@@512 "$$f" "::/SRC/MC/$$(basename "$$f" | tr 'a-z' 'A-Z')" || exit 1; \
-	done
-	@if ! mdir -i $(DISK)@@512 ::/SRC/TOP >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SRC/TOP; fi
-	@for f in $(TOP_SRC); do \
-	  mcopy -o -i $(DISK)@@512 "$$f" "::/SRC/TOP/$$(basename "$$f" | tr 'a-z' 'A-Z')" || exit 1; \
-	done
-	@if ! mdir -i $(DISK)@@512 ::/SRC/GIT >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SRC/GIT; fi
-	@for f in $(GIT_SRC); do \
-	  mcopy -o -i $(DISK)@@512 "$$f" "::/SRC/GIT/$$(basename "$$f" | tr 'a-z' 'A-Z')" || exit 1; \
-	done
-	@if ! mdir -i $(DISK)@@512 ::/SRC/WIFI >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SRC/WIFI; fi
-	@for f in $(WIFI_SRC); do \
-	  mcopy -o -i $(DISK)@@512 "$$f" "::/SRC/WIFI/$$(basename "$$f" | tr 'a-z' 'A-Z')" || exit 1; \
-	done
-	@if ! mdir -i $(DISK)@@512 ::/SRC/CMD >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SRC/CMD; fi
-	@if ! mdir -i $(DISK)@@512 ::/SRC/CMD/XCOPY >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/SRC/CMD/XCOPY; fi
-	@for f in $(XCOPY_SRC); do \
-	  mcopy -o -i $(DISK)@@512 "$$f" "::/SRC/CMD/XCOPY/$$(basename "$$f" | tr 'a-z' 'A-Z')" || exit 1; \
-	done
-	@if ! mdir -i $(DISK)@@512 ::/DEVELOP >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/DEVELOP; fi
-	@if ! mdir -i $(DISK)@@512 ::/DEVELOP/MAKE >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/DEVELOP/MAKE; fi
-	@for f in $(MAKE_SRC); do \
-	  mcopy -o -i $(DISK)@@512 "$$f" "::/DEVELOP/MAKE/$$(basename "$$f" | tr 'a-z' 'A-Z')" || exit 1; \
-	done
-	@# AGENT.CFG tem a chave da API: fica fora do git, vai so para o disco
-	@if [ -f AGENT.CFG ]; then mcopy -o -i $(DISK)@@512 AGENT.CFG ::/AGENT.CFG || exit 1; fi
-	@# WIFI.SIM: APs falsos para o net wifi scan rodar no QEMU (sem a placa).
-	@# So entra em acao quando a RTL8852BE nao esta no barramento.
-	@if ! mdir -i $(DISK)@@512 ::/NET >/dev/null 2>&1; then mmd -i $(DISK)@@512 ::/NET; fi
-	@mcopy -o -i $(DISK)@@512 wifi/WIFI.SIM ::/NET/WIFI.SIM || exit 1
-	@sh firefox/sodos/scripts/copy-firefox-disk.sh $(DISK)
-	@# Atalho no desktop: o FFLAUNCH.EXE pede ao WIN o D:\FIREFOX\FIREFOX.EXE.
-	@mcopy -o -i $(DISK)@@512 c_compiler/out/FFLAUNCH.EXE ::/USER/DEFAULT/DESKTOP/FIREFOX.EXE
-	@# QEMU (qemu/): QEMU.EXE, firmware, guests de teste e .BAT em D:\UTILS\QEMU
-	@sh qemu/scripts/copy-qemu-disk.sh $(DISK)
+	@sh ../install/install.sh $(DISK)
 	@mdir -i $(DISK)@@512 -w ::/
 	@[ -d "$(DISK)" ] || sh tools/usb-docs.sh
 	@[ -d "$(DISK)" ] || sh tools/usb-wifi.sh
+
+# Arquivos gerados que as listas do install/ copiam, refeitos do zero em
+# c_compiler/build/install: a miniatura .THM de cada imagem solta em content/
+# (desktop.lst) e o .ICN de cada PNG dos temas com icones=arquivo no TEMA.CFG
+# (aparencia.lst).
+.PHONY: install-gerados
+install-gerados:
+	@mkdir -p c_compiler/build
+	@gcc -O2 -D__export= -idirafter c_compiler/include -o c_compiler/build/mkthumb \
+	  c_compiler/img/img.c utils/mkthumb.c
+	@gcc -O2 -D__export= -idirafter c_compiler/include -o c_compiler/build/mkicon \
+	  c_compiler/img/img.c utils/mkicon.c
+	@rm -rf c_compiler/build/install
+	@mkdir -p c_compiler/build/install/desk c_compiler/build/install/icons
+	@for f in content/*; do \
+	  [ -f "$$f" ] || continue; \
+	  n=$$(basename "$$f" | tr 'a-z' 'A-Z'); \
+	  case "$$n" in *.PNG|*.JPG|*.JPE|*.GIF|*.ICO|*.BMP) \
+	    ./c_compiler/build/mkthumb "$$f" "c_compiler/build/install/desk/$${n%.*}.THM" || exit 1 ;; \
+	  esac; \
+	done
+	@for d in content/icons/*/; do \
+	  grep -qi '^icones=arquivo' "$$d/TEMA.CFG" 2>/dev/null || continue; \
+	  t=$$(basename "$$d" | tr 'a-z' 'A-Z'); \
+	  mkdir -p "c_compiler/build/install/icons/$$t"; \
+	  for f in "$$d"*; do \
+	    [ -f "$$f" ] || continue; \
+	    n=$$(basename "$$f" | tr 'a-z' 'A-Z'); \
+	    case "$$n" in *.PNG) \
+	      ./c_compiler/build/mkicon "$$f" "c_compiler/build/install/icons/$$t/$${n%.*}.ICN" || exit 1 ;; \
+	    esac; \
+	  done; \
+	done
+
+# So as listas do install/, sem compilar o c_compiler nem rodar o resto do
+# disk-files. Por exemplo, depois de mudar o docs/CLAUDE-SODOS.md:
+#   make instalar                       todos os componentes, no $(DISK)
+#   make instalar C="claude wsl"        so esses
+#   make instalar DISK=/mnt/sodoshd     FAT32 ja montada (o SSD do make send)
+#   make instalar N=1                   so mostra o que faria
+.PHONY: instalar
+instalar: install-gerados
+	@sh ../install/install.sh $(if $(N),-n) $(DISK) $(C)
 
 # Apaga o perfil do Firefox no disco (D:\USER\DEFAULT\.MOZILLA) e reinstala as
 # prefs do port. Util quando o perfil acumulado de execucoes interrompidas

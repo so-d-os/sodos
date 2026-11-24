@@ -24,7 +24,6 @@
 #include "fbcon.h"
 #include "visual.h"
 
-int win_screen_size(int* w, int* h);
 int win_screen_bgr(int y, uint8_t* dst, int max);
 
 #define SHOT_DIR "Z:\\SAVE\\SCREENSHOT"
@@ -68,6 +67,10 @@ static int next_sec(int t) {
   return h * 10000 + m * 100 + s;
 }
 
+static char shot_last_copy[160];
+
+const char* prtscr_last_copy(void) { return shot_last_copy; }
+
 /* copia em D:\TEMP (ou SET PRTSCRCOPY=pasta; =0 desliga), mesmo nome */
 static void shot_copy(const char* zpath, const uint8_t* png, int len) {
   const char* dir = env_get("PRTSCRCOPY");
@@ -86,6 +89,10 @@ static void shot_copy(const char* zpath, const uint8_t* png, int len) {
   for (p = name; *p && n < 158; p++) dst[n++] = *p;
   dst[n] = 0;
   rc = file_save(dst, (const char*)png, len);
+  if (rc == 0) {
+    for (n = 0; dst[n] && n < (int)sizeof(shot_last_copy) - 1; n++) shot_last_copy[n] = dst[n];
+    shot_last_copy[n] = 0;
+  }
   serial_puts("[prtscr] copia ");
   serial_puts(dst);
   serial_puts(rc == 0 ? " ok\n" : " ERRO ao gravar\n");
@@ -139,11 +146,13 @@ static int shot_store(const char* path, uint8_t* rgb, int w, int h, char* out_pa
 }
 
 int prtscr_save(char* out_path, int max) {
+  shot_last_copy[0] = 0;
   int w = 0, h = 0, y, x, n, rc;
   uint8_t* row;
   uint8_t* rgb;
   char path[80];
-  if (!win_screen_size(&w, &h) || w < 1 || h < 1) return -1;
+  /* a tela que se ve: o comando PRTSC pode vir de uma tela do DOS ao fundo */
+  if (!win_shown_size(&w, &h) || w < 1 || h < 1) return -1;
   rc = shot_path(path);
   if (rc < 0) return rc;
 
@@ -187,6 +196,7 @@ int prtscr_text_save(char* out_path, int max) {
   uint8_t* rgb;
   char path[80];
   int i, rc, r, px;
+  shot_last_copy[0] = 0;
   /* copia antes: o PNG demora e a tela pode mudar no meio */
   for (i = 0; i < TXT_COLS * TXT_ROWS; i++) cells[i] = vga_text[i];
   rc = shot_path(path);

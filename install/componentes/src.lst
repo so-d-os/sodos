@@ -1,0 +1,39 @@
+# Fontes para recompilar dentro do SODOS, pelo BUILD.BAT ou, com o MAKE.EXE,
+# pelo MAKEFILE da pasta. Os .EXE ja vao prontos (programas.lst).
+
+# Midnight Commander: D:\SRC\MC
+copia  src13/mc/*.h        D:\SRC\MC\
+copia  src13/mc/*.c        D:\SRC\MC\
+copia  src13/mc/BUILD.BAT  D:\SRC\MC\
+copia  src13/mc/MAKEFILE   D:\SRC\MC\
+
+# TOP: D:\SRC\TOP
+copia  src13/top/*.h        D:\SRC\TOP\
+copia  src13/top/*.c        D:\SRC\TOP\
+copia  src13/top/BUILD.BAT  D:\SRC\TOP\
+copia  src13/top/MAKEFILE   D:\SRC\TOP\
+
+# git: D:\SRC\GIT (BUILD.BAT e GETSODOS.BAT)
+copia  src13/git/*.h       D:\SRC\GIT\
+copia  src13/git/*.c       D:\SRC\GIT\
+copia  src13/git/*.BAT     D:\SRC\GIT\
+copia  src13/git/MAKEFILE  D:\SRC\GIT\
+
+# WiFi: D:\SRC\WIFI
+copia  src13/wifi/wifi.cpp   D:\SRC\WIFI\
+copia  src13/wifi/BUILD.BAT  D:\SRC\WIFI\
+copia  src13/wifi/WIFI.SIM   D:\SRC\WIFI\
+
+# Comandos externos (.EXE) com fonte em src13/cmd/<nome>: D:\SRC\CMD\<NOME>
+copia  src13/cmd/xcopy/*.cpp      D:\SRC\CMD\XCOPY\
+copia  src13/cmd/xcopy/BUILD.BAT  D:\SRC\CMD\XCOPY\
+copia  src13/cmd/xcopy/MAKEFILE   D:\SRC\CMD\XCOPY\
+
+# Ferramentas de develop/ (fora do src13): D:\DEVELOP\<FERRAMENTA>. O MAKE.EXE
+# vai para a raiz do D: com os outros .EXE.
+copia  develop/make/*.c        D:\DEVELOP\MAKE\
+copia  develop/make/*.h        D:\DEVELOP\MAKE\
+copia  develop/make/BUILD.BAT  D:\DEVELOP\MAKE\
+copia  develop/make/MAKEFILE   D:\DEVELOP\MAKE\
+copia  develop/make/LEIA.TXT   D:\DEVELOP\MAKE\
+copia  develop/make/LICENSE    D:\DEVELOP\MAKE\

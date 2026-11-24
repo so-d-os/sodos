@@ -25,6 +25,8 @@ estão em [`licenses/`](licenses/).
 | Noto Serif | Regular | `NOTOSERF.TTF` | OFL 1.1 | idem |
 | Noto Sans Mono | Regular | `NOTOMONO.TTF` | OFL 1.1 | idem |
 | Sans Serif (coleta) | Regular | `SANSCOLL.TTF` | OFL 1.1 | idem |
+| **DejaVu Sans** | Book | `DEJAVU.TTF` | Bitstream Vera (`DEJAVU.TXT`) | [dejavu-fonts](https://dejavu-fonts.github.io/) 2.37 (Debian `fonts-dejavu-core`) |
+| **DejaVu Sans** | Bold | `DEJAVUBD.TTF` | idem | idem |
 
 As quatro últimas já existiam no repositório (`fonts/ship/`, `OFL.TXT`).
 
@@ -36,6 +38,10 @@ As quatro últimas já existiam no repositório (`fonts/ship/`, `OFL.TXT`).
 - **Montserrat** — títulos e cabeçalhos (geométrica, larga).
 - **JetBrains Mono** — código/terminal (monoespaçada, altura de x grande).
 - **Fira Mono** — segunda monoespaçada, mais estreita.
+- **DejaVu Sans** — fonte de interface dos programas do Windows no WINE: o
+  `system-ui` do Chromium (Claude Desktop) usa ela, como o Claude no Linux.
+  `SET WINEUIFONT=<família>` troca (o WINE.DLL põe o nome no
+  `SPI_GETNONCLIENTMETRICS`).
 
 ## Nomes 8.3
 

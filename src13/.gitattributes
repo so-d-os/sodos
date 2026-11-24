@@ -13,3 +13,4 @@ firefox/sodos/sodos-*          text eol=lf
 firefox/sodos/rust/tools/*     text eol=lf
 firefox/toolchain/bin/*        text eol=lf
 vendor/netsurf/sodos/sodos-cc  text eol=lf
+wsl/scripts/sodos              text eol=lf

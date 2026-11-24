@@ -1,0 +1,3 @@
+# install.sh roda no Linux/WSL: LF mesmo em checkout no Windows
+*.sh   text eol=lf
+*.lst  text eol=lf
