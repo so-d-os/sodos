@@ -4,13 +4,33 @@
  *   git status [pasta]     o que mudou (staged, nao staged, nao rastreado)
  *   git add -u | -A | arquivo...   prepara o proximo commit
  *   git commit [-a] -m mensagem    grava o commit (objetos soltos em .git\objects)
- *   git push               manda os commits locais (precisa de token)
+ *   git push               manda os commits locais (sem login, chama o git login)
+ *   git login | logout     entra no GitHub pelo navegador (codigo) | apaga o token
  *   git diff [--cached] [--numstat|--name-only|--name-status] [HEAD] [arquivo...]
  *   git log [--oneline|--format=...] [-n N]
  *   git config [--global] [--get] chave [valor]
  *   consulta: rev-parse, branch, symbolic-ref, remote, worktree list, ls-files
- * O clone e raso (so o ultimo commit). Arquivos com nome que nao cabe em
- * 8.3 ganham um nome curto (LEIAME~1.MD); a lista fica em .git\sodos\NAMES.TXT.
+ * O clone e raso (so o ultimo commit). Os arquivos ficam com o nome de
+ * verdade (o FAT do SODOS tem nomes longos); so um nome que o FAT nao aceita
+ * (com \ : * ? " < > |) vai com _ no lugar. A lista fica em .git\sodos\NAMES.TXT.
+ *
+ * Versoes (GIT_SODOS_VER; aparece em git --version e no git sem argumentos):
+ *   1.0.12  git login/logout: entra no GitHub pelo navegador com um codigo,
+ *           sem criar token a mao; o primeiro push sem login chama o login;
+ *           clone/pull de repositorio privado do GitHub com esse token.
+ *           Nomes longos em tudo: acabou o nome 8.3 de reserva (LEIAME~1.MD)
+ *           e o aviso de 8.3 da ajuda.
+ *   1.0.13  git login: /user com User-Agent proprio (a API do GitHub recusa
+ *           "git/..." com 403), entao o login volta a saber o usuario; aviso
+ *           quando o clientid e de um GitHub App (Iv..., token ghu_) em vez
+ *           de OAuth App. Push recusado (403) mostra o motivo do GitHub.
+ *   1.0.14  Client ID do OAuth App "SODOS git" (Ov23liW7Qf9Rc1K7lI4h) dentro
+ *           do GIT.EXE: git login e o primeiro push funcionam sem configurar
+ *           nada (git config --global clientid ... ainda troca o app).
+ *   1.0.15  Arquivo de 0 bytes nao aparece mais como "apagado" no status/add:
+ *           o load_file confirma pela entrada da pasta (k_dir_entry).
+ *           Prototipo do git_file no topo: acabou o aviso "funcao 'git_file'
+ *           sem declaracao" na compilacao.
  *
  * Repositorio no formato padrao, em .git:
  *   HEAD, config, refs\heads\<ramo>, refs\remotes\origin\<ramo>, logs\HEAD
@@ -19,7 +39,7 @@
  *   index                                 DIRC v2 do que vai no commit
  * e o que e so do git do SODOS em .git\sodos:
  *   STATE.TXT  url, ref, commit (o HEAD local) e remote (o ultimo do servidor)
- *   NAMES.TXT  arquivos do HEAD: curto TAB longo TAB sha TAB modo
+ *   NAMES.TXT  arquivos do HEAD: nome no disco TAB nome no git TAB sha TAB modo
  *   INDEX.TXT  mesmo formato, o que vai no proximo commit (sem ele = NAMES)
  *   COMMIT.TXT o commit do clone/pull; PACK.TXT o caminho do pack
  *   CONFIG.TXT e X:\GITCONF.TXT (X = disco do GIT.EXE): chave=valor
@@ -28,15 +48,18 @@
 
 /* O repositorio fica em .git, como em qualquer git: HEAD, config, refs,
  * logs, objects (pack do clone com .idx e objetos soltos com zlib) e index.
- * O que e so do git do SODOS (estado, lista de nomes 8.3, o que vai no
+ * O que e so do git do SODOS (estado, lista de nomes, o que vai no
  * commit) fica em .git\sodos. Repositorios antigos (_GIT) sao migrados
  * sozinhos no primeiro comando. */
+#define GIT_SODOS_VER "1.0.15"
 #define GITDIR ".git\\sodos"
 #define OLDDIR "_GIT"
 #define PATHMAX 260
 
 static char err[320];
 static void sync_dotgit(const char* root);
+static int gh_auth(const char* url);
+static void git_file(const char* root, const char* name, char* out);
 
 /* ---------- utilidades ---------- */
 
@@ -57,11 +80,22 @@ static int dir_entries(const char* path) {
   return k_dir(path, &one, 1);
 }
 
-/* Arquivo inteiro (malloc, com 0 no fim). 0 se nao existe. */
+/* Arquivo inteiro (malloc, com 0 no fim). 0 se nao existe.
+ * Arquivo de 0 bytes nao tem cluster no FAT, e o k_fsize/k_fload podem dar
+ * erro nele: quem decide se existe e a entrada da pasta (k_dir_entry). Sem
+ * isso o git status dava "apagado" para um arquivo vazio que esta ali. */
 static char* load_file(const char* path, int* len) {
   int n = k_fsize(path);
   char* b;
-  if (n < 0) return 0;
+  if (n <= 0) {
+    struct k_direntl d;
+    if (n < 0 && (k_dir_entry(path, &d) != 0 || d.dir || d.size != 0)) return 0;
+    b = (char*)malloc(1);
+    if (!b) return 0;
+    b[0] = 0;
+    *len = 0;
+    return b;
+  }
   b = (char*)malloc((size_t)n + 1);
   if (!b) return 0;
   n = k_fload(path, b, n + 1);
@@ -182,10 +216,27 @@ static int get_refs(struct remote* r, int push) {
   sprintf(url, "%s/info/refs?service=%s", r->url, push ? "git-receive-pack" : "git-upload-pack");
   printf("buscando refs de %s\n", r->url);
   st = http_req(url, 0, 0, 0, &body, &len, err);
+  /* repositorio privado do GitHub: de novo com o token do git login */
+  if (!push && (st == 401 || st == 403 || st == 404) && !http_auth[0] && gh_auth(r->url)) {
+    free(body);
+    st = http_req(url, 0, 0, 0, &body, &len, err);
+  }
   if (st < 0) return -1;
   if (st == 401 || st == 403) {
-    if (push) sprintf(err, "HTTP %d: o servidor recusou o login (confira o token: git config token ...)", st);
-    else sprintf(err, "repositorio nao encontrado (ou privado): HTTP %d", st);
+    if (push) {
+      /* o GitHub diz o motivo no corpo: "Permission to dono/repo.git denied to fulano." */
+      char why[200];
+      int k = 0;
+      while (body && k < len && k < (int)sizeof(why) - 1 && body[k] != '\n' && body[k] != '\r') {
+        why[k] = body[k];
+        k++;
+      }
+      why[k] = 0;
+      if (st == 401) sprintf(err, "HTTP 401: o servidor recusou o login (rode git login de novo)");
+      else sprintf(err, "HTTP 403: %s\n  (o token nao pode escrever aqui; veja git login)", why[0] ? why : "sem permissao");
+    } else {
+      sprintf(err, "repositorio nao encontrado (se for privado: git login): HTTP %d", st);
+    }
     free(body);
     return -1;
   }
@@ -311,7 +362,10 @@ static int get_pack(struct remote* r, char** buf, unsigned char** pack, int* ple
   return -1;
 }
 
-/* ---------- nomes 8.3 ---------- */
+/* ---------- nomes no disco ----------
+ * O FAT do SODOS tem nomes longos: cada arquivo fica com o nome do git.
+ * is83 so serve ao git add, para nomes que o FAT antigo gravava em
+ * maiusculas (NOVO.TXT vira novo.txt). */
 
 static int ok83(int c) {
   if (c >= 'A' && c <= 'Z') return 1;
@@ -340,12 +394,6 @@ static int is83(const char* s) {
   return b > 0 && e != 0;
 }
 
-static int used_has(char (*used)[13], int n, const char* s) {
-  int i;
-  for (i = 0; i < n; i++)
-    if (strcmp(used[i], s) == 0) return 1;
-  return 0;
-}
 
 /* Nome que o FAT com nomes longos aceita como esta: sem \ / : * ? " < > |,
  * sem controle, ate 200 caracteres, sem terminar em ponto ou espaco. */
@@ -360,50 +408,55 @@ static int long_ok(const char* n) {
   return 1;
 }
 
-/* Nome curto unico na pasta: README.MD fica; README.pt-BR.md vira README~1.MD. */
-static void make83(const char* name, char (*used)[13], int nused, char* out) {
-  char base[16], ext[4];
-  const char* dot = 0;
+/* 1 se s ja e o nome de outra entrada da arvore ou de um nome ja trocado
+ * nesta pasta (o FAT nao diferencia maiusculas). */
+static int name_taken(const char* s, const unsigned char* tree, int size, char (*used)[256], int nused) {
+  int p = 0, i;
+  for (i = 0; i < nused; i++)
+    if (ci_cmp(used[i], s) == 0) return 1;
+  while (tree && p < size) {
+    while (p < size && tree[p] != ' ') p++;
+    p++;
+    if (p < size && ci_cmp((const char*)tree + p, s) == 0) return 1;
+    while (p < size && tree[p]) p++;
+    p += 21;
+  }
+  return 0;
+}
+
+/* Nome no disco para um nome do git que o FAT nao aceita (\ / : * ? " < > |,
+ * controle, ponto ou espaco no fim): continua longo, com _ no lugar do que
+ * nao pode; se colidir na pasta, ganha ~N antes da extensao. O nome de
+ * verdade fica no NAMES.TXT. out: 256 bytes. */
+static void disk_name(const char* name, const unsigned char* tree, int size, char (*used)[256], int nused, char* out) {
+  char base[210], ext[210];
+  char* dot;
   const char* p;
-  int nb = 0, ne = 0, k;
-  if (is83(name)) {
-    for (k = 0; name[k]; k++) out[k] = (char)up((unsigned char)name[k]);
-    out[k] = 0;
-    if (!used_has(used, nused, out)) return;
+  int l = 0, k;
+  for (p = name; *p && l < 200; p++) {
+    unsigned char c = (unsigned char)*p;
+    base[l++] = (char)((c < 32 || strchr("\\/:*?\"<>|", c)) ? '_' : c);
   }
-  for (p = name + 1; *p; p++)
-    if (*p == '.') dot = p;
-  for (p = name; *p && p != dot && nb < 8; p++) {
-    int c = up((unsigned char)*p);
-    if (c == '.' || c == ' ') continue;
-    base[nb++] = (char)(ok83(c) ? c : '_');
+  if (!l) base[l++] = '_';
+  base[l] = 0;
+  if (base[l - 1] == '.' || base[l - 1] == ' ') base[l - 1] = '_';
+  strcpy(out, base);
+  if (!name_taken(out, tree, size, used, nused)) return;
+  dot = strrchr(base, '.');
+  ext[0] = 0;
+  if (dot && dot != base) {
+    strcpy(ext, dot);
+    *dot = 0;
   }
-  if (!nb) base[nb++] = '_';
-  base[nb] = 0;
-  if (dot)
-    for (p = dot + 1; *p && ne < 3; p++) {
-      int c = up((unsigned char)*p);
-      if (c == '.' || c == ' ') continue;
-      ext[ne++] = (char)(ok83(c) ? c : '_');
-    }
-  ext[ne] = 0;
   for (k = 1; k < 100000; k++) {
-    char num[8];
-    int nl = sprintf(num, "~%d", k), keep = 8 - nl;
-    if (keep > nb) keep = nb;
-    memcpy(out, base, (size_t)keep);
-    strcpy(out + keep, num);
-    if (ne) {
-      strcat(out, ".");
-      strcat(out, ext);
-    }
-    if (!used_has(used, nused, out)) return;
+    sprintf(out, "%s~%d%s", base, k, ext);
+    if (!name_taken(out, tree, size, used, nused)) return;
   }
 }
 
 /* ---------- listas de arquivos (NAMES.TXT, INDEX.TXT) ----------
- * linha: curto TAB longo TAB sha [TAB modo]. Curto "*" = nao esta no disco
- * (caminho longo demais ou submodulo), mas faz parte da arvore. */
+ * linha: nome no disco TAB nome no git TAB sha [TAB modo]. Disco "*" = nao
+ * esta no disco (caminho longo demais ou submodulo), mas faz parte da arvore. */
 
 struct nent {
   char* dos;
@@ -635,7 +688,7 @@ static int checkout_tree(struct co* c, const unsigned char* tsha, const char* do
   unsigned char* t;
   unsigned char* tree;
   int type, size, p, n = 0, nused = 0;
-  char (*used)[13];
+  char (*used)[256];
   t = pack_get(tsha, &type, &size);
   if (!t || type != OBJ_TREE) {
     sprintf(err, "arvore que nao veio no pack");
@@ -647,12 +700,13 @@ static int checkout_tree(struct co* c, const unsigned char* tsha, const char* do
     return -1;
   }
   memcpy(tree, t, (size_t)size);
+  tree[size] = 0;
   for (p = 0; p < size; p++)
     if (tree[p] == 0) n++;
-  used = (char (*)[13])malloc(sizeof(*used) * (size_t)(n + 1));
+  used = 0; /* nomes trocados nesta pasta: so se algum nome nao servir */
   p = 0;
   while (p < size) {
-    char mode[8], name[256], short83[13], dos[PATHMAX], lng[PATHMAX + 256];
+    char mode[8], name[256], fixed[256], dos[PATHMAX], lng[PATHMAX + 256];
     const unsigned char* sha;
     int k = 0;
     while (p < size && tree[p] != ' ' && k < 7) mode[k++] = (char)tree[p++];
@@ -671,18 +725,23 @@ static int checkout_tree(struct co* c, const unsigned char* tsha, const char* do
       names_line(c, "*", lng, sha, mode);
       continue;
     }
-    /* o nome de verdade (o FAT do SODOS tem nomes longos); 8.3 so para nome
-     * que o FAT nao aceita */
+    /* o nome de verdade (o FAT do SODOS tem nomes longos); so um nome que o
+     * FAT nao aceita vai com _ no lugar do caractere proibido */
     if (long_ok(name)) {
-      strcpy(short83, "");
-      if (dosrel[0]) snprintf(dos, sizeof(dos), "%s\\%s", dosrel, name);
-      else snprintf(dos, sizeof(dos), "%s", name);
+      strcpy(fixed, name);
     } else {
-      make83(name, used, nused, short83);
-      strcpy(used[nused++], short83);
-      if (dosrel[0]) sprintf(dos, "%s\\%s", dosrel, short83);
-      else strcpy(dos, short83);
+      if (!used) used = (char (*)[256])malloc(sizeof(*used) * (size_t)(n + 1));
+      if (!used) {
+        sprintf(err, "sem memoria");
+        free(tree);
+        return -1;
+      }
+      disk_name(name, tree, size, used, nused, fixed);
+      strcpy(used[nused++], fixed);
+      printf("  nome que o FAT nao aceita: %s gravado como %s\n", lng, fixed);
     }
+    if (dosrel[0]) snprintf(dos, sizeof(dos), "%s\\%s", dosrel, fixed);
+    else snprintf(dos, sizeof(dos), "%s", fixed);
     if (strcmp(mode, "40000") == 0) {
       if (checkout_tree(c, sha, dos, lng) != 0) {
         free(tree);
@@ -1356,11 +1415,10 @@ static int fetch_checkout(const char* root, struct remote* r, int keep) {
 
 static int cmd_clone(int argc, char** argv) {
   struct remote r;
-  char root[PATHMAX], name[64], short83[13], cwd[PATHMAX];
+  char root[PATHMAX], name[PATHMAX], fixed[256], cwd[PATHMAX];
   const char* p;
   const char* last;
   int n;
-  char none[1][13];
   if (argc < 3) {
     printf("uso: git clone https://servidor/dono/projeto [pasta]\n");
     return 1;
@@ -1372,8 +1430,8 @@ static int cmd_clone(int argc, char** argv) {
     strncpy(name, argv[3], sizeof(name) - 1);
     name[sizeof(name) - 1] = 0;
     if (!strchr(name, ':') && !strchr(name, '\\') && !long_ok(name)) {
-      make83(name, none, 0, short83);
-      strcpy(name, short83);
+      disk_name(name, 0, 0, 0, 0, fixed);
+      strcpy(name, fixed);
     }
   } else {
     last = r.url;
@@ -1383,11 +1441,10 @@ static int cmd_clone(int argc, char** argv) {
     name[sizeof(name) - 1] = 0;
     n = (int)strlen(name);
     if (n > 4 && strcmp(name + n - 4, ".git") == 0) name[n - 4] = 0;
-    /* a pasta com o nome do projeto (o FAT tem nomes longos); 8.3 so se o
-     * nome nao servir */
+    /* a pasta com o nome do projeto (o FAT tem nomes longos) */
     if (!long_ok(name)) {
-      make83(name, none, 0, short83);
-      strcpy(name, short83);
+      disk_name(name, 0, 0, 0, 0, fixed);
+      strcpy(name, fixed);
     }
   }
   if (name[0] && name[1] == ':') strcpy(root, name);
@@ -2840,6 +2897,222 @@ static void base64(const unsigned char* in, int n, char* out) {
   out[o] = 0;
 }
 
+/* ---------- login no GitHub (como o Git Credential Manager do Windows) ----------
+ * Fluxo "device code" do OAuth: o GitHub da um codigo curto, a pessoa abre
+ * github.com/login/device em qualquer navegador (celular, PC), digita o
+ * codigo e autoriza. O git pergunta de tempos em tempos ate o GitHub
+ * entregar o token, que fica no X:\GITCONF.TXT (token= e user=). Ninguem
+ * cria chave nem token a mao.
+ * Precisa do Client ID de um "OAuth App" do GitHub com "Enable Device Flow"
+ * ligado. O Client ID e publico (nao e segredo) e o fluxo nao usa o client
+ * secret. Vem de GIT_CLIENT_ID ou de: git config --global clientid ID */
+#define GIT_CLIENT_ID "Ov23liW7Qf9Rc1K7lI4h" /* OAuth App "SODOS git" */
+#define GH_SCOPE "repo%20workflow" /* repositorios (inclusive privados) e .github\workflows */
+#define GH_FORM "application/x-www-form-urlencoded"
+
+static int hexd(int c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  c = lowc(c);
+  return (c >= 'a' && c <= 'f') ? c - 'a' + 10 : 0;
+}
+
+/* Um campo da resposta do GitHub: formulario (a=1&b=x%2Fy) ou JSON ("a":1).
+ * 1 = achou (out sem o %xx). */
+static int gh_field(const char* t, const char* key, char* out, int max) {
+  int kl = (int)strlen(key), n = 0;
+  const char* p;
+  out[0] = 0;
+  if (!t) return 0;
+  for (p = t; (p = strstr(p, key)) != 0; p += kl) {
+    const char* v = p + kl + 1;
+    if (p > t && p[-1] == '"' && p[kl] == '"') {
+      while (*v == ' ' || *v == ':') v++;
+      if (*v == '"')
+        for (v++; *v && *v != '"' && n < max - 1;) out[n++] = *v++;
+      else
+        while (*v && *v != ',' && *v != '}' && *v != ' ' && *v != '\n' && n < max - 1) out[n++] = *v++;
+    } else if ((p == t || p[-1] == '&') && p[kl] == '=') {
+      while (*v && *v != '&' && *v != '\r' && *v != '\n' && n < max - 1) {
+        if (*v == '%' && v[1] && v[2]) {
+          out[n++] = (char)(hexd(v[1]) * 16 + hexd(v[2]));
+          v += 3;
+        } else {
+          out[n++] = *v == '+' ? ' ' : *v;
+          v++;
+        }
+      }
+    } else {
+      continue;
+    }
+    out[n] = 0;
+    return 1;
+  }
+  return 0;
+}
+
+/* Espera s segundos cedendo o turno. 1 = a pessoa apertou Esc. */
+static int login_wait(int s) {
+  unsigned t0 = k_ms();
+  while (k_ms() - t0 < (unsigned)s * 1000u) {
+    if (k_trygetc() == 27) return 1;
+    k_yield();
+  }
+  return 0;
+}
+
+static int gh_post(const char* url, const char* body, char** out) {
+  int len;
+  return http_req(url, GH_FORM, body, (int)strlen(body), out, &len, err);
+}
+
+static int do_login(void) {
+  char cid[100], dev[128], ucode[32], vuri[200], tmp[160], tok[256], login[128], body[600], path[PATHMAX];
+  char* t = 0;
+  int st, len, interval = 5, expires = 900;
+  unsigned t0;
+  strcpy(cid, GIT_CLIENT_ID);
+  if (cfg_get(0, "clientid", tmp, sizeof(tmp)) && tmp[0]) {
+    strncpy(cid, tmp, sizeof(cid) - 1);
+    cid[sizeof(cid) - 1] = 0;
+  }
+  if (cid[0] == 'I' && cid[1] == 'v') {
+    printf("Aviso: o clientid %s parece ser de um GitHub App (comeca com Iv).\n", cid);
+    printf("O certo e um OAuth App (o Client ID comeca com Ov): veja no fim do login.\n");
+  }
+  if (!cid[0]) {
+    printf("Falta o Client ID do aplicativo de login do GitHub (uma vez so, vale para\n");
+    printf("todo mundo que usar este GIT.EXE):\n");
+    printf("  1. github.com > Settings > Developer settings > OAuth Apps (nao GitHub Apps)\n");
+    printf("     > New OAuth App\n");
+    printf("     nome: SODOS git; Homepage URL e Callback URL: https://github.com\n");
+    printf("  2. marque \"Enable Device Flow\" e salve (nao precisa de client secret)\n");
+    printf("  3. git config --global clientid O_CLIENT_ID   (ou GIT_CLIENT_ID no GIT.C)\n");
+    return 1;
+  }
+  if (!k_net_ready()) {
+    printf("rede nao pronta\n");
+    return 1;
+  }
+  http_auth[0] = 0;
+  sprintf(body, "client_id=%s&scope=%s", cid, GH_SCOPE);
+  st = gh_post("https://github.com/login/device/code", body, &t);
+  if (st < 0) {
+    printf("erro: %s\n", err);
+    return 1;
+  }
+  if (st != 200 || !gh_field(t, "device_code", dev, sizeof(dev)) || !gh_field(t, "user_code", ucode, sizeof(ucode))) {
+    if (!gh_field(t, "error_description", tmp, sizeof(tmp)) && !gh_field(t, "error", tmp, sizeof(tmp)))
+      strcpy(tmp, "sem detalhes");
+    printf("o GitHub recusou o pedido de login (HTTP %d): %s\n", st, tmp);
+    printf("confira o clientid (%s) e se o app tem \"Enable Device Flow\" ligado\n", cid);
+    free(t);
+    return 1;
+  }
+  if (!gh_field(t, "verification_uri", vuri, sizeof(vuri)) || !vuri[0]) strcpy(vuri, "https://github.com/login/device");
+  if (gh_field(t, "interval", tmp, sizeof(tmp)) && atoi(tmp) > 0) interval = atoi(tmp);
+  if (gh_field(t, "expires_in", tmp, sizeof(tmp)) && atoi(tmp) > 0) expires = atoi(tmp);
+  free(t);
+  printf("\nPara entrar no GitHub, abra em qualquer navegador (no celular ou no PC):\n\n");
+  printf("    %s\n\n", vuri);
+  printf("e digite o codigo:   %s\n\n", ucode);
+  printf("Esperando a autorizacao (Esc cancela)");
+  fflush(stdout);
+  t0 = k_ms();
+  for (;;) {
+    if (login_wait(interval)) {
+      printf("\ncancelado\n");
+      return 1;
+    }
+    if ((k_ms() - t0) / 1000u > (unsigned)expires) {
+      printf("\no codigo expirou: rode git login de novo\n");
+      return 1;
+    }
+    sprintf(body, "client_id=%s&device_code=%s&grant_type=urn%%3Aietf%%3Aparams%%3Aoauth%%3Agrant-type%%3Adevice_code",
+            cid, dev);
+    t = 0;
+    st = gh_post("https://github.com/login/oauth/access_token", body, &t);
+    if (st < 0) { /* a rede falhou desta vez: tenta no proximo intervalo */
+      printf("!");
+      fflush(stdout);
+      continue;
+    }
+    if (gh_field(t, "access_token", tok, sizeof(tok)) && tok[0]) {
+      free(t);
+      break;
+    }
+    gh_field(t, "error", tmp, sizeof(tmp));
+    if (strcmp(tmp, "authorization_pending") == 0) {
+      printf(".");
+      fflush(stdout);
+    } else if (strcmp(tmp, "slow_down") == 0) {
+      char iv[16];
+      interval = gh_field(t, "interval", iv, sizeof(iv)) && atoi(iv) > interval ? atoi(iv) : interval + 5;
+    } else {
+      if (strcmp(tmp, "access_denied") == 0) printf("\no acesso foi recusado na pagina do GitHub\n");
+      else if (strcmp(tmp, "expired_token") == 0) printf("\no codigo expirou: rode git login de novo\n");
+      else printf("\no GitHub respondeu HTTP %d: %s\n", st, tmp[0] ? tmp : "sem token");
+      free(t);
+      return 1;
+    }
+    free(t);
+  }
+  /* quem entrou: o login vai no "usuario" do Basic do push */
+  login[0] = 0;
+  t = 0;
+  sprintf(http_auth, "Authorization: Bearer %s", tok);
+  sprintf(http_ua, "SODOS-git/%s", GIT_SODOS_VER); /* a API recusa "git/..." */
+  st = http_req("https://api.github.com/user", 0, 0, 0, &t, &len, err);
+  http_auth[0] = 0;
+  http_ua[0] = 0;
+  if (st == 200) gh_field(t, "login", login, sizeof(login));
+  free(t);
+  cfg_path(0, 1, path);
+  if (cfg_set(path, "token", tok) != 0 || cfg_set(path, "user", login) != 0) {
+    printf("\nnao gravou %s\n", path);
+    return 1;
+  }
+  printf("\n\nPronto: entrou no GitHub%s%s. O acesso ficou em %s.\n", login[0] ? " como " : "", login, path);
+  if (strncmp(tok, "ghu_", 4) == 0) {
+    /* token de GitHub App: so vale onde o app estiver instalado e com as
+     * permissoes dele, e por padrao expira em 8 horas */
+    printf("\nAtencao: o clientid %s e de um GitHub App, nao de um OAuth App.\n", cid);
+    printf("O push so funciona nos repositorios onde o app estiver instalado (com\n");
+    printf("permissao Contents: Read and write), e o acesso expira em 8 horas.\n");
+    printf("Melhor: github.com > Settings > Developer settings > OAuth Apps > New OAuth App,\n");
+    printf("marque \"Enable Device Flow\" e depois:\n");
+    printf("  git config --global clientid NOVO_ID     e     git login\n");
+  }
+  return 0;
+}
+
+static int cmd_login(void) { return do_login(); }
+
+static int cmd_logout(void) {
+  char path[PATHMAX];
+  cfg_path(0, 1, path);
+  if (cfg_set(path, "token", "") != 0 || cfg_set(path, "user", "") != 0) {
+    printf("nao gravou %s\n", path);
+    return 1;
+  }
+  printf("Saiu: o token foi apagado de %s.\n", path);
+  printf("No GitHub o app continua autorizado ate voce tirar em Settings > Applications.\n");
+  return 0;
+}
+
+/* Clone/pull de repositorio privado do GitHub: Basic com o token do git
+ * login (ou de SET GIT_TOKEN). 1 = ha token e http_auth foi preenchido. */
+static int gh_auth(const char* url) {
+  char token[256], login[128], line[400], cred[560];
+  if (!ci_start(url, "https://github.com/")) return 0;
+  if (!cfg_get(0, "token", token, sizeof(token)) || !token[0]) return 0;
+  if (!cfg_get(0, "user", login, sizeof(login)) || !login[0]) strcpy(login, "x-access-token");
+  sprintf(line, "%s:%s", login, token);
+  base64((unsigned char*)line, (int)strlen(line), cred);
+  if (strlen(cred) + 30 > sizeof(http_auth)) return 0;
+  sprintf(http_auth, "Authorization: Basic %s", cred);
+  return 1;
+}
+
 /* git push|pull [origin [ramo]] [-u] [pasta]: so o que parece pasta vale
  * (antes "git push origin main" procurava a pasta "origin") */
 static const char* path_arg(int argc, char** argv) {
@@ -2877,10 +3150,16 @@ static int cmd_push(int argc, char** argv) {
     return 1;
   }
   if (!cfg_get(root, "token", token, sizeof(token)) || !token[0]) {
-    printf("falta o token de acesso (no GitHub: Settings > Developer settings > Personal access tokens,\n");
-    printf("com permissao de escrita no repositorio). Guarde com:\n");
-    printf("  git config --global token SEU_TOKEN     (ou SET GIT_TOKEN=...)\n");
-    return 1;
+    if (!ci_start(r.url, "https://github.com/")) {
+      printf("falta o token de acesso deste servidor. Guarde com:\n");
+      printf("  git config --global token SEU_TOKEN     (ou SET GIT_TOKEN=...)\n");
+      return 1;
+    }
+    /* como no Windows: o primeiro push pede o login */
+    printf("Ainda nao entrou no GitHub neste SODOS.\n");
+    if (do_login() != 0) return 1;
+    if (!cfg_get(root, "token", token, sizeof(token)) || !token[0]) return 1;
+    printf("\n");
   }
   if (!cfg_get(root, "user", login, sizeof(login)) || !login[0]) strcpy(login, "x-access-token");
   sprintf(line, "%s:%s", login, token);
@@ -3600,7 +3879,7 @@ static int log_wants_fmt(int argc, char** argv) {
 }
 
 static void usage(void) {
-  printf("git do SODOS (clone raso)\n");
+  printf("git do SODOS %s (clone raso)\n", GIT_SODOS_VER);
   printf("  git clone https://github.com/dono/projeto [pasta]\n");
   printf("  git pull [pasta]        atualiza para o ultimo commit\n");
   printf("  git status [pasta]      o que mudou\n");
@@ -3609,10 +3888,11 @@ static void usage(void) {
   printf("  git add arquivo|pasta   poe esse no commit\n");
   printf("  git diff [--cached] [arquivo]\n");
   printf("  git commit [-a] -m mensagem\n");
-  printf("  git push                manda os commits (git config token ...)\n");
+  printf("  git push                manda os commits (o primeiro pede o login)\n");
+  printf("  git login               entra no GitHub: abre github.com/login/device e digita o codigo\n");
+  printf("  git logout              apaga o token guardado\n");
   printf("  git log [pasta]\n");
   printf("  git config [--global] chave [valor]   user.name, user.email, token, tz (-0300)\n");
-  printf("Nomes longos viram 8.3 (LEIAME~1.MD); veja .git\\sodos\\NAMES.TXT.\n");
 }
 
 static int git_main(int argc, char** argv);
@@ -3632,7 +3912,7 @@ static int git_main(int argc, char** argv) {
     const char* o = argv[1];
     int take = 1;
     if (strcmp(o, "--version") == 0 || strcmp(o, "version") == 0) {
-      printf("git version 2.45.0.sodos\n");
+      printf("git version 2.45.0.sodos (GIT.EXE %s)\n", GIT_SODOS_VER);
       return 0;
     }
     if (strcmp(o, "-C") == 0 && argc > 2) {
@@ -3656,7 +3936,7 @@ static int git_main(int argc, char** argv) {
     return 1;
   }
   if (strcmp(argv[1], "version") == 0) {
-    printf("git version 2.45.0.sodos\n");
+    printf("git version 2.45.0.sodos (GIT.EXE %s)\n", GIT_SODOS_VER);
     return 0;
   }
   if (strcmp(argv[1], "rev-parse") == 0) return cmd_rev_parse(argc, argv);
@@ -3675,6 +3955,8 @@ static int git_main(int argc, char** argv) {
   if (strcmp(argv[1], "push") == 0) return cmd_push(argc, argv);
   if (strcmp(argv[1], "diff") == 0) return cmd_diff(argc, argv);
   if (strcmp(argv[1], "config") == 0) return cmd_config(argc, argv);
+  if (strcmp(argv[1], "login") == 0) return cmd_login();
+  if (strcmp(argv[1], "logout") == 0) return cmd_logout();
   printf("git: '%s' is not a git command (git do SODOS). Veja 'git --help'.\n", argv[1]);
   return 1;
 }

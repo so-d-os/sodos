@@ -1,6 +1,6 @@
-/* git.h - git minimo do SODOS: clone e pull (raso, so leitura) por HTTPS,
- * status e log. Os arquivos ficam com nomes 8.3; o nome longo de cada um
- * esta em <pasta>\_GIT\NAMES.TXT.
+/* git.h - git minimo do SODOS: clone e pull (raso), commit e push por
+ * HTTPS, status, diff e log. Os arquivos ficam com o nome longo de verdade;
+ * a lista esta em <pasta>\.git\sodos\NAMES.TXT.
  *   cc -o GIT.EXE git.c http.c pack.c sha1.c zinf.c TLS.DLL */
 #ifndef GIT_H
 #define GIT_H
@@ -39,6 +39,7 @@ int zstore(const unsigned char* src, int slen, unsigned char* dst);
 /* GET (body = 0) ou POST para https://... Segue redirecionamentos.
  * *out e malloc. Devolve o status HTTP, ou -1 com err preenchido. */
 extern char http_auth[400];   /* "Authorization: Basic ..." ou vazio */
+extern char http_ua[64];      /* User-Agent; vazio = o do git */
 int http_req(const char* url, const char* ctype, const char* body, int blen, char** out, int* olen,
              char* err);
 

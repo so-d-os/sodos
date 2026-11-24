@@ -7,6 +7,9 @@
 
 /* "Authorization: Basic ..." do push; vazio = sem login */
 char http_auth[400];
+/* User-Agent; vazio = o do git. A API do GitHub (api.github.com) recusa
+ * com 403 qualquer User-Agent que comece com "git/". */
+char http_ua[64];
 
 struct url {
   char host[128];
@@ -130,18 +133,19 @@ static int once(const struct url* u, const char* ctype, const char* body, int bl
   char* buf = 0;
   int len = 0, cap = 0, hdr_end = -1, clen = -1, chunked = 0, status = 0, shown = 0;
   int rn;
+  const char* ua = http_ua[0] ? http_ua : "git/2.43.0 (SODOS)";
   auth[0] = 0;
   if (http_auth[0]) sprintf(auth, "%s\r\n", http_auth);
   if (body)
     rn = sprintf(req,
-                 "POST %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: git/2.43.0 (SODOS)\r\n"
+                 "POST %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\n"
                  "%sAccept: */*\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
-                 u->path, u->host, auth, ctype, blen);
+                 u->path, u->host, ua, auth, ctype, blen);
   else
     rn = sprintf(req,
-                 "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: git/2.43.0 (SODOS)\r\n"
+                 "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\n"
                  "%sAccept: */*\r\nConnection: close\r\n\r\n",
-                 u->path, u->host, auth);
+                 u->path, u->host, ua, auth);
   if (u->tls) {
     if (tls_connect(u->host, u->port) != 0) {
       sprintf(err, "TLS falhou: %s", tls_error());
