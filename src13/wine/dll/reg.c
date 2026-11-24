@@ -355,10 +355,242 @@ static WINAPI long RegNotifyChangeKeyValue(HANDLE h, BOOL sub, DWORD flt, HANDLE
   return 0;
 }
 
+/* ---------- registro nativo da ntdll (Nt*Key) ----------
+ * O chrome_elf.dll do Chrome le e grava o registro por aqui, com caminhos
+ * "\Registry\Machine\..." e "\Registry\User\<SID>\..." (a SID vem do
+ * RtlFormatCurrentUserKeyPath, misc.c). Sao as mesmas chaves do Reg*:
+ * Machine -> hklm, User\<SID> -> hkcu, User\<SID>_Classes -> hkcr, o resto
+ * de User -> hku. Com RootDirectory, o nome e relativo a esse HKEY. */
+#define ST_OK 0L
+#define ST_BUFFER_OVERFLOW ((long)0x80000005L)
+#define ST_INVALID_INFO_CLASS ((long)0xC0000003L)
+#define ST_INVALID_HANDLE ((long)0xC0000008L)
+#define ST_INVALID_PARAMETER ((long)0xC000000DL)
+#define ST_NO_MEMORY ((long)0xC0000017L)
+#define ST_BUFFER_TOO_SMALL ((long)0xC0000023L)
+#define ST_NAME_NOT_FOUND ((long)0xC0000034L)
+
+/* a mesma SID do sec.c e do misc.c, em minusculas */
+#define USER_SID "s-1-5-21-1329876819-1464486739-555819301-1000"
+
+struct nt_ustr { /* UNICODE_STRING: len em bytes, sem 0 no fim */
+  uint16_t len, max;
+  wchar16* buf;
+};
+struct nt_oa { /* OBJECT_ATTRIBUTES */
+  DWORD len;
+  HANDLE root;
+  const struct nt_ustr* name;
+  DWORD attr;
+  void* sd;
+  void* sqos;
+};
+
+static int ustr8(const struct nt_ustr* u, char* d, int max) {
+  int n = (u && u->buf) ? wutf16_to_8(u->buf, u->len / 2, d, max - 1) : 0;
+  d[n] = 0;
+  return n;
+}
+
+/* "\Registry\..." -> "hklm\..." (0 = fora do registro) */
+static int native_path(const char* s, char* out, int max) {
+  char low[400];
+  const char* rest;
+  const char* root;
+  int n;
+  wlower(low, s, (int)sizeof(low));
+  if (strncmp(low, "\\registry\\machine", 17) == 0) {
+    root = "hklm";
+    rest = low + 17;
+  } else if (strncmp(low, "\\registry\\user", 14) == 0) {
+    root = "hku";
+    rest = low + 14;
+    if (rest[0] == '\\' && strncmp(rest + 1, USER_SID, sizeof(USER_SID) - 1) == 0) {
+      const char* t = rest + sizeof(USER_SID);
+      if (strncmp(t, "_classes", 8) == 0 && (t[8] == 0 || t[8] == '\\')) {
+        root = "hkcr";
+        rest = t + 8;
+      } else if (*t == 0 || *t == '\\') {
+        root = "hkcu";
+        rest = t;
+      }
+    }
+  } else {
+    return 0;
+  }
+  if (*rest && *rest != '\\') return 0;
+  if ((int)(strlen(root) + strlen(rest)) >= max) return 0;
+  strcpy(out, root);
+  strcat(out, rest);
+  n = (int)strlen(out);
+  while (n > 0 && out[n - 1] == '\\') out[--n] = 0;
+  return 1;
+}
+
+static long nt_path(const struct nt_oa* oa, char* out, int max) {
+  char s8[400];
+  if (!oa || !oa->name) return ST_INVALID_PARAMETER;
+  ustr8(oa->name, s8, (int)sizeof(s8));
+  if (oa->root) return key_path(oa->root, s8, out, max) ? ST_OK : ST_INVALID_HANDLE;
+  if (!native_path(s8, out, max)) {
+    if (wine_debug) wlog("NtOpenKey/NtCreateKey: caminho fora do registro ", s8);
+    return ST_NAME_NOT_FOUND;
+  }
+  return ST_OK;
+}
+
+/* A lista guarda so as chaves criadas: a raiz (hklm, hkcu...) e as pastas
+ * acima de uma chave existente tambem existem, como no Windows. */
+static int key_exists(struct wreg* r, const char* path) {
+  struct rkey* k;
+  size_t n = strlen(path);
+  if (!strchr(path, '\\')) return 1;
+  for (k = r->keys; k; k = k->next)
+    if (strncmp(k->path, path, n) == 0 && (k->path[n] == 0 || k->path[n] == '\\')) return 1;
+  return 0;
+}
+
+static WINAPI long NtOpenKeyEx(HANDLE* out, DWORD acc, const struct nt_oa* oa, DWORD opt) {
+  struct wreg* r = reg_get();
+  char path[400];
+  long st;
+  (void)acc;
+  (void)opt;
+  if (!out) return ST_INVALID_PARAMETER;
+  *out = 0;
+  if (!r) return ST_NO_MEMORY;
+  st = nt_path(oa, path, (int)sizeof(path));
+  if (st != ST_OK) return st;
+  if (!key_exists(r, path)) {
+    if (wine_debug) wlog("NtOpenKey (nao existe) ", path);
+    return ST_NAME_NOT_FOUND;
+  }
+  *out = key_handle(path);
+  return *out ? ST_OK : ST_NO_MEMORY;
+}
+static WINAPI long NtOpenKey(HANDLE* out, DWORD acc, const struct nt_oa* oa) { return NtOpenKeyEx(out, acc, oa, 0); }
+
+static WINAPI long NtCreateKey(HANDLE* out, DWORD acc, const struct nt_oa* oa, DWORD title, const struct nt_ustr* cls,
+                               DWORD opt, DWORD* disp) {
+  struct wreg* r = reg_get();
+  char path[400];
+  int existed;
+  long st;
+  (void)acc; (void)title; (void)cls; (void)opt;
+  if (!out) return ST_INVALID_PARAMETER;
+  *out = 0;
+  if (!r) return ST_NO_MEMORY;
+  st = nt_path(oa, path, (int)sizeof(path));
+  if (st != ST_OK) return st;
+  existed = key_exists(r, path);
+  if (!key_make(r, path)) return ST_NO_MEMORY;
+  if (disp) *disp = existed ? 2 : 1; /* REG_OPENED_EXISTING_KEY : REG_CREATED_NEW_KEY */
+  if (wine_debug) wlog("NtCreateKey ", path);
+  *out = key_handle(path);
+  return *out ? ST_OK : ST_NO_MEMORY;
+}
+
+static void put32(uint8_t* p, DWORD v) { memcpy(p, &v, 4); }
+
+/* KEY_VALUE_{BASIC,FULL,PARTIAL}_INFORMATION e a PARTIAL_ALIGN64. O Chrome
+ * pede FULL com buffer 0 para saber o tamanho: espera BUFFER_TOO_SMALL. */
+static WINAPI long NtQueryValueKey(HANDLE h, const struct nt_ustr* name, DWORD cls, void* info, DWORD len,
+                                   DWORD* ret) {
+  struct rkey* k = key_of(h, 0);
+  struct rval* v;
+  uint8_t* o = (uint8_t*)info;
+  char n8[200];
+  DWORD nl = name ? name->len : 0, fixed, total;
+  ustr8(name, n8, (int)sizeof(n8));
+  v = k ? val_find(k, n8) : 0;
+  if (!v) {
+    if (wine_debug) wlog("NtQueryValueKey (nao existe) ", n8);
+    return ST_NAME_NOT_FOUND;
+  }
+  if (cls == 0) { /* Basic: indice, tipo, NameLength, Name */
+    fixed = 12;
+    total = fixed + nl;
+  } else if (cls == 1) { /* Full: indice, tipo, DataOffset, DataLength, NameLength, Name, dados */
+    fixed = 20;
+    total = fixed + nl + v->size;
+  } else if (cls == 2) { /* Partial: indice, tipo, DataLength, Data */
+    fixed = 12;
+    total = fixed + v->size;
+  } else if (cls == 3) { /* PartialAlign64: tipo, DataLength, Data */
+    fixed = 8;
+    total = fixed + v->size;
+  } else {
+    return ST_INVALID_INFO_CLASS;
+  }
+  if (ret) *ret = total;
+  if (!o || len < fixed) return ST_BUFFER_TOO_SMALL;
+  if (cls == 3) {
+    put32(o, v->type);
+    put32(o + 4, v->size);
+  } else {
+    put32(o, 0);
+    put32(o + 4, v->type);
+    if (cls == 0) put32(o + 8, nl);
+    else if (cls == 2) put32(o + 8, v->size);
+    else {
+      put32(o + 8, fixed + nl);
+      put32(o + 12, v->size);
+      put32(o + 16, nl);
+    }
+  }
+  if (len < total) return ST_BUFFER_OVERFLOW;
+  if (cls == 0 || cls == 1) {
+    if (nl) memcpy(o + fixed, name->buf, nl);
+    if (cls == 1 && v->size) memcpy(o + fixed + nl, v->data, v->size);
+  } else if (v->size) {
+    memcpy(o + fixed, v->data, v->size);
+  }
+  return ST_OK;
+}
+
+static WINAPI long NtSetValueKey(HANDLE h, const struct nt_ustr* name, DWORD title, DWORD type, const void* data,
+                                 DWORD size) {
+  struct wreg* r = reg_get();
+  struct rkey* k;
+  char path[400], n8[200];
+  (void)title;
+  if (!r || !key_path(h, 0, path, (int)sizeof(path))) return ST_INVALID_HANDLE;
+  k = key_make(r, path); /* chave so implicita (pasta acima de outra) passa a existir */
+  if (!k) return ST_NO_MEMORY;
+  ustr8(name, n8, (int)sizeof(n8));
+  val_set(k, n8, type, data, size);
+  return ST_OK;
+}
+
+static WINAPI long NtDeleteKey(HANDLE h) {
+  struct wreg* r = reg_get();
+  struct rkey** pp;
+  char path[400];
+  if (!r || !key_path(h, 0, path, (int)sizeof(path))) return ST_INVALID_HANDLE;
+  for (pp = &r->keys; *pp; pp = &(*pp)->next) {
+    struct rkey* k = *pp;
+    if (strcmp(k->path, path) == 0) {
+      *pp = k->next;
+      while (k->vals) {
+        struct rval* v = k->vals;
+        k->vals = v->next;
+        k_free(v->name);
+        k_free(v->data);
+        k_free(v);
+      }
+      k_free(k->path);
+      k_free(k);
+      break;
+    }
+  }
+  return ST_OK;
+}
+
 #define S(n) {#n, (void*)n}
 const struct wine_sym reg_syms[] = {
     S(RegOpenKeyExW), S(RegOpenKeyExA), S(RegCreateKeyExW), S(RegCloseKey), S(RegQueryValueExW),
     S(RegGetValueW), S(RegSetValueExW), S(RegDeleteValueW), S(RegDeleteKeyW), S(RegDeleteKeyExW),
     S(RegDeleteTreeW), S(RegEnumKeyExW), S(RegEnumValueW), S(RegQueryInfoKeyW), S(RegFlushKey),
     S(RegNotifyChangeKeyValue),
+    S(NtOpenKeyEx), S(NtOpenKey), S(NtCreateKey), S(NtQueryValueKey), S(NtSetValueKey), S(NtDeleteKey),
     {0, 0}};
