@@ -2042,6 +2042,171 @@ fail:
   return 1;
 }
 
+/* ---------- restore e reset ---------- */
+
+/* dos (caminho do disco relativo a root) esta em rel? rel "" = tudo; pasta =
+ * o que esta dentro dela */
+static int rel_has(const char* rel, int dir, const char* dos) {
+  int n = (int)strlen(rel);
+  if (!n) return 1;
+  if (!dir) return ci_cmp(dos, rel) == 0;
+  return ci_start(dos, rel) && (dos[n] == '\\' || dos[n] == 0);
+}
+
+/* git restore [--staged] [--worktree] caminho...
+ *   sem opcao:  a pasta volta a versao do stage (INDEX.TXT)
+ *   --staged:   o stage volta a versao do commit atual (NAMES.TXT); arquivo
+ *               novo (que nao esta no commit) sai do stage e fica na pasta
+ *   os dois:    stage e pasta voltam ao commit atual */
+static int cmd_restore(int argc, char** argv) {
+  char root[PATHMAX], rel[PATHMAX * 2], path[PATHMAX * 2], full[PATHMAX * 2];
+  struct list idx, head;
+  int i, k, staged = 0, work = 0, nfiles = 0, restored = 0, unstaged = 0, missing = 0;
+  if (find_root(0, root) != 0) {
+    printf("%s\n", err);
+    return 1;
+  }
+  for (i = 2; i < argc; i++) {
+    if (strcmp(argv[i], "--staged") == 0 || strcmp(argv[i], "-S") == 0) staged = 1;
+    else if (strcmp(argv[i], "--worktree") == 0 || strcmp(argv[i], "-W") == 0) work = 1;
+    else if (argv[i][0] == '-') {
+      printf("opcao desconhecida: %s\n", argv[i]);
+      return 1;
+    } else nfiles++;
+  }
+  if (!nfiles) {
+    printf("uso: git restore [--staged] [--worktree] arquivo-ou-pasta...  (. = tudo)\n");
+    return 1;
+  }
+  if (!staged) work = 1;
+  index_load(root, &idx);
+  list_load(root, "NAMES.TXT", &head);
+  for (i = 2; i < argc; i++) {
+    int dir, hit = 0;
+    if (argv[i][0] == '-') continue;
+    if (rel_path(root, argv[i], rel) != 0) {
+      printf("erro: %s\n", err);
+      return 1;
+    }
+    path_join(path, root, rel);
+    dir = !rel[0] || is_dir(path);
+    if (staged) {
+      /* stage = commit atual: o que esta no stage e o que esta no commit */
+      for (k = 0; k < idx.n; k++) {
+        struct nent* e = &idx.e[k];
+        struct nent* h;
+        if (e->dos[0] == '*' || !rel_has(rel, dir, e->dos)) continue;
+        hit = 1;
+        h = list_find(&head, e->lng);
+        if (!h) {
+          if (!e->gone) unstaged++;
+          e->gone = 1;
+          continue;
+        }
+        if (e->gone || memcmp(e->sha, h->sha, 20) != 0) unstaged++;
+        memcpy(e->sha, h->sha, 20);
+        memcpy(e->mode, h->mode, sizeof(e->mode));
+        e->hasmode = h->hasmode;
+        e->gone = 0;
+      }
+      for (k = 0; k < head.n; k++) {
+        struct nent* h = &head.e[k];
+        struct nent* e;
+        if (h->dos[0] == '*' || !rel_has(rel, dir, h->dos)) continue;
+        hit = 1;
+        if (list_find(&idx, h->lng)) continue;
+        e = list_push(&idx);
+        if (!e) {
+          printf("sem memoria\n");
+          return 1;
+        }
+        *e = *h;
+        e->seen = 0;
+        e->gone = 0;
+        unstaged++;
+      }
+    }
+    if (work) {
+      for (k = 0; k < idx.n; k++) {
+        struct nent* e = &idx.e[k];
+        unsigned char* data;
+        int len;
+        if (!on_disk(e) || !rel_has(rel, dir, e->dos)) continue;
+        hit = 1;
+        data = blob_get(root, e->sha, &len);
+        if (!data) {
+          printf("sem o conteudo de %s\n", e->lng);
+          missing++;
+          continue;
+        }
+        path_join(full, root, e->dos);
+        make_parents(root, full);
+        if (k_fsave(full, (const char*)data, len) != 0) {
+          printf("nao gravou %s\n", full);
+          missing++;
+        } else {
+          restored++;
+        }
+        free(data);
+      }
+    }
+    if (!hit) printf("nao esta no git: %s\n", argv[i]);
+  }
+  if (staged && list_save(root, "INDEX.TXT", &idx) != 0) {
+    printf("nao gravou o INDEX.TXT\n");
+    return 1;
+  }
+  if (staged) printf("%d tirado(s) do stage\n", unstaged);
+  if (work) printf("%d arquivo(s) restaurado(s)\n", restored);
+  return missing ? 1 : 0;
+}
+
+/* git reset origin: o commit atual volta a ser o do servidor (o do ultimo
+ * pull ou push). Os commits locais saem do ramo; os arquivos da pasta nao
+ * mudam (o que difere aparece no git status) e o stage fica vazio. Destrava
+ * o pull quando ha commits locais e o servidor mudou. */
+static int cmd_reset(int argc, char** argv) {
+  struct remote r;
+  char root[PATHMAX], hex[41], bhex[41], path[PATHMAX];
+  unsigned char cur[20], base[20];
+  int gr;
+  if (argc != 3 || (strcmp(argv[2], "origin") != 0 && strncmp(argv[2], "origin/", 7) != 0)) {
+    printf("uso: git reset origin   (volta ao commit do servidor; a pasta nao muda)\n");
+    return 1;
+  }
+  if (find_root(0, root) != 0) {
+    printf("%s\n", err);
+    return 1;
+  }
+  if (state_read(root, &r, cur, base) != 0) {
+    printf("%s\\%s\\STATE.TXT invalido\n", root, GITDIR);
+    return 1;
+  }
+  sha_hex(cur, hex);
+  sha_hex(base, bhex);
+  if (memcmp(cur, base, 20) == 0) {
+    printf("Ja esta no commit do servidor (%.12s): nada a desfazer.\n", bhex);
+    return 0;
+  }
+  if (!k_net_ready()) {
+    printf("rede nao pronta (o reset baixa o commit do servidor para refazer a lista)\n");
+    return 1;
+  }
+  printf("commit local %.12s -> commit do servidor %.12s\n", hex, bhex);
+  memcpy(r.head, base, 20);
+  list_load(root, "NAMES.TXT", &olds);
+  gr = fetch_checkout(root, &r, 1); /* keep: so refaz a lista, nao grava por cima */
+  if (gr != 0) {
+    printf(gr < 0 ? "\nerro: %s\n" : "erro: %s\n", err);
+    return 1;
+  }
+  sprintf(path, "%s\\%s\\INDEX.TXT", root, GITDIR);
+  k_fdelete(path);
+  printf("Pronto. O commit %.12s continua guardado no .git.\n", hex);
+  printf("Os arquivos da pasta nao mudaram: git status mostra o que difere do servidor.\n");
+  return 0;
+}
+
 /* ---------- status ---------- */
 
 static int count_ahead(const char* root, const unsigned char* cur, const unsigned char* base) {
@@ -3951,6 +4116,8 @@ static int git_main(int argc, char** argv) {
   if (strcmp(argv[1], "status") == 0) return cmd_status(argc, argv);
   if (strcmp(argv[1], "log") == 0) return cmd_log(argc, argv);
   if (strcmp(argv[1], "add") == 0) return cmd_add(argc, argv);
+  if (strcmp(argv[1], "restore") == 0) return cmd_restore(argc, argv);
+  if (strcmp(argv[1], "reset") == 0) return cmd_reset(argc, argv);
   if (strcmp(argv[1], "commit") == 0) return cmd_commit(argc, argv);
   if (strcmp(argv[1], "push") == 0) return cmd_push(argc, argv);
   if (strcmp(argv[1], "diff") == 0) return cmd_diff(argc, argv);
