@@ -460,17 +460,6 @@ static const int ZIG[64] = {
   35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
   58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63
 };
-static const int COS8[8][8] = {
-  {256, 251, 237, 213, 181, 142, 98, 50},
-  {256, 213, 98, -50, -181, -251, -237, -142},
-  {256, 142, -98, -251, -181, 50, 237, 213},
-  {256, 50, -237, -142, 181, 213, -98, -251},
-  {256, -50, -237, 142, 181, -213, -98, 251},
-  {256, -142, -98, 251, -181, -50, 237, -213},
-  {256, -213, 98, 50, -181, 251, -237, 142},
-  {256, -251, 237, -213, 181, -142, 98, -50}
-};
-
 typedef struct {
   const u8* p;
   int n, i;
@@ -498,8 +487,35 @@ static int jbyte(jbit_t* b) {
   return c;
 }
 
+/* Enche o acumulador (ate 32 bits) sem passar de um marcador: o marcador fica
+ * para o jbyte, que trata RST e fim de dados como sempre (caminho lento). */
+static void jfill(jbit_t* b) {
+  const u8* p = b->p;
+  int i = b->i, n = b->n, nbit = b->nbit;
+  unsigned acc = b->acc;
+  while (nbit <= 24 && i < n) {
+    int c = p[i];
+    if (c == 0xFF) {
+      if (i + 1 >= n || p[i + 1] != 0) break;
+      i += 2;
+    } else {
+      i++;
+    }
+    acc = (acc << 8) | (unsigned)c;
+    nbit += 8;
+  }
+  b->i = i;
+  b->nbit = nbit;
+  b->acc = acc;
+}
+
 static int jbits(jbit_t* b, int n) {
   int v = 0;
+  if (b->nbit < n) jfill(b);
+  if (b->nbit >= n) {
+    b->nbit -= n;
+    return (int)((b->acc >> b->nbit) & ((1u << n) - 1u));
+  }
   while (n > 0) {
     if (b->nbit == 0) {
       int c = jbyte(b);
@@ -514,7 +530,12 @@ static int jbits(jbit_t* b, int n) {
   return v;
 }
 
-typedef struct { u8 bits[16]; u8 val[256]; int nval; int max; int mincode[16]; int off[16]; } jhuff_t;
+/* fast[9 bits seguintes] = (tamanho << 8) | simbolo, 0 = codigo mais longo */
+#define JFAST 9
+typedef struct {
+  u8 bits[16]; u8 val[256]; int nval; int max; int mincode[16]; int off[16];
+  unsigned short fast[1 << JFAST];
+} jhuff_t;
 
 static void jhuff_build(jhuff_t* h) {
   int i, code = 0, k = 0;
@@ -531,10 +552,46 @@ static void jhuff_build(jhuff_t* h) {
     k += h->bits[i];
     code = (code + h->bits[i]) << 1;
   }
+  memset(h->fast, 0, sizeof h->fast);
+  code = 0;
+  k = 0;
+  for (i = 0; i < JFAST; i++) {
+    int j;
+    for (j = 0; j < h->bits[i]; j++, code++, k++) {
+      int sh = JFAST - 1 - i, f, base = code << sh;
+      if (k >= h->nval) break;
+      for (f = 0; f < (1 << sh); f++)
+        if (base + f < (1 << JFAST) && !h->fast[base + f])
+          h->fast[base + f] = (unsigned short)(((i + 1) << 8) | h->val[k]);
+    }
+    code <<= 1;
+  }
 }
 
 static int jhuff_dec(jbit_t* b, const jhuff_t* h) {
   int len, code = 0;
+  if (b->nbit < 16) jfill(b);
+  if (b->nbit >= JFAST) {
+    int e = h->fast[(b->acc >> (b->nbit - JFAST)) & ((1 << JFAST) - 1)];
+    if (e) {
+      b->nbit -= e >> 8;
+      return e & 255;
+    }
+  }
+  if (b->nbit >= 16) {   /* codigo longo: os 16 bits ja estao no acumulador */
+    unsigned c16 = (b->acc >> (b->nbit - 16)) & 0xFFFFu;
+    for (len = 0; len < 16; len++) {
+      int c = (int)(c16 >> (15 - len));
+      if (h->mincode[len] >= 0 && c >= h->mincode[len] && c < h->mincode[len] + h->bits[len]) {
+        int idx = h->off[len] + c;
+        if (idx < 0 || idx >= h->nval) return -1;
+        b->nbit -= len + 1;
+        return h->val[idx];
+      }
+    }
+    return -1;
+  }
+  /* perto de um marcador ou do fim: um bit por vez */
   for (len = 0; len < 16; len++) {
     int bit = jbits(b, 1);
     if (bit < 0) return bit;
@@ -555,22 +612,122 @@ static int jextend(int v, int n) {
   return v;
 }
 
-static void idct(const int in[64], u8 out[64]) {
-  int x, y, u, v;
-  for (y = 0; y < 8; y++) {
-    for (x = 0; x < 8; x++) {
-      long long s = 0;
-      for (v = 0; v < 8; v++) {
-        for (u = 0; u < 8; u++) {
-          long long t = (long long)in[v * 8 + u] * COS8[x][u] * COS8[y][v];
-          if (u == 0) t = t * 181 / 256;
-          if (v == 0) t = t * 181 / 256;
-          s += t;
-        }
-      }
-      out[y * 8 + x] = (u8)clip8((int)(s / (256 * 256 * 4)) + 128);
+/* IDCT inteira separavel (colunas e depois linhas, como a islow do libjpeg):
+ * 32 bits, constantes em ponto fixo de 12 bits ja calculadas (o cc nao dobra
+ * constantes de ponto flutuante). Entrada: coeficientes ja multiplicados pela
+ * tabela de quantizacao, em ordem natural. Grava 8x8 em out (passo stride). */
+#define JIDCT_1D(s0, s1, s2, s3, s4, s5, s6, s7)                              \
+  p2 = s2;                                                                    \
+  p3 = s6;                                                                    \
+  p1 = (p2 + p3) * 2217;                                                      \
+  t2 = p1 + p3 * -7567;                                                       \
+  t3 = p1 + p2 * 3135;                                                        \
+  p2 = s0;                                                                    \
+  p3 = s4;                                                                    \
+  t0 = (p2 + p3) * 4096;                                                      \
+  t1 = (p2 - p3) * 4096;                                                      \
+  x0 = t0 + t3;                                                               \
+  x3 = t0 - t3;                                                               \
+  x1 = t1 + t2;                                                               \
+  x2 = t1 - t2;                                                               \
+  t0 = s7;                                                                    \
+  t1 = s5;                                                                    \
+  t2 = s3;                                                                    \
+  t3 = s1;                                                                    \
+  p3 = t0 + t2;                                                               \
+  p4 = t1 + t3;                                                               \
+  p1 = t0 + t3;                                                               \
+  p2 = t1 + t2;                                                               \
+  p5 = (p3 + p4) * 4816;                                                      \
+  t0 = t0 * 1223;                                                             \
+  t1 = t1 * 8410;                                                             \
+  t2 = t2 * 12586;                                                            \
+  t3 = t3 * 6149;                                                             \
+  p1 = p5 + p1 * -3685;                                                       \
+  p2 = p5 + p2 * -10497;                                                      \
+  p3 = p3 * -8034;                                                            \
+  p4 = p4 * -1597;                                                            \
+  t3 += p1 + p4;                                                              \
+  t2 += p2 + p3;                                                              \
+  t1 += p2 + p4;                                                              \
+  t0 += p1 + p3;
+
+#define JPUT(o, v)                                                            \
+  r = (v) >> 17;                                                              \
+  o = (u8)((unsigned)r < 256u ? r : r < 0 ? 0 : 255);
+
+static void idct_put(const int* in, u8* out, int stride) {
+  int i, val[64], r;
+  int t0, t1, t2, t3, p1, p2, p3, p4, p5, x0, x1, x2, x3;
+  int* v = val;
+  const int* d = in;
+  for (i = 0; i < 8; i++, d++, v++) {
+    if (d[8] == 0 && d[16] == 0 && d[24] == 0 && d[32] == 0 && d[40] == 0 &&
+        d[48] == 0 && d[56] == 0) {
+      int dc = d[0] * 4;
+      v[0] = v[8] = v[16] = v[24] = v[32] = v[40] = v[48] = v[56] = dc;
+      continue;
     }
+    JIDCT_1D(d[0], d[8], d[16], d[24], d[32], d[40], d[48], d[56])
+    x0 += 512;
+    x1 += 512;
+    x2 += 512;
+    x3 += 512;
+    v[0] = (x0 + t3) >> 10;
+    v[56] = (x0 - t3) >> 10;
+    v[8] = (x1 + t2) >> 10;
+    v[48] = (x1 - t2) >> 10;
+    v[16] = (x2 + t1) >> 10;
+    v[40] = (x2 - t1) >> 10;
+    v[24] = (x3 + t0) >> 10;
+    v[32] = (x3 - t0) >> 10;
   }
+  for (i = 0, v = val; i < 8; i++, v += 8, out += stride) {
+    if ((v[1] | v[2] | v[3] | v[4] | v[5] | v[6] | v[7]) == 0) {
+      /* so o termo DC na linha: (v0 * 4096 + 65536 + (128 << 17)) >> 17 */
+      int c = ((v[0] + 16) >> 5) + 128;
+      u8 px = (u8)((unsigned)c < 256u ? c : c < 0 ? 0 : 255);
+      out[0] = out[1] = out[2] = out[3] = out[4] = out[5] = out[6] = out[7] = px;
+      continue;
+    }
+    JIDCT_1D(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7])
+    x0 += 16842752;   /* 65536 (arredonda) + (128 << 17) (nivel 128) */
+    x1 += 16842752;
+    x2 += 16842752;
+    x3 += 16842752;
+    JPUT(out[0], x0 + t3)
+    JPUT(out[7], x0 - t3)
+    JPUT(out[1], x1 + t2)
+    JPUT(out[6], x1 - t2)
+    JPUT(out[2], x2 + t1)
+    JPUT(out[5], x2 - t1)
+    JPUT(out[3], x3 + t0)
+    JPUT(out[4], x3 - t0)
+  }
+}
+
+/* YCbCr -> RGB em tabela, com as mesmas contas (e arredondamentos) de antes. */
+static int jcr_r[256], jcb_b[256], jcb_g[256], jcr_g[256];
+static int jcor_ok;
+
+static void jcor_init(void) {
+  int i;
+  if (jcor_ok) return;
+  for (i = 0; i < 256; i++) {
+    jcr_r[i] = (359 * (i - 128)) / 256;
+    jcb_b[i] = (454 * (i - 128)) / 256;
+    jcb_g[i] = 88 * (i - 128);
+    jcr_g[i] = 183 * (i - 128);
+  }
+  jcor_ok = 1;
+}
+
+/* Bloco so com DC: o mesmo valor da idct_put, sem a conta. */
+static void idct_dc(int dc, u8* out, int stride) {
+  int c = ((dc + 4) >> 3) + 128, y;
+  u8 px = (u8)((unsigned)c < 256u ? c : c < 0 ? 0 : 255);
+  for (y = 0; y < 8; y++, out += stride)
+    out[0] = out[1] = out[2] = out[3] = out[4] = out[5] = out[6] = out[7] = px;
 }
 
 static int refine_one(jbit_t* jb, short* c, int al) {
@@ -903,16 +1060,16 @@ static int jpeg_decode(const u8* data, int len, img_t* o) {
     for (by = 0; by < nbyy; by++) {
       for (bx = 0; bx < nbxx; bx++) {
         short* src = coef[i] + ((size_t)by * nbxx + bx) * 64;
-        int coefi[64], k;
-        u8 block[64];
-        for (k = 0; k < 64; k++) coefi[k] = (int)src[k] * qt[tq[i]][k];
-        idct(coefi, block);
-        {
-          int ox = bx * 8, oy = by * 8, yy, xx;
-          for (yy = 0; yy < 8; yy++)
-            for (xx = 0; xx < 8; xx++)
-              plane[i][(oy + yy) * pstride[i] + ox + xx] = block[yy * 8 + xx];
+        const int* q = qt[tq[i]];
+        int coefi[64], k, nz = 0;
+        u8* dst = plane[i] + (size_t)(by * 8) * pstride[i] + bx * 8;
+        coefi[0] = (int)src[0] * q[0];
+        for (k = 1; k < 64; k++) {
+          coefi[k] = (int)src[k] * q[k];
+          nz |= coefi[k];
         }
+        if (nz) idct_put(coefi, dst, pstride[i]);
+        else idct_dc(coefi[0], dst, pstride[i]);
       }
     }
   }
@@ -950,9 +1107,11 @@ scan: {
           int by, bx;
           for (by = 0; by < vs[c]; by++) {
             for (bx = 0; bx < hs[c]; bx++) {
-              int coef[64], k, zz;
-              u8 block[64];
+              int coef[64], zz, nz = 0;
               int sym, extra;
+              const int* q = qt[tq[c]];
+              const jhuff_t* hac = &ac[tac[c]];
+              u8* dst;
               memset(coef, 0, sizeof coef);
               sym = jhuff_dec(&jb, &dc[tdc[c]]);
               if (sym == -2) { pred[0] = pred[1] = pred[2] = 0; jb.nbit = 0; sym = jhuff_dec(&jb, &dc[tdc[c]]); }
@@ -961,12 +1120,11 @@ scan: {
               if (extra == -2) goto fail;
               if (extra < 0) goto fail;
               pred[c] += jextend(extra, sym);
-              coef[0] = pred[c] * qt[tq[c]][0];
+              coef[0] = pred[c] * q[0];
               zz = 1;
               while (zz < 64) {
-                int run, sz;
-                sym = jhuff_dec(&jb, &ac[tac[c]]);
-                if (sym == -2) goto fail;
+                int run, sz, k;
+                sym = jhuff_dec(&jb, hac);
                 if (sym < 0) goto fail;
                 if (sym == 0) break;
                 run = sym >> 4;
@@ -979,20 +1137,16 @@ scan: {
                   if (zz >= 64) goto fail;
                   extra = jbits(&jb, sz);
                   if (extra < 0) goto fail;
-                  coef[ZIG[zz]] = jextend(extra, sz) * qt[tq[c]][ZIG[zz]];
+                  k = ZIG[zz];
+                  coef[k] = jextend(extra, sz) * q[k];
+                  nz = 1;
                   zz++;
                 }
               }
-              idct(coef, block);
-              {
-                int ox = (mbx * hs[c] + bx) * 8;
-                int oy = (mby * vs[c] + by) * 8;
-                int yy, xx;
-                for (yy = 0; yy < 8; yy++)
-                  for (xx = 0; xx < 8; xx++)
-                    plane[c][(oy + yy) * pstride[c] + ox + xx] = block[yy * 8 + xx];
-              }
-              (void)k;
+              dst = plane[c] + (size_t)((mby * vs[c] + by) * 8) * pstride[c] +
+                    (mbx * hs[c] + bx) * 8;
+              if (nz) idct_put(coef, dst, pstride[c]);
+              else idct_dc(coef[0], dst, pstride[c]);
             }
           }
         }
@@ -1004,31 +1158,51 @@ color:
     int step = sample_step(w, h);
     int ow = step > 0 ? (w + step - 1) / step : 0;
     int oh = step > 0 ? (h + step - 1) / step : 0;
-    int y, x;
+    int y, x, c;
+    int* xi;
     if (alloc_img(o, ow, oh) < 0) goto fail;
-    for (y = 0; y < oh; y++) {
-      int sy = y * step;
-      if (sy >= h) sy = h - 1;
+    /* coluna de cada componente para cada x da saida: sem divisao no laco */
+    xi = (int*)malloc((size_t)ow * 3 * sizeof(int));
+    if (!xi) goto fail;
+    for (c = 0; c < ncomp; c++) {
       for (x = 0; x < ow; x++) {
         int sx = x * step;
-        int Y, cb = 128, cr = 128, r, g, b;
-        u8* d;
         if (sx >= w) sx = w - 1;
-        Y = plane[0][(sy * vs[0] / vmax) * pstride[0] + (sx * hs[0] / hmax)];
-        d = o->rgba + ((size_t)y * (size_t)ow + (size_t)x) * 4;
-        if (ncomp >= 3) {
-          cb = plane[1][(sy * vs[1] / vmax) * pstride[1] + (sx * hs[1] / hmax)];
-          cr = plane[2][(sy * vs[2] / vmax) * pstride[2] + (sx * hs[2] / hmax)];
-        }
-        r = Y + (359 * (cr - 128)) / 256;
-        g = Y - (88 * (cb - 128) + 183 * (cr - 128)) / 256;
-        b = Y + (454 * (cb - 128)) / 256;
-        d[0] = (u8)clip8(r);
-        d[1] = (u8)clip8(g);
-        d[2] = (u8)clip8(b);
-        d[3] = 255;
+        xi[c * ow + x] = sx * hs[c] / hmax;
       }
     }
+    jcor_init();
+    for (y = 0; y < oh; y++) {
+      int sy = y * step;
+      u8* d = o->rgba + (size_t)y * (size_t)ow * 4;
+      const u8* p0;
+      const int* x0 = xi;
+      if (sy >= h) sy = h - 1;
+      p0 = plane[0] + (size_t)(sy * vs[0] / vmax) * pstride[0];
+      if (ncomp >= 3) {
+        const u8* p1 = plane[1] + (size_t)(sy * vs[1] / vmax) * pstride[1];
+        const u8* p2 = plane[2] + (size_t)(sy * vs[2] / vmax) * pstride[2];
+        const int* x1 = xi + ow;
+        const int* x2 = xi + 2 * ow;
+        for (x = 0; x < ow; x++, d += 4) {
+          int Y = p0[x0[x]], cb = p1[x1[x]], cr = p2[x2[x]], v;
+          v = Y + jcr_r[cr];
+          d[0] = (u8)((unsigned)v < 256u ? v : v < 0 ? 0 : 255);
+          v = Y - (jcb_g[cb] + jcr_g[cr]) / 256;
+          d[1] = (u8)((unsigned)v < 256u ? v : v < 0 ? 0 : 255);
+          v = Y + jcb_b[cb];
+          d[2] = (u8)((unsigned)v < 256u ? v : v < 0 ? 0 : 255);
+          d[3] = 255;
+        }
+      } else {
+        for (x = 0; x < ow; x++, d += 4) {
+          u8 Y = p0[x0[x]];
+          d[0] = d[1] = d[2] = Y;
+          d[3] = 255;
+        }
+      }
+    }
+    free(xi);
   }
   free(plane[0]);
   free(plane[1]);
