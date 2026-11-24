@@ -1,0 +1,1 @@
+unsigned tot = 0, fre = 0;

@@ -225,9 +225,9 @@ GIT_SRC = ../git/git.c ../git/http.c ../git/pack.c ../git/sha1.c ../git/zinf.c
 $(O)/GIT.EXE: $(GIT_SRC) ../git/git.h $(O)/TLS.DLL $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
 	$(HCC) -o $@ $(GIT_SRC) $(O)/TLS.DLL
 
-# MAKE.EXE (../develop/make): port do pdpmake. As receitas rodam no prompt
+# MAKE.EXE (../../develop/make): port do pdpmake. As receitas rodam no prompt
 # (__so_shell da libc); stat e opendir vem da POSIX.DLL. BUILD.BAT idem.
-MAKE_DIR = ../develop/make
+MAKE_DIR = ../../develop/make
 MAKE_SRC = $(addprefix $(MAKE_DIR)/,main.c input.c macro.c make.c modtime.c \
 	rules.c target.c utils.c check.c sodos.c)
 $(O)/MAKE.EXE: $(MAKE_SRC) $(MAKE_DIR)/make.h $(MAKE_DIR)/sodos.h $(O)/POSIX.DLL $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL

@@ -1,0 +1,684 @@
+/* agent2.c - AGENT2.EXE: agente de IA do SODOS com tela no padrao do TOP.
+ *
+ * Mesmo modelo de conexao do AGENT.EXE: le o AGENT.CFG (key/url/model,
+ * anthropic=, deepseek=) e fala com a API no formato OpenAI via ai_client.c
+ * (fonte unica, como o AIPANEL). A tela segue o SPECIAL/TOP: janela com
+ * sombra, barra de menu em cima, barra de teclas embaixo, bolhas de conversa.
+ *
+ * O modelo responde com um bloco de acao (```cmd, ```write CAMINHO, ```open)
+ * ou com as ferramentas nativas; o AGENT2 roda no prompt (k_shell_capture),
+ * devolve a saida e pergunta de novo, ate o modelo responder sem acao.
+ *
+ *   cc -I D:\ -L D:\ -o AGENT2.EXE AGENT2.C
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <so.h>
+#include <tls.h>
+#include "ai_client.c"
+
+/* ==================== tela (padrao do TOP/SPECIAL) ==================== */
+#define G_BL 0xC0
+#define G_BR 0xC1
+#define G_HB 0xC2
+#define G_VL 0xC3
+#define G_VR 0xC4
+#define G_CLOSE 0xC5
+#define G_SEPL 0xC6
+#define G_SEPH 0xC7
+#define G_SEPR 0xC8
+#define G_BTNL 0xC9
+#define G_BTNR 0xCA
+#define G_DESK 0xD9
+#define G_BASE 0xC0
+#define N_GLIFOS 11
+
+#define COR(fundo, frente) (((fundo) << 4) | (frente))
+#define PRETO 0
+#define AZUL 1
+#define CIANO 3
+#define CINZA 7
+#define AZUL_CLARO 9
+#define AMARELO 14
+#define BRANCO 15
+
+#define C_JANELA COR(AZUL_CLARO, BRANCO)
+#define C_BORDA COR(AZUL_CLARO, BRANCO)
+#define C_TITULO COR(BRANCO, AZUL)
+#define C_FORTE COR(AZUL_CLARO, BRANCO)
+#define C_FRACO COR(AZUL_CLARO, AZUL)
+#define C_FUNDO COR(PRETO, AZUL)
+#define C_MENU COR(CIANO, PRETO)
+#define C_MENUSEL COR(PRETO, BRANCO)
+#define C_MENUHOT COR(CIANO, AMARELO)
+#define C_TECLA COR(PRETO, CINZA)
+#define C_ROTULO COR(CIANO, PRETO)
+#define C_ME COR(BRANCO, AZUL)
+#define C_AI COR(AZUL_CLARO, PRETO)
+#define C_SYS COR(AZUL_CLARO, AZUL)
+
+#define K_UP 0x100
+#define K_DOWN 0x101
+#define K_F(n) (0x140 + (n))
+#define K_ESC 27
+#define K_ENTER '\n'
+#define K_EOF 26
+#define K_NADA (-1)
+#define K_RESIZE 0x1F0
+
+#define TMAXC 256
+#define TMAXR 96
+static int COLS = 80, ROWS = 25;
+
+static const unsigned char glifos[N_GLIFOS][16] = {
+  {0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xFF,0xFF},
+  {0x03,0x03,0x03,0x03,0x03,0x03,0x03,0x03,0x03,0x03,0x03,0x03,0x03,0x03,0xFF,0xFF},
+  {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0xFF},
+  {0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0},
+  {0x03,0x03,0x03,0x03,0x03,0x03,0x03,0x03,0x03,0x03,0x03,0x03,0x03,0x03,0x03,0x03},
+  {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x7E,0x7E,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
+  {0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xFF,0xFF,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xC0},
+  {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0xFF,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
+  {0x03,0x03,0x03,0x03,0x03,0x03,0x03,0xFF,0xFF,0x03,0x03,0x03,0x03,0x03,0x03,0x03},
+  {0x0F,0x3F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x3F,0x0F},
+  {0xF0,0xFC,0xFE,0xFE,0xFE,0xFE,0xFE,0xFE,0xFE,0xFE,0xFE,0xFE,0xFE,0xFE,0xFC,0xF0},
+};
+
+static unsigned char salvo[N_GLIFOS][16];
+static unsigned short tela[TMAXR * TMAXC];
+static unsigned short vista[TMAXR * TMAXC];
+static unsigned short copia[TMAXR * TMAXC];
+
+static void tamanho(void) {
+  int i, c = 80, r = 25;
+  k_textsize(&c, &r);
+  if (c < 40) c = 40;
+  if (r < 12) r = 12;
+  if (c > TMAXC) c = TMAXC;
+  if (r > TMAXR) r = TMAXR;
+  COLS = c;
+  ROWS = r;
+  for (i = 0; i < TMAXR * TMAXC; i++) vista[i] = 0xFFFF;
+}
+
+static int tela_inicia(void) {
+  int i;
+  if (k_vput(0, 0, tela, 0) != 0) return -1;
+  tamanho();
+  if (k_blink(0) != 0) return -1;
+  for (i = 0; i < N_GLIFOS; i++)
+    if (k_font_get(G_BASE + i, salvo[i]) != 0) return -1;
+  for (i = 0; i < N_GLIFOS; i++)
+    if (k_font_set(G_BASE + i, glifos[i]) != 0) {
+      for (i = 0; i < N_GLIFOS; i++) k_font_set(G_BASE + i, salvo[i]);
+      k_blink(1);
+      return -1;
+    }
+  k_cursor(-1, 0);
+  return 0;
+}
+
+static void tela_fim(void) {
+  int i;
+  for (i = 0; i < N_GLIFOS; i++) k_font_set(G_BASE + i, salvo[i]);
+  k_blink(1);
+  k_clear();
+  k_cursor(0, 0);
+}
+
+static void tela_mostra(void) {
+  int r, c;
+  for (r = 0; r < ROWS; r++) {
+    int a = -1, b = -1;
+    unsigned short* t = tela + r * TMAXC;
+    unsigned short* v = vista + r * TMAXC;
+    for (c = 0; c < COLS; c++) {
+      if (t[c] != v[c]) {
+        if (a < 0) a = c;
+        b = c;
+      }
+    }
+    if (a < 0) continue;
+    k_vput(r, a, t + a, b - a + 1);
+    for (c = a; c <= b; c++) v[c] = t[c];
+  }
+}
+
+static void poe(int r, int c, int ch, int cor) {
+  if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return;
+  tela[r * TMAXC + c] = (unsigned short)((ch & 0xFF) | ((cor & 0xFF) << 8));
+}
+
+static void texto(int r, int c, const char* s, int cor) {
+  while (*s) poe(r, c++, (unsigned char)*s++, cor);
+}
+
+static void textow(int r, int c, const char* s, int w, int cor) {
+  int i = 0;
+  while (i < w && s[i]) {
+    poe(r, c + i, (unsigned char)s[i], cor);
+    i++;
+  }
+  while (i < w) poe(r, c + i++, ' ', cor);
+}
+
+static void linha(int r, int c, int n, int ch, int cor) {
+  while (n-- > 0) poe(r, c++, ch, cor);
+}
+
+static int tam(const char* s) { return (int)strlen(s); }
+
+static void fundo(void) {
+  int r;
+  for (r = 1; r < ROWS - 1; r++) linha(r, 0, COLS, G_DESK, C_FUNDO);
+}
+
+static void menu_topo(void) {
+  char buf[32];
+  int t;
+  linha(0, 0, COLS, ' ', C_MENU);
+  texto(0, 1, "AGENT2", COR(CIANO, BRANCO));
+  texto(0, 9, " Assistente SODOS ", C_MENUSEL);
+  t = k_time();
+  if (t >= 0) {
+    sprintf(buf, "%02d:%02d:%02d UTC", t / 10000, t / 100 % 100, t % 100);
+    texto(0, COLS - 14, buf, C_MENU);
+  }
+}
+
+static void teclas(const char* const* rotulos) {
+  int i, c = 0;
+  char n[4];
+  int kw = COLS / 10;
+  linha(ROWS - 1, 0, COLS, ' ', C_ROTULO);
+  for (i = 0; i < 10; i++) {
+    int w = i == 9 ? COLS - c : kw;
+    sprintf(n, "%d", i + 1);
+    texto(ROWS - 1, c, n, C_TECLA);
+    textow(ROWS - 1, c + tam(n), rotulos[i], w - tam(n), C_ROTULO);
+    c += w;
+  }
+}
+
+static void janela(int r, int c, int h, int w, const char* titulo) {
+  int i;
+  for (i = 1; i < h; i++) linha(r + i, c + w, 2, ' ', COR(PRETO, PRETO));
+  linha(r + h, c + 2, w, ' ', COR(PRETO, PRETO));
+  for (i = 1; i < h - 1; i++) {
+    linha(r + i, c + 1, w - 2, ' ', C_JANELA);
+    poe(r + i, c, G_VL, C_BORDA);
+    poe(r + i, c + w - 1, G_VR, C_BORDA);
+  }
+  linha(r + h - 1, c + 1, w - 2, G_HB, C_BORDA);
+  poe(r + h - 1, c, G_BL, C_BORDA);
+  poe(r + h - 1, c + w - 1, G_BR, C_BORDA);
+  linha(r, c, w, ' ', C_TITULO);
+  poe(r, c, G_CLOSE, COR(PRETO, BRANCO));
+  texto(r, c + (w - tam(titulo)) / 2, titulo, C_TITULO);
+}
+
+static void separador(int r, int c, int w) {
+  poe(r, c, G_SEPL, C_BORDA);
+  linha(r, c + 1, w - 2, G_SEPH, C_BORDA);
+  poe(r, c + w - 1, G_SEPR, C_BORDA);
+}
+
+static int tecla(int ms) {
+  unsigned t0 = k_ms();
+  int k;
+  tela_mostra();
+  if (ms <= 0) {
+    k = k_getc();
+  } else {
+    for (;;) {
+      k = k_trygetc();
+      if (k >= 0) break;
+      if (k_ms() - t0 >= (unsigned)ms) return K_NADA;
+      k_yield();
+    }
+  }
+  if (k < 0) return K_EOF;
+  if (k == K_RESIZE) {
+    tamanho();
+    return K_NADA;
+  }
+  if (k == '\r') return K_ENTER;
+  return k;
+}
+
+/* ==================== conversa ==================== */
+#define MSG_MAX 40
+#define MSG_LEN 2400
+#define ROLE_ME 1
+#define ROLE_AI 0
+#define ROLE_SYS 2
+#define ROLE_OBS 3
+#define STEPS_MAX 8
+
+struct msg {
+  int role;
+  char text[MSG_LEN];
+};
+
+static struct msg g_msgs[MSG_MAX];
+static int g_n;
+static ai_cfg_t g_cfg;
+static int g_waiting;
+static char g_stream[MSG_LEN];
+static int g_stream_len;
+static char g_edit[MSG_LEN];
+static int g_edit_len;
+static char g_status[120];
+static ai_tool_t g_tools[4];
+static int g_busy;
+
+static const char* SYS_PROMPT =
+    "You are AGENT2, the assistant that runs natively inside SODOS (a small "
+    "DOS-like OS: 64-bit kernel, FAT16 on C:/D:/U:, the WIN desktop, its own "
+    "C compiler CC.EXE). You act on the system and never say you cannot. "
+    "Answer in Brazilian Portuguese, short.\n"
+    "To act, end the reply with exactly ONE fenced block and stop:\n"
+    "```cmd\n<one DOS command line>\n```\n"
+    "```write D:\\PATH\\FILE.EXT\n<file content>\n```\n"
+    "```open D:\\PATH\\PROGRAM.EXE\n```\n"
+    "After the block you get its result and may act again; when done, or if "
+    "you need the user, reply with NO block. Use DOS commands (dir, type, "
+    "copy, del, mkdir), 8.3 names; compile with: cc -I D:\\ -L D:\\ -o "
+    "PROG.EXE PROG.C. Never run edit, mc, win or other interactive programs.";
+
+static void set_status(const char* s) {
+  int i = 0;
+  while (s[i] && i < (int)sizeof(g_status) - 1) {
+    g_status[i] = s[i];
+    i++;
+  }
+  g_status[i] = 0;
+}
+
+static void add_msg(int role, const char* text) {
+  int i = 0;
+  if (g_n >= MSG_MAX) {
+    for (i = 1; i < MSG_MAX; i++) g_msgs[i - 1] = g_msgs[i];
+    g_n = MSG_MAX - 1;
+  }
+  g_msgs[g_n].role = role;
+  i = 0;
+  while (text[i] && i < MSG_LEN - 1) {
+    g_msgs[g_n].text[i] = text[i];
+    i++;
+  }
+  g_msgs[g_n].text[i] = 0;
+  g_n++;
+}
+
+/* Quebra o texto em linhas de cpl colunas; devolve quantas. */
+static int wrap_lines(const char* text, int cpl, int* start, int* len, int maxl) {
+  int n = 0, i = 0, col = 0, s = 0;
+  if (cpl < 1) cpl = 1;
+  while (text[i] && n < maxl) {
+    if (text[i] == '\n') {
+      start[n] = s;
+      len[n] = i - s;
+      n++;
+      i++;
+      s = i;
+      col = 0;
+      continue;
+    }
+    if (col >= cpl) {
+      start[n] = s;
+      len[n] = i - s;
+      n++;
+      s = i;
+      col = 0;
+      continue;
+    }
+    i++;
+    col++;
+  }
+  if (n < maxl && i > s) {
+    start[n] = s;
+    len[n] = i - s;
+    n++;
+  }
+  return n;
+}
+
+/* ==================== ferramentas ==================== */
+struct tool {
+  int kind;
+  char arg[128];
+  char body[1600];
+};
+
+static int dsml_param(const char* a, const char* b, const char* name, char* out, int cap) {
+  int nl = (int)strlen(name);
+  const char* p = a;
+  while (p < b) {
+    const char* q = strstr(p, "name=\"");
+    const char* v, * e;
+    int n;
+    if (!q || q >= b) return 0;
+    q += 6;
+    if (q + nl <= b && !memcmp(q, name, (size_t)nl) && q[nl] == '"') {
+      v = q + nl + 1;
+      while (v < b && *v != '>') v++;
+      if (v >= b) return 0;
+      v++;
+      e = v;
+      while (e < b && !(*e == '<' && e + 1 < b && e[1] == '/')) e++;
+      n = (int)(e - v);
+      if (n > cap - 1) n = cap - 1;
+      ai_utf8_to_cp850(out, cap, v, n);
+      return 1;
+    }
+    p = q + 1;
+  }
+  return 0;
+}
+
+static int parse_tool(const char* s, const char** next, struct tool* t) {
+  t->kind = 0;
+  t->arg[0] = 0;
+  t->body[0] = 0;
+  {
+    const char* inv = strstr(s, "DSML");
+    if (inv) {
+      const char* nm = strstr(inv, "invoke name=\"");
+      const char* ce = strstr(inv, "calls>");
+      const char* end = ce ? ce + 6 : s + strlen(s);
+      if (nm) {
+        nm += 13;
+        if (!strncmp(nm, "write", 5) || !strncmp(nm, "create", 6)) {
+          if (dsml_param(inv, end, "path", t->arg, sizeof(t->arg)) ||
+              dsml_param(inv, end, "filename", t->arg, sizeof(t->arg))) {
+            if (!dsml_param(inv, end, "content", t->body, sizeof(t->body)))
+              if (!dsml_param(inv, end, "text", t->body, sizeof(t->body)))
+                dsml_param(inv, end, "body", t->body, sizeof(t->body));
+            t->kind = 'w';
+            if (next) *next = end;
+            return 1;
+          }
+        } else if (!strncmp(nm, "open", 4) || !strncmp(nm, "launch", 6) ||
+                   !strncmp(nm, "run", 3)) {
+          if (dsml_param(inv, end, "path", t->arg, sizeof(t->arg)) ||
+              dsml_param(inv, end, "file", t->arg, sizeof(t->arg)) ||
+              dsml_param(inv, end, "program", t->arg, sizeof(t->arg))) {
+            t->kind = 'o';
+            if (next) *next = end;
+            return 1;
+          }
+        } else if (!strncmp(nm, "cmd", 3) || !strncmp(nm, "shell", 5) ||
+                   !strncmp(nm, "exec", 4)) {
+          if (dsml_param(inv, end, "command", t->arg, sizeof(t->arg)) ||
+              dsml_param(inv, end, "cmd", t->arg, sizeof(t->arg)) ||
+              dsml_param(inv, end, "line", t->arg, sizeof(t->arg))) {
+            t->kind = 'c';
+            if (next) *next = end;
+            return 1;
+          }
+        }
+      }
+    }
+  }
+  {
+    const char* p = strstr(s, "```");
+    while (p) {
+      const char* tag = p + 3;
+      const char* nl = strchr(tag, '\n');
+      if (!nl) break;
+      if (!strncmp(tag, "cmd", 3)) {
+        const char* a = nl + 1;
+        const char* e = strchr(a, '\n');
+        int n = e ? (int)(e - a) : (int)strlen(a);
+        if (n > (int)sizeof(t->arg) - 1) n = (int)sizeof(t->arg) - 1;
+        ai_utf8_to_cp850(t->arg, sizeof(t->arg), a, n);
+        t->kind = 'c';
+        if (next) {
+          const char* q = strstr(p + 3, "```");
+          *next = q ? q + 3 : p + strlen(p);
+        }
+        return 1;
+      }
+      if (!strncmp(tag, "open ", 5)) {
+        const char* a = tag + 5;
+        const char* e = (nl > a) ? nl : a;
+        int n = (int)(e - a);
+        if (n > (int)sizeof(t->arg) - 1) n = (int)sizeof(t->arg) - 1;
+        ai_utf8_to_cp850(t->arg, sizeof(t->arg), a, n);
+        t->kind = 'o';
+        if (next) {
+          const char* q = strstr(p + 3, "```");
+          *next = q ? q + 3 : p + strlen(p);
+        }
+        return 1;
+      }
+      if (!strncmp(tag, "write ", 6)) {
+        const char* a = tag + 6;
+        const char* e = (nl > a) ? nl : a;
+        int n = (int)(e - a);
+        const char* b = nl + 1;
+        const char* c = strstr(b, "```");
+        int bn = c ? (int)(c - b) : (int)strlen(b);
+        if (n > (int)sizeof(t->arg) - 1) n = (int)sizeof(t->arg) - 1;
+        if (bn > (int)sizeof(t->body) - 1) bn = (int)sizeof(t->body) - 1;
+        ai_utf8_to_cp850(t->arg, sizeof(t->arg), a, n);
+        ai_utf8_to_cp850(t->body, sizeof(t->body), b, bn);
+        t->kind = 'w';
+        if (next) {
+          const char* q = strstr(p + 3, "```");
+          *next = q ? q + 3 : p + strlen(p);
+        }
+        return 1;
+      }
+      p = nl + 1;
+      {
+        const char* q = strstr(p, "```");
+        if (!q) break;
+        p = q + 3;
+      }
+    }
+  }
+  return 0;
+}
+
+static void run_tool(struct tool* t, char* obs, int cap, char* label, int lcap) {
+  if (t->kind == 'w') {
+    int rc = k_fsave(t->arg, t->body, (int)strlen(t->body));
+    snprintf(obs, (size_t)cap, "write %s: %d bytes, result %d (%s)", t->arg,
+             (int)strlen(t->body), rc, rc == 0 ? "ok" : "falhou");
+    snprintf(label, (size_t)lcap, "gravou %s (%d bytes)", t->arg, (int)strlen(t->body));
+    return;
+  }
+  if (t->kind == 'o') {
+    int rc = k_win_launch(t->arg);
+    snprintf(obs, (size_t)cap, "open %s: %d (%s)", t->arg, rc,
+             rc == 0 ? "pedido aceito" : "falhou");
+    snprintf(label, (size_t)lcap, "abriu %s", t->arg);
+    return;
+  }
+  if (t->kind == 'c') {
+    char* out = (char*)malloc(16384);
+    int len = 0, rc;
+    if (!out) {
+      snprintf(obs, (size_t)cap, "sem memoria");
+      return;
+    }
+    rc = k_shell_capture(t->arg, out, 16384, &len);
+    if (len < 0) len = -len;
+    snprintf(obs, (size_t)cap, "exit %d, saida:\n%s", rc, out);
+    snprintf(label, (size_t)lcap, "rodou %s (exit %d)", t->arg, rc);
+    free(out);
+    return;
+  }
+  snprintf(obs, (size_t)cap, "nenhuma acao");
+}
+
+static void strip_tool_markup(const char* s, char* out, int cap) {
+  int i = 0, o = 0, hide = 0;
+  while (s[i] && o < cap - 1) {
+    if (hide) {
+      if (s[i] == '>' && i >= 5 && !memcmp(s + i - 5, "calls", 5)) hide = 0;
+      i++;
+      continue;
+    }
+    if (s[i] == '<' && (s[i + 1] == '|' || s[i + 1] == '?')) {
+      hide = 1;
+      i += 2;
+      continue;
+    }
+    if (s[i] == '`' && s[i + 1] == '`' && s[i + 2] == '`') {
+      const char* close = strstr(s + i + 3, "```");
+      if (!close) break;
+      i = (int)(close - s) + 3;
+      if (s[i] == '\n') i++;
+      continue;
+    }
+    out[o++] = s[i++];
+  }
+  out[o] = 0;
+}
+
+/* ==================== desenho da conversa ==================== */
+static void desenha(void) {
+  static const char* const rotulos[10] = {
+    "Ajuda", "", "Novo", "", "", "", "", "", "", "Sair"
+  };
+  int r, c, w, h, i, y, ytop, ybot, cpl;
+  char disp[MSG_LEN * 2];
+  int lstart[128], llen[128];
+
+  fundo();
+  menu_topo();
+  teclas(rotulos);
+  r = 1;
+  c = 0;
+  h = ROWS - 3;
+  w = COLS;
+  janela(r, c, h, w, " Conversa ");
+
+  ytop = r + 1;
+  ybot = r + h - 4;
+  cpl = w - 8;
+  if (cpl < 10) cpl = 10;
+
+  /* desenha de baixo para cima, como o AIPANEL */
+  y = ybot;
+  for (i = g_n - 1; i >= 0; i--) {
+    int nl, li, bh;
+    if (g_msgs[i].role == ROLE_OBS) continue;
+    ai_utf8_to_cp850(disp, (int)sizeof(disp), g_msgs[i].text, (int)strlen(g_msgs[i].text));
+    nl = wrap_lines(disp, cpl, lstart, llen, 128);
+    bh = nl + 1;
+    if (y - bh < ytop) break;
+    y -= bh;
+    {
+      int cor = g_msgs[i].role == ROLE_ME ? C_ME
+              : g_msgs[i].role == ROLE_SYS ? C_SYS : C_AI;
+      const char* lab = g_msgs[i].role == ROLE_ME ? "voce"
+                      : g_msgs[i].role == ROLE_SYS ? "sistema" : "SODOS";
+      texto(y, c + 2, lab, C_FRACO);
+      for (li = 0; li < nl; li++) {
+        int n = llen[li];
+        if (n > cpl) n = cpl;
+        textow(y + 1 + li, c + 2, disp + lstart[li], n, cor);
+        if (n < cpl) linha(y + 1 + li, c + 2 + n, cpl - n, ' ', cor);
+      }
+    }
+    y--;
+  }
+  if (g_waiting) {
+    int nl, li;
+    ai_utf8_to_cp850(disp, (int)sizeof(disp), g_stream_len ? g_stream : "...",
+                     (int)strlen(g_stream_len ? g_stream : "..."));
+    nl = wrap_lines(disp, cpl, lstart, llen, 128);
+    if (y - (nl + 1) >= ytop) {
+      y -= nl + 1;
+      texto(y, c + 2, "SODOS", C_FRACO);
+      for (li = 0; li < nl; li++) {
+        int n = llen[li];
+        if (n > cpl) n = cpl;
+        textow(y + 1 + li, c + 2, disp + lstart[li], n, C_AI);
+        if (n < cpl) linha(y + 1 + li, c + 2 + n, cpl - n, ' ', C_AI);
+      }
+    }
+  }
+
+  separador(r + h - 3, c, w);
+  texto(r + h - 2, c + 2, "voce>", C_FORTE);
+  textow(r + h - 2, c + 8, g_edit, w - 12, C_JANELA);
+  if (!g_busy) poe(r + h - 2, c + 8 + g_edit_len, '_', C_FORTE);
+  texto(r + h - 1, c + 2, g_status, C_FRACO);
+  tela_mostra();
+}
+
+/* ==================== API ==================== */
+static void on_token(void* ud, const char* s, int n) {
+  (void)ud;
+  if (n <= 0) return;
+  if (g_stream_len + n < MSG_LEN - 1) {
+    memcpy(g_stream + g_stream_len, s, (size_t)n);
+    g_stream_len += n;
+    g_stream[g_stream_len] = 0;
+  }
+  if (g_waiting) desenha();
+}
+
+static int call_api(void) {
+  ai_msg_t* list;
+  int i, k = 0, rc;
+  g_stream_len = 0;
+  g_stream[0] = 0;
+  list = (ai_msg_t*)malloc((size_t)(g_n + 1) * sizeof(ai_msg_t));
+  if (!list) {
+    set_status("sem memoria");
+    return -1;
+  }
+  list[k].role = "system";
+  list[k].text = SYS_PROMPT;
+  k++;
+  for (i = 0; i < g_n; i++) {
+    if (g_msgs[i].role == ROLE_SYS) continue;
+    list[k].role = (g_msgs[i].role == ROLE_ME || g_msgs[i].role == ROLE_OBS)
+                       ? "user" : "assistant";
+    list[k].text = g_msgs[i].text;
+    k++;
+  }
+  rc = ai_chat_tools(&g_cfg, list, k, on_token, 0, g_tools, 4);
+  free(list);
+  return rc;
+}
+
+static void send_now(void) {
+  char q[MSG_LEN];
+  char obs[1200];
+  char label[160];
+  char shown[MSG_LEN * 2];
+  struct tool tl;
+  const char* cur;
+  int step;
+
+  ai_cp850_to_utf8(q, (int)sizeof(q), g_edit, (int)strlen(g_edit));
+  if (!q[0]) {
+    set_status("escreva uma mensagem");
+    return;
+  }
+  if (!g_cfg.key[0]) {
+    set_status("falta key no AGENT.CFG");
+    return;
+  }
+  add_msg(ROLE_ME, q);
+  g_edit[0] = 0;
+  g_edit_len = 0;
+  g_busy = 1;
+
+  for (step = 0; step < STEPS_MAX; step++) {
+    int rc;
+    g_waiting = 1;
+    set_status(step ? "executando e perguntando de novo..." : "esperando a API...");
+    desenha();
+    rc = call_api();
+    if (rc < 0) {
+      char st[200];
+      if (g_stream_len > 0) {

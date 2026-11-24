@@ -1,0 +1,126 @@
+PLAY - videos do YouTube no SODOS pelo link publico (sem som)
+
+Uso (no WIN: Explorer, ou Command do WIN)
+  play                        abre a janela: cole o link (Ctrl+V) e Enter
+  play LINK [LARGURA] [QPS]   ja comeca a tocar (padrao 480 pixels e 15 qps)
+  play -t LINK [SEGUNDOS]     teste sem janela (prompt, PONTE): decodifica tudo
+                              o que chega, o mais rapido possivel (vazao)
+  play -r LINK [SEGUNDOS]     teste sem janela no ritmo do video, como a janela
+                              (a fila enche e o Linux espera): a cada 30 s mostra
+                              recebidos, mostrados, fila e paradas; no fim, os
+                              perdidos (tem de ser 0)
+  O LINK pode ser o endereco inteiro (youtube.com/watch?v=..., youtu.be/...)
+  ou so o codigo de 11 letras do video.
+  Espaco pausa. Esc no video para e volta ao link; Esc no link fecha.
+  No fim, Enter toca de novo (ou troque o link).
+
+Precisa de
+  - Linux do WSL do SODOS (SET WSL=1; o PLAY liga sozinho e espera ate 2 min)
+  - internet
+  - os arquivos desta pasta: YTPLAY.PY e linux\ (yt-dlp e ffmpeg)
+
+Como funciona
+  O SODOS nao decodifica H.264/VP9 nem fala com o YouTube. O PLAY.EXE pede
+  ao Linux do WSL, pela caixa de comandos do WSL (a mesma do WSL exec):
+    python3 /d/develop/play/YTPLAY.PY 'LINK' 480 15 7
+  O YTPLAY.PY usa o yt-dlp para achar e baixar so a imagem do video (ate
+  360p, H.264 ou VP9) e o ffmpeg minimo desta pasta para converter em MJPEG
+  (480 de largura, 15 qps). Os JPEG voltam em fluxo pelo stdout da caixa; o
+  PLAY.EXE separa cada um (FF D8 ... FF D9), decodifica com o IMG.DLL (o
+  decodificador padrao do SODOS) e mostra no ritmo do video. Nada e gravado
+  em disco.
+  Vazao medida da caixa: ~440 KB/s; um video a 480x270 usa ~150-250 KB/s.
+  Com a fila cheia (~40 s de video) o PLAY para de ler e o Linux espera.
+  A barra de baixo mostra os quadros por segundo de verdade: "play 15/15 q/s".
+
+Velocidade (23/11/26)
+  O JPEG do IMG.DLL (src13\c_compiler\img\img.c) levava ~900 ms por quadro
+  de 480x360: a IDCT fazia 4096 multiplicacoes de 64 bits por bloco. Agora
+  usa IDCT inteira separavel, Huffman com tabela de 9 bits e cor em tabela:
+  ~20 ms por quadro (a imagem sai igual, diferenca de ate 3 niveis).
+  O IMG.DLL novo esta em D:\IMG.DLL; o antigo ficou em D:\IMG.BAK.
+  O PLAY escala cada quadro uma vez (~7 ms para 1152x864) e manda tudo numa
+  chamada so de k_gui_pixels; a tela so e redesenhada quando algo muda.
+  play -t mostra os dois tempos (img_decode e escala).
+
+Fila cheia (24/11/26)
+  Com a fila cheia (600 quadros) o PLAY ainda lia um bloco do anel (ate 64 KB,
+  varios quadros), guardava um e jogava o resto fora. O relogio andava a 15 q/s
+  mas o video pulava ~2/3 dos quadros e "acabava" antes (Big Buck Bunny parava
+  em 4:15 de 9:57). Agora o que nao cabe fica no buffer ate abrir lugar.
+  Conferido com play -r: 5 min, 0 perdidos, 0 paradas, e o yt-dlp baixando no
+  ritmo do video (~26 KB/s).
+  A separacao dos JPEG puxava o resto do buffer a cada quadro (ate 512 KB de
+  memmove por quadro) e atrasava o comeco do video em ~0,4 s; agora puxa uma
+  vez por leitura, e tocando le no maximo 2 blocos do anel por volta.
+  Big Buck Bunny inteiro (9:57) conferido na janela: chegou a 9:56/9:57 sem
+  erro, e o yt-dlp e o ffmpeg sairam com 0.
+
+Relogio (24/11/26)
+  O k_ms do SODOS conta as interrupcoes do timer e perde ticks com carga
+  (medido: 3,5% a 7,8% devagar com a VM do WSL ligada; o relogio do CMOS e o
+  da VM bateram com a internet). Com ele o video saia uns 5% lento. O PLAY
+  agora marca o ritmo pelo TSC, calibrado pelas viradas de segundo do CMOS
+  enquanto toca (antes de 4 s de calibracao vale o k_ms), e calcula o horario
+  de cada quadro sem acumular arredondamento: 15,0 q/s de verdade.
+  Mexer na janela (arrastar) pode segurar o PLAY por um instante; atraso de
+  mais de meio segundo nao e recuperado (o video so continua dali).
+
+  Conferido na janela (Rick Astley inteiro, 3:33): 3174 quadros em 211 s do
+  CMOS = 15,04 q/s, 0 saltos, 0 paradas, ~15 ms de atraso por quadro.
+  Ler arquivos do D: pela VM (9p) ou compilar no SODOS durante o video pode
+  segurar o kernel e causar saltos; sozinho, o PLAY fica no ritmo.
+
+Diagnostico
+  SET PLAYLOG=1     uma linha a cada 5 s em D:\TEMP\PLAYLOG.TXT (relogio,
+  SET PLAYLOG=NOME  k_ms, CMOS, quadros mostrados, fila, perdidos, saltos,
+                    paradas, MHz do TSC, erro do k_ms, ms de decodificacao e
+                    de desenho); NOME (ate 8 letras) grava D:\TEMP\NOME.TXT.
+                    O arquivo e gravado a cada 60 s e no fim (gravar segura o
+                    kernel). Os tempos tambem aparecem na barra.
+  SET PLAYLOG=      desliga.
+  Se o video parar antes do fim, a tela de fim diz o que o Linux devolveu
+  (codigos do yt-dlp e do ffmpeg) e o YTPLAY.PY grava /tmp/ytplay.log na VM
+  (progresso do download, avisos e erros do yt-dlp).
+
+Arquivos
+  PLAY.C        o programa do WIN (PLAY.EXE)
+  YTPLAY.PY     o ajudante do Linux (estado no stderr: PLAY titulo/duracao/
+                formato/erro/fim)
+  linux\yt-dlp  yt-dlp (github.com/yt-dlp/yt-dlp), zipapp do python3
+  linux\ffmpeg  ffmpeg 9.1 estatico minimo, compilado no WSL do SODOS
+  linux\ffmpeg-9.1.tar.xz   o fonte dele (ffmpeg.org)
+  MAKEFILE, BUILD.BAT       compilam o PLAY.EXE (make, ou build)
+  SET PLAYDIR=X:\PASTA      outra pasta para o YTPLAY.PY e o linux\
+
+Limites
+  - Sem som: o SODOS nao tem driver de audio.
+  - Sem voltar/avancar: os quadros sao descartados depois de mostrados.
+  - O yt-dlp roda sem interprete de JavaScript (deno); o YouTube ja avisa que
+    isso esta obsoleto e alguns formatos podem faltar. Se parar de achar
+    formatos, atualize o yt-dlp (abaixo) e, se precisar, instale o deno.
+  - Pausa longa: o YouTube pode derrubar a conexao parada; ai o video acaba.
+  - A caixa do WSL e de um programa LP64 (WSL.EXE): o PLAY a acessa por
+    deslocamentos fixos (wslbox.h versao 1) e confere magic e versao. Se o
+    wslbox.h mudar, atualize os deslocamentos no PLAY.C.
+  - O cc do SODOS nao tem operacao atomica: o PLAY pega a vaga da caixa de
+    cima para baixo (o WSL exec e o BASH.EXE pegam de baixo para cima).
+
+Manutencao (no Linux do WSL)
+  Atualizar o yt-dlp:
+    python3 /d/develop/play/linux/yt-dlp -U
+  Recompilar o ffmpeg (precisa de gcc, make e nasm na VM; ~4 min):
+    apt-get install -y --no-install-recommends gcc make binutils nasm libc6-dev
+    mkdir -p /tmp/ff && tar -xJf /d/develop/play/linux/ffmpeg-9.1.tar.xz -C /tmp/ff
+    cd /tmp/ff/ffmpeg-9.1 && export TMPDIR=/tmp
+    ./configure --disable-everything --disable-autodetect --disable-doc \
+      --disable-debug --disable-network --disable-ffplay --disable-ffprobe \
+      --disable-avdevice --disable-iconv --disable-zlib --enable-static \
+      --disable-shared --extra-ldflags=-static --enable-protocol=pipe,file \
+      --enable-demuxer=mov,matroska --enable-parser=h264,vp9 \
+      --enable-decoder=h264,vp9 --enable-bsf=vp9_superframe_split \
+      --enable-encoder=mjpeg --enable-muxer=mjpeg \
+      --enable-filter=buffer,buffersink,format,null,scale,fps --enable-swscale
+    make -j2 ffmpeg && cp ffmpeg /d/develop/play/linux/ffmpeg
+  O YTPLAY.PY copia o linux\ffmpeg para /tmp/play-ffmpeg a cada boot da VM
+  (o D: e FAT: sem bit de execucao).

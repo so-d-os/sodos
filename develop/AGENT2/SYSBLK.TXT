@@ -1,0 +1,88 @@
+static const char* SYS_BASE =
+    "You are AGENT2, the assistant that runs natively inside SODOS (a small "
+    "DOS-like OS: 64-bit kernel, FAT16 on C:/D:/U:, the WIN desktop, its own "
+    "C compiler CC.EXE). You act on the system and never say you cannot. "
+    "Answer in Brazilian Portuguese, short.\n"
+    "To act, end the reply with exactly ONE fenced block and stop:\n"
+    "```cmd\n<one DOS command line>\n```\n"
+    "```write D:\\PATH\\FILE.EXT\n<file content>\n```\n"
+    "```open D:\\PATH\\PROGRAM.EXE\n```\n"
+    "After the block you get its result and may act again; when done, or if "
+    "you need the user, reply with NO block. Use DOS commands (dir, type, "
+    "copy, del, mkdir), 8.3 names; compile with: cc -I D:\\ -L D:\\ -o "
+    "PROG.EXE PROG.C. Never run edit, mc, win or other interactive programs.\n";
+
+/* Buffer do system prompt montado a cada chamada: texto base + contexto
+ * do SODOS (pasta atual, listagem, hardware, memoria, disco, rede). */
+static char g_sys[4096];
+
+static void sys_add(char* d, int cap, int* n, const char* s) {
+  while (*s && *n < cap - 1) d[(*n)++] = *s++;
+  d[*n] = 0;
+}
+
+static void build_sys(void) {
+  char pwd[128];
+  char lst[1024];
+  char tmp[256];
+  unsigned tot = 0, fre = 0, mt = 0, mf = 0;
+  int n = 0, dr, i, cnt;
+  struct k_hwstat hw;
+
+  g_sys[0] = 0;
+  sys_add(g_sys, (int)sizeof(g_sys), &n, SYS_BASE);
+  sys_add(g_sys, (int)sizeof(g_sys), &n,
+          "\n=== CONTEXTO DO SODOS (agora) ===\n");
+
+  /* pasta e unidade atuais */
+  pwd[0] = 0;
+  k_pwd(pwd, (int)sizeof(pwd));
+  dr = k_drive();
+  sys_add(g_sys, (int)sizeof(g_sys), &n, "Pasta atual: ");
+  sys_add(g_sys, (int)sizeof(g_sys), &n, pwd[0] ? pwd : "?");
+  sys_add(g_sys, (int)sizeof(g_sys), &n, "\n");
+  snprintf(tmp, sizeof(tmp), "Unidade atual: %c:  (EXE em %c:)\n",
+           dr ? dr : '?', k_exe_drive() ? k_exe_drive() : '?');
+  sys_add(g_sys, (int)sizeof(g_sys), &n, tmp);
+  sys_add(g_sys, (int)sizeof(g_sys), &n,
+          "Comandos sem caminho usam a pasta atual; use caminho completo "
+          "quando precisar de outra pasta.\n");
+
+  /* listagem resumida da pasta atual */
+  lst[0] = 0;
+  cnt = k_dirlist(pwd[0] ? pwd : ".", lst, (int)sizeof(lst));
+  if (cnt > 0) {
+    sys_add(g_sys, (int)sizeof(g_sys), &n, "Conteudo da pasta atual:\n");
+    sys_add(g_sys, (int)sizeof(g_sys), &n, lst);
+    sys_add(g_sys, (int)sizeof(g_sys), &n, "\n");
+  }
+
+  /* hardware e memoria */
+  memset(&hw, 0, sizeof(hw));
+  if (k_hwstat(&hw) == 0) {
+    snprintf(tmp, sizeof(tmp),
+             "CPUs: %d  carga: %d%%  temp CPU: %d C  uptime: %u s\n",
+             hw.ncpu, hw.load_pct, hw.cpu_c, hw.uptime_s);
+    sys_add(g_sys, (int)sizeof(g_sys), &n, tmp);
+  }
+  k_meminfo(&mt, &mf);
+  snprintf(tmp, sizeof(tmp), "Memoria: %u KB total, %u KB livre\n",
+           mt / 1024, mf / 1024);
+  sys_add(g_sys, (int)sizeof(g_sys), &n, tmp);
+
+  /* discos */
+  for (i = 0; i < 26; i++) {
+    if (!(k_drive_mask() & (1u << i))) continue;
+    if (k_dfree('A' + i, &tot, &fre) == 0) {
+      snprintf(tmp, sizeof(tmp), "Disco %c: %u KB livres de %u KB\n",
+               'A' + i, fre, tot);
+      sys_add(g_sys, (int)sizeof(g_sys), &n, tmp);
+    }
+  }
+
+  /* rede */
+  sys_add(g_sys, (int)sizeof(g_sys), &n,
+          k_net_ready() ? "Rede: pronta\n" : "Rede: NAO pronta (rode net)\n");
+  sys_add(g_sys, (int)sizeof(g_sys), &n,
+          "=== fim do contexto ===\n");
+}

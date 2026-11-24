@@ -58,6 +58,7 @@ const char* sodos_version(void);
 void version_boot_log(void);
 void version_print(int full);
 int cmd_ver(int argc, char** argv);
+int cmd_relogio(int argc, char** argv);
 int cmd_reboot(int argc, char** argv);
 
 const struct executable_entry* find_executable(const char* name) {
@@ -2239,6 +2240,7 @@ void kmain(const struct BootInfo* bi) {
   register_builtin("reboot", cmd_reboot);
   register_builtin("set", cmd_set);
   register_builtin("ver", cmd_ver);
+  register_builtin("relogio", cmd_relogio);
 
   drives_init();
   drives_automount();

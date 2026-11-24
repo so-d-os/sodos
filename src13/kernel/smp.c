@@ -215,12 +215,37 @@ void smp_nmi_others(void) {
   if (ap_online) ipi_others(0x400u);  /* delivery mode NMI */
 }
 
-/* Mede o timer do LAPIC contra o IRQ0 (PIT, 1 ms) da BSP. */
+static inline uint64_t smp_rdtsc(void) {
+  uint32_t lo, hi;
+  __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((uint64_t)hi << 32) | lo;
+}
+
+/* Mede o timer do LAPIC contra o TSC calibrado (irq.c) ou, sem ele (VM),
+ * contra o IRQ0 (PIT, 1 ms) da BSP. Pelo TSC um tick perdido no boot nao
+ * entra na conta do timer das APs. */
 static void lapic_calibrate(void) {
-  uint64_t t;
+  uint64_t t, hz = irq_clock_hz();
   uint32_t left;
   lapic_wr(0x3E0, 0x3);               /* divide por 16 */
   lapic_wr(0x320, 0x10000u | 0xF2u);  /* mascarado, one-shot */
+  if (hz) {
+    uint64_t fl, t0, t1;
+    __asm__ volatile ("pushfq; pop %0; cli" : "=r"(fl) : : "memory");
+    lapic_wr(0x380, 0xFFFFFFFFu);
+    t0 = smp_rdtsc();
+    do {
+      t1 = smp_rdtsc();
+    } while (t1 - t0 < hz / 20u);     /* 50 ms */
+    left = lapic_rd(0x390);
+    lapic_wr(0x380, 0);
+    if (fl & 0x200u) __asm__ volatile ("sti" ::: "memory");
+    lapic_per_ms = (uint32_t)((uint64_t)(0xFFFFFFFFu - left) * (hz / 1000u) / (t1 - t0));
+    serial_puts("[smp] lapic timer (TSC): 0x");
+    serial_hex32(lapic_per_ms);
+    serial_puts(" contagens/ms (div 16)\n");
+    return;
+  }
   t = irq_ticks();
   while (irq_ticks() == t) __asm__ volatile ("pause");
   lapic_wr(0x380, 0xFFFFFFFFu);

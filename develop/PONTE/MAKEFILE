@@ -1,0 +1,9 @@
+# Makefile da PONTE do SODOS, para o MAKE.EXE (so recompila o que mudou).
+#   cd \develop\ponte   e depois   make
+# Sem o MAKE.EXE, ou se o make falhar: use o BUILD.BAT (compila tudo).
+# CC, CFLAGS, SYSINC e SYSLIB ja vem definidos pelo make.
+
+OBJS = ponte.obj
+
+PONTE.EXE: $(OBJS)
+	$(CC) $(CFLAGS) -o $@ $(OBJS)

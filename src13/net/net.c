@@ -179,6 +179,9 @@ static void time_init(void) {
   }
   serial_puts(pit_ok ? "[net] relogio: IRQ0 (PIT se o IRQ0 parar)\n"
                       : "[net] relogio: sem PIT\n");
+  /* Com o PIT a 1 kHz: calibra o TSC e, se servir, o IRQ0 passa a recuperar
+   * os ticks perdidos por ele (irq.c). */
+  if (pit_ok) irq_clock_init();
 }
 
 /* Relogio dos programas (k_ms) e da rede: o contador do IRQ0 (1 kHz), uma
@@ -191,6 +194,10 @@ static void time_init(void) {
  * de disco com cli): IRQ0 +0,02% (o PIT do KVM reinjeta tick atrasado). O TSC
  * da VM aninhada nao serve: variou alguns % entre boots e durante a execucao,
  * e o rdtsc tambem sai para o emulador.
+ * No PC de verdade o PIC nao reinjeta: com o IRQ0 parado > 1 ms os ticks se
+ * perdiam e o k_ms andava 3,5-8,4% devagar com carga (notebook, 2026-11-24).
+ * Por isso, com TSC invariante e sem hypervisor, o irq.c acerta a contagem
+ * do IRQ0 pelo TSC (irq_clock_init, abaixo); numa VM fica como aqui.
  * IRQ0 parado (mascarado, cli) por 4M consultas seguidas: volta a ler o PIT
  * ate o tick andar de novo (o relogio nunca congela). O limite e alto porque
  * com a consulta barata um laco de espera do port passa de 64K chamadas

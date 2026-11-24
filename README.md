@@ -45,6 +45,7 @@ run.bat
 | Path | Contents |
 |---|---|
 | `src13/` | Code, `Makefile`, working disks and the internal documentation |
+| `develop/` | Tools that run on any SODOS version (`make` and experimental programs); see [develop/README.md](develop/README.md) |
 | `README.md` | This file (English) |
 | `README.pt-BR.md` | Portuguese version |
 | `LICENSE` | GNU GPLv3 |

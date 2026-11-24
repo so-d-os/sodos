@@ -566,10 +566,10 @@ GIT_SRC = git/git.h git/git.c git/http.c git/pack.c git/sha1.c git/zinf.c git/BU
 WIFI_SRC = wifi/wifi.cpp wifi/BUILD.BAT wifi/WIFI.SIM
 # Comandos externos (.EXE) com fonte em cmd/<nome>: fontes em D:\SRC\CMD\<NOME>.
 XCOPY_SRC = cmd/xcopy/xcopy.cpp cmd/xcopy/BUILD.BAT cmd/xcopy/MAKEFILE
-# Ferramentas de desenvolvimento: fontes em D:\DEVELOP\<ferramenta>.
+# Ferramentas de desenvolvimento (../develop, fora do src13): fontes em D:\DEVELOP\<ferramenta>.
 # O MAKE.EXE (port do pdpmake) vai para a raiz do D: com os outros .EXE.
-MAKE_SRC = develop/make/*.c develop/make/*.h develop/make/BUILD.BAT develop/make/MAKEFILE \
-	develop/make/LEIA.TXT develop/make/LICENSE
+MAKE_SRC = ../develop/make/*.c ../develop/make/*.h ../develop/make/BUILD.BAT ../develop/make/MAKEFILE \
+	../develop/make/LEIA.TXT ../develop/make/LICENSE
 
 DISK_FILES = c_compiler/out/*.EXE c_compiler/out/*.DLL c_compiler/out/*.OBJ \
 	c_compiler/out/*.IMP c_compiler/include/*.h c_compiler/include/sys/*.h \

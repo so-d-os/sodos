@@ -1,0 +1,3 @@
+snprintf(tmp, sizeof(tmp), "Memoria: %u MB total, %u MB livre\n",
+hw.mem_total_mb, hw.mem_free_mb);
+sys_add(g_sys, (int)sizeof(g_sys), &n, tmp);

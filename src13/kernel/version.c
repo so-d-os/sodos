@@ -13,6 +13,7 @@
 #include "kexports.h"
 #include "drives.h"
 #include "vt.h"
+#include "irq.h"
 
 const char* sodos_version(void) { return SODOS_VERSION; }
 int sodos_build(void) { return SODOS_VER_BUILD; }
@@ -49,6 +50,26 @@ static void cat_u(char* d, int max, unsigned v, int digits) {
     r[j] = 0;
     cat(d, max, r);
   }
+}
+
+static void cat_hex64(char* d, int max, uint64_t v) {
+  static const char hx[] = "0123456789ABCDEF";
+  char b[19];
+  int i;
+  b[0] = '0';
+  b[1] = 'x';
+  for (i = 0; i < 16; i++) b[2 + i] = hx[(v >> (60 - 4 * i)) & 15u];
+  b[18] = 0;
+  cat(d, max, b);
+}
+
+/* "1996,312 MHz" */
+static void cat_mhz(char* d, int max, uint64_t hz) {
+  unsigned khz = (unsigned)(hz / 1000u);
+  cat_u(d, max, khz / 1000u, 1);
+  cat(d, max, ",");
+  cat_u(d, max, khz % 1000u, 3);
+  cat(d, max, " MHz");
 }
 
 /* "build N" da ultima linha de boot do log (pula as linhas de reboot);
@@ -164,6 +185,17 @@ void version_boot_log(void) {
   cat_u(line, (int)sizeof line, (unsigned)on, 1);
   cat(line, (int)sizeof line, "/");
   cat_u(line, (int)sizeof line, (unsigned)ncpu, 1);
+  {
+    struct irq_clock ck;
+    irq_clock_info(&ck);
+    if (ck.tsc) {
+      cat(line, (int)sizeof line, "  relogio tsc ");
+      cat_u(line, (int)sizeof line, (unsigned)(ck.hz / 1000u), 1);
+      cat(line, (int)sizeof line, " kHz");
+    } else {
+      cat(line, (int)sizeof line, "  relogio irq0");
+    }
+  }
   cat(line, (int)sizeof line, "\r\n");
 
   serial_puts("[ver] ");
@@ -208,6 +240,24 @@ void version_print(int full) {
       puts_k(b);
     }
     puts_k(" (SMP; 'smp' mostra o uso de cada uma)\n");
+    {
+      struct irq_clock ck;
+      char b[120];
+      irq_clock_info(&ck);
+      b[0] = 0;
+      if (ck.tsc) {
+        cat(b, (int)sizeof b, "  Relogio: TSC ");
+        cat_mhz(b, (int)sizeof b, ck.hz);
+        cat(b, (int)sizeof b, ", ");
+        cat_u(b, (int)sizeof b, (unsigned)ck.lost, 1);
+        cat(b, (int)sizeof b, " ms recuperados ('relogio' detalha)\n");
+      } else {
+        cat(b, (int)sizeof b, "  Relogio: contagem do IRQ0 (");
+        cat(b, (int)sizeof b, ck.why);
+        cat(b, (int)sizeof b, ")\n");
+      }
+      puts_k(b);
+    }
   }
 }
 
@@ -215,6 +265,139 @@ int cmd_ver(int argc, char** argv) {
   (void)argc;
   (void)argv;
   version_print(1);
+  return 0;
+}
+
+/* RELOGIO: de onde vem o k_ms (irq.c) e quantos ticks o TSC recuperou.
+ *   RELOGIO            estado
+ *   RELOGIO TSC        acerta pelo TSC (calibra se preciso; vale ate numa VM)
+ *   RELOGIO IRQ0       volta a so contar o IRQ0 (como antes)
+ *   RELOGIO TESTE [ms] segura o IRQ0 (cli) por ms e mostra quanto o k_ms andou */
+static int str_ieq(const char* a, const char* b) {
+  while (*a && *b) {
+    char x = *a++, y = *b++;
+    if (x >= 'a' && x <= 'z') x = (char)(x - 32);
+    if (y >= 'a' && y <= 'z') y = (char)(y - 32);
+    if (x != y) return 0;
+  }
+  return *a == *b;
+}
+
+static void clock_ago(char* b, int max, uint64_t now, uint64_t at) {
+  cat(b, max, "ha ");
+  cat_u(b, max, (unsigned)((now - at) / 1000u), 1);
+  cat(b, max, " s");
+}
+
+int cmd_relogio(int argc, char** argv) {
+  struct irq_clock ck;
+  char b[160];
+  if (argc > 1 && str_ieq(argv[1], "tsc")) {
+    if (irq_clock_set(1) != 0) {
+      puts_k("RELOGIO: nao deu para calibrar o TSC contra o PIT\n");
+      return 1;
+    }
+  } else if (argc > 1 && str_ieq(argv[1], "irq0")) {
+    irq_clock_set(0);
+  } else if (argc > 1 && str_ieq(argv[1], "teste")) {
+    uint32_t ms = 200;
+    uint64_t got;
+    if (argc > 2) {
+      const char* p = argv[2];
+      ms = 0;
+      while (*p >= '0' && *p <= '9') ms = ms * 10u + (uint32_t)(*p++ - '0');
+      if (ms < 2) ms = 2;
+      if (ms > 2000) ms = 2000;
+    }
+    if (irq_clock_test(ms, &got) != 0) {
+      puts_k("RELOGIO TESTE: TSC nao calibrado\n");
+      return 1;
+    }
+    b[0] = 0;
+    cat(b, (int)sizeof b, "IRQ0 segurado ");
+    cat_u(b, (int)sizeof b, ms, 1);
+    cat(b, (int)sizeof b, " ms (cli): o relogio andou ");
+    cat_u(b, (int)sizeof b, (unsigned)got, 1);
+    cat(b, (int)sizeof b, " ms");
+    cat(b, (int)sizeof b, got + 2u >= ms ? " (ok)\n" : " (ticks perdidos)\n");
+    puts_k(b);
+    return 0;
+  } else if (argc > 1) {
+    puts_k("Uso: RELOGIO [TSC | IRQ0 | TESTE [ms]]\n");
+    return 1;
+  }
+  irq_clock_info(&ck);
+  b[0] = 0;
+  cat(b, (int)sizeof b, "Relogio (k_ms): ");
+  if (ck.tsc) {
+    cat(b, (int)sizeof b, "IRQ0 acertado pelo TSC, ");
+    cat_mhz(b, (int)sizeof b, ck.hz);
+    cat(b, (int)sizeof b, " (desvio da calibracao ");
+    cat_u(b, (int)sizeof b, ck.spread_ppm, 1);
+    cat(b, (int)sizeof b, " ppm; ");
+    cat(b, (int)sizeof b, ck.why);
+    cat(b, (int)sizeof b, ")\n");
+  } else {
+    cat(b, (int)sizeof b, "so a contagem do IRQ0 (");
+    cat(b, (int)sizeof b, ck.why);
+    cat(b, (int)sizeof b, ")\n");
+  }
+  puts_k(b);
+  if (!ck.tsc) {
+    b[0] = 0;
+    cat(b, (int)sizeof b, ck.hz ? "  TSC calibrado; 'relogio tsc' liga o acerto. No ar ha "
+                                : "  'relogio tsc' calibra o TSC e liga o acerto. No ar ha ");
+    cat_u(b, (int)sizeof b, (unsigned)(ck.now / 1000u), 1);
+    cat(b, (int)sizeof b, ",");
+    cat_u(b, (int)sizeof b, (unsigned)(ck.now % 1000u), 3);
+    cat(b, (int)sizeof b, " s\n");
+    puts_k(b);
+    if (!ck.lost) return 0;
+  }
+  b[0] = 0;
+  cat(b, (int)sizeof b, "  recuperados ");
+  cat_u(b, (int)sizeof b, (unsigned)ck.lost, 1);
+  cat(b, (int)sizeof b, " ms em ");
+  cat_u(b, (int)sizeof b, (unsigned)(ck.now / 1000u), 1);
+  cat(b, (int)sizeof b, ",");
+  cat_u(b, (int)sizeof b, (unsigned)(ck.now % 1000u), 3);
+  cat(b, (int)sizeof b, " s; IRQ0 parado >= 2 ms: ");
+  cat_u(b, (int)sizeof b, ck.stalls, 1);
+  cat(b, (int)sizeof b, " vezes");
+  if (ck.stalls) {
+    cat(b, (int)sizeof b, ", a ultima ");
+    clock_ago(b, (int)sizeof b, ck.now, ck.last_at);
+  }
+  cat(b, (int)sizeof b, "\n");
+  puts_k(b);
+  if (ck.max_ms) {
+    b[0] = 0;
+    cat(b, (int)sizeof b, "  maior parada: ");
+    cat_u(b, (int)sizeof b, ck.max_ms + 1u, 1);
+    cat(b, (int)sizeof b, " ms, ");
+    clock_ago(b, (int)sizeof b, ck.now, ck.max_at);
+    cat(b, (int)sizeof b, " (rip ");
+    cat_hex64(b, (int)sizeof b, ck.max_rip);
+    cat(b, (int)sizeof b, "); ticks segurados (PIT adiantado): ");
+    cat_u(b, (int)sizeof b, (unsigned)ck.held, 1);
+    cat(b, (int)sizeof b, "\n");
+    puts_k(b);
+  }
+  if (ck.nlog) {
+    uint32_t i;
+    puts_k("  ultimas paradas >= 5 ms (o rip e onde o IRQ0 voltou):\n");
+    for (i = 0; i < ck.nlog; i++) {
+      b[0] = 0;
+      cat(b, (int)sizeof b, "    ");
+      cat_u(b, (int)sizeof b, ck.log[i].ms, 1);
+      cat(b, (int)sizeof b, " ms  ");
+      clock_ago(b, (int)sizeof b, ck.now, ck.log[i].at);
+      cat(b, (int)sizeof b, "  rip ");
+      cat_hex64(b, (int)sizeof b, ck.log[i].rip);
+      cat(b, (int)sizeof b, "\n");
+      puts_k(b);
+    }
+  }
   return 0;
 }
 

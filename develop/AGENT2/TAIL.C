@@ -1,0 +1,127 @@
+        strip_tool_markup(g_stream, shown, (int)sizeof(shown));
+        if (shown[0]) add_msg(ROLE_AI, shown);
+      }
+      snprintf(st, sizeof(st), "[%s]",
+               ai_last_error()[0] ? ai_last_error() : "sem resposta");
+      add_msg(ROLE_SYS, st);
+      set_status(ai_last_error());
+      g_waiting = 0;
+      g_busy = 0;
+      return;
+    }
+    strip_tool_markup(g_stream, shown, (int)sizeof(shown));
+    if (shown[0]) add_msg(ROLE_AI, shown);
+    if (rc == 0) {
+      cur = g_stream;
+      if (!parse_tool(cur, &cur, &tl)) break;
+      obs[0] = 0;
+      label[0] = 0;
+      run_tool(&tl, obs, (int)sizeof(obs), label, (int)sizeof(label));
+      if (label[0]) add_msg(ROLE_SYS, label);
+      add_msg(ROLE_OBS, obs);
+    } else {
+      int ti;
+      for (ti = 0; ti < rc; ti++) {
+        memset(&tl, 0, sizeof(tl));
+        tl.kind = g_tools[ti].kind;
+        snprintf(tl.arg, sizeof(tl.arg), "%s", g_tools[ti].arg);
+        snprintf(tl.body, sizeof(tl.body), "%s", g_tools[ti].body);
+        obs[0] = 0;
+        label[0] = 0;
+        run_tool(&tl, obs, (int)sizeof(obs), label, (int)sizeof(label));
+        if (label[0]) add_msg(ROLE_SYS, label);
+        add_msg(ROLE_OBS, obs);
+      }
+    }
+  }
+  if (step == STEPS_MAX) add_msg(ROLE_SYS, "[limite de acoes neste pedido]");
+  g_busy = 0;
+  g_waiting = 0;
+  g_stream_len = 0;
+  g_stream[0] = 0;
+  set_status("ok");
+}
+
+/* ==================== entrada ==================== */
+static void edit_key(int k) {
+  if (k == 8 || k == 127) {
+    if (g_edit_len > 0) g_edit[--g_edit_len] = 0;
+  } else if (k >= 32 && k < 256 && g_edit_len < MSG_LEN - 1) {
+    g_edit[g_edit_len++] = (char)k;
+    g_edit[g_edit_len] = 0;
+  }
+}
+
+static void ajuda(void) {
+  int r, c, h, w, i;
+  static const char* linhas[] = {
+    "AGENT2 - assistente de IA do SODOS",
+    "",
+    "Mesmo AGENT.CFG do AGENT.EXE (key/url/model).",
+    "Escreva o pedido e tecle Enter. O modelo pode",
+    "rodar comandos, gravar arquivos e abrir programas;",
+    "o resultado volta e ele continua ate terminar.",
+    "",
+    "F1 ajuda   F3 novo   F10/ESC sai",
+    "",
+    "Enter envia   Backspace apaga"
+  };
+  h = 14;
+  w = 56;
+  if (w > COLS - 4) w = COLS - 4;
+  r = (ROWS - 1 - h) / 2;
+  c = (COLS - w) / 2;
+  memcpy(copia, tela, sizeof tela);
+  janela(r, c, h, w, " Ajuda ");
+  for (i = 0; i < (int)(sizeof(linhas) / sizeof(linhas[0])); i++)
+    texto(r + 2 + i, c + 3, linhas[i], i == 0 ? C_FORTE : C_JANELA);
+  separador(r + h - 3, c, w);
+  texto(r + h - 2, c + 3, "Enter ou ESC fecha", C_FRACO);
+  tela_mostra();
+  for (;;) {
+    int k = tecla(0);
+    if (k == K_ENTER || k == K_ESC || k == K_EOF || k == ' ') break;
+  }
+  memcpy(tela, copia, sizeof tela);
+}
+
+int main(void) {
+  int run = 1;
+  if (tela_inicia() != 0) {
+    printf("AGENT2: precisa da tela de texto (rode no DOS, nao no WIN)\n");
+    return 1;
+  }
+  ai_cfg_load(&g_cfg);
+  if (g_cfg.key[0]) set_status(g_cfg.model);
+  else set_status("falta key no AGENT.CFG");
+  add_msg(ROLE_SYS, "Converse com o SODOS. Enter envia, F1 ajuda, F10 sai.");
+  if (!k_net_ready()) set_status("rede nao esta pronta; use net antes");
+
+  while (run) {
+    int k;
+    desenha();
+    k = tecla(200);
+    if (k == K_NADA) continue;
+    if (k == K_EOF) break;
+    if (k == K_ESC || k == K_F(10) || k == 'q' || k == 'Q') {
+      if (g_edit_len == 0) break;
+      edit_key(8);
+    } else if (k == K_F(1) || k == '?') {
+      ajuda();
+    } else if (k == K_F(3)) {
+      g_n = 0;
+      g_edit[0] = 0;
+      g_edit_len = 0;
+      add_msg(ROLE_SYS, "Conversa nova. Enter envia, F1 ajuda, F10 sai.");
+      set_status("conversa limpa");
+    } else if (k == K_ENTER) {
+      if (!g_busy) send_now();
+    } else if (k == 8 || k == 127) {
+      edit_key(k);
+    } else if (k >= 32 && k < 256) {
+      edit_key(k);
+    }
+  }
+  tela_fim();
+  return 0;
+}

@@ -1,0 +1,396 @@
+static void set_status(const char* s) {
+  int i = 0;
+  while (s[i] && i < (int)sizeof(g_status) - 1) {
+    g_status[i] = s[i];
+    i++;
+  }
+  g_status[i] = 0;
+}
+
+static void add_msg(int role, const char* text) {
+  int i = 0;
+  if (g_n >= MSG_MAX) {
+    for (i = 1; i < MSG_MAX; i++) g_msgs[i - 1] = g_msgs[i];
+    g_n = MSG_MAX - 1;
+  }
+  g_msgs[g_n].role = role;
+  i = 0;
+  while (text[i] && i < MSG_LEN - 1) {
+    g_msgs[g_n].text[i] = text[i];
+    i++;
+  }
+  g_msgs[g_n].text[i] = 0;
+  g_n++;
+}
+
+/* Quebra o texto em linhas de cpl colunas; devolve quantas. */
+static int wrap_lines(const char* text, int cpl, int* start, int* len, int maxl) {
+  int n = 0, i = 0, col = 0, s = 0;
+  if (cpl < 1) cpl = 1;
+  while (text[i] && n < maxl) {
+    if (text[i] == '\n') {
+      start[n] = s;
+      len[n] = i - s;
+      n++;
+      i++;
+      s = i;
+      col = 0;
+      continue;
+    }
+    if (col >= cpl) {
+      start[n] = s;
+      len[n] = i - s;
+      n++;
+      s = i;
+      col = 0;
+      continue;
+    }
+    i++;
+    col++;
+  }
+  if (n < maxl && i > s) {
+    start[n] = s;
+    len[n] = i - s;
+    n++;
+  }
+  return n;
+}
+
+/* ==================== ferramentas ==================== */
+struct tool {
+  int kind;
+  char arg[128];
+  char body[1600];
+};
+
+static int dsml_param(const char* a, const char* b, const char* name, char* out, int cap) {
+  int nl = (int)strlen(name);
+  const char* p = a;
+  while (p < b) {
+    const char* q = strstr(p, "name=\"");
+    const char* v, * e;
+    int n;
+    if (!q || q >= b) return 0;
+    q += 6;
+    if (q + nl <= b && !memcmp(q, name, (size_t)nl) && q[nl] == '"') {
+      v = q + nl + 1;
+      while (v < b && *v != '>') v++;
+      if (v >= b) return 0;
+      v++;
+      e = v;
+      while (e < b && !(*e == '<' && e + 1 < b && e[1] == '/')) e++;
+      n = (int)(e - v);
+      if (n > cap - 1) n = cap - 1;
+      ai_utf8_to_cp850(out, cap, v, n);
+      return 1;
+    }
+    p = q + 1;
+  }
+  return 0;
+}
+
+static int parse_tool(const char* s, const char** next, struct tool* t) {
+  t->kind = 0;
+  t->arg[0] = 0;
+  t->body[0] = 0;
+  {
+    const char* inv = strstr(s, "DSML");
+    if (inv) {
+      const char* nm = strstr(inv, "invoke name=\"");
+      const char* ce = strstr(inv, "calls>");
+      const char* end = ce ? ce + 6 : s + strlen(s);
+      if (nm) {
+        nm += 13;
+        if (!strncmp(nm, "write", 5) || !strncmp(nm, "create", 6)) {
+          if (dsml_param(inv, end, "path", t->arg, sizeof(t->arg)) ||
+              dsml_param(inv, end, "filename", t->arg, sizeof(t->arg))) {
+            if (!dsml_param(inv, end, "content", t->body, sizeof(t->body)))
+              if (!dsml_param(inv, end, "text", t->body, sizeof(t->body)))
+                dsml_param(inv, end, "body", t->body, sizeof(t->body));
+            t->kind = 'w';
+            if (next) *next = end;
+            return 1;
+          }
+        } else if (!strncmp(nm, "open", 4) || !strncmp(nm, "launch", 6) ||
+                   !strncmp(nm, "run", 3)) {
+          if (dsml_param(inv, end, "path", t->arg, sizeof(t->arg)) ||
+              dsml_param(inv, end, "file", t->arg, sizeof(t->arg)) ||
+              dsml_param(inv, end, "program", t->arg, sizeof(t->arg))) {
+            t->kind = 'o';
+            if (next) *next = end;
+            return 1;
+          }
+        } else if (!strncmp(nm, "cmd", 3) || !strncmp(nm, "shell", 5) ||
+                   !strncmp(nm, "exec", 4)) {
+          if (dsml_param(inv, end, "command", t->arg, sizeof(t->arg)) ||
+              dsml_param(inv, end, "cmd", t->arg, sizeof(t->arg)) ||
+              dsml_param(inv, end, "line", t->arg, sizeof(t->arg))) {
+            t->kind = 'c';
+            if (next) *next = end;
+            return 1;
+          }
+        }
+      }
+    }
+  }
+  {
+    const char* p = strstr(s, "```");
+    while (p) {
+      const char* tag = p + 3;
+      const char* nl = strchr(tag, '\n');
+      if (!nl) break;
+      if (!strncmp(tag, "cmd", 3)) {
+        const char* a = nl + 1;
+        const char* e = strchr(a, '\n');
+        int n = e ? (int)(e - a) : (int)strlen(a);
+        if (n > (int)sizeof(t->arg) - 1) n = (int)sizeof(t->arg) - 1;
+        ai_utf8_to_cp850(t->arg, sizeof(t->arg), a, n);
+        t->kind = 'c';
+        if (next) {
+          const char* q = strstr(p + 3, "```");
+          *next = q ? q + 3 : p + strlen(p);
+        }
+        return 1;
+      }
+      if (!strncmp(tag, "open ", 5)) {
+        const char* a = tag + 5;
+        const char* e = (nl > a) ? nl : a;
+        int n = (int)(e - a);
+        if (n > (int)sizeof(t->arg) - 1) n = (int)sizeof(t->arg) - 1;
+        ai_utf8_to_cp850(t->arg, sizeof(t->arg), a, n);
+        t->kind = 'o';
+        if (next) {
+          const char* q = strstr(p + 3, "```");
+          *next = q ? q + 3 : p + strlen(p);
+        }
+        return 1;
+      }
+      if (!strncmp(tag, "write ", 6)) {
+        const char* a = tag + 6;
+        const char* e = (nl > a) ? nl : a;
+        int n = (int)(e - a);
+        const char* b = nl + 1;
+        const char* c = strstr(b, "```");
+        int bn = c ? (int)(c - b) : (int)strlen(b);
+        if (n > (int)sizeof(t->arg) - 1) n = (int)sizeof(t->arg) - 1;
+        if (bn > (int)sizeof(t->body) - 1) bn = (int)sizeof(t->body) - 1;
+        ai_utf8_to_cp850(t->arg, sizeof(t->arg), a, n);
+        ai_utf8_to_cp850(t->body, sizeof(t->body), b, bn);
+        t->kind = 'w';
+        if (next) {
+          const char* q = strstr(p + 3, "```");
+          *next = q ? q + 3 : p + strlen(p);
+        }
+        return 1;
+      }
+      p = nl + 1;
+      {
+        const char* q = strstr(p, "```");
+        if (!q) break;
+        p = q + 3;
+      }
+    }
+  }
+  return 0;
+}
+
+static void run_tool(struct tool* t, char* obs, int cap, char* label, int lcap) {
+  if (t->kind == 'w') {
+    int rc = k_fsave(t->arg, t->body, (int)strlen(t->body));
+    snprintf(obs, (size_t)cap, "write %s: %d bytes, result %d (%s)", t->arg,
+             (int)strlen(t->body), rc, rc == 0 ? "ok" : "falhou");
+    snprintf(label, (size_t)lcap, "gravou %s (%d bytes)", t->arg, (int)strlen(t->body));
+    return;
+  }
+  if (t->kind == 'o') {
+    int rc = k_win_launch(t->arg);
+    snprintf(obs, (size_t)cap, "open %s: %d (%s)", t->arg, rc,
+             rc == 0 ? "pedido aceito" : "falhou");
+    snprintf(label, (size_t)lcap, "abriu %s", t->arg);
+    return;
+  }
+  if (t->kind == 'c') {
+    char* out = (char*)malloc(16384);
+    int len = 0, rc;
+    if (!out) {
+      snprintf(obs, (size_t)cap, "sem memoria");
+      return;
+    }
+    rc = k_shell_capture(t->arg, out, 16384, &len);
+    if (len < 0) len = -len;
+    snprintf(obs, (size_t)cap, "exit %d, saida:\n%s", rc, out);
+    snprintf(label, (size_t)lcap, "rodou %s (exit %d)", t->arg, rc);
+    free(out);
+    return;
+  }
+  snprintf(obs, (size_t)cap, "nenhuma acao");
+}
+
+static void strip_tool_markup(const char* s, char* out, int cap) {
+  int i = 0, o = 0, hide = 0;
+  while (s[i] && o < cap - 1) {
+    if (hide) {
+      if (s[i] == '>' && i >= 5 && !memcmp(s + i - 5, "calls", 5)) hide = 0;
+      i++;
+      continue;
+    }
+    if (s[i] == '<' && (s[i + 1] == '|' || s[i + 1] == '?')) {
+      hide = 1;
+      i += 2;
+      continue;
+    }
+    if (s[i] == '`' && s[i + 1] == '`' && s[i + 2] == '`') {
+      const char* close = strstr(s + i + 3, "```");
+      if (!close) break;
+      i = (int)(close - s) + 3;
+      if (s[i] == '\n') i++;
+      continue;
+    }
+    out[o++] = s[i++];
+  }
+  out[o] = 0;
+}
+
+/* ==================== desenho da conversa ==================== */
+static void desenha(void) {
+  static const char* const rotulos[10] = {
+    "Ajuda", "", "Novo", "", "", "", "", "", "", "Sair"
+  };
+  int r, c, w, h, i, y, ytop, ybot, cpl;
+  char disp[MSG_LEN * 2];
+  int lstart[128], llen[128];
+
+  fundo();
+  menu_topo();
+  teclas(rotulos);
+  r = 1;
+  c = 0;
+  h = ROWS - 3;
+  w = COLS;
+  janela(r, c, h, w, " Conversa ");
+
+  ytop = r + 1;
+  ybot = r + h - 4;
+  cpl = w - 8;
+  if (cpl < 10) cpl = 10;
+
+  /* desenha de baixo para cima, como o AIPANEL */
+  y = ybot;
+  for (i = g_n - 1; i >= 0; i--) {
+    int nl, li, bh;
+    if (g_msgs[i].role == ROLE_OBS) continue;
+    ai_utf8_to_cp850(disp, (int)sizeof(disp), g_msgs[i].text, (int)strlen(g_msgs[i].text));
+    nl = wrap_lines(disp, cpl, lstart, llen, 128);
+    bh = nl + 1;
+    if (y - bh < ytop) break;
+    y -= bh;
+    {
+      int cor = g_msgs[i].role == ROLE_ME ? C_ME
+              : g_msgs[i].role == ROLE_SYS ? C_SYS : C_AI;
+      const char* lab = g_msgs[i].role == ROLE_ME ? "voce"
+                      : g_msgs[i].role == ROLE_SYS ? "sistema" : "SODOS";
+      texto(y, c + 2, lab, C_FRACO);
+      for (li = 0; li < nl; li++) {
+        int n = llen[li];
+        if (n > cpl) n = cpl;
+        textow(y + 1 + li, c + 2, disp + lstart[li], n, cor);
+        if (n < cpl) linha(y + 1 + li, c + 2 + n, cpl - n, ' ', cor);
+      }
+    }
+    y--;
+  }
+  if (g_waiting) {
+    int nl, li;
+    ai_utf8_to_cp850(disp, (int)sizeof(disp), g_stream_len ? g_stream : "...",
+                     (int)strlen(g_stream_len ? g_stream : "..."));
+    nl = wrap_lines(disp, cpl, lstart, llen, 128);
+    if (y - (nl + 1) >= ytop) {
+      y -= nl + 1;
+      texto(y, c + 2, "SODOS", C_FRACO);
+      for (li = 0; li < nl; li++) {
+        int n = llen[li];
+        if (n > cpl) n = cpl;
+        textow(y + 1 + li, c + 2, disp + lstart[li], n, C_AI);
+        if (n < cpl) linha(y + 1 + li, c + 2 + n, cpl - n, ' ', C_AI);
+      }
+    }
+  }
+
+  separador(r + h - 3, c, w);
+  texto(r + h - 2, c + 2, "voce>", C_FORTE);
+  textow(r + h - 2, c + 8, g_edit, w - 12, C_JANELA);
+  if (!g_busy) poe(r + h - 2, c + 8 + g_edit_len, '_', C_FORTE);
+  texto(r + h - 1, c + 2, g_status, C_FRACO);
+  tela_mostra();
+}
+
+/* ==================== API ==================== */
+static void on_token(void* ud, const char* s, int n) {
+  (void)ud;
+  if (n <= 0) return;
+  if (g_stream_len + n < MSG_LEN - 1) {
+    memcpy(g_stream + g_stream_len, s, (size_t)n);
+    g_stream_len += n;
+    g_stream[g_stream_len] = 0;
+  }
+  if (g_waiting) desenha();
+}
+
+static int call_api(void) {
+  ai_msg_t* list;
+  int i, k = 0, rc;
+  g_stream_len = 0;
+  g_stream[0] = 0;
+  list = (ai_msg_t*)malloc((size_t)(g_n + 1) * sizeof(ai_msg_t));
+  if (!list) {
+    set_status("sem memoria");
+    return -1;
+  }
+  list[k].role = "system";
+build_sys();
+list[k].text = g_sys;
+  k++;
+  for (i = 0; i < g_n; i++) {
+    if (g_msgs[i].role == ROLE_SYS) continue;
+    list[k].role = (g_msgs[i].role == ROLE_ME || g_msgs[i].role == ROLE_OBS)
+                       ? "user" : "assistant";
+    list[k].text = g_msgs[i].text;
+    k++;
+  }
+  rc = ai_chat_tools(&g_cfg, list, k, on_token, 0, g_tools, 4);
+  free(list);
+  return rc;
+}
+
+static void send_now(void) {
+  char q[MSG_LEN];
+  char obs[1200];
+  char label[160];
+  char shown[MSG_LEN * 2];
+  struct tool tl;
+  const char* cur;
+  int step;
+
+  ai_cp850_to_utf8(q, (int)sizeof(q), g_edit, (int)strlen(g_edit));
+  if (!q[0]) {
+    set_status("escreva uma mensagem");
+    return;
+  }
+  if (!g_cfg.key[0]) {
+    set_status("falta key no AGENT.CFG");
+    return;
+  }
+  add_msg(ROLE_ME, q);
+  g_edit[0] = 0;
+  g_edit_len = 0;
+  g_busy = 1;
+
+  for (step = 0; step < STEPS_MAX; step++) {
+    int rc;
+    g_waiting = 1;
+    set_status(step ? "executando e perguntando de novo..." : "esperando a API...");
+    desenha();
+    rc = call_api();
+    if (rc < 0) {
+      char st[200];
+      if (g_stream_len > 0) {

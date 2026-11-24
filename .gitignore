@@ -21,3 +21,18 @@ src13/content/*.mp4
 # Versao do kernel gerada no build (tools/mkversion.sh). O contador
 # src13/kernel/BUILDNO fica no git: o numero da build e o mesmo em todo checkout.
 src13/kernel/version.h
+
+# develop/: so fonte vai para o git. AGENT.CFG tem a chave da API; os .json
+# sao estado local dos programas (janela, dumps); .obj e .EXE saem do build.
+develop/**/[Aa][Gg][Ee][Nn][Tt].[Cc][Ff][Gg]
+develop/**/*.[Jj][Ss][Oo][Nn]
+develop/**/*.[Oo][Bb][Jj]
+develop/**/*.[Ee][Xx][Ee]
+develop/**/__pycache__/
+# PLAY/linux: ffmpeg e yt-dlp do Linux (binarios grandes, baixe de novo).
+develop/PLAY/linux/
+# Sessoes gravadas do agente e temporarios.
+develop/**/*.[Ss][Ee][Ss]
+develop/**/*.[Tt][Mm][Pp]
+# CON e nome reservado no DOS/Windows: o arquivo nao abre la.
+develop/**/[Cc][Oo][Nn]

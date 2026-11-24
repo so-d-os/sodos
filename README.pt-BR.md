@@ -45,6 +45,7 @@ run.bat
 | Caminho | Conteúdo |
 |---|---|
 | `src13/` | Código, `Makefile`, discos de trabalho e a documentação interna |
+| `develop/` | Ferramentas que rodam em qualquer versão do SODOS (`make` e programas experimentais); veja [develop/README.md](develop/README.md) |
 | `README.md` | README principal, em inglês |
 | `README.pt-BR.md` | Este arquivo, em português |
 | `LICENSE` | GNU GPLv3 |

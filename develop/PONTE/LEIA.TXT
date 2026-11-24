@@ -1,0 +1,47 @@
+PONTE - comandos do SODOS a partir da VM Linux do WSL
+
+Para que serve
+  O bash do Claude Code e a VM Linux do WSL.EXE. Ela le e grava os discos do
+  SODOS (/d = D:), mas nao roda programas do SODOS, e a API HTTP 8797 (/exec)
+  nao responde de dentro da propria maquina (o SODOS nao tem loopback e o
+  roteador 10.0.3.2 da VM so atende ping). A PONTE resolve por arquivos:
+
+    Linux: SODOSRUN.PY grava FILA\PED.TXT e espera FILA\RESP.TXT
+    SODOS: PONTE.EXE acha o pedido, roda a linha no prompt (k_shell_capture)
+           na pasta pedida e grava a resposta com o codigo e a saida
+
+Arquivos
+  PONTE.C       o servico do lado do SODOS (PONTE.EXE)
+  SODOSRUN.PY   o cliente do lado do Linux (python3)
+  MAKEFILE      compila com o make;  BUILD.BAT  compila sem o make
+  FILA\         pedidos e respostas (o PONTE.EXE cria)
+
+Como usar
+  1. No SODOS, uma vez:     cd \develop\ponte   e   make   (ou build)
+  2. Numa tela livre do SODOS (Ctrl+F2...):   cd \develop\ponte   e   ponte
+     Deixe aberto; ESC fecha. Cada pedido aparece na tela.
+  3. No Linux:
+       python3 /d/DEVELOP/PONTE/SODOSRUN.PY ver
+       cd /d/develop/agent2 && python3 /d/DEVELOP/PONTE/SODOSRUN.PY make
+       python3 /d/DEVELOP/PONTE/SODOSRUN.PY -C D:\DEVELOP -t 60 dir
+
+  A pasta padrao e a atual do Linux, traduzida (/d/x -> D:\x). O codigo de
+  saida e o do comando no SODOS; 124 = tempo esgotado, 125 = o PONTE.EXE nao
+  pegou o pedido (nao esta aberto).
+
+Protocolo (CP850)
+  PED.TXT    PONTE 1 <id>\n<pasta>\n<comando>\n
+  RESP.TXT   PONTE 1 <id> <codigo> <bytes> <cortou>\n<saida>
+  O cliente grava PED.TMP e renomeia para PED.TXT; o PONTE.EXE apaga o
+  PED.TXT ao pegar o pedido e grava o RESP.TXT inteiro de uma vez (k_fsave).
+  Um pedido por vez. Saida ate 256 KB (cortou = 1 se passou).
+
+Limites
+  - So comandos sem interacao: o que pedir tecla fica esperando na tela da
+    PONTE (aperte a tecla la). Programas de tela cheia (AGENT2, TOP, MC, WIN)
+    nao funcionam com a saida capturada.
+  - A linha do prompt tem ate 255 caracteres.
+  - A pasta atual do SODOS e do sistema todo: a PONTE muda para a pasta do
+    pedido e volta para a anterior quando o comando termina.
+  - Sem senha: qualquer programa que grave na FILA roda comandos no SODOS.
+    Feche a PONTE (ESC) quando nao estiver usando.

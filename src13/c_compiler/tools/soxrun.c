@@ -24,6 +24,8 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <signal.h>
+#include <ucontext.h>
 #include "sox.h"
 
 #define MAXMOD 32
@@ -113,6 +115,11 @@ static void k_write(const char* s, int n) {
   if (cap_buf) { if (s) cap_put(s, n); return; }
   if (s && n > 0) fwrite(s, 1, (size_t)n, stdout);
   fflush(stdout);
+}
+/* k_dbg: no kernel vai para a serial; aqui vai para o stderr, fora do
+ * stdout que os testes conferem. */
+static void k_dbg(const char* s, int n) {
+  if (s && n > 0) fwrite(s, 1, (size_t)n, stderr);
 }
 static void k_puts(const char* s) {
   if (cap_buf) { if (s) cap_put(s, (int)strlen(s)); return; }
@@ -378,6 +385,13 @@ static int k_chdir(const char* path) {
   slash_to_host(cwd_rel);
   return 0;
 }
+/* Data e hora no formato da FAT (2 em 2 segundos). */
+static void fat_stamp(const struct stat* st, unsigned short* date, unsigned short* time) {
+  struct tm tm;
+  if (!localtime_r(&st->st_mtime, &tm)) return;
+  *date = (unsigned short)(((tm.tm_year - 80) << 9) | ((tm.tm_mon + 1) << 5) | tm.tm_mday);
+  *time = (unsigned short)((tm.tm_hour << 11) | (tm.tm_min << 5) | (tm.tm_sec / 2));
+}
 struct k_dirent {
   char name[32];
   unsigned size;
@@ -397,7 +411,6 @@ static int k_dir(const char* path, struct k_dirent* out, int max) {
   while ((e = readdir(d)) != NULL && n < max) {
     char sub[600];
     struct stat st;
-    struct tm tm;
     if (e->d_name[0] == '.') continue;
     snprintf(sub, sizeof sub, "%s/%s", hp, e->d_name);
     if (stat(sub, &st) != 0) continue;
@@ -405,14 +418,65 @@ static int k_dir(const char* path, struct k_dirent* out, int max) {
     snprintf(out[n].name, sizeof out[n].name, "%s", e->d_name);
     out[n].dir = S_ISDIR(st.st_mode) ? 1 : 0;
     out[n].size = out[n].dir ? 0 : (unsigned)st.st_size;
-    if (localtime_r(&st.st_mtime, &tm)) {
-      out[n].date = (unsigned short)(((tm.tm_year - 80) << 9) | ((tm.tm_mon + 1) << 5) | tm.tm_mday);
-      out[n].time = (unsigned short)((tm.tm_hour << 11) | (tm.tm_min << 5) | (tm.tm_sec / 2));
-    }
+    fat_stamp(&st, &out[n].date, &out[n].time);
     n++;
   }
   closedir(d);
   return n;
+}
+/* Como k_dir, com o nome inteiro (ate 255): no Linux nao ha apelido 8.3. */
+struct k_direntl {
+  char name[256];
+  unsigned size;
+  unsigned short date;
+  unsigned short time;
+  unsigned char dir;
+  unsigned char pad[3];
+};
+static void direntl_fill(struct k_direntl* o, const char* name, const struct stat* st) {
+  memset(o, 0, sizeof *o);
+  snprintf(o->name, sizeof o->name, "%s", name);
+  o->dir = S_ISDIR(st->st_mode) ? 1 : 0;
+  o->size = o->dir ? 0 : (unsigned)st->st_size;
+  fat_stamp(st, &o->date, &o->time);
+}
+static int k_dir_long(const char* path, struct k_direntl* out, int max) {
+  char hp[300];
+  DIR* d;
+  struct dirent* e;
+  int n = 0;
+  if (!out || max <= 0) return -1;
+  host_path(path && path[0] ? path : "D:\\", hp, sizeof hp);
+  d = opendir(hp);
+  if (!d) return -1;
+  while ((e = readdir(d)) != NULL && n < max) {
+    char sub[600];
+    struct stat st;
+    if (e->d_name[0] == '.') continue;
+    snprintf(sub, sizeof sub, "%s/%s", hp, e->d_name);
+    if (stat(sub, &st) != 0) continue;
+    direntl_fill(&out[n++], e->d_name, &st);
+  }
+  closedir(d);
+  return n;
+}
+/* Uma entrada so (o stat da POSIX.DLL). 0 achou; -1 nao. Como no kernel, a
+ * raiz da unidade nao tem entrada. */
+static int k_dir_entry(const char* path, struct k_direntl* out) {
+  char hp[300];
+  struct stat st;
+  const char* n;
+  const char* b;
+  if (!path || !out) return -1;
+  n = path;
+  if (n[0] && n[1] == ':') n += 2;
+  while (*n == '\\' || *n == '/') n++;
+  if (!*n && path[0] && (path[1] == ':' || path[0] == '\\' || path[0] == '/')) return -1;
+  if (stat(host_path(path, hp, sizeof hp), &st) != 0) return -1;
+  for (b = n; *n; n++)
+    if (*n == '\\' || *n == '/') b = n + 1;
+  direntl_fill(out, b, &st);
+  return 0;
 }
 static int k_fdelete(const char* path) {
   char hp[300];
@@ -1019,17 +1083,27 @@ static void k_gui_pixels(int x, int y, int w, int h, const void* p, int stride) 
   }
 }
 
+/* k_dl_sym(0, nome, 0): a exportacao do kernel, se o soxrun tiver (os
+ * programas testam assim o que so existe em kernel novo, como k_fwrite_at).
+ * Bibliotecas ELF (handle > 0) nao existem aqui. */
+static void* kfind(const char* n);
+static void* k_dl_sym(int h, const char* name, const void* caller) {
+  (void)caller;
+  return h == 0 && name ? kfind(name) : NULL;
+}
+
 #define E(n) { #n, (void*)n }
 static const struct {
   const char* name;
   void* fn;
 } ktab[] = {
-  E(k_putc), E(k_write), E(k_puts), E(k_getc), E(k_trygetc), E(k_readline), E(k_clear), E(k_yield),
+  E(k_putc), E(k_write), E(k_puts), E(k_dbg), E(k_getc), E(k_trygetc), E(k_readline), E(k_clear), E(k_yield),
   E(k_fsize), E(k_fload), E(k_fread), E(k_fsave), E(k_flist), E(k_dirlist), E(k_pwd), E(k_chdir),
-  E(k_drive), E(k_set_drive), E(k_exe_drive), E(k_dir), E(k_fdelete), E(k_frename), E(k_mkdir), E(k_rmdir), E(k_dfree),
+  E(k_drive), E(k_set_drive), E(k_exe_drive), E(k_dir), E(k_dir_long), E(k_dir_entry), E(k_fdelete), E(k_frename), E(k_mkdir), E(k_rmdir), E(k_dfree),
   E(k_vput), E(k_cursor), E(k_font_get), E(k_font_set), E(k_font_reset), E(k_blink),
   E(k_malloc), E(k_free), E(k_realloc), E(k_msize), E(k_meminfo), E(k_ps), E(k_kill), E(k_memmap), E(k_vram),
   E(k_exit), E(k_exec), E(k_shell), E(k_shell_capture), E(k_last_error), E(k_dll_load), E(k_dll_sym), E(k_dll_free),
+  E(k_dl_sym),
   E(k_rdtsc), E(k_ms), E(k_date), E(k_time), E(k_random),
   E(k_net_ready), E(k_dns), E(k_tcp_connect), E(k_tcp_send), E(k_tcp_recv), E(k_net_pending), E(k_tcp_close),
   E(k_gui_open), E(k_gui_size), E(k_gui_font), E(k_gui_event),
@@ -1218,8 +1292,68 @@ static int run_exe(const char* path, int argc, char** argv, int wide) {
   return rc;
 }
 
+/* A libc do SODOS escreve na serial direto (outb 0x3F8, ser_write do
+ * stdio.c): no SO isso funciona, mas no Linux a instrucao de porta da #GP e
+ * vira SIGSEGV. Aqui in/out (sem rep) sao pulados; o in devolve 0, menos o
+ * registro de linha da serial (porta base+5), que diz "transmissor vazio".
+ * Qualquer outra falha volta ao SIGSEGV normal. */
+static void io_skip(int sig, siginfo_t* si, void* ctx) {
+  ucontext_t* uc = (ucontext_t*)ctx;
+  greg_t* g = uc->uc_mcontext.gregs;
+  const unsigned char* p = (const unsigned char*)g[REG_RIP];
+  int len = 0, o16 = 0;
+  unsigned port, v;
+  if (si->si_code == SI_KERNEL) { /* #GP; falta de pagina vem como SEGV_* */
+    if (*p == 0x66) {
+      o16 = 1;
+      p++;
+      len++;
+    }
+    switch (*p) {
+    case 0xE4: case 0xE5: case 0xE6: case 0xE7:
+      port = p[1];
+      len += 2;
+      break;
+    case 0xEC: case 0xED: case 0xEE: case 0xEF:
+      port = (unsigned)(g[REG_RDX] & 0xFFFF);
+      len += 1;
+      break;
+    default:
+      len = 0;
+      break;
+    }
+    if (len) {
+      if (!(*p & 2)) { /* in */
+        v = (port & 7) == 5 ? 0x60 : 0;
+        if (!(*p & 1)) g[REG_RAX] = (g[REG_RAX] & ~(greg_t)0xFF) | v;
+        else if (o16) g[REG_RAX] = (g[REG_RAX] & ~(greg_t)0xFFFF) | v;
+        else g[REG_RAX] = v; /* 32 bits zeram a parte de cima */
+      }
+      g[REG_RIP] += len;
+      return;
+    }
+  }
+  signal(sig, SIG_DFL); /* refaz a instrucao e morre como antes */
+}
+
+static void io_skip_install(void) {
+  static char alt[64 * 1024];
+  stack_t ss;
+  struct sigaction sa;
+  ss.ss_sp = alt;
+  ss.ss_size = sizeof alt;
+  ss.ss_flags = 0;
+  sigaltstack(&ss, NULL);
+  memset(&sa, 0, sizeof sa);
+  sa.sa_sigaction = io_skip;
+  sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGSEGV, &sa, NULL);
+}
+
 int main(int argc, char** argv) {
   int a = 1, rc;
+  io_skip_install();
   if (a + 1 < argc && strcmp(argv[a], "-C") == 0) {
     root_dir = argv[a + 1];
     a += 2;
