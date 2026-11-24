@@ -143,7 +143,8 @@ static int fetch_once(const url_t* u, http_resp_t* r, char* location, progress_f
   ka_open = 0; /* em uso; volta a ficar guardada se a resposta deixar */
   snprintf(req, sizeof(req),
            "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: SO-Navegador/1.0\r\n"
-           "Accept: text/html,text/plain;q=0.9,*/*;q=0.5\r\nAccept-Encoding: identity\r\n\r\n",
+           "Accept: text/html,text/plain;q=0.9,*/*;q=0.5\r\nAccept-Encoding: gzip, deflate\r\n"
+           "Accept-Language: pt-BR,pt;q=0.9,en;q=0.6\r\n\r\n",
            u->path, u->host);
   /* A segunda volta so acontece se a conexao guardada ja tinha caido. */
   while (stale) {
@@ -317,6 +318,31 @@ static int fetch_once(const url_t* u, http_resp_t* r, char* location, progress_f
     data[out_len] = 0;
     r->body = data;
     r->body_len = out_len;
+  }
+  {
+    /* Content-Encoding: gzip ou deflate -> texto puro antes do cache e do layout */
+    char enc[64];
+    int i, packed = r->body_len;
+    header(buf, hdr_end, "Content-Encoding", enc, (int)sizeof(enc));
+    for (i = 0; enc[i]; i++) enc[i] = (char)tolower((unsigned char)enc[i]);
+    if (r->body_len > 0 && (strstr(enc, "gzip") || strstr(enc, "deflate"))) {
+      char* plain = 0;
+      int plen = 0;
+      if (inflate_body((const unsigned char*)r->body, r->body_len, &plain, &plen) != 0) {
+        free(buf);
+        http_free(r);
+        snprintf(r->err, sizeof(r->err), "%s mandou %s que nao descompactou", u->host, enc);
+        return -1;
+      }
+      free(r->body);
+      r->body = plain;
+      r->body_len = plen;
+      free(buf);
+      snprintf(msg, sizeof(msg), "100%% %d bytes (%s %d) em %u ms", r->body_len, enc, packed,
+               k_ms() - t0);
+      progress(msg);
+      return 0;
+    }
   }
   free(buf);
   snprintf(msg, sizeof(msg), "100%% %d bytes em %u ms", r->body_len, k_ms() - t0);

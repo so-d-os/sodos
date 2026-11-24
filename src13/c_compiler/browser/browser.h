@@ -45,6 +45,16 @@ void http_free(http_resp_t* r);
 /* Fecha a conexao que ficou aberta para o proximo pedido (fim da pagina). */
 void http_idle_close(void);
 
+/* ---- main.c ---- */
+/* Tamanho de uma figura ja decodificada nesta sessao: 1 se sabe (w = h = 0
+ * quando ela falhou e nao deve ocupar caixa), 0 se nunca foi vista. */
+int img_hint(const char* url, int* w, int* h);
+
+/* ---- inflate.c ---- */
+/* Corpo com Content-Encoding gzip ou deflate -> *out (malloc, com NUL no fim).
+ * 0 = ok (cortado no meio: fica o que veio); -1 = nao descompactou. */
+int inflate_body(const unsigned char* in, int n, char** out, int* out_len);
+
 /* ---- html.c ---- */
 #define RUN_BOLD  1
 #define RUN_ULINE 2
@@ -123,6 +133,7 @@ typedef struct {
   int nlinks, links_cap;
   int nlines;
   char title[128];
+  char title_ascii[128]; /* sem acentos: a barra de titulo do WIN so tem ASCII */
   doc_img_t imgs[DOC_IMGS];
   int nimgs;
   doc_el_t els[DOC_ELS];
@@ -176,5 +187,23 @@ char* search_images_html(const char* body, int len, const char* q, int cols, int
 int search_image_copy(const char* url, char* out, int max);
 /* Escapa q para usar num link (about:busca?q=...) */
 int search_enc(char* dst, int n, int max, const char* s);
+/* valor de name= na query (sem o '?'), com %XX e '+' decodificados; 0 se nao tem */
+int search_param(const char* query, const char* name, char* out, int max);
+/* duckduckgo.com (pagina com JavaScript) -> html.duckduckgo.com. 1 se trocou. */
+int search_rewrite(const char* url, char* out, int max);
+
+/* ---- youtube.c ---- */
+#define YT_HOME   1 /* youtube.com: so a caixa de busca */
+#define YT_SEARCH 2 /* /results?search_query= */
+#define YT_WATCH  3 /* /watch?v= */
+#define YT_LIST   4 /* canal, playlist: os videos que vierem */
+/* youtu.be/ID, m.youtube.com, /shorts/ID, /embed/ID -> www.youtube.com/watch?v=ID.
+ * 1 se trocou. */
+int yt_rewrite(const char* url, char* out, int max);
+/* Que pagina do YouTube e esta (0 = nao e, ou fica como vier). q recebe a
+ * busca (YT_SEARCH) ou o id do video (YT_WATCH). */
+int yt_kind(const char* url, char* q, int qmax);
+/* Pagina do YouTube -> HTML simples (malloc). YT_HOME nao precisa de body. */
+char* yt_html(int kind, const char* body, int len, const char* q, const char* url, int* outlen);
 
 #endif

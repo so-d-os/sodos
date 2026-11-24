@@ -19,9 +19,11 @@
 #define COL_EM   0x303050
 #define COL_BTN  0xE4E4E4
 
-#define CSS_RULES 3072
-#define CSS_VARS 512
-#define CSS_HASH 256
+/* O GitHub traz ~2,6 MB de CSS: com 3072 regras as do cabecalho (que escondem
+ * os menus suspensos) ficavam de fora. Cada regra tem ~1 KB. */
+#define CSS_RULES 24576
+#define CSS_VARS 1024
+#define CSS_HASH 4096
 #define CSS_DEPTH 96
 #define SEL_PARTS 5
 #define RAW_MAX (64 * 1024) /* corpo de <style>, <script> e <textarea> */
@@ -170,6 +172,9 @@ struct lay {
   unsigned link_color;
   int button;     /* campo do <button> aberto, -1 */
   int glue_run, glue_col; /* palavra colada (<a>x</a>) que comecou neste run e coluna */
+  /* float:right (tabela): o texto corre a esquerda dela, com cols menor, ate
+   * passar da ultima linha da tabela; os runs saem de ordem e sao ordenados no fim */
+  int fl_end, fl_cols, fl_used;
 };
 
 /* ---------- caracteres ---------- */
@@ -181,8 +186,9 @@ static const unsigned char cp437_hi[96] = {
   0x85, 0xA0, 0x83, 'a', 0x84, 0x86, 0x91, 0x87, 0x8A, 0x82, 0x88, 0x89, 0x8D, 0xA1, 0x8C, 0x8B,
   'd', 0xA4, 0x95, 0xA2, 0x93, 'o', 0x94, 0xF6, 'o', 0x97, 0xA3, 0x96, 0x81, 'y', 'p', 0x98
 };
+/* U+00A0..U+00FF sem a fonte da BIOS: 16 por linha (o \0 do U+00AD some) */
 static const char ascii_hi[] =
-  " !cL?Y|S\"ca<\0R-" "o+23'uP.,1o>????" "AAAAAAACEEEEIIII" "DNOOOOOxOUUUUYPs"
+  " !cL?Y|S\"ca<-\0R-" "o+23'uP.,1o>????" "AAAAAAACEEEEIIII" "DNOOOOOxOUUUUYPs"
   "aaaaaaaceeeeiiii" "dnooooo/ouuuuypy";
 
 /* code point -> ate 3 bytes da fonte; devolve quantos */
@@ -258,6 +264,10 @@ static void emit(lay_t* L, const char* s, int n, int extra_flags) {
   unsigned color = COL_TEXT;
   unsigned bg = 0;
   if (n <= 0 || L->hide) return;
+  if (L->fl_end >= 0 && L->line > L->fl_end) { /* float_check, antes da definicao */
+    L->cols = L->fl_cols;
+    L->fl_end = -1;
+  }
   if (L->bold || L->heading) flags |= RUN_BOLD;
   if (L->link >= 0 || L->uline) flags |= RUN_ULINE;
   if (L->css_bold > 0) flags |= RUN_BOLD;
@@ -330,6 +340,14 @@ static void align_line(lay_t* L) {
   }
 }
 
+/* passou da ultima linha do float: a largura volta ao normal */
+static void float_check(lay_t* L) {
+  if (L->fl_end >= 0 && L->line > L->fl_end) {
+    L->cols = L->fl_cols;
+    L->fl_end = -1;
+  }
+}
+
 static void flush_line(lay_t* L) {
   if (!L->line_empty) {
     align_line(L);
@@ -337,6 +355,7 @@ static void flush_line(lay_t* L) {
     L->line_empty = 1;
     L->blank = 0;
   }
+  float_check(L);
   L->col = L->indent;
   L->space_pending = 0;
   L->line_run0 = L->d->nruns;
@@ -464,11 +483,16 @@ static void text_cp(lay_t* L, unsigned cp) {
   if (cp == '\r') return;
   if (L->in_title) {
     int tl = (int)strlen(L->d->title);
+    int al = (int)strlen(L->d->title_ascii);
     if (cp == '\n' || cp == '\t') cp = ' ';
     if (cp == ' ' && (tl == 0 || L->d->title[tl - 1] == ' ')) return;
     n = map_cp(cp, out, L->cp437);
     for (i = 0; i < n && tl < (int)sizeof(L->d->title) - 1; i++) L->d->title[tl++] = out[i];
     L->d->title[tl] = 0;
+    /* a barra de titulo do WIN so desenha ASCII: copia sem acentos */
+    n = map_cp(cp, out, 0);
+    for (i = 0; i < n && al < (int)sizeof(L->d->title_ascii) - 1; i++) L->d->title_ascii[al++] = out[i];
+    L->d->title_ascii[al] = 0;
     return;
   }
   if (L->upper == 1) {
@@ -715,22 +739,48 @@ static void place_image(lay_t* L, tag_t* t) {
   }
   avail = L->cols - L->indent;
   if (avail < 1) avail = 1;
-  idx = d->nimgs++;
-  im = &d->imgs[idx];
-  memset(im, 0, sizeof(*im));
-  strncpy(im->url, abs, URL_MAX - 1);
-  strncpy(im->alt, t->alt, sizeof(im->alt) - 1);
-  if (t->width < 0) cols = L->measure ? 16 : avail * -t->width / 100;
-  else if (t->width > 0) cols = (t->width + 7) / 8;
-  else cols = 16;
-  if (t->height > 0) lines = (t->height + 15) / 16;
-  else if (t->width != 0) lines = cols / 2;
-  else lines = 8;
-  im->fit = !(t->width > 0 && t->height > 0);
+  {
+    /* figura ja vista (main.c): tamanho real; se falhou (SVG...), so o alt */
+    int hw = 0, hh = 0, known = img_hint(abs, &hw, &hh);
+    if (known && (hw <= 0 || hh <= 0)) {
+      alt_word(L, t->alt);
+      return;
+    }
+    idx = d->nimgs++;
+    im = &d->imgs[idx];
+    memset(im, 0, sizeof(*im));
+    strncpy(im->url, abs, URL_MAX - 1);
+    strncpy(im->alt, t->alt, sizeof(im->alt) - 1);
+    if (known) {
+      /* a proporcao vem da figura; o HTML/CSS so fixa um dos lados */
+      int pw;
+      if (t->width < 0) pw = (L->measure ? 16 : avail * -t->width / 100) * 8;
+      else if (t->width > 0) pw = t->width;
+      else if (t->height > 0) pw = t->height * hw / hh;
+      else pw = hw;
+      if (pw > avail * 8) pw = avail * 8;
+      if (t->height > 0 && t->width > 0) lines = (t->height + 15) / 16;
+      else lines = (pw * hh / hw + 15) / 16;
+      if (lines > 45) { /* figura muito alta: reduz mantendo a proporcao */
+        pw = pw * 45 / lines;
+        lines = 45;
+      }
+      cols = (pw + 7) / 8;
+      im->fit = 0;
+    } else {
+      if (t->width < 0) cols = L->measure ? 16 : avail * -t->width / 100;
+      else if (t->width > 0) cols = (t->width + 7) / 8;
+      else cols = 16;
+      if (t->height > 0) lines = (t->height + 15) / 16;
+      else if (t->width != 0) lines = cols / 2;
+      else lines = 8;
+      im->fit = !(t->width > 0 && t->height > 0);
+    }
+  }
   if (cols < 1) cols = 1;
   if (cols > avail) cols = avail;
   if (lines < 1) lines = 1;
-  if (lines > 30) lines = 30;
+  if (lines > 45) lines = 45;
   im->cols = cols;
   im->lines = lines;
   if (cols > L->minw) L->minw = cols;
@@ -2302,7 +2352,7 @@ static void props_onto(const css_props_t* r, frm_t* f) {
   if (r->set & P_FLOAT) f->flt = r->flt;
 }
 
-#define MATCH_MAX 96
+#define MATCH_MAX 256
 
 static void css_bucket(const lay_t* L, int head, const tag_t* t, int* got, int* ng) {
   const css_t* c = L->css;
@@ -2663,6 +2713,7 @@ static void lay_init(lay_t* L, doc_t* d, int cols, int cp437) {
   L->last_emit = -1;
   L->band_runs = -1;
   L->glue_run = -1;
+  L->fl_end = -1;
   L->link_color = COL_LINK;
   d->page_bg = 0xFFFFFF;
   L->ebg = 0xFFFFFF;
@@ -3543,9 +3594,38 @@ static int start_tag(lay_t* L, tag_t* t, const char* html, int i, int len) {
   fi = frame_push(L, &f, t);
   L->blk = !hid && mode != M_INLINE;
   if (is(n, "table") && L->blk && L->table_depth < TABLE_DEPTH && !L->skip) {
+    int right = (fi >= 0 && L->frame[fi].flt == 2) || is(t->align, "right");
+    int run0, line0;
+    flush_word(L);
+    flush_line(L);
+    run0 = L->d->nruns;
+    line0 = L->line;
     i = lay_table(L, t, fi, html, i, len);
     if (fi >= 0) style_pop_to(L, fi);
     L->blk = 1;
+    if (right && !L->measure && L->table_depth == 0 && L->fl_end < 0 && L->d->nruns > run0) {
+      /* tabela a direita (ficha da Wikipedia): o texto que vem depois sobe e
+       * corre a esquerda dela */
+      int k, left = L->cols, bottom = line0;
+      for (k = run0; k < L->d->nruns; k++) {
+        const run_t* r = &L->d->runs[k];
+        if (r->col < left) left = r->col;
+        if (r->line > bottom) bottom = r->line;
+      }
+      if (left - 2 - L->indent >= 24) {
+        L->fl_cols = L->cols;
+        L->fl_end = bottom;
+        L->fl_used = 1;
+        L->cols = left - 2;
+        L->line = line0;
+        L->col = L->indent;
+        L->line_empty = 1;
+        L->blank = 1;
+        L->space_pending = 0;
+        L->line_run0 = L->d->nruns;
+        L->glue_run = -1;
+      }
+    }
     return i;
   }
   handle_tag(L, t);
@@ -3684,6 +3764,65 @@ static void lay_finish(lay_t* L) {
   L->d->nlines = L->line > L->last_emit + 1 ? L->line : L->last_emit + 1;
 }
 
+/* Runs em ordem de linha e coluna: o float poe o texto de volta em linhas
+ * que a tabela ja ocupou, e o desenho (doc_first_run) busca por linha.
+ * Merge sort estavel por indices; doc_el_t (getElementById do js.c) segue. */
+static void order_runs(doc_t* d) {
+  int n = d->nruns, w, i;
+  int* a = (int*)malloc(sizeof(int) * (size_t)n);
+  int* b = (int*)malloc(sizeof(int) * (size_t)n);
+  int* inv = (int*)malloc(sizeof(int) * (size_t)n);
+  run_t* nr = (run_t*)malloc(sizeof(run_t) * (size_t)n);
+  if (n < 2 || !a || !b || !inv || !nr) {
+    free(a);
+    free(b);
+    free(inv);
+    free(nr);
+    return;
+  }
+  for (i = 0; i < n; i++) a[i] = i;
+  for (w = 1; w < n; w *= 2) {
+    int* t;
+    for (i = 0; i < n; i += 2 * w) {
+      int mid = i + w < n ? i + w : n, hi = i + 2 * w < n ? i + 2 * w : n;
+      int p = i, q = mid, o = i;
+      while (p < mid && q < hi) {
+        const run_t* x = &d->runs[a[p]];
+        const run_t* y = &d->runs[a[q]];
+        if (y->line < x->line || (y->line == x->line && y->col < x->col)) b[o++] = a[q++];
+        else b[o++] = a[p++];
+      }
+      while (p < mid) b[o++] = a[p++];
+      while (q < hi) b[o++] = a[q++];
+    }
+    t = a;
+    a = b;
+    b = t;
+  }
+  for (i = 0; i < n; i++) {
+    nr[i] = d->runs[a[i]];
+    inv[a[i]] = i;
+  }
+  memcpy(d->runs, nr, sizeof(run_t) * (size_t)n);
+  for (i = 0; i < d->nels; i++) {
+    doc_el_t* e = &d->els[i];
+    int k, lo = n, hi = -1;
+    if (e->run1 < e->run0) continue;
+    for (k = e->run0; k <= e->run1 && k < n; k++) {
+      if (inv[k] < lo) lo = inv[k];
+      if (inv[k] > hi) hi = inv[k];
+    }
+    if (hi >= 0) {
+      e->run0 = lo;
+      e->run1 = hi;
+    }
+  }
+  free(a);
+  free(b);
+  free(inv);
+  free(nr);
+}
+
 void doc_layout(doc_t* d, const char* html, int len, int cols, const char* base_url,
                 int latin1, int cp437, const char* extra_css, int extra_len) {
   lay_t* L = (lay_t*)malloc(sizeof(lay_t));
@@ -3708,6 +3847,7 @@ void doc_layout(doc_t* d, const char* html, int len, int cols, const char* base_
   lay_finish(L);
   style_close_all(L);
   if (L->d->nlines < L->last_emit + 1) L->d->nlines = L->last_emit + 1;
+  if (L->fl_used) order_runs(L->d);
   if (css) free(css->rules);
   free(css);
   free(L);

@@ -1,9 +1,14 @@
 /* main.c - BROWSER.EXE: navegador minimo do WIN.
  *   cc -o browser.exe browser.c url.c http.c html.c js.c search.c cache.cpp
- *      tls.dll gui.dll img.dll
- * No WIN abre uma janela com barra de endereco, Voltar, Recarregar, rolagem
- * e links clicaveis. Fora do WIN (shell do DOS) imprime a pagina como texto.
- * Palavras na barra viram busca (search.c): DuckDuckGo, Google, Bing ou imagens. */
+ *      inflate.c youtube.c tls.dll gui.dll img.dll
+ * No WIN abre uma janela com barra de endereco, Voltar, Recarregar, JS,
+ * rolagem e links clicaveis. Fora do WIN (shell do DOS) imprime a pagina como
+ * texto. Palavras na barra viram busca (search.c): DuckDuckGo, Google, Bing ou
+ * imagens. O YouTube vira pagina simples (youtube.c).
+ *   BROWSER [-t] [-j] [endereco ou busca]
+ *   -t  sempre como texto, com o tempo total (testes pela PONTE ou pela API)
+ *   -j  liga o JS.EXE (o mesmo que o botao JS ou SET BROWSERJS=1)
+ *   SET BROWSERDUMP=arquivo  grava o corpo de cada pagina recebida */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +23,7 @@
 #define SCROLL_W 14
 #define WHEEL_LINES 3 /* linhas por passo da roda do rato */
 #define JS_MAX (64 * 1024) /* bytes por <script src> baixado */
+#define JS_EXT_MAX 3       /* mais <script src> que isso: pagina de framework */
 
 static const char start_page[] =
   "<html><head><title>Navegador do SO</title>"
@@ -55,6 +61,8 @@ static const char start_page[] =
   "<li>Clique na barra de endereco, ou num campo da pagina, digite e tecle Enter</li>"
   "<li>Roda do mouse, setas, PgUp/PgDn, Home/End e Espaco rolam a pagina</li>"
   "<li>Backspace volta; Tab alterna entre endereco e pagina; Esc fecha</li>"
+  "<li>Botao <b>JS</b>: roda os scripts da pagina no <code>JS.EXE</code> (o SpiderMonkey "
+  "do Firefox) antes de mostrar. A faixa verde diz que esta ligado.</li>"
   "</ul></body></html>";
 
 static doc_t doc;
@@ -71,7 +79,7 @@ static gui_edit_t addr;
 static int focus_addr;
 static int focus_field = -1;
 static int W, H, CW, CH, bar_h, status_h, content_y, content_h, btn_back_x, btn_back_w;
-static int btn_rel_x, btn_rel_w, addr_x, addr_w, btn_go_x, btn_go_w;
+static int btn_rel_x, btn_rel_w, addr_x, addr_w, btn_go_x, btn_go_w, btn_js_x, btn_js_w;
 static int load_pct = -1;
 static int async_phase, async_i, async_js;
 static char page_status[200];
@@ -239,6 +247,53 @@ static int decode_data_url(const char* url, img_t* im) {
   return 0;
 }
 
+/* ---------- tamanho das figuras ja vistas ----------
+ * html.c pergunta (img_hint) o tamanho de uma <img> sem width/height. Se a
+ * figura ja foi decodificada nesta sessao, a caixa sai do tamanho certo; se
+ * falhou (SVG, formato que a IMG.DLL nao le), nao reserva caixa. */
+#define HINTS 512
+static struct {
+  unsigned h;
+  int w, ht;
+} hints[HINTS];
+static int hint_next;
+
+static unsigned url_hash(const char* s) {
+  unsigned h = 2166136261u;
+  while (*s) {
+    h ^= (unsigned char)*s++;
+    h *= 16777619u;
+  }
+  return h ? h : 1;
+}
+
+static void hint_put(const char* url, int w, int h) {
+  unsigned k = url_hash(url);
+  int i;
+  for (i = 0; i < HINTS; i++)
+    if (hints[i].h == k) break;
+  if (i == HINTS) {
+    i = hint_next;
+    hint_next = (hint_next + 1) % HINTS;
+  }
+  hints[i].h = k;
+  hints[i].w = w;
+  hints[i].ht = h;
+}
+
+int img_hint(const char* url, int* w, int* h) {
+  unsigned k = url_hash(url);
+  int i;
+  for (i = 0; i < HINTS; i++) {
+    if (hints[i].h == k) {
+      *w = hints[i].w;
+      *h = hints[i].ht;
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static void load_one_image(int i) {
   char* data = 0;
   int n = 0;
@@ -249,6 +304,82 @@ static void load_one_image(int i) {
              img_decode(data, n, &pics[i]) == 0)
     doc.imgs[i].state = 1;
   free(data);
+  if (doc.imgs[i].state > 0) hint_put(doc.imgs[i].url, pics[i].w, pics[i].h);
+  else hint_put(doc.imgs[i].url, 0, 0);
+}
+
+/* ---------- refazer o layout ----------
+ * A ultima pagina (HTML e CSS) fica guardada: quando as figuras chegam com
+ * tamanho diferente do adivinhado, ou falham, a pagina e diagramada de novo
+ * com os tamanhos certos. As figuras ja decodificadas sao reaproveitadas. */
+static char* last_html;
+static int last_len, last_latin1;
+static char* last_css;
+static int last_cssn;
+static char last_base[URL_MAX];
+
+static void keep_page(const char* html, int len, const char* base, int latin1, char* css, int cssn) {
+  free(last_html);
+  free(last_css);
+  last_html = (char*)malloc((size_t)len + 1);
+  if (last_html) {
+    memcpy(last_html, html, (size_t)len);
+    last_html[len] = 0;
+  }
+  last_len = last_html ? len : 0;
+  last_css = css; /* fica com o CSS (antes era liberado logo depois do layout) */
+  last_cssn = css ? cssn : 0;
+  last_latin1 = latin1;
+  strncpy(last_base, base ? base : "", URL_MAX - 1);
+  last_base[URL_MAX - 1] = 0;
+}
+
+/* 1 se alguma figura saiu de tamanho diferente do que o layout reservou */
+static int images_moved(void) {
+  int i;
+  for (i = 0; i < doc.nimgs && i < DOC_IMGS; i++) {
+    const doc_img_t* m = &doc.imgs[i];
+    if (!m->fit) continue; /* tamanho veio do HTML/CSS */
+    if (m->state < 0) return 1;
+    if (m->state > 0 && pics[i].w > 0) {
+      int want = pics[i].w * m->lines * CH;     /* largura que a altura pede */
+      int have = m->cols * CW * pics[i].h;
+      if (want > have + have / 5 || have > want + want / 5) return 1;
+    }
+  }
+  return 0;
+}
+
+static void relayout(void) {
+  img_t keep[DOC_IMGS];
+  char kurl[DOC_IMGS][96];
+  int kstate[DOC_IMGS];
+  int nkeep = 0, i, j, top = scroll;
+  if (!last_html) return;
+  for (i = 0; i < doc.nimgs && i < DOC_IMGS; i++) {
+    keep[nkeep] = pics[i];
+    memset(&pics[i], 0, sizeof(img_t));
+    strncpy(kurl[nkeep], doc.imgs[i].url, sizeof kurl[0] - 1);
+    kurl[nkeep][sizeof kurl[0] - 1] = 0;
+    kstate[nkeep] = doc.imgs[i].state;
+    nkeep++;
+  }
+  doc_free(&doc);
+  doc_layout(&doc, last_html, last_len, cols, last_base, last_latin1, gui_mode, last_css, last_cssn);
+  for (j = 0; j < doc.nimgs && j < DOC_IMGS; j++) {
+    for (i = 0; i < nkeep; i++) {
+      if (kstate[i] == 2 || strncmp(kurl[i], doc.imgs[j].url, sizeof kurl[0] - 1) != 0) continue;
+      if (kstate[i] > 0) {
+        pics[j] = keep[i];
+        memset(&keep[i], 0, sizeof(img_t));
+      }
+      doc.imgs[j].state = kstate[i] > 0 ? 1 : -1;
+      kstate[i] = 2; /* usada */
+      break;
+    }
+  }
+  for (i = 0; i < nkeep; i++) img_free(&keep[i]);
+  scroll = top;
 }
 
 static void load_images(void) {
@@ -256,10 +387,21 @@ static void load_images(void) {
   for (i = 0; i < doc.nimgs && i < DOC_IMGS; i++) load_one_image(i);
 }
 
+/* Pagina com mais de JS_EXT_MAX scripts externos e de framework (React,
+ * pacotes do GitHub e do YouTube, de centenas de KB cada): o js.c nao roda
+ * nada disso, e baixar tudo era a maior parte do tempo de carga. */
+static int ext_scripts(void) {
+  int i, n = 0;
+  for (i = 0; i < doc.nscripts; i++)
+    if (doc.scripts[i].url[0]) n++;
+  return n;
+}
+
 static void load_one_script(int i) {
   char* data = 0;
   int n = 0;
   if (doc.scripts[i].src || !doc.scripts[i].url[0]) return;
+  if (ext_scripts() > JS_EXT_MAX) return;
   if (read_url(doc.scripts[i].url, &data, &n) == 0 && data) {
     if (n > JS_MAX) n = JS_MAX;
     data[n] = 0;
@@ -273,7 +415,8 @@ static void load_scripts(void) {
   for (i = 0; i < doc.nscripts; i++) load_one_script(i);
 }
 
-/* Um script ou uma imagem por volta do laco. A pagina aparece antes do resto. */
+/* Uma imagem ou um script por volta do laco. A pagina aparece antes do resto;
+ * as figuras vem primeiro (sao o que se ve), os scripts depois. */
 static int async_step(void) {
   int total, done;
   if (pending_ev_have) {
@@ -283,8 +426,19 @@ static int async_step(void) {
     return 0;
   }
   if (async_phase == 1) {
+    if (async_i < doc.nimgs && async_i < DOC_IMGS) {
+      load_one_image(async_i);
+      async_i++;
+    } else {
+      /* figuras com tamanho adivinhado que vieram diferentes: diagrama de
+       * novo (antes dos scripts, que mexem no doc) */
+      if (gui_mode && images_moved()) relayout();
+      async_phase = 2;
+      async_i = 0;
+    }
+  } else if (async_phase == 2) {
     while (async_i < doc.nscripts &&
-           (doc.scripts[async_i].src || !doc.scripts[async_i].url[0]))
+           (doc.scripts[async_i].src || !doc.scripts[async_i].url[0] || ext_scripts() > JS_EXT_MAX))
       async_i++;
     if (async_i < doc.nscripts) {
       load_one_script(async_i);
@@ -302,14 +456,8 @@ static int async_step(void) {
           set_status(page_status);
         }
       }
-      async_phase = 2;
-      async_i = 0;
+      async_phase = 0;
     }
-  } else if (async_phase == 2) {
-    if (async_i < doc.nimgs && async_i < DOC_IMGS) {
-      load_one_image(async_i);
-      async_i++;
-    } else async_phase = 0;
   }
   if (!async_phase) {
     load_pct = -1;
@@ -319,7 +467,7 @@ static int async_step(void) {
   }
   total = doc.nscripts + doc.nimgs;
   if (total < 1) total = 1;
-  done = (async_phase == 2) ? doc.nscripts + async_i : async_i;
+  done = (async_phase == 2) ? doc.nimgs + async_i : async_i;
   load_pct = 90 + done * 10 / total;
   if (load_pct > 99) load_pct = 99;
   return 1;
@@ -565,7 +713,7 @@ static void show_html(const char* html, int len, const char* base, int latin1, i
   doc_free(&doc);
   if (fetch_img) css = gather_css(html, len, base, &cssn);
   doc_layout(&doc, html, len, cols, base, latin1, gui_mode, css, cssn);
-  free(css);
+  keep_page(html, len, base, latin1, css, cssn); /* fica com o css, para o relayout */
   scroll = 0;
   if (fetch_img && gui_mode) {
     /* CSS ja entrou. Scripts e figuras seguem no laco, um por vez. */
@@ -638,6 +786,397 @@ static int show_picture(const char* url, const char* body, int n) {
   img_free(&im);
   if (doc.nimgs > 0) doc.imgs[0].state = -1;
   return gui_mode ? -1 : 0;
+}
+
+/* ---------- JavaScript de verdade: JS.EXE (SpiderMonkey) + BRDOM.JS ----------
+ * Com o botao JS ligado (ou SET BROWSERJS=1, ou -j), a pagina com <script>
+ * passa pelo JS.EXE antes do layout. O navegador grava numa pasta de trabalho
+ * o DADOS.JS (o HTML numa string e a lista de scripts) e os <script src> ja
+ * baixados (S0.JS...), roda "JS.EXE --no-jit-backend BRDOM.JS" ali e desenha o
+ * HTML que volta: o DOM depois dos scripts, do load e dos timers. Os dados vao
+ * como JavaScript porque o load() do shell le arquivos no SODOS e o readFile
+ * nao (ele chama fstat). Scripts que a pagina criou e que faltaram sao
+ * baixados e o JS.EXE roda mais uma vez. */
+#define JSX_SCRIPTS 48
+#define JSX_SCRIPT_MAX (3 * 1024 * 1024)
+#define JSX_OUT_MAX (8 * 1024 * 1024)
+
+static int js_full;            /* 1 = paginas com <script> passam pelo JS.EXE */
+static char jsx_note[160];     /* resumo para a barra de estado */
+static char jsx_goto[URL_MAX]; /* location = ... pedido pela pagina */
+static int jsx_hops;           /* redirecionamentos do JS seguidos em sequencia */
+
+typedef struct {
+  char raw[URL_MAX]; /* src como esta no HTML */
+  char abs[URL_MAX];
+  char file[16];     /* S<n>.JS */
+  int ok;            /* 0 por baixar, 1 gravado, -1 falhou */
+} jsx_script_t;
+
+typedef struct {
+  char* b;
+  int n, cap; /* cap < 0: faltou memoria */
+} ob_t;
+
+static void ob_put(ob_t* o, const char* s, int n) {
+  if (o->cap < 0 || n <= 0) return;
+  if (o->n + n + 1 > o->cap) {
+    int nc = o->cap ? o->cap : 65536;
+    char* nb;
+    while (nc < o->n + n + 1) nc *= 2;
+    nb = (char*)realloc(o->b, (size_t)nc);
+    if (!nb) {
+      free(o->b);
+      o->b = 0;
+      o->cap = -1;
+      return;
+    }
+    o->b = nb;
+    o->cap = nc;
+  }
+  memcpy(o->b + o->n, s, (size_t)n);
+  o->n += n;
+  o->b[o->n] = 0;
+}
+
+static void ob_str(ob_t* o, const char* s) { ob_put(o, s, (int)strlen(s)); }
+
+/* tamanho da sequencia UTF-8 em s[0..n), 0 se invalida */
+static int utf8_len(const unsigned char* s, int n) {
+  int need, k;
+  unsigned c = s[0];
+  if (c < 0x80) return 1;
+  if (c >= 0xC2 && c <= 0xDF) need = 1;
+  else if (c >= 0xE0 && c <= 0xEF) need = 2;
+  else if (c >= 0xF0 && c <= 0xF4) need = 3;
+  else return 0;
+  if (need >= n) return 0;
+  for (k = 1; k <= need; k++)
+    if ((s[k] & 0xC0) != 0x80) return 0;
+  return need + 1;
+}
+
+/* texto como string de JavaScript ("..."). Byte que nao e UTF-8 (ou
+ * latin1 = 1) vira o caractere Latin-1 dele. */
+static void ob_jsstr(ob_t* o, const char* s, int n, int latin1) {
+  const unsigned char* p = (const unsigned char*)s;
+  char esc[8];
+  int i = 0;
+  ob_put(o, "\"", 1);
+  while (i < n) {
+    unsigned c = p[i];
+    int k;
+    if (c >= 0x20 && c < 0x80 && c != '"' && c != '\\') {
+      int j = i + 1;
+      while (j < n && p[j] >= 0x20 && p[j] < 0x80 && p[j] != '"' && p[j] != '\\') j++;
+      ob_put(o, s + i, j - i);
+      i = j;
+      continue;
+    }
+    if (c == '"' || c == '\\') {
+      esc[0] = '\\';
+      esc[1] = (char)c;
+      ob_put(o, esc, 2);
+      i++;
+      continue;
+    }
+    if (c == '\n') {
+      ob_put(o, "\\n", 2);
+      i++;
+      continue;
+    }
+    k = (c >= 0x80 && !latin1) ? utf8_len(p + i, n - i) : 0;
+    if (k > 1) {
+      if (k == 3 && c == 0xE2 && p[i + 1] == 0x80 && (p[i + 2] == 0xA8 || p[i + 2] == 0xA9))
+        ob_str(o, p[i + 2] == 0xA8 ? "\\u2028" : "\\u2029");
+      else
+        ob_put(o, s + i, k);
+      i += k;
+      continue;
+    }
+    snprintf(esc, sizeof esc, "\\u%04x", c); /* controle ou Latin-1 */
+    ob_put(o, esc, 6);
+    i++;
+  }
+  ob_put(o, "\"", 1);
+}
+
+/* copia em UTF-8 valido: byte solto vira o caractere Latin-1 dele */
+static char* utf8_fix(const char* s, int n, int* outn) {
+  ob_t o;
+  int i = 0;
+  memset(&o, 0, sizeof o);
+  while (i < n) {
+    int j = i;
+    while (j < n) {
+      int k = (unsigned char)s[j] < 0x80 ? 1 : utf8_len((const unsigned char*)s + j, n - j);
+      if (k == 0) break;
+      j += k;
+    }
+    ob_put(&o, s + i, j - i);
+    if (j < n) {
+      unsigned c = (unsigned char)s[j];
+      char t[2];
+      t[0] = (char)(0xC0 | (c >> 6));
+      t[1] = (char)(0x80 | (c & 0x3F));
+      ob_put(&o, t, 2);
+      j++;
+    }
+    i = j;
+  }
+  if (!o.b && o.cap >= 0) ob_put(&o, "\n", 1);
+  *outn = o.n;
+  return o.b;
+}
+
+/* X:\NOME na unidade do .EXE, no D: ou no U: */
+static int find_on_drives(const char* name, char* out, int max) {
+  char dr[3];
+  int i;
+  dr[0] = (char)k_exe_drive();
+  dr[1] = 'D';
+  dr[2] = 'U';
+  for (i = 0; i < 3; i++) {
+    if (!dr[i] || (i > 0 && dr[i] == dr[0])) continue;
+    snprintf(out, (size_t)max, "%c:\\%s", dr[i], name);
+    if (k_fsize(out) > 0) return 1;
+  }
+  return 0;
+}
+
+/* pasta de trabalho: Z:\TEMP\BRJS (disco em RAM) ou D:\TEMP\BRJS */
+static void jsx_dir(char* out, int max) {
+  char d = (k_drive_mask() & (1u << ('Z' - 'A'))) ? 'Z' : 'D';
+  snprintf(out, (size_t)max, "%c:\\TEMP", d);
+  k_mkdir(out);
+  snprintf(out, (size_t)max, "%c:\\TEMP\\BRJS", d);
+  k_mkdir(out);
+}
+
+static int has_script(const char* html, int len) {
+  int i;
+  for (i = 0; i + 7 < len; i++)
+    if (html[i] == '<' && strncasecmp(html + i + 1, "script", 6) == 0) return 1;
+  return 0;
+}
+
+static int jsx_known(const jsx_script_t* sc, int n, const char* abs) {
+  int d;
+  for (d = 0; d < n; d++)
+    if (strcmp(sc[d].abs, abs) == 0) return 1;
+  return 0;
+}
+
+/* <script src> da pagina, na ordem; type que nao e JS (module, json) fica de fora */
+static int jsx_find_scripts(const char* html, int len, const char* base, jsx_script_t* sc, int max) {
+  int i, n = 0;
+  for (i = 1; i + 7 < len && n < max; i++) {
+    char tag[2048], v[URL_MAX], ty[64], absu[URL_MAX];
+    int j = i, k = 0, e;
+    if (html[i - 1] != '<' || strncasecmp(html + i, "script", 6) != 0 || isalnum((unsigned char)html[i + 6]))
+      continue;
+    while (j < len && html[j] != '>' && k < (int)sizeof tag - 1) tag[k++] = html[j++];
+    tag[k] = 0;
+    e = j;
+    while (e + 8 <= len && strncasecmp(html + e, "</script", 8) != 0) e++;
+    i = e;
+    if (!tag_attr(tag, "src", v, (int)sizeof v) || !v[0]) continue;
+    if (tag_attr(tag, "type", ty, (int)sizeof ty) && ty[0] && !ci_has(ty, "javascript") &&
+        !ci_has(ty, "ecmascript"))
+      continue;
+    if (url_resolve(base, v, absu, URL_MAX) != 0 || jsx_known(sc, n, absu)) continue;
+    strcpy(sc[n].abs, absu);
+    strncpy(sc[n].raw, v, URL_MAX - 1);
+    sc[n].raw[URL_MAX - 1] = 0;
+    sc[n].file[0] = 0;
+    sc[n].ok = 0;
+    n++;
+  }
+  return n;
+}
+
+static int jsx_cur, jsx_cnt;
+static int jsx_progress(const char* msg) {
+  char b[200];
+  while (*msg >= '0' && *msg <= '9') msg++;
+  if (*msg == '%') msg++;
+  while (*msg == ' ') msg++;
+  snprintf(b, sizeof b, "JS %d/%d - %s", jsx_cur, jsx_cnt, msg);
+  return progress(b);
+}
+
+/* baixa os scripts ainda nao baixados e grava S<n>.JS (UTF-8 valido) */
+static void jsx_fetch(jsx_script_t* sc, int n, const char* dir) {
+  int i;
+  jsx_cnt = n;
+  for (i = 0; i < n && !pending_ev_have; i++) {
+    char* data = 0;
+    int dn = 0;
+    jsx_cur = i + 1;
+    if (sc[i].ok) continue;
+    sc[i].ok = -1;
+    if (read_url_fn(sc[i].abs, &data, &dn, jsx_progress) == 0 && data) {
+      char path[200];
+      int fn2 = 0;
+      char* fixed;
+      if (dn > JSX_SCRIPT_MAX) dn = JSX_SCRIPT_MAX;
+      fixed = utf8_fix(data, dn, &fn2);
+      snprintf(sc[i].file, sizeof sc[i].file, "S%d.JS", i);
+      snprintf(path, sizeof path, "%s\\%s", dir, sc[i].file);
+      if (fixed && k_fsave(path, fixed, fn2) == 0) sc[i].ok = 1;
+      free(fixed);
+    }
+    free(data);
+  }
+}
+
+static int jsx_write_data(const char* dir, const char* url, const char* html, int len, int latin1,
+                          const jsx_script_t* sc, int n) {
+  ob_t o;
+  char path[200], num[80];
+  int i, rc, first = 1;
+  memset(&o, 0, sizeof o);
+  ob_str(&o, "var __BRDADOS = {\nurl: ");
+  ob_jsstr(&o, url, (int)strlen(url), 0);
+  snprintf(num, sizeof num, ",\nw: %d, h: %d,\nscripts: {", gui_mode ? W - SCROLL_W : cols * 8,
+           gui_mode ? content_h : 600);
+  ob_str(&o, num);
+  for (i = 0; i < n; i++) {
+    if (sc[i].ok != 1) continue;
+    ob_str(&o, first ? "\n" : ",\n");
+    first = 0;
+    ob_jsstr(&o, sc[i].raw, (int)strlen(sc[i].raw), 0);
+    ob_str(&o, ": ");
+    ob_jsstr(&o, sc[i].file, (int)strlen(sc[i].file), 0);
+    ob_str(&o, ",\n");
+    ob_jsstr(&o, sc[i].abs, (int)strlen(sc[i].abs), 0);
+    ob_str(&o, ": ");
+    ob_jsstr(&o, sc[i].file, (int)strlen(sc[i].file), 0);
+  }
+  ob_str(&o, "},\nhtml: ");
+  ob_jsstr(&o, html, len, latin1);
+  ob_str(&o, "\n};\n");
+  if (!o.b) return -1;
+  snprintf(path, sizeof path, "%s\\DADOS.JS", dir);
+  rc = k_fsave(path, o.b, o.n);
+  free(o.b);
+  return rc;
+}
+
+/* Mensagens do BRDOM.JS ate a marca <<<BRDOM>>>; devolve o HTML (dentro de
+ * out) ou 0. Scripts que faltaram entram em sc com ok = 0. */
+static char* jsx_parse(char* out, int len, int* htmln, jsx_script_t* sc, int* nsc, int* errs,
+                       char* last, int lmax) {
+  char* mark = strstr(out, "<<<BRDOM>>>\n");
+  char* end = mark ? mark : out + len;
+  char* p = out;
+  while (p < end) {
+    char* nl = (char*)memchr(p, '\n', (size_t)(end - p));
+    if (!nl) nl = end;
+    *nl = 0;
+    if (strncmp(p, "[js-ir] ", 8) == 0) {
+      if (!jsx_goto[0]) {
+        strncpy(jsx_goto, p + 8, URL_MAX - 1);
+        jsx_goto[URL_MAX - 1] = 0;
+      }
+    } else if (strncmp(p, "[js-falta] ", 11) == 0) {
+      if (*nsc < JSX_SCRIPTS && !jsx_known(sc, *nsc, p + 11)) {
+        jsx_script_t* s = &sc[*nsc];
+        strncpy(s->abs, p + 11, URL_MAX - 1);
+        s->abs[URL_MAX - 1] = 0;
+        strcpy(s->raw, s->abs);
+        s->file[0] = 0;
+        s->ok = 0;
+        (*nsc)++;
+      }
+    } else if (strncmp(p, "[js-alert] ", 11) == 0) {
+      snprintf(last, (size_t)lmax, "alert: %s", p + 11);
+    } else if (strncmp(p, "[js] erro", 9) == 0) {
+      (*errs)++;
+      if (strncmp(last, "alert", 5) != 0) snprintf(last, (size_t)lmax, "%s", p + 5);
+    } else if (!mark && p[0] && !last[0]) {
+      snprintf(last, (size_t)lmax, "%s", p); /* JS.EXE nao iniciou: a mensagem dele */
+    }
+    p = nl + 1;
+  }
+  if (!mark) return 0;
+  p = mark + 12;
+  *htmln = len - (int)(p - out);
+  if (*htmln < 0) *htmln = 0;
+  return p;
+}
+
+/* 1 = mostrou a pagina depois do JS.EXE; 0 = siga sem ele (desligado, sem
+ * <script>, sem JS.EXE ou BRDOM.JS, ou nada voltou) */
+static int js_page(const char* html, int len, const char* url, int latin1) {
+  char jsexe[64], brdom[64], dir[64], line[200], save[160], last[120];
+  jsx_script_t* sc;
+  char* out;
+  char* page = 0;
+  int nsc, round, olen = 0, htmln = 0, errs = 0;
+  unsigned tjs = 0;
+  jsx_note[0] = 0;
+  jsx_goto[0] = 0;
+  last[0] = 0;
+  if (!js_full || !has_script(html, len)) return 0;
+  if (!find_on_drives("JS.EXE", jsexe, (int)sizeof jsexe) ||
+      !find_on_drives("BRDOM.JS", brdom, (int)sizeof brdom)) {
+    snprintf(jsx_note, sizeof jsx_note, "JS: falta JS.EXE ou BRDOM.JS no D:");
+    return 0;
+  }
+  sc = (jsx_script_t*)calloc(JSX_SCRIPTS, sizeof(jsx_script_t));
+  out = (char*)malloc(JSX_OUT_MAX);
+  if (!sc || !out) {
+    free(sc);
+    free(out);
+    return 0;
+  }
+  jsx_dir(dir, (int)sizeof dir);
+  nsc = jsx_find_scripts(html, len, url, sc, JSX_SCRIPTS);
+  for (round = 0; round < 2 && !pending_ev_have; round++) {
+    int before;
+    unsigned t1;
+    jsx_fetch(sc, nsc, dir);
+    if (pending_ev_have) break;
+    if (jsx_write_data(dir, url, html, len, latin1, sc, nsc) != 0) {
+      snprintf(last, sizeof last, "nao gravei %s\\DADOS.JS", dir);
+      break;
+    }
+    http_idle_close();
+    progress("95% JS.EXE: rodando os scripts da pagina...");
+    /* --no-threads: o GC do JS.EXE de 11/2026 esperava threads auxiliares
+     * que nao rodavam e travava */
+    snprintf(line, sizeof line, "%s --no-jit-backend --no-threads %s", jsexe, brdom);
+    save[0] = 0;
+    k_pwd(save, (int)sizeof save);
+    k_chdir(dir);
+    t1 = k_ms();
+    olen = 0;
+    k_shell_capture(line, out, JSX_OUT_MAX, &olen);
+    tjs += k_ms() - t1;
+    if (save[0]) k_chdir(save);
+    if (olen < 0) olen = -olen;
+    if (olen > JSX_OUT_MAX - 1) olen = JSX_OUT_MAX - 1;
+    out[olen] = 0;
+    before = nsc;
+    errs = 0;
+    page = jsx_parse(out, olen, &htmln, sc, &nsc, &errs, last, (int)sizeof last);
+    if (!page || nsc == before) break; /* nada novo para baixar */
+  }
+  if (page) {
+    show_html(page, htmln, url, 0, 1);
+    if (errs)
+      snprintf(jsx_note, sizeof jsx_note, "JS.EXE %u ms, %d erro%s: %s", tjs, errs, errs > 1 ? "s" : "", last);
+    else if (last[0])
+      snprintf(jsx_note, sizeof jsx_note, "JS.EXE %u ms - %s", tjs, last);
+    else
+      snprintf(jsx_note, sizeof jsx_note, "JS.EXE %u ms", tjs);
+  } else if (!pending_ev_have) {
+    snprintf(jsx_note, sizeof jsx_note, "JS.EXE nao devolveu a pagina: %s", last[0] ? last : "sem saida");
+  }
+  free(sc);
+  free(out);
+  return page != 0;
 }
 
 /* Linha no topo das buscas de texto: as mesmas palavras nos outros buscadores. */
@@ -716,8 +1255,9 @@ static void load_file(const char* path) {
   n = (long)fread(buf, 1, (size_t)n, f);
   buf[n] = 0;
   fclose(f);
-  if (ci_has(path, ".htm")) show_html(buf, (int)n, path, 0, 1);
-  else if (ci_has(path, ".png") || ci_has(path, ".jpg") || ci_has(path, ".jpeg") ||
+  if (ci_has(path, ".htm")) {
+    if (!js_page(buf, (int)n, path, 0)) show_html(buf, (int)n, path, 0, 1);
+  } else if (ci_has(path, ".png") || ci_has(path, ".jpg") || ci_has(path, ".jpeg") ||
            ci_has(path, ".gif") || ci_has(path, ".ico"))
     show_picture(path, buf, (int)n);
   else {
@@ -728,7 +1268,14 @@ static void load_file(const char* path) {
     scroll = 0;
   }
   free(buf);
-  status_done(path);
+  if (jsx_note[0]) {
+    char b[200];
+    snprintf(b, sizeof b, "%s | %s", path, jsx_note);
+    jsx_note[0] = 0;
+    status_done(b);
+  } else {
+    status_done(path);
+  }
 }
 
 /* carrega url; push = guarda no historico */
@@ -736,8 +1283,8 @@ static void navigate(const char* input, int push, int fresh) {
   url_t u;
   char url[URL_MAX];
   char via[URL_MAX];
-  char q[256];
-  int typed_scheme, kind = 0;
+  char q[256], ytq[256];
+  int typed_scheme, kind = 0, ytk;
   if (search_unwrap(input, via, URL_MAX) || search_url(input, via, URL_MAX)) input = via;
   typed_scheme = ci_has(input, "://");
   focus_field = -1;
@@ -747,10 +1294,22 @@ static void navigate(const char* input, int push, int fresh) {
     return;
   }
   url_format(&u, url, URL_MAX);
+  /* sites que tem versao sem JavaScript, ou que viram pagina simples aqui */
+  if ((yt_rewrite(url, via, URL_MAX) || search_rewrite(url, via, URL_MAX)) && url_parse(via, &u) == 0) {
+    url_format(&u, url, URL_MAX);
+    typed_scheme = 1;
+  }
+  ytk = yt_kind(url, ytq, (int)sizeof(ytq));
   is_tls = 0;
   if (strcmp(u.scheme, "about") == 0) {
     show_html(start_page, (int)strlen(start_page), url, 0, 1);
     status_done("pagina inicial");
+  } else if (ytk == YT_HOME) {
+    int n = 0;
+    char* page = yt_html(YT_HOME, 0, 0, "", url, &n);
+    if (page) show_html(page, n, url, 0, 1);
+    free(page);
+    status_done("YouTube: busque um video");
   } else if (strcmp(u.scheme, "file") == 0) {
     load_file(u.path);
   } else {
@@ -760,7 +1319,7 @@ static void navigate(const char* input, int push, int fresh) {
     /* a URL pedida, antes dos redirecionamentos. Resultado de busca muda a
      * cada vez: nem le nem grava o cache. */
     kind = search_kind(url, q, (int)sizeof(q));
-    flags = kind ? (HTTP_FRESH | HTTP_NOSTORE) : (fresh ? HTTP_FRESH : 0);
+    flags = (kind || ytk == YT_SEARCH) ? (HTTP_FRESH | HTTP_NOSTORE) : (fresh ? HTTP_FRESH : 0);
     set_status("carregando...");
     rc = http_get(url, &r, progress, flags);
     if (rc != 0 && r.aborted) {
@@ -780,6 +1339,12 @@ static void navigate(const char* input, int push, int fresh) {
         stopped_status(input);
         return;
       }
+    }
+    if (rc == 0 && r.body) {
+      /* SET BROWSERDUMP=D:\TEMP\PAGINA.TXT: grava o corpo recebido (depuracao
+       * de adaptadores como o do YouTube) */
+      char dp[160];
+      if (k_getenv("BROWSERDUMP", dp, (int)sizeof dp) > 0 && dp[0]) k_fsave(dp, r.body, r.body_len);
     }
     if (rc != 0) {
       if (show_copy(url, push, fresh)) {
@@ -820,6 +1385,12 @@ static void navigate(const char* input, int push, int fresh) {
         doc_free(&doc);
         doc_layout_text(&doc, r.body, r.body_len, cols, gui_mode);
         scroll = 0;
+      } else if (ytk) {
+        int n = 0;
+        char* page = yt_html(ytk, r.body, r.body_len, ytq, url, &n);
+        if (page) show_html(page, n, url, 0, 1);
+        else show_error("Sem memoria", "para a pagina do YouTube");
+        free(page);
       } else if (kind == SEARCH_IMAGES) {
         int n = 0;
         char* grid = search_images_html(r.body, r.body_len, q, cols, &n);
@@ -843,8 +1414,8 @@ static void navigate(const char* input, int push, int fresh) {
           show_html(r.body, r.body_len, url, 0, 1);
         }
       } else {
-        show_html(r.body, r.body_len, url, ci_has(r.content_type, "8859") ||
-                                           ci_has(r.content_type, "1252"), 1);
+        int l1 = ci_has(r.content_type, "8859") || ci_has(r.content_type, "1252");
+        if (!js_page(r.body, r.body_len, url, l1)) show_html(r.body, r.body_len, url, l1, 1);
       }
       if (r.from_cache)
         snprintf(msg, sizeof(msg), "%d - %d KB - cache %s", r.status, r.body_len / 1024,
@@ -855,6 +1426,11 @@ static void navigate(const char* input, int push, int fresh) {
       else
         snprintf(msg, sizeof(msg), "%d - %d KB - %s", r.status, r.body_len / 1024,
                  r.tls ? (r.secure[0] ? r.secure : "HTTPS") : "HTTP");
+      if (jsx_note[0]) {
+        size_t ml = strlen(msg);
+        snprintf(msg + ml, sizeof(msg) - ml, " | %s", jsx_note);
+        jsx_note[0] = 0;
+      }
       status_done(msg);
       http_free(&r);
     }
@@ -873,7 +1449,7 @@ static void navigate(const char* input, int push, int fresh) {
   if (gui_mode) {
     char t[160];
     int i, pick = -1;
-    snprintf(t, sizeof(t), "%s - Navegador", doc.title[0] ? doc.title : url);
+    snprintf(t, sizeof(t), "%s - Navegador", doc.title_ascii[0] ? doc.title_ascii : url);
     gui_title(t);
     for (i = 0; i < doc.nfields; i++) {
       if (doc.fields[i].hidden || doc.fields[i].submit || doc.fields[i].line < 0) continue;
@@ -883,6 +1459,19 @@ static void navigate(const char* input, int push, int fresh) {
     focus_field = pick;
     if (pick >= 0) focus_addr = 0;
   }
+  /* a pagina mandou ir para outro endereco (location = ...): segue, no lugar
+   * desta no historico, ate 3 vezes seguidas */
+  if (jsx_goto[0] && jsx_hops < 3 && strcmp(jsx_goto, url) != 0) {
+    char g[URL_MAX];
+    strcpy(g, jsx_goto);
+    jsx_goto[0] = 0;
+    jsx_hops++;
+    if (push && hist_pos > 0) hist_pos--;
+    navigate(g, push, 0);
+    return;
+  }
+  jsx_goto[0] = 0;
+  jsx_hops = 0;
 }
 
 static void go_back(void) {
@@ -909,7 +1498,9 @@ static void layout_geometry(void) {
   btn_rel_w = (small ? 1 : 10) * CW + 12;
   btn_go_w = 2 * CW + 16;
   btn_go_x = W - btn_go_w - 4;
-  addr_x = btn_rel_x + btn_rel_w + 6;
+  btn_js_x = btn_rel_x + btn_rel_w + 4;
+  btn_js_w = 2 * CW + 12;
+  addr_x = btn_js_x + btn_js_w + 6;
   addr_w = btn_go_x - addr_x - 6;
   cols = (W - SCROLL_W - 16) / CW;
   rows = content_h / CH;
@@ -943,6 +1534,9 @@ static void draw(void) {
   gui_fill(0, bar_h - 1, W, 1, 0x808080);
   gui_button(btn_back_x, 4, btn_back_w, CH + 4, small ? "<" : "Voltar", hist_pos > 0);
   gui_button(btn_rel_x, 4, btn_rel_w, CH + 4, small ? "R" : "Recarregar", 1);
+  /* JS: ligado = as paginas passam pelo JS.EXE (faixa verde embaixo) */
+  gui_button(btn_js_x, 4, btn_js_w, CH + 4, "JS", 1);
+  if (js_full) gui_fill(btn_js_x + 3, CH + 4, btn_js_w - 6, 3, 0x00A000);
   gui_edit_draw(&addr, addr_x, 4, addr_w, CH + 4, focus_addr);
   gui_button(btn_go_x, 4, btn_go_w, CH + 4, "Ir", 1);
 
@@ -1174,6 +1768,12 @@ static int run_gui(const char* first) {
         char u[URL_MAX];
         strcpy(u, cur_url);
         navigate(u, 0, 1);
+      } else if (gui_hit(btn_js_x, 4, btn_js_w, CH + 4, ev.x, ev.y)) {
+        /* liga ou desliga o JS.EXE e mostra a pagina de novo (do cache) */
+        char u[URL_MAX];
+        js_full = !js_full;
+        strcpy(u, cur_url);
+        navigate(u, 0, 0);
       } else if (gui_hit(btn_go_x, 4, btn_go_w, CH + 4, ev.x, ev.y)) {
         char u[URL_MAX];
         strcpy(u, addr.text);
@@ -1200,6 +1800,11 @@ static int run_gui(const char* first) {
       if (track > 0) scroll = (ev.y - drag_dy - content_y) * max_scroll() / track;
     } else if (ev.type == GUI_EV_UP) {
       dragging = 0;
+    } else if (ev.type == GUI_EV_RESIZE) {
+      /* maximizar/restaurar: a grade muda de largura, a pagina se refaz */
+      int old_cols = cols;
+      layout_geometry();
+      if (cols != old_cols && !async_phase) relayout();
     } else if (ev.type == GUI_EV_WHEEL) {
       scroll += ev.key * WHEEL_LINES;
     } else if (ev.type == GUI_EV_KEY) {
@@ -1271,9 +1876,22 @@ static void dump_doc(void) {
 
 int main(int argc, char** argv) {
   static char first[URL_MAX];
-  int i, n = 0;
+  int i, n = 0, text = 0;
+  unsigned t0;
   strcpy(first, "about:inicio");
   doc.page_bg = 0xFFFFFF;
+  {
+    char v[8];
+    if (k_getenv("BROWSERJS", v, (int)sizeof v) > 0 && v[0] == '1') js_full = 1;
+  }
+  /* -t: sempre como texto, com o tempo (testes pela PONTE ou pela API, que
+   * rodam fora do WIN mas abririam a janela do navegador). -j: liga o JS.EXE. */
+  while (argc > 1 && argv[1][0] == '-' && (argv[1][1] == 't' || argv[1][1] == 'j') && !argv[1][2]) {
+    if (argv[1][1] == 't') text = 1;
+    else js_full = 1;
+    argc--;
+    argv++;
+  }
   /* BROWSER g gato preto: os argumentos voltam a ser uma linha */
   for (i = 1; i < argc; i++) {
     int k = (int)strlen(argv[i]);
@@ -1282,11 +1900,13 @@ int main(int argc, char** argv) {
     memcpy(first + n, argv[i], (size_t)k + 1);
     n += k;
   }
-  if (run_gui(first) == 0) return 0;
+  if (!text && run_gui(first) == 0) return 0;
   gui_mode = 0;
   cols = 78;
+  t0 = k_ms();
   navigate(first, 1, 0);
   http_idle_close();
   dump_doc();
+  if (text) printf("[tempo total: %u ms]\n", k_ms() - t0);
   return 0;
 }

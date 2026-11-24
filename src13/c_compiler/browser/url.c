@@ -162,6 +162,24 @@ int url_resolve(const char* base, const char* href, char* out, int max) {
     char* hash = strchr(tmp, '#');
     if (hash) *hash = 0;
   }
+  if (strcmp(b.scheme, "file") == 0 && !(isalpha((unsigned char)tmp[0]) && tmp[1] == ':')) {
+    /* pagina do disco: relativo a pasta dela (D:\PASTA\X.HTM + img/a.png) */
+    char dir[URL_MAX];
+    char* s;
+    char* q = strchr(tmp, '?');
+    int k;
+    if (q) *q = 0;
+    strcpy(dir, b.path);
+    s = strrchr(dir, '\\');
+    if (!s) s = strrchr(dir, '/');
+    if (tmp[0] == '/' || tmp[0] == '\\') dir[2] = 0;   /* raiz da unidade */
+    else if (s) s[1] = 0;
+    else dir[2] = 0;                                    /* "D:ARQ.HTM" */
+    snprintf(out, (size_t)max, "%s%s", dir, tmp);
+    for (k = (int)strlen(dir); out[k]; k++)
+      if (out[k] == '/') out[k] = '\\';
+    return 0;
+  }
   if (strcmp(b.scheme, "file") == 0 || strcmp(b.scheme, "about") == 0) {
     url_t u;
     if (url_parse(tmp, &u) != 0) return -1;

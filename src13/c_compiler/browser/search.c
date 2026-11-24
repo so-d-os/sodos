@@ -105,6 +105,34 @@ static int param(const char* query, const char* name, char* out, int max) {
   return 0;
 }
 
+int search_param(const char* query, const char* name, char* out, int max) {
+  return param(query, name, out, max);
+}
+
+static int build(int kind, const char* q, char* out, int max);
+
+/* duckduckgo.com e a versao com JavaScript: vai para a html.duckduckgo.com,
+ * que e a mesma busca em HTML puro (a que a barra de endereco ja usa). */
+int search_rewrite(const char* url, char* out, int max) {
+  url_t u;
+  char q[256];
+  const char* p;
+  if (url_parse(url, &u) != 0 || (strcmp(u.scheme, "https") != 0 && strcmp(u.scheme, "http") != 0))
+    return 0;
+  if (strcmp(u.host, "duckduckgo.com") != 0 && strcmp(u.host, "www.duckduckgo.com") != 0) return 0;
+  if (strcmp(u.path, "/") == 0 || u.path[0] == 0) {
+    snprintf(out, (size_t)max, "https://html.duckduckgo.com/html/");
+    return 1;
+  }
+  if (u.path[0] != '/' || u.path[1] != '?') return 0;
+  p = u.path + 2;
+  if (!param(p, "q", q, (int)sizeof(q)) || !q[0]) {
+    snprintf(out, (size_t)max, "https://html.duckduckgo.com/html/");
+    return 1;
+  }
+  return build(SEARCH_DDG, q, out, max);
+}
+
 /* URL vinda de JSON ou de um parametro: escapa espaco, aspas e bytes altos */
 static void url_clean(const char* in, char* out, int max) {
   int o = 0;
