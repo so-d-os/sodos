@@ -35,6 +35,8 @@ void smp_send_ipi(int cpu, uint8_t vec);
 uint32_t smp_apic_id(int cpu);
 void smp_ipi_others(uint8_t vec);
 void smp_nmi_others(void);
+/* Indice da CPU corrente pelo LAPIC (vale dentro de um NMI); -1 = nao achou. */
+int smp_cpu_self(void);
 /* Timer local da CPU corrente (LAPIC, periodico, vetor 0xF2). */
 void smp_timer_start(void);
 #define SMP_TICK_MS 4

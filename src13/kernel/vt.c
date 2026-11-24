@@ -25,6 +25,8 @@
 #define VS_KEY  2   /* ao fundo, esperando tecla: so anda na tela */
 #define VS_GFX  3   /* o WIN fora da tela: parado */
 #define VS_DEAD 4   /* o WIN fechou */
+#define VS_HELD 5   /* parada pelo Ctrl+Alt+Del (hang.c): presa ao fundo sem largar a
+                     * CPU0; o vt_idle nao volta a ela, so o Ctrl+F dela */
 
 struct vt {
   int state;
@@ -54,6 +56,13 @@ static int vt_rr;
 static int vt_outn;
 static volatile uint16_t* vt_hw;   /* a tela de verdade */
 static uint8_t font0[256][16];     /* fonte do boot: a de cada tela nova */
+/* Troca de tela pela metade (estado de vt_cur/vt_fg mudando): o Ctrl+Alt+Del
+ * pelo IRQ0 (vt_rescue) espera o proximo tique. */
+static volatile int vt_busy;
+/* Aviso para a tela 1, escrito no console dela quando ela voltar a rodar
+ * (Ctrl+Alt+Del, hang.c). */
+static volatile int vt_note_on;
+static char vt_note[320];
 
 /* ---- log do sistema (Ctrl+F12) ----
  * Anel em memoria: cada execucao (mod_exec) e, com SET PRODUCTION=1, a saida
@@ -165,10 +174,16 @@ static void vt_load(int i) {
 static void vt_switch_to(int j) {
   int i = vt_cur;
   if (i == j || kt_in_thread()) return;   /* telas sao do mundo */
+  vt_busy++;
   vt_save(&vts[i]);
   vt_cur = j;
   vt_load(j);
+  vt_busy--;
   ctx_switch(&vts[i].rsp, vts[j].rsp);
+  if (vt_note_on && vt_cur == 0) {
+    vt_note_on = 0;
+    puts_k(vt_note);
+  }
   /* A CPU ja esta na pilha da tarefa que acordou. Se o WIN fechou, a pilha
    * dele (256 KB) pode ser liberada agora; ate aqui ela era a pilha corrente
    * ou ainda podia ser retomada pelo vt_idle/vt_yield. */
@@ -669,18 +684,19 @@ int vt_hotkey(uint8_t sc) {
   return -1;
 }
 
-void vt_select(int i) {
+/* Tudo de vt_select antes da troca. 1 = trocar para a tela i agora; 0 = ja
+ * esta nela (ou faltou memoria para cria-la). */
+static int vt_select_prep(int i) {
   int old = vt_fg;
-  if (!vt_on || i < 0 || i >= VT_TASKS) return;
   if (i == VT_WIN) {
     if (vts[i].state == VS_FREE || vts[i].state == VS_DEAD) {
       vts[i].back = vt_cur < VT_TEXT ? vt_cur : 0;
-      if (vt_new(i, VT_WIN_STACK, vt_win_entry) != 0) return;
+      if (vt_new(i, VT_WIN_STACK, vt_win_entry) != 0) return 0;
     }
   } else if (vts[i].state == VS_FREE) {
-    if (vt_new(i, VT_STACK, i == VT_LOG ? vt_log_entry : vt_text_entry) != 0) return;
+    if (vt_new(i, VT_STACK, i == VT_LOG ? vt_log_entry : vt_text_entry) != 0) return 0;
   }
-  if (i == old) return;
+  if (i == old) return 0;
   serial_puts("[vt] tela ");
   serial_hex32((uint32_t)i);
   serial_puts("\n");
@@ -700,7 +716,61 @@ void vt_select(int i) {
   vga_text = (vt_cur == i) ? vt_hw : vts[vt_cur].cells;
   vts[i].state = VS_RUN;
   vt_outn = 0;
-  vt_switch_to(i);
+  return 1;
+}
+
+void vt_select(int i) {
+  int go;
+  if (!vt_on || i < 0 || i >= VT_TASKS) return;
+  vt_busy++;
+  go = vt_select_prep(i);
+  vt_busy--;
+  if (go) vt_switch_to(i);
+}
+
+/* ---- Ctrl+Alt+Del com o sistema parado (hang.c) ----
+ * Chamado no IRQ0 da CPU0 (hang_tick), com IF=1 e o mundo interrompido onde
+ * estava preso. 1 = fez alguma coisa (so volta quando a tarefa interrompida
+ * for retomada), 0 = nada agora. */
+int vt_fg_index(void) { return vt_on ? vt_fg : 0; }
+int vt_cur_index(void) { return vt_on ? vt_cur : 0; }
+int vt_state(int i) { return (vt_on && i >= 0 && i < VT_TASKS) ? vts[i].state : -1; }
+int vt_held(int i) { return vt_state(i) == VS_HELD; }
+
+void vt_note_set(const char* s) {
+  int n = 0;
+  while (s && s[n] && n < (int)sizeof(vt_note) - 1) {
+    vt_note[n] = s[n];
+    n++;
+  }
+  vt_note[n] = 0;
+  vt_note_on = n > 0;
+}
+
+void win_rescue_vt(int to);   /* video/visual.c */
+
+int vt_rescue(void) {
+  int fg, cur;
+  if (!vt_on || vt_busy || kt_in_thread()) return 0;
+  fg = vt_fg;
+  cur = vt_cur;
+  if (fg == 0 && cur == 0) return 0;   /* a propria tela 1 esta presa */
+  if (cur != fg) {
+    /* Uma tela ao fundo nao larga a CPU0 (o programa dela num laco): fica
+     * parada e a tela visivel volta; o Ctrl+F1 que o hang.c ja mandou leva
+     * dela para a tela 1. Ctrl+F da tela parada a retoma. */
+    serial_puts("[vt] Ctrl+Alt+Del: tela ");
+    serial_hex32((uint32_t)cur);
+    serial_puts(" presa ao fundo fica parada\n");
+    vts[cur].state = VS_HELD;
+    vt_outn = 0;
+    vt_switch_to(fg);
+    return 1;
+  }
+  serial_puts("[vt] Ctrl+Alt+Del: a tela visivel esta presa, indo para a tela 1\n");
+  if (fg == VT_WIN) win_rescue_vt(0);
+  else vt_select(0);
+  return 1;
 }
 
 void vt_yield(int wait) {

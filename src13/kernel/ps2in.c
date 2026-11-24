@@ -11,6 +11,7 @@
 #include "serial.h"
 #include "irq.h"
 #include "xhci.h"
+#include "hang.h"
 
 #define PQ 256   /* potencia de 2 */
 
@@ -78,6 +79,29 @@ static int q_has(struct pq* q) {
   return __atomic_load_n(&q->head, __ATOMIC_ACQUIRE) != q->tail;
 }
 
+/* Byte de teclado para a fila, com ps2_lk: o kbd_watch ve antes e decide.
+ * O prefixo E0 fica retido ate o byte seguinte, para que o Del engolido do
+ * Ctrl+Alt+Del (E0 53) nao deixe um E0 sozinho na fila (ele grudaria na
+ * proxima tecla). */
+static int kq_e0;
+static void kq_feed(uint8_t b, uint32_t now) {
+  int r = kbd_watch(b);
+  if (r == KBW_E0) {
+    if (kq_e0) q_push(&kq, 0xE0, now);
+    kq_e0 = 1;
+    return;
+  }
+  if (r == KBW_SWALLOW) {
+    kq_e0 = 0;
+    return;
+  }
+  if (kq_e0) {
+    kq_e0 = 0;
+    q_push(&kq, 0xE0, now);
+  }
+  q_push(&kq, b, now);
+}
+
 /* Com ps2_lk e IF=0. Limite de bytes por chamada: sem controlador a porta
  * 0x64 pode devolver 0xFF para sempre. */
 static void drain_locked(void) {
@@ -95,8 +119,7 @@ static void drain_locked(void) {
     if (st & 0x20) {
       q_push(&aq, b, now);
     } else {
-      kbd_watch(b);
-      q_push(&kq, b, now);
+      kq_feed(b, now);
     }
   }
 }
@@ -123,8 +146,7 @@ void ps2in_inject(uint8_t b) {
   lk_take();
   now = (uint32_t)irq_ticks();
   if (!now) now = 1;
-  kbd_watch(b);
-  q_push(&kq, b, now);
+  kq_feed(b, now);
   lk_drop();
   irq_restore(f);
 }
@@ -144,10 +166,38 @@ void fs_force_release(void);               /* kexports.c */
 int kt_thread_create(int (*fn)(void*), void* arg, uint32_t stack_size, uint32_t mask);
 int kt_futex_wait(volatile int* addr, int val, int timeout_ms);
 int kt_online_count(void);
+/* irq_ticks que anda mesmo com a CPU0 sem IRQ0 (kthread.c): com o mundo
+ * preso de interrupcoes desligadas o irq_ticks para e o guardiao nunca via
+ * o tempo passar. */
+uint64_t kt_ms_robust(void);
 
 void kbd_emergency_note(void) {
-  uint64_t t = irq_ticks();
+  uint64_t t = kt_ms_robust();
   emerg_ms = t ? t : 1;
+}
+
+static uint64_t kq_wait_ms(uint64_t now);
+/* ms desde a ultima vez que o mundo leu o teclado (ps2in_pump fora de
+ * interrupcao), ou ha quanto tempo a tecla mais velha espera na fila: o
+ * maior dos dois. */
+uint32_t ps2in_world_idle_ms(void) {
+  uint64_t now = kt_ms_robust(), p = pump_ms, a = 0, k = kq_wait_ms(now);
+  if (p && now > p) a = now - p;
+  if (k > a) a = k;
+  return (uint32_t)(a > 0xFFFFFFFFu ? 0xFFFFFFFFu : a);
+}
+
+/* Le o 8042 de fora da CPU0 (o guardiao, com o mundo parado). So se a trava
+ * estiver livre: a CPU0 pode estar parada justamente com ela. */
+static void ps2_try_drain(void) {
+  uint64_t f;
+  if (!ps2_irq_on || ps2_raw_depth) return;
+  f = irq_save();
+  if (!__atomic_exchange_n(&ps2_lk, 1, __ATOMIC_ACQUIRE)) {
+    drain_locked();
+    lk_drop();
+  }
+  irq_restore(f);
 }
 
 /* Tecla parada na fila (ninguem lendo) ha quanto tempo? 0 = fila vazia. */
@@ -170,10 +220,14 @@ static int guard_main(void* arg) {
     int stuck;
     kt_futex_wait(&z, 0, 50);
     /* o teclado USB anda mesmo se o mundo nao chama o pump: Ctrl+Alt+Del
-     * reinicia pelo kbd_watch; o pump tem trava propria e respeita o driver
-     * ocupado */
-    now = irq_ticks();
-    if (now - pump_ms > 1000u) xhci_kbd_pump(); /* o mundo nao esta lendo: nao disputa com ele */
+     * chega ao kbd_watch; o pump tem trava propria e respeita o driver
+     * ocupado. O PS/2 tambem: com a CPU0 presa de interrupcoes desligadas a
+     * IRQ1 nao entra, e so daqui o Ctrl+Alt+Del seria visto. */
+    now = kt_ms_robust();
+    if (now - pump_ms > 1000u) {   /* o mundo nao esta lendo: nao disputa com ele */
+      xhci_kbd_pump();
+      ps2_try_drain();
+    }
     stuck = kq_wait_ms(now) > 1500u;
     if (!stuck) {
       noted = 0;
@@ -204,15 +258,20 @@ void guard_start(void) {
   int tid;
   if (started || kt_online_count() < 2) return;
   started = 1;
-  pump_ms = irq_ticks();
+  pump_ms = kt_ms_robust();
   tid = kt_thread_create(guard_main, 0, 16384, ~1u); /* longe da CPU0 (o mundo) */
   serial_puts(tid > 0 ? "[guarda] ligado\n" : "[guarda] nao foi possivel criar a thread\n");
+  hang_start();   /* Ctrl+Alt+Del: tela 1, HANG.LOG (hang.c) */
 }
 
 void ps2in_pump(void) {
   uint64_t f;
-  {
-    uint64_t t = irq_ticks();
+  /* So conta como "o mundo leu" fora de interrupcao: o gancho do IRQ0 do
+   * WIN (gui_preempt_tick -> ps2in_pending) bombeia a cada tique, e com o
+   * WIN preso o mundo parecia vivo (o Ctrl+Alt+Del nao gravava o HANG.LOG). */
+  __asm__ volatile ("pushfq; popq %0" : "=r"(f));
+  if (f & 0x200u) {
+    uint64_t t = kt_ms_robust();
     pump_ms = t ? t : 1;
   }
   /* Teclado USB primeiro, fora do cli: ele pode esperar comandos do xHCI. */
@@ -274,13 +333,12 @@ static void syn_feed(void) {
   if (__atomic_load_n(&sq_h, __ATOMIC_ACQUIRE) == sq_t) return;
   f = irq_save();
   lk_take();
-  if (sq_h != sq_t && !q_has(&kq)) {
+  if (sq_h != sq_t && (!q_has(&kq) || kq_e0)) {
     uint8_t b = sq[sq_t & (SQ - 1)];
     uint32_t now = (uint32_t)irq_ticks();
     sq_t++;
     if (!now) now = 1;
-    kbd_watch(b);
-    q_push(&kq, b, now);
+    kq_feed(b, now);
   }
   lk_drop();
   irq_restore(f);

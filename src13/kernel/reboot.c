@@ -3,6 +3,7 @@
 #include "serial.h"
 #include "visual.h"
 #include "keymap.h"
+#include "hang.h"
 
 static inline void outb(uint16_t port, uint8_t val) {
   __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -81,7 +82,11 @@ int kbd_break_take(void) {
   return b;
 }
 
-void kbd_watch(uint8_t sc) {
+/* Del do Ctrl+Alt+Del ja tratado: a repeticao automatica (tecla segurada) e
+ * a soltura tambem sao engolidas. */
+static int kw_cad;
+
+int kbd_watch(uint8_t sc) {
   int ext = kw_e0;
   int up = sc & 0x80;
   uint8_t key = sc & 0x7F;
@@ -89,43 +94,56 @@ void kbd_watch(uint8_t sc) {
 
   if (kw_skip) {
     kw_skip--;
-    return;
+    return KBW_PASS;
   }
   if (sc == 0xE0) {
     kw_e0 = 1;
-    return;
+    return KBW_E0;
   }
   kw_e0 = 0;
   if (sc == 0xE1) {
     kw_skip = 2;
-    return;
+    return KBW_PASS;
   }
   if (sc == 0xFA || sc == 0xFE)   /* ACK / resend do controlador */
-    return;
+    return KBW_PASS;
 
-  keymap_watch(ext, key, up);
   side = ext ? 2 : 1;
+  /* 0x53: Delete (E0 53) ou o Del do teclado numerico. Ctrl+Alt+Del nao
+   * reinicia mais na hora (hang.c): fora da tela 1 leva a ela (com o HANG.LOG
+   * se o sistema estava parado), na tela 1 reinicia. O Del nunca chega ao
+   * programa: no Explorer ele apagaria o arquivo selecionado. */
+  if (key == 0x53) {
+    if (!up && kw_ctrl && kw_alt) {
+      if (!kw_cad) {
+        kw_cad = 1;
+        hang_ctrl_alt_del();
+      }
+      return KBW_SWALLOW;
+    }
+    if (up && kw_cad) {
+      kw_cad = 0;
+      return KBW_SWALLOW;
+    }
+  }
+  keymap_watch(ext, key, up);
   if (key == 0x1D) {
     if (up) kw_ctrl &= (uint8_t)~side;
     else kw_ctrl |= side;
-    return;
+    return KBW_PASS;
   }
   if (key == 0x38) {
     if (up) kw_alt &= (uint8_t)~side;
     else kw_alt |= side;
-    return;
+    return KBW_PASS;
   }
   /* 0x2E: C. E0 46: Break (Ctrl+Pause). O WIN trata Ctrl+C como tecla. */
   if (!up && kw_ctrl && ((key == 0x2E && !ext) || (key == 0x46 && ext))) {
     if (!kw_raw && (kw_armed || !win_screen_size(0, 0))) kw_break = 1;
-    return;
+    return KBW_PASS;
   }
   /* Ctrl+F1: troca de tela pelo mundo; se o mundo estiver parado, o
    * guardiao (ps2in.c) usa o aviso para destravar ou reiniciar. */
   if (key == 0x3B && !up && !ext && kw_ctrl) kbd_emergency_note();
-  /* 0x53: Delete (E0 53) ou o Del do teclado numerico. */
-  if (key == 0x53 && !up && kw_ctrl && kw_alt) {
-    serial_puts("[reboot] Ctrl+Alt+Del\n");
-    sys_reboot();
-  }
+  return KBW_PASS;
 }

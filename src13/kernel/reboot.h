@@ -6,8 +6,12 @@
 void sys_reboot(void) __attribute__((noreturn));
 
 /* Recebe cada scancode (set 1) lido do teclado em 0x60, inclusive os
- * prefixos 0xE0 e as solturas. Ctrl+Alt+Del chama sys_reboot(). */
-void kbd_watch(uint8_t sc);
+ * prefixos 0xE0 e as solturas. Ctrl+Alt+Del chama hang_ctrl_alt_del().
+ * Devolve o que fazer com o byte na fila do teclado (ps2in.c): */
+#define KBW_PASS    0   /* vai para a fila */
+#define KBW_SWALLOW 1   /* some (o Del do Ctrl+Alt+Del) */
+#define KBW_E0      2   /* prefixo E0: segura ate ver o byte seguinte */
+int kbd_watch(uint8_t sc);
 
 /* Ctrl+F1 visto (ps2in.c): o guardiao age se o mundo estiver parado. */
 void kbd_emergency_note(void);

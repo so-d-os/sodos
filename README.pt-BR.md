@@ -365,7 +365,7 @@ O laço principal lê uma linha e chama `shell_exec_line`. Se o primeiro token f
 | `Esc` | Limpa a linha inteira |
 | `Enter` | Executa |
 
-Não há edição com Ctrl na linha do prompt; `Ctrl+C` cancela um comando interno em andamento (`dir /s`, `type`, `find`...). As combinações do SO são `Ctrl+F1`..`Ctrl+F12` (telas; `Ctrl+F7` é o WIN), `Ctrl+Backspace` (fecha o WIN e libera a memória gráfica) e `Ctrl+Alt+Del` (reinicia a máquina), no shell e no desktop. A linha tem no máximo 255 caracteres; o tokenizador separa só por espaços e aceita até 16 argumentos. Não há curingas, pipes ou aspas.
+Não há edição com Ctrl na linha do prompt; `Ctrl+C` cancela um comando interno em andamento (`dir /s`, `type`, `find`...). As combinações do SO são `Ctrl+F1`..`Ctrl+F12` (telas; `Ctrl+F7` é o WIN), `Ctrl+Backspace` (fecha o WIN e libera a memória gráfica) e `Ctrl+Alt+Del` (fora da tela 1 leva ao `Ctrl+F1`, na tela 1 reinicia; se o sistema estava parado grava antes o `\LOG\HANG.LOG`, veja abaixo), no shell e no desktop. A linha tem no máximo 255 caracteres; o tokenizador separa só por espaços e aceita até 16 argumentos. Não há curingas, pipes ou aspas.
 
 ### Comandos internos
 
@@ -1124,7 +1124,7 @@ dlls      módulos carregados, base, tamanho e referências
 - Programas veem nomes de até **31 caracteres** (mais longos chegam como o apelido 8.3); arquivos de `make disk-files` são copiados em maiúsculas.
 - **Sem edição com Ctrl** na linha do prompt; as combinações do SO são as telas `Ctrl+F1`..`Ctrl+F12`, o `Ctrl+Backspace` e o `Ctrl+C`.
 - **Sem controle de acesso**: o HTTP da porta 8797 executa comandos sem autenticação.
-- **Sem comando `reboot`**: `Ctrl+Alt+Del` reinicia (pulso do 8042, porta `0xCF9` ou triple fault, nessa ordem). `shutdown` usa ACPI/porta Bochs sem interpretar as tabelas ACPI e não desliga um PC real.
+- **Ctrl+Alt+Del** (`kernel/hang.c`): fora da tela 1 vai para o `Ctrl+F1`; na tela 1 reinicia (pulso do 8042, porta `0xCF9` ou triple fault, nessa ordem). Se o mundo (CPU0: shell, WIN, telas) está há 1,5 s sem ler o teclado, uma thread em outra CPU antes tira fotos de todas as CPUs por NMI (RIP, registros, pilha), junta o dono do BKL, as threads, as telas, a trava do disco e o final do log serial e grava `D:\LOG\HANG.LOG`. Se a tela 1 não vier e responder em 5 s (ela é forçada pela interrupção do timer da CPU0 quando o teclado não basta; uma tela presa ao fundo fica parada até o `Ctrl+F` dela), as outras CPUs são congeladas, o log é gravado sem travas e o PC reinicia. Um segundo `Ctrl+Alt+Del` no meio disso reinicia na hora. `smp travar laco|cli|bkl [s]` trava de propósito para testar. O comando `reboot` também existe. `shutdown` usa ACPI/porta Bochs sem interpretar as tabelas ACPI e não desliga um PC real.
 - `IMG.DLL` não decodifica BMP, embora o desktop aceite `.BMP`.
 - `make debug` está defasado em relação ao kernel atual. `make iso-grub` carrega esse kernel por Multiboot2.
 - O stage 2 ainda carrega `app.bin` em `0x58000` por compatibilidade, mas o kernel de 64 bits ignora esse aplicativo de 32 bits.

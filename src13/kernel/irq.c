@@ -298,6 +298,9 @@ uint64_t irq_idle(void) { return bsp_idle_ticks; }
 /* Marca o BSP como ocioso (esperando tecla/tarefa) para o TOP. */
 void cpu_idle(int on) { bsp_idle_flag = on ? 1 : 0; }
 
+extern volatile int hang_force;          /* hang.c */
+void hang_tick(uint64_t rip);
+
 /* Preempcao do WIN: chamado no IRQ0, depois do EOI, com o RIP interrompido. */
 static void (*tick_hook)(uint64_t rip);
 void irq_set_tick_hook(void (*fn)(uint64_t rip)) { tick_hook = fn; }
@@ -355,6 +358,12 @@ void irq_handle(isr_frame_t* f) {
      * So com o mundo (WIN) nesta CPU, e so se o BKL estiver livre ou com
      * ele: com uma thread de outra CPU no kernel, fica para o proximo tick. */
     if (irq == 0) {
+      /* Ctrl+Alt+Del com o mundo parado (hang.c): leva a tela 1 para a frente
+       * de onde a CPU0 estiver presa (com IF=1), como a preempcao do WIN. */
+      if (hang_force && kt_world_here() && kt_bkl_try_world()) {
+        hang_tick(f->eip);
+        kt_bkl_drop_world();
+      }
       if (tick_hook && kt_world_here() && kt_bkl_try_world()) {
         tick_hook(f->eip);
         kt_bkl_drop_world();

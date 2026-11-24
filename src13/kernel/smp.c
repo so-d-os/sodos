@@ -215,6 +215,18 @@ void smp_nmi_others(void) {
   if (ap_online) ipi_others(0x400u);  /* delivery mode NMI */
 }
 
+/* Indice da CPU pelo id do LAPIC (nao pelo GS): serve dentro de um NMI, que
+ * pode cair no meio de uma troca da base do GS. -1 se nao achou. */
+int smp_cpu_self(void) {
+  uint32_t me;
+  int i;
+  if (!ap_online) return 0;
+  me = lapic_rd(0x20) >> 24;
+  for (i = 0; i < ncpu && i < SMP_MAX; i++)
+    if (ids[i] == me) return i;
+  return -1;
+}
+
 static inline uint64_t smp_rdtsc(void) {
   uint32_t lo, hi;
   __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));

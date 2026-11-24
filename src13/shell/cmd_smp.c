@@ -3,6 +3,9 @@
  *   smp                      lista as CPUs e o uso de cada uma
  *   smp run <cpu> <comando>  roda o comando (interno ou .EXE) naquela CPU
  *   smp win <cpu>            abre o WIN naquela CPU
+ *   smp travar laco|cli|bkl [s]  trava de proposito (teste do Ctrl+Alt+Del,
+ *                            kernel/hang.c): o mundo num laco com IF=1, com
+ *                            IF=0, ou uma thread com o BKL; s = espera antes
  *
  * Com run/win o "mundo" (shell, WIN, drivers) muda para aquela CPU enquanto
  * o comando roda; a CPU0 fica com as threads dos programas (ou em hlt).
@@ -13,6 +16,7 @@
 #include "smp.h"
 #include "visual.h"
 #include "kthread.h"
+#include "hang.h"
 
 extern int shell_exec_line(char* line);
 
@@ -128,6 +132,23 @@ static int prof_saver(void* arg) {
 
 int cmd_smp(int argc, char** argv) {
   int cpu = 0, i;
+  /* smp travar laco|cli|bkl [s]: teste do Ctrl+Alt+Del / HANG.LOG */
+  if (argc >= 3 && seq(argv[1], "travar")) {
+    int s = 0;
+    if (argc >= 4 && num(argv[3], &s) != 0) s = 0;
+    puts_k("Travando de proposito");
+    if (s > 0) {
+      puts_k(" daqui a ");
+      put_u((unsigned)s);
+      puts_k(" s");
+    }
+    puts_k(". Ctrl+Alt+Del: tela 1 e \\LOG\\HANG.LOG.\n");
+    if (hang_test(argv[2], s) != 0) {
+      puts_k("Uso: smp travar laco|cli|bkl [segundos]\n");
+      return 1;
+    }
+    return 0;
+  }
   /* smp prof on|off|save: amostra onde as CPUs estao (isr.c) */
   if (argc >= 3 && seq(argv[1], "prof")) {
     if (seq(argv[2], "on")) {

@@ -225,6 +225,12 @@ static void fs_steal(const char* why) {
 }
 /* 1 se quem chama segura a trava do FS (sched.c: a tarefa nao cede a vez). */
 int fs_held_by_me(void) { return fs_depth > 0 && fs_owner == fs_me(); }
+/* Dono (0x1000+tarefa do WIN+1 no mundo, 0x100000+tid numa thread) e
+ * profundidade da trava, para o HANG.LOG (hang.c). */
+void fs_lock_info(int* owner, int* depth) {
+  if (owner) *owner = fs_owner;
+  if (depth) *depth = fs_depth;
+}
 /* Ctrl+F1 com o mundo parado (ps2in.c, guardiao): solta a trava a forca. */
 void fs_force_release(void) {
   if (fs_depth) fs_steal("tecla de emergencia");

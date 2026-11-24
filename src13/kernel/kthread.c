@@ -34,6 +34,7 @@ enum { K_WORLD = 1, K_IDLE, K_THREAD };
 #define SLICE_MS     8      /* fatia de uma thread antes do round-robin */
 #define BAL_MS       50     /* balanceamento periodico (puxar) */
 #define LEND_MS      10     /* o mundo empresta a CPU no maximo isto por vez */
+#define PIT_STALL_MS 20u    /* irq_ticks parado: as APs vencem os prazos (pit_watch) */
 #define XS_MAX       4096
 #define STACK_DEF    (256u * 1024u)
 #define STACK_MIN    (16u * 1024u)
@@ -111,6 +112,10 @@ struct cpu {
   uint32_t bal_ms;
   volatile uint32_t tlb_ack;
   uint32_t switches;
+  /* AP: irq_ticks visto no ultimo tique e ha quantos ms ele nao anda (a CPU0
+   * sem IRQ0). Ver pit_watch: os prazos dos futex vencem mesmo assim. */
+  uint64_t pit_last;
+  volatile uint32_t pit_still;
 };
 
 static struct cpu cpus[KT_CPU_MAX];
@@ -628,6 +633,16 @@ void kt_bkl_set_depth(int depth) {
   if (bkl_owner == &world) world.bkl_depth = depth;
 }
 
+/* HANG.LOG em panico (hang.c): as outras CPUs estao paradas no NMI e o PC
+ * vai reiniciar; quem chama passa a ser o dono do BKL, esteja com quem
+ * estiver (o dono pode ser justamente quem travou). */
+void kt_bkl_steal(void) {
+  struct task* t = cur();
+  __atomic_store_n(&bkl_lock, 1, __ATOMIC_SEQ_CST);
+  bkl_owner = t;
+  t->bkl_depth = 1;
+}
+
 int kt_bkl_try_world(void) {
   if (bkl_owner == &world) {
     world.bkl_depth++;
@@ -728,6 +743,180 @@ void kt_dump(void) {
     serial_puts(c->curr == &world ? " (mundo)" : (c->curr == c->idle ? " (ociosa)" : " (thread)"));
     serial_puts("\n");
   }
+}
+
+/* ---------- HANG.LOG (hang.c) ----------
+ * Retrato do escalonador para o Ctrl+Alt+Del com o sistema parado. Le tudo
+ * sem pegar trava nenhuma (quem segura uma pode ser justamente quem travou):
+ * os numeros podem estar no meio de uma mudanca, mas nunca prendem. */
+uint32_t kt_online_mask(void) { return online_mask; }
+
+struct hb { char* p; int n, max; };
+static void hb_c(struct hb* b, char c) { if (b->n < b->max - 1) b->p[b->n++] = c; }
+static void hb_s(struct hb* b, const char* s) { while (s && *s) hb_c(b, *s++); }
+static void hb_u(struct hb* b, uint64_t v) {
+  char t[21];
+  int i = 0;
+  do t[i++] = (char)('0' + v % 10u); while ((v /= 10u) && i < 20);
+  while (i) hb_c(b, t[--i]);
+}
+static void hb_x(struct hb* b, uint64_t v, int digits) {
+  static const char hx[] = "0123456789ABCDEF";
+  while (digits-- > 0) hb_c(b, hx[(v >> (digits * 4)) & 0xFu]);
+}
+/* Endereco do kernel como "k+0x..." (addr2line -e kernel_multiboot.elf). */
+static void hb_addr(struct hb* b, uint64_t a) {
+  extern char __bss_start[];
+  if (a >= 0x01000000ull && a < (uint64_t)(uintptr_t)__bss_start) {
+    hb_s(b, "k+0x");
+    hb_x(b, a - 0x01000000ull, 6);
+  } else {
+    hb_s(b, "0x");
+    hb_x(b, a, 8);
+  }
+}
+static const char* st_name(int s) {
+  switch (s) {
+    case T_RUNNING: return "rodando";
+    case T_READY: return "pronta";
+    case T_BLOCKED: return "bloqueada";
+    case T_DEAD: return "morta";
+    default: return "?";
+  }
+}
+static void hb_task(struct hb* b, const struct task* t) {
+  if (!t) { hb_s(b, "ninguem"); return; }
+  if (t == &world) { hb_s(b, "o mundo (CPU0: shell/WIN/telas)"); return; }
+  if (t->kind == K_IDLE) { hb_s(b, "ociosa"); return; }
+  hb_s(b, "thread ");
+  hb_u(b, (uint32_t)t->tid);
+  hb_s(b, " pid ");
+  hb_u(b, t->pid);
+  if (t->kind == K_THREAD && t->fn && (uintptr_t)t->fn < 0x100000000ull) {
+    hb_s(b, " fn ");
+    hb_addr(b, (uint64_t)(uintptr_t)t->fn);
+  }
+}
+
+int kt_hang_text(char* out, int max) {
+  struct hb b = { out, 0, max };
+  struct task* o = bkl_owner;
+  int i, alive = 0;
+  if (max <= 0) return 0;
+  hb_s(&b, "BKL: ");
+  hb_s(&b, bkl_lock ? "preso" : "livre");
+  hb_s(&b, ", dono ");
+  hb_task(&b, o);
+  if (o) {
+    hb_s(&b, ", profundidade ");
+    hb_u(&b, (uint32_t)o->bkl_depth);
+    hb_s(&b, ", estado ");
+    hb_s(&b, st_name(o->state));
+    hb_s(&b, " na cpu ");
+    hb_u(&b, (uint32_t)o->cpu);
+    if (o->last_exp) {
+      hb_s(&b, ", ultimo k_* ");
+      hb_addr(&b, o->last_exp);
+    }
+  }
+  hb_s(&b, "\r\n     girando ");
+  hb_u(&b, (uint32_t)bkl_waiters);
+  hb_s(&b, ", dormindo ");
+  hb_u(&b, (uint32_t)bkl_sleepers);
+  hb_s(&b, ", voltas ");
+  hb_u(&b, st_bkl_spin);
+  hb_s(&b, ", sonos ");
+  hb_u(&b, st_bkl_sleep);
+  hb_s(&b, ", ms do mundo com o BKL ");
+  hb_u(&b, st_world_bkl_ms);
+  hb_s(&b, "\r\nmundo: estado ");
+  hb_s(&b, st_name(world.state));
+  hb_s(&b, ", cpu ");
+  hb_u(&b, (uint32_t)world.cpu);
+  hb_s(&b, ", bkl ");
+  hb_u(&b, (uint32_t)world.bkl_depth);
+  hb_s(&b, ", pid ");
+  hb_u(&b, world.pid);
+  if (world.last_exp) {
+    hb_s(&b, ", ultimo k_* ");
+    hb_addr(&b, world.last_exp);
+  }
+  hb_s(&b, "\r\nlimite de CPUs ");
+  hb_u(&b, (uint32_t)kt_cpu_cap());
+  hb_s(&b, ", tlb_gen ");
+  hb_u(&b, tlb_gen);
+  hb_s(&b, "\r\n");
+  for (i = 0; i < KT_CPU_MAX; i++) {
+    struct cpu* c = &cpus[i];
+    if (!c->online) continue;
+    hb_s(&b, "  cpu");
+    hb_u(&b, (uint32_t)i);
+    hb_s(&b, ": atual ");
+    hb_task(&b, c->curr);
+    hb_s(&b, " | fila ");
+    hb_u(&b, (uint32_t)c->nr);
+    hb_s(&b, ", trocas ");
+    hb_u(&b, c->switches);
+    hb_s(&b, ", ocupada ");
+    hb_u(&b, c->busy_ms);
+    hb_s(&b, " ms, ociosa ");
+    hb_u(&b, c->idle_ms);
+    hb_s(&b, " ms, tlb_ack ");
+    hb_u(&b, c->tlb_ack);
+    if (i && c->pit_still >= PIT_STALL_MS) {
+      hb_s(&b, ", irq_ticks parado ha ");
+      hb_u(&b, c->pit_still);
+      hb_s(&b, " ms");
+    }
+    if (rt_mask & (1u << i)) hb_s(&b, " (tempo real)");
+    if (parked(c)) hb_s(&b, " (estacionada)");
+    hb_s(&b, "\r\n");
+  }
+  for (i = 0; i < KT_MAX; i++)
+    if (kts[i].state != T_FREE) alive++;
+  hb_s(&b, "threads: ");
+  hb_u(&b, (uint32_t)alive);
+  hb_s(&b, " (tid pid estado cpu bkl espera prazo ultimo-k_* fn)\r\n");
+  for (i = 0; i < KT_MAX; i++) {
+    struct task* t = &kts[i];
+    if (t->state == T_FREE) continue;
+    hb_s(&b, "  ");
+    hb_u(&b, (uint32_t)t->tid);
+    hb_c(&b, ' ');
+    hb_u(&b, t->pid);
+    hb_c(&b, ' ');
+    hb_s(&b, st_name(t->state));
+    hb_s(&b, t->on_cpu ? " cpu" : " fila");
+    hb_u(&b, (uint32_t)t->cpu);
+    hb_s(&b, " bkl");
+    hb_u(&b, (uint32_t)t->bkl_depth);
+    if (t->fw_listed && t->fw_addr) {
+      hb_s(&b, " futex 0x");
+      hb_x(&b, (uint64_t)(uintptr_t)t->fw_addr, 8);
+      if (t->fw_deadline) {
+        hb_s(&b, " ate ");
+        hb_u(&b, t->fw_deadline);
+      }
+    }
+    if (t->killed) hb_s(&b, " MORTA-PEDIDA");
+    if (t->rt) hb_s(&b, " RT");
+    if (t->teb) hb_s(&b, " win");
+    if (t->last_exp) {
+      hb_c(&b, ' ');
+      hb_addr(&b, t->last_exp);
+    }
+    if (t->fn && (uintptr_t)t->fn < 0x100000000ull) {
+      hb_s(&b, " fn ");
+      hb_addr(&b, (uint64_t)(uintptr_t)t->fn);
+    }
+    hb_s(&b, "\r\n");
+    if (b.n >= max - 200) {
+      hb_s(&b, "  (lista cortada)\r\n");
+      break;
+    }
+  }
+  b.p[b.n] = 0;
+  return b.n;
 }
 
 /* ---------- acordar / balancear ---------- */
@@ -1000,8 +1189,7 @@ int kt_futex_wake(volatile int* addr, int n) {
   return cnt;
 }
 
-static void fx_timeouts(void) {
-  uint32_t now = (uint32_t)irq_ticks();
+static void fx_timeouts_at(uint32_t now) {
   struct task** pp;
   if (!fx_head) return;
   spin_lock(&fx_lock);
@@ -1440,10 +1628,41 @@ static void tick_common(struct cpu* c, int ms) {
   preempt_check(c);
 }
 
+/* Os prazos dos futex vencem pelo irq_ticks, que so anda com o IRQ0 da CPU0
+ * (kt_tick_pit). Com a CPU0 presa de interrupcoes desligadas nenhuma thread
+ * com prazo acordava: nem o guardiao do teclado (ps2in.c) nem o Ctrl+Alt+Del
+ * (hang.c). Cada AP conta pelo proprio tique ha quanto tempo o irq_ticks nao
+ * anda; passou de PIT_STALL_MS, ela mesma vence os prazos com "agora" =
+ * irq_ticks parado + esse tempo. */
+static void pit_watch(struct cpu* c, int ms) {
+  uint64_t t = irq_ticks();
+  if (t != c->pit_last) {
+    c->pit_last = t;
+    c->pit_still = 0;
+    return;
+  }
+  c->pit_still += (uint32_t)ms;
+  if (c->pit_still >= PIT_STALL_MS) fx_timeouts_at((uint32_t)(t + c->pit_still));
+}
+
+/* irq_ticks que continua andando com a CPU0 parada (o maior atraso que uma AP
+ * viu desde a ultima mudanca do irq_ticks). Para o guardiao e o hang.c. */
+uint64_t kt_ms_robust(void) {
+  uint64_t t = irq_ticks();
+  uint32_t still = 0;
+  int i;
+  for (i = 1; i < KT_CPU_MAX; i++) {
+    const struct cpu* c = &cpus[i];
+    if (c->online && c->pit_last == t && c->pit_still > still) still = c->pit_still;
+  }
+  return t + still;
+}
+
 void kt_tick_lapic(int ms) {
   struct cpu* c = this_cpu();
   if (c->curr == c->idle) c->idle_ms += (uint32_t)ms;
   else c->busy_ms += (uint32_t)ms;
+  if (c->index != 0) pit_watch(c, ms);
   tick_common(c, ms);
 }
 
@@ -1454,7 +1673,7 @@ void kt_tick_pit(void) {
   c = this_cpu();
   if (c->curr == c->idle) c->idle_ms++;
   else c->busy_ms++;
-  fx_timeouts();
+  fx_timeouts_at((uint32_t)irq_ticks());
   tick_common(c, 1);
 }
 

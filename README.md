@@ -365,7 +365,7 @@ The main loop reads a line and calls `shell_exec_line`. If the first token is a 
 | `Esc` | Clears the whole line |
 | `Enter` | Runs it |
 
-There is no Ctrl editing on the prompt line; `Ctrl+C` cancels a running built-in command (`dir /s`, `type`, `find`...). The OS combinations are `Ctrl+F1`..`Ctrl+F12` (screens; `Ctrl+F7` is WIN), `Ctrl+Backspace` (closes WIN and releases graphics memory) and `Ctrl+Alt+Del` (reboots the machine), in the shell and on the desktop. The line is at most 255 characters; the tokenizer splits on spaces only and accepts up to 16 arguments. No wildcards, pipes or quotes.
+There is no Ctrl editing on the prompt line; `Ctrl+C` cancels a running built-in command (`dir /s`, `type`, `find`...). The OS combinations are `Ctrl+F1`..`Ctrl+F12` (screens; `Ctrl+F7` is WIN), `Ctrl+Backspace` (closes WIN and releases graphics memory) and `Ctrl+Alt+Del` (outside screen 1 it brings `Ctrl+F1` to the front, on screen 1 it reboots; if the system was stuck it first writes `\LOG\HANG.LOG`, see below), in the shell and on the desktop. The line is at most 255 characters; the tokenizer splits on spaces only and accepts up to 16 arguments. No wildcards, pipes or quotes.
 
 ### Built-in commands
 
@@ -1123,7 +1123,7 @@ dlls      loaded modules, base, size and references
 - Programs see names of up to **31 characters** (longer ones arrive as the 8.3 alias); files from `make disk-files` are copied in uppercase.
 - **No Ctrl line editing** in the shell; the OS combinations are the `Ctrl+F1`..`Ctrl+F12` screens, `Ctrl+Backspace` and `Ctrl+C`.
 - **No access control**: the HTTP server on port 8797 runs commands without authentication.
-- **No `reboot` command**: `Ctrl+Alt+Del` reboots (8042 pulse, port `0xCF9` or triple fault, in that order). `shutdown` uses ACPI/the Bochs port without parsing the ACPI tables and does not power off a real PC.
+- **Ctrl+Alt+Del** (`kernel/hang.c`): outside screen 1 it goes to `Ctrl+F1`; on screen 1 it reboots (8042 pulse, port `0xCF9` or triple fault, in that order). If the world (CPU0: shell, WIN, screens) has not read the keyboard for 1.5 s, a thread on another CPU first takes NMI snapshots of every CPU (RIP, registers, stack) plus the BKL owner, threads, screens, disk lock and the tail of the serial log, and writes `D:\LOG\HANG.LOG`. If screen 1 does not come up and answer within 5 s (it is forced from the CPU0 timer interrupt when the keyboard path fails; a screen stuck in the background is put on hold until its `Ctrl+F` key), the other CPUs are frozen, the log is written without locks and the PC reboots. A second `Ctrl+Alt+Del` while this runs reboots at once. `smp travar laco|cli|bkl [s]` hangs the system on purpose to test it. The `reboot` command also exists. `shutdown` uses ACPI/the Bochs port without parsing the ACPI tables and does not power off a real PC.
 - `IMG.DLL` does not decode BMP, although the desktop accepts `.BMP`.
 - `make debug` is outdated relative to the current kernel. `make iso-grub` loads that kernel through Multiboot2.
 - Stage 2 still loads `app.bin` at `0x58000` for compatibility, but the 64-bit kernel ignores that 32-bit application.

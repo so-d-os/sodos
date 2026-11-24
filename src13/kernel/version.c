@@ -411,6 +411,46 @@ void thermal_note(const char* line);
 void wine_dump_waits(void);
 void puts_k(const char* s);
 
+/* "AAAA-MM-DD hh:mm:ss UTC  REBOOT <motivo>, no ar ha N min S s" no BOOT.LOG
+ * (D:, U:, Z:) e no TEMP.LOG, como o comando REBOOT. Ctrl+Alt+Del (hang.c).
+ * Quem chama segura o BKL (ou o sistema ja parou: fs_panic). */
+void version_reboot_note(const char* motivo) {
+  static const char order[] = {'D', 'U', 'Z'};
+  char line[200];
+  int d = rtc_date(), t = rtc_time(), i;
+  uint32_t up = net_ms() / 1000u;
+  line[0] = 0;
+  if (d > 0) {
+    cat_u(line, (int)sizeof line, (unsigned)(d / 10000), 4);
+    cat(line, (int)sizeof line, "-");
+    cat_u(line, (int)sizeof line, (unsigned)(d / 100 % 100), 2);
+    cat(line, (int)sizeof line, "-");
+    cat_u(line, (int)sizeof line, (unsigned)(d % 100), 2);
+  } else {
+    cat(line, (int)sizeof line, "sem data RTC");
+  }
+  cat(line, (int)sizeof line, " ");
+  if (t >= 0) {
+    cat_u(line, (int)sizeof line, (unsigned)(t / 10000), 2);
+    cat(line, (int)sizeof line, ":");
+    cat_u(line, (int)sizeof line, (unsigned)(t / 100 % 100), 2);
+    cat(line, (int)sizeof line, ":");
+    cat_u(line, (int)sizeof line, (unsigned)(t % 100), 2);
+  }
+  cat(line, (int)sizeof line, " UTC  REBOOT ");
+  cat(line, (int)sizeof line, motivo ? motivo : "");
+  cat(line, (int)sizeof line, ", no ar ha ");
+  cat_u(line, (int)sizeof line, up / 60u, 1);
+  cat(line, (int)sizeof line, " min ");
+  cat_u(line, (int)sizeof line, up % 60u, 2);
+  cat(line, (int)sizeof line, " s\r\n");
+  serial_puts("[reboot] ");
+  serial_puts(line);
+  for (i = 0; i < (int)sizeof order; i++)
+    if (try_log(order[i], line) == 0) break;
+  thermal_note(line + 11);
+}
+
 int cmd_reboot(int argc, char** argv) {
   static const char order[] = {'D', 'U', 'Z'};
   char line[200];

@@ -40,7 +40,7 @@ sh /d/WSL/SODOS 'tecla {F10}'           # sair
 ## Cuidados
 
 - `tecla` e `mouse` vão para a janela que tem o foco. Antes de digitar, confira com `janelas` ou clique na janela certa.
-- No desktop, sem janela com foco, `{ESC}` fecha o WIN inteiro. `{CTRL+ALT+DEL}` reinicia o computador. Não mande essas teclas sem necessidade.
+- No desktop, sem janela com foco, `{ESC}` fecha o WIN inteiro. `{CTRL+ALT+DEL}` leva o sistema para a tela 1 (Ctrl+F1); na tela 1 reinicia o computador. Não mande essas teclas sem necessidade.
 - A pasta atual do `sodos` é a do SODOS (vale para o sistema todo), não a do Linux: use caminhos completos ou mande antes `sh /d/WSL/SODOS cd /d/PASTA`.
 - Os programas do SODOS usam nomes 8.3 e texto em CP850. Para compilar: `sh /d/WSL/SODOS cc -I /d/ -L /d/ -o /d/PASTA/PROG.EXE /d/PASTA/PROG.C`.
 - Mais detalhes no repositório do SODOS: `src13/docs/CONTROLE.md`.

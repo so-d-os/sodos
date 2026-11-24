@@ -10816,6 +10816,16 @@ static void win_vt_away(int to) {
   win_api_dirty = 1;
 }
 
+/* Ctrl+Alt+Del com o WIN preso (hang.c, pelo IRQ0 da CPU0): o mesmo caminho
+ * do Ctrl+F1, so que de onde o WIN parou. Quando alguem voltar ao WIN
+ * (Ctrl+F7) o laco dele redesenha tudo (win_rescued). */
+static volatile int win_rescued;
+void win_rescue_vt(int to) {
+  serial_puts("[visual] Ctrl+Alt+Del: WIN sai a forca para a tela de texto\n");
+  win_vt_away(to);
+  win_rescued = 1;
+}
+
 /* Fim do WIN (Esc, menu Sair ou Ctrl+Backspace): desfaz o ambiente grafico e
  * devolve a memoria. As janelas, as tarefas, o papel de parede, o driver da
  * placa e os buffers do desktop saem agora; a tarefa do WIN em vt.c fica
@@ -10984,6 +10994,12 @@ static int win_wm_run_u(void) {
     uint8_t data = 0;
 
     kt_bkl_breathe();
+    if (win_rescued) {   /* voltou de um Ctrl+Alt+Del (win_rescue_vt) */
+      win_rescued = 0;
+      pkt_idx = 0;
+      shift_on = 0;
+      need_draw = 1;
+    }
     if (th_gen_seen != ui_th.gen) {
       /* tema novo (TEMAS.EXE): tamanho dos icones do desktop pode mudar */
       th_gen_seen = ui_th.gen;

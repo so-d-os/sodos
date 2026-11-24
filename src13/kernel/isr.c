@@ -56,6 +56,9 @@ static int mapped(uint64_t va) {
   return 0;
 }
 
+/* Para o hang.c (HANG.LOG): o mesmo teste, de fora. */
+int isr_va_mapped(uint64_t va) { return mapped(va); }
+
 static int dump_stack_words(uint64_t rsp, int row) {
   if ((rsp & 7u) || !mapped(rsp) || !mapped(rsp + 47u)) {
     int c = 0;
@@ -465,6 +468,12 @@ isr_ret_t isr_dispatch(isr_frame_t* f) {
   /* NMI de parada: outra CPU teve uma excecao fatal. */
   if (f->int_no == 2 && kt_stopping()) {
     for (;;) __asm__ volatile ("cli; hlt");
+  }
+  /* NMI do Ctrl+Alt+Del com o sistema parado (hang.c): foto desta CPU para o
+   * HANG.LOG e volta (ou fica parada enquanto o log e gravado). */
+  if (f->int_no == 2) {
+    int hang_nmi(isr_frame_t* fr);
+    if (hang_nmi(f)) return isr_ret0;
   }
 
   /* IRQ 32..47: enviar EOI e retornar (nao travar) */
