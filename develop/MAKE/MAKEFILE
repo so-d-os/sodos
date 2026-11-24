@@ -1,0 +1,15 @@
+# Makefile do MAKE do SODOS, para o proprio MAKE.EXE.
+#   cd \develop\make
+#   make            compila so o que mudou
+#   make -n         mostra o que faria
+# Sem um MAKE.EXE ainda: use o BUILD.BAT.
+# CC, CFLAGS, SYSINC e SYSLIB ja vem definidos (veja LEIA.TXT).
+
+OBJS = main.obj input.obj macro.obj make.obj modtime.obj rules.obj \
+	target.obj utils.obj check.obj sodos.obj
+
+MAKE.EXE: $(OBJS)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(SYSLIB)POSIX.DLL
+
+# Todo fonte inclui o make.h, que inclui o sodos.h.
+$(OBJS): make.h sodos.h

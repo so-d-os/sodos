@@ -2021,6 +2021,27 @@ static WINAPI BOOL SystemParametersInfoW(DWORD a, DWORD b, void* p, DWORD f) {
     memset((uint8_t*)p + 4, 0, sz > 4 ? sz - 4 : 0);
     return 1;
   }
+  /* Suavizacao de fontes. O Chromium (gfx::FontRenderParams) so liga o
+   * antialias do texto se SPI_GETFONTSMOOTHING der TRUE; sem isso o Skia
+   * pedia DWRITE_RENDERING_MODE_ALIASED e dwrite.c entregava glifos em
+   * preto e branco (texto serrilhado no Claude). Tipo STANDARD = tons de
+   * cinza: dwrite.c nao faz ClearType de verdade. */
+  if (a == 0x4A && p) { /* SPI_GETFONTSMOOTHING */
+    *(BOOL*)p = 1;
+    return 1;
+  }
+  if (a == 0x200A && p) { /* SPI_GETFONTSMOOTHINGTYPE: FE_FONTSMOOTHINGSTANDARD */
+    *(uint32_t*)p = 1;
+    return 1;
+  }
+  if (a == 0x200C && p) { /* SPI_GETFONTSMOOTHINGCONTRAST: padrao do Windows */
+    *(uint32_t*)p = 1400;
+    return 1;
+  }
+  if (a == 0x2012 && p) { /* SPI_GETFONTSMOOTHINGORIENTATION: FE_FONTSMOOTHINGORIENTATIONRGB */
+    *(uint32_t*)p = 1;
+    return 1;
+  }
   if (p) memset(p, 0, 4);
   return 0;
 }
