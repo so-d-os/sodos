@@ -14,6 +14,7 @@
 #include "linkext.h"
 #include "wine.h"
 #include "vt.h"
+#include "audio.h"
 
 #define ENV_N 32
 
@@ -84,6 +85,9 @@ int env_set(const char* name, const char* val) {
   /* WINE=0 tira o WINE.DLL da memoria (wine.c); WINE=1 so carrega no
    * primeiro EXE do Windows. */
   if (gen != g && name_is(name, "WINE")) wine_env_changed();
+  /* AUDIO=0 (ou sem a variavel): driver nulo, nada carregado; AUDIO=1 carrega
+   * o AUDIO.DLL e acha a placa (audio.c). */
+  if (gen != g && (name_is(name, "AUDIO") || name_is(name, "PATHSODOS"))) audio_env_changed();
   if (gen != g && name_is(name, "DISKSYNC")) vt_service_check();
   if (gen != g && name_is(name, "WSL")) vt_wsl_check();
   if (gen != g && name_is(name, "SYSTEMLOG")) syslog_service_check();

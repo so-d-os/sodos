@@ -28,6 +28,7 @@
 #include "vmem.h"
 #include "irq.h"
 #include "troca.h"
+#include "audio.h"
 
 void mod_exit(int code);
 void shell_read_line(char* buf, int max);
@@ -1786,6 +1787,14 @@ static const struct kexp table[] = {
   EXP(k_troca_apply),
   EXP(k_troca_estado),
   EXP(k_troca_dll),
+  /* som (kernel/audio.c, docs/AUDIO.md) */
+  EXP(k_audio_open),
+  EXP(k_audio_write),
+  EXP(k_audio_close),
+  EXP(k_audio_pending),
+  EXP(k_audio_volume),
+  EXP(k_audio_beep),
+  EXP(k_audio_info),
 };
 
 #define NEXP (sizeof(table) / sizeof(table[0]))

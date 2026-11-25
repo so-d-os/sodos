@@ -442,6 +442,22 @@ int k_pendrive(int op, int arg, char* out, int max);
  * k_clip_set: n < 0 = ate o '\0'. k_clip_get devolve o tamanho copiado. */
 void k_clip_set(const char* s, int n);
 int k_clip_get(char* out, int max);
+/* Som (docs/AUDIO.md). Com SET AUDIO=0 (ou sem a variavel) o driver e o nulo:
+ * tudo funciona e o som vai para lugar nenhum.
+ * k_audio_open: rate 8000..192000 Hz, channels 1 ou 2, bits 8 (sem sinal) ou
+ *   16 (com sinal). 0 ok; -1 parametros; -2 outro programa tocando; -3 a placa
+ *   recusou.
+ * k_audio_write: espera ter lugar na fila (~200 ms); devolve bytes aceitos ou
+ *   <0. k_audio_close(1) espera tocar o que falta; (0) corta na hora.
+ * k_audio_pending: bytes na fila (para sincronizar video). k_audio_volume:
+ *   0..100, pct < 0 so le (-1 = sem placa). k_audio_beep: tom sem esperar. */
+int k_audio_open(int rate, int channels, int bits);
+int k_audio_write(const void* buf, int bytes);
+int k_audio_close(int wait);
+int k_audio_pending(void);
+int k_audio_volume(int pct);
+int k_audio_beep(int hz, int ms);
+int k_audio_info(char* out, int max);
 
 /* No cc, __export em uma funcao ou variavel global a coloca na tabela de
  * exports da DLL. No gcc (bootstrap) use link /export:nome ou /exportall. */

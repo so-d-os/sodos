@@ -202,6 +202,7 @@ int cmd_rit(int argc, char** argv);      /* video/visual.c */
 int cmd_visual(int argc, char** argv);
 int cmd_mouse(int argc, char** argv);
 int cmd_usb(int argc, char** argv);
+int cmd_audio(int argc, char** argv);    /* shell/cmd_audio.c: som (SET AUDIO=1) */
 int cmd_win(int argc, char** argv);
 int cmd_ping(int argc, char** argv);
 int cmd_net(int argc, char** argv);

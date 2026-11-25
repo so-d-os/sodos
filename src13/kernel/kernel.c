@@ -2145,6 +2145,7 @@ void shell_register_all(void) {
   register_builtin("visual", cmd_visual);
   register_builtin("mouse", cmd_mouse);
   register_builtin("usb", cmd_usb);
+  register_builtin("audio", cmd_audio);
   register_builtin("win", cmd_win);
   register_builtin("win.exe", cmd_win);
   register_builtin("ping", cmd_ping);

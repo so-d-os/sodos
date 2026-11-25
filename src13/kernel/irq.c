@@ -1,6 +1,7 @@
 /* irq.c - Envia EOI para IRQ 32..47 */
 #include "irq.h"
 #include "wine.h"
+#include "audio.h"
 #include "pic.h"
 #include "reboot.h"
 #include "kthread.h"
@@ -366,6 +367,12 @@ void irq_handle(isr_frame_t* f) {
       }
       if (tick_hook && kt_world_here() && kt_bkl_try_world()) {
         tick_hook(f->eip);
+        kt_bkl_drop_world();
+      }
+      /* Som tocando (SET AUDIO=1 e um fluxo aberto): zera o que a placa ja
+       * tocou e alimenta o tom (audio.c). Desligado: so este if. */
+      if (audio_tick_on && kt_world_here() && kt_bkl_try_world()) {
+        audio_irq_tick(irq_tick_count);
         kt_bkl_drop_world();
       }
       kt_tick_pit();
