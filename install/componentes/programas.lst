@@ -29,6 +29,8 @@ copia  src13/c_compiler/browser/*.c        D:\   exceto=main.c
 copia  src13/c_compiler/browser/main.c     D:\BROWSER.C
 copia  src13/c_compiler/browser/*.cpp      D:\
 copia  src13/c_compiler/browser/*.h        D:\
+# DOM falso que o JS.EXE roda com os scripts da pagina (browser/main.c js_page)
+copia  src13/c_compiler/browser/brdom.js   D:\BRDOM.JS
 
 # Exemplos
 copia  src13/c_compiler/examples/*.c       D:\

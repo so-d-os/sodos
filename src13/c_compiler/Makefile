@@ -71,7 +71,7 @@ $(O)/IMGBIG.DLL: $(B)/img_img_big.obj $(O)/LIBC.DLL $(LINK)
 	$(HCC) -dll -o $@ $(B)/img_img_big.obj
 
 BROWSER_OBJ = $(B)/br_main.obj $(B)/br_url.obj $(B)/br_http.obj $(B)/br_html.obj $(B)/br_js.obj \
-	$(B)/br_search.obj $(B)/br_cache.obj
+	$(B)/br_search.obj $(B)/br_youtube.obj $(B)/br_inflate.obj $(B)/br_cache.obj
 $(B)/br_%.obj: browser/%.c browser/browser.h $(HCC) $(HEADERS) | $(B)
 	$(HCC) -c $< -o $@
 $(B)/br_cache.obj: browser/cache.cpp browser/cache.h $(HCC) $(HEADERS) | $(B)
