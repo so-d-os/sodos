@@ -704,8 +704,13 @@ static void k_net_addr(uint32_t* ip, uint32_t* mask, uint32_t* gw, uint32_t* dns
 /* TEB do Windows da thread corrente (WINE.DLL): vira a base do GS dela
  * (TEB+0 e TEB+0x18 ficam com o kernel, ver kthread.c). 0 desliga. */
 static void k_win_teb(void* teb) { kt_win_teb_set((uint64_t)(uintptr_t)teb); }
-/* pid do SODOS do processo corrente (WINE.DLL: casar com o wine_pid_gone). */
-static uint32_t k_getpid(void) { return um_owner(); } /* certo tambem numa k_thread */
+/* pid do SODOS do processo corrente (WINE.DLL: casar com o wine_pid_gone).
+ * EXP_NOLOCK: numa k_thread sem o BKL o um_owner() e o dono de quem esta com
+ * o BKL (o WIN, pid 0, ou outro programa), nao o da thread. As threads que o
+ * Claude cria de outras threads ficavam no registro de esperas com o pid
+ * errado; o Ctrl+Backspace (fim do WIN) nao as limpava e o wine_dump do
+ * REBOOT lia o wproc ja solto (#GP). A k_thread guarda o pid dela. */
+static uint32_t k_getpid(void) { return kt_in_thread() ? kt_cur_pid() : um_owner(); }
 /* Memoria num endereco baixo fixo para a imagem de um EXE sem relocacoes. */
 static void* k_win_lowmem(uint32_t addr, uint32_t size) { return wine_low_alloc(addr, size); }
 /* Memoria virtual dos programas do Windows (kernel/vmem.c). */

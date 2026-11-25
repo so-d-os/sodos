@@ -234,6 +234,7 @@ struct wproc {
   char* spawn_dir;              /* lpCurrentDirectory do filho (k_malloc_shared) */
   HANDLE spawn_std[3];          /* STARTUPINFO hStdInput/Output/Error para o filho */
   HANDLE std[3];                /* GetStdHandle: 0 = console */
+  uint32_t kpid;                /* pid do SODOS (k_getpid na tarefa do loader) */
 };
 
 /* Processo corrente: PEB = gs:0x60. */

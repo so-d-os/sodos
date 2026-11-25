@@ -514,7 +514,7 @@ void wtrack_thread(struct wobj* t) {
     wtrk[i].p = wp();
     wtrk[i].teb = t->teb;
     wtrk[i].pid = wp()->pid;
-    wtrk[i].kpid = k_getpid();
+    wtrk[i].kpid = wp()->kpid ? wp()->kpid : k_getpid();
     wtrk[i].tid = t->tid;
     wtrk[i].what = 0;
     wtrk[i].used = 1;
@@ -540,10 +540,22 @@ void wtrack_proc_exit(struct wproc* p) {
  * Ctrl+Backspace, onde o wtrack_proc_exit nao roda): o wproc dele vai ser
  * solto, entao as vagas nao podem continuar apontando para ele. */
 void wine_pid_gone(uint32_t kpid) {
-  int i;
+  struct wproc* gone[8];
+  int i, j, ng = 0;
   if (!kpid) return;
-  for (i = 0; i < WTRK_MAX; i++)
-    if (wtrk[i].used && wtrk[i].kpid == kpid) wtrk[i].used = 0;
+  for (i = 0; i < WTRK_MAX; i++) {
+    if (!wtrk[i].used || wtrk[i].kpid != kpid) continue;
+    for (j = 0; j < ng && gone[j] != wtrk[i].p; j++) {
+    }
+    if (j == ng && ng < 8) gone[ng++] = wtrk[i].p;
+    wtrk[i].used = 0;
+  }
+  /* vaga gravada com outro kpid (WINE.DLL com kernel antigo: k_getpid errado
+   * numa k_thread) mas do mesmo processo: o wproc tambem vai ser solto. So
+   * compara ponteiros, nao le o wproc. */
+  for (i = 0; ng && i < WTRK_MAX; i++)
+    for (j = 0; wtrk[i].used && j < ng; j++)
+      if (wtrk[i].p == gone[j]) wtrk[i].used = 0;
 }
 
 static struct wtrk* wtrk_cur(void) {

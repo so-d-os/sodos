@@ -110,6 +110,9 @@ static int start(int argc, char** argv) {
   memset(teb, 0, TEB_SIZE);
   *(uint64_t*)(teb + TEB_SELF) = (uint64_t)(uintptr_t)teb;
   p->pid = wnew_pid();
+  /* na tarefa do loader o k_getpid e o do processo; o registro de esperas
+   * (util.c) usa este para todas as threads, criadas de onde forem */
+  p->kpid = k_getpid();
   *(uint64_t*)(teb + TEB_PID) = p->pid;
   *(uint64_t*)(teb + TEB_TID) = 0x104;
   *(uint64_t*)(teb + TEB_TLSPTR) = (uint64_t)(uintptr_t)tlsarr;
