@@ -184,6 +184,127 @@ static uint64_t hm_user_used;
 static uint64_t hm_user_quota;
 static uint32_t hm_user_pct = HM_USER_PCT_DEFAULT;
 
+/* ---- Detector de cabecalho estragado acima de 4 GB ----
+ * Em 25/11/2026 a cadeia quebrou duas vezes com o Chrome aberto: o cabecalho
+ * logo depois de um bloco livre virou FF (uma vez) ou zeros (outra) e a RAM
+ * dali ate o fim (23 GB) sumiu ate o reboot. O alocador sozinho esta certo:
+ * alguem escreve na memoria do hm depois de solta ou alem do fim. Aqui fica
+ * um historico das ultimas operacoes (quem pegou e soltou o que, e de onde
+ * veio a chamada) e a cadeia e conferida a cada soltura, busca, juncao, fim
+ * de programa e conta (o [temp] conta a cada 10 s). Na primeira quebra o
+ * serial ganha um relatorio "[mm] hm estragado" com o historico daquela
+ * regiao. */
+#define HM_HIST 1024u
+struct hm_ev {
+  uint64_t addr;  /* cabecalho do bloco */
+  uint64_t size;
+  uint64_t quem;  /* retorno de quem chamou hmalloc/hm_user_alloc/hfree/hm_user_free */
+  uint32_t owner;
+  uint32_t op;    /* 'A' pegou, 'L' soltou, 'D' solto no fim do dono */
+};
+static struct hm_ev hm_hist[HM_HIST];
+static uint32_t hm_hist_n;       /* eventos desde o boot (indice = n % HM_HIST) */
+static uint64_t hm_quem;         /* quem chamou a operacao em curso (sob o BKL) */
+static uint64_t hm_bad_seen;     /* quebra ja relatada (uma vez por endereco) */
+static uint32_t hm_bad_frees;    /* hfree de bloco invalido ja relatados */
+const char* mod_pid_name(uint32_t pid); /* module.c */
+
+#define HM_QUEM() (hm_quem = (uint64_t)(uintptr_t)__builtin_return_address(0))
+
+static void hm_hex64(uint64_t v) {
+  serial_hex32((uint32_t)(v >> 32));
+  serial_hex32((uint32_t)v);
+}
+
+static void hm_owner_name(uint32_t owner) {
+  serial_puts(owner == 0 ? "kernel" : owner == 0xFFFFFF00u ? "WINE-compartilhado" : mod_pid_name(owner));
+}
+
+static void hm_note(uint32_t op, const struct hm_hdr* h, uint64_t size, uint32_t owner) {
+  struct hm_ev* e = &hm_hist[hm_hist_n % HM_HIST];
+  e->addr = (uint64_t)(uintptr_t)h;
+  e->size = size;
+  e->quem = hm_quem;
+  e->owner = owner;
+  e->op = op;
+  hm_hist_n++;
+}
+
+/* Operacoes do historico cujo bloco cobria [lo, hi), da mais nova para a
+ * mais velha. */
+static void hm_hist_near(uint64_t lo, uint64_t hi) {
+  uint32_t k, shown = 0, n = hm_hist_n < HM_HIST ? hm_hist_n : HM_HIST;
+  for (k = 0; k < n && shown < 40u; k++) {
+    uint32_t seq = hm_hist_n - 1u - k;
+    const struct hm_ev* e = &hm_hist[seq % HM_HIST];
+    char op[2];
+    if (e->addr >= hi || e->addr + e->size <= lo) continue;
+    op[0] = (char)e->op;
+    op[1] = 0;
+    serial_puts("[mm]   #");
+    serial_hex32(seq);
+    serial_puts(" ");
+    serial_puts(op);
+    serial_puts(" bloco ");
+    hm_hex64(e->addr);
+    serial_puts(" tam ");
+    hm_hex64(e->size);
+    serial_puts(" dono ");
+    serial_hex32(e->owner);
+    serial_puts(" ");
+    hm_owner_name(e->owner);
+    serial_puts(" quem ");
+    hm_hex64(e->quem);
+    serial_puts("\n");
+    shown++;
+  }
+  if (!shown) serial_puts("[mm]   (nada no historico perto dali)\n");
+}
+
+/* bad: onde devia haver um cabecalho e nao ha; prev: o ultimo bloco bom. */
+static void hm_broken(const struct harena* a, const struct hm_hdr* prev, const struct hm_hdr* bad,
+                      const char* onde) {
+  uint64_t b = (uint64_t)(uintptr_t)bad, room = a->end - b;
+  const uint8_t* raw = (const uint8_t*)bad;
+  int i;
+  if (b >= a->end || b == hm_bad_seen) return;
+  hm_bad_seen = b;
+  serial_puts("[mm] hm estragado (");
+  serial_puts(onde);
+  serial_puts(") em ");
+  hm_hex64(b);
+  serial_puts(", operacao ");
+  serial_hex32(hm_hist_n);
+  serial_puts(", quem ");
+  hm_hex64(hm_quem);
+  serial_puts("\n[mm]   bytes:");
+  for (i = 0; i < 16 && (uint64_t)i < room; i++) {
+    static const char hx[] = "0123456789ABCDEF";
+    serial_putc(' ');
+    serial_putc(hx[raw[i] >> 4]);
+    serial_putc(hx[raw[i] & 15u]);
+  }
+  serial_puts("\n");
+  if (prev) {
+    serial_puts("[mm]   bloco de antes ");
+    hm_hex64((uint64_t)(uintptr_t)prev);
+    serial_puts(" tam ");
+    hm_hex64(prev->size);
+    serial_puts(prev->free ? " livre" : " usado, dono ");
+    if (!prev->free) {
+      serial_hex32(prev->owner);
+      serial_puts(" ");
+      hm_owner_name(prev->owner);
+    }
+    serial_puts("\n");
+  }
+  /* quem morou do bloco de antes ate o cabecalho estragado: o bloco de antes
+   * costuma ser livre, juntado de varios soltos, e quem escreveu depois de
+   * soltar (ou alem do fim) esta entre eles */
+  serial_puts("[mm]   historico da regiao (bloco de antes ate o cabecalho estragado):\n");
+  hm_hist_near(prev ? (uint64_t)(uintptr_t)prev : (b > 16u ? b - 16u : 0), b + 16u);
+}
+
 static void hm_add_arena(uint64_t s, uint64_t e) {
   uint32_t i;
   if (e <= s + UM_MIN_SIZE) return;
@@ -493,7 +614,12 @@ static void hm_merge(uint32_t ai, struct hm_hdr* h) {
   const struct harena* a = &hm_arenas[ai];
   for (;;) {
     struct hm_hdr* nxt = (struct hm_hdr*)((uint8_t*)h + h->size);
-    if ((uint64_t)(uintptr_t)nxt >= a->end || !hm_ok(a, nxt) || !nxt->free) return;
+    if ((uint64_t)(uintptr_t)nxt >= a->end) return;
+    if (!hm_ok(a, nxt)) {
+      hm_broken(a, h, nxt, "juntar");
+      return;
+    }
+    if (!nxt->free) return;
     if (hm_rover[ai] == nxt) hm_rover[ai] = h;
     h->size += nxt->size;
   }
@@ -542,6 +668,7 @@ static void* hm_take(uint32_t ai, struct hm_hdr* h, uint64_t nbytes, uint64_t al
   }
   h->free = 0;
   h->owner = owner;
+  hm_note('A', h, h->size, owner);
   return (uint8_t*)h + sizeof(struct hm_hdr);
 }
 
@@ -555,25 +682,32 @@ static void* hm_alloc(uint64_t nbytes, uint64_t align, uint32_t owner) {
     struct hm_hdr* first = (struct hm_hdr*)(uintptr_t)a->start;
     struct hm_hdr* r = hm_rover[i];
     struct hm_hdr* h;
+    struct hm_hdr* prev = 0;
     void* p;
     if (!r || !hm_ok(a, r)) r = first;
     /* Do rover ate o fim, depois do inicio ate o rover. */
-    for (h = r; hm_ok(a, h); h = (struct hm_hdr*)((uint8_t*)h + h->size)) {
+    for (h = r; hm_ok(a, h); prev = h, h = (struct hm_hdr*)((uint8_t*)h + h->size)) {
       if (!h->free) continue;
       hm_merge(i, h);
       if ((p = hm_take(i, h, nbytes, align, owner)) != 0) return p;
     }
+    if (prev) hm_broken(a, prev, h, "busca"); /* parou antes do fim (no fim nao relata) */
     if (r == first) continue;
-    for (h = first; hm_ok(a, h) && h != r; h = (struct hm_hdr*)((uint8_t*)h + h->size)) {
+    prev = 0;
+    for (h = first; hm_ok(a, h) && h != r; prev = h, h = (struct hm_hdr*)((uint8_t*)h + h->size)) {
       if (!h->free) continue;
       hm_merge(i, h);
       if ((p = hm_take(i, h, nbytes, align, owner)) != 0) return p;
     }
+    if (h != r) hm_broken(a, prev, h, "busca");
   }
   return 0;
 }
 
-void* hmalloc(uint64_t nbytes) { return hm_alloc(nbytes, MM_ALIGN, 0); }
+void* hmalloc(uint64_t nbytes) {
+  HM_QUEM();
+  return hm_alloc(nbytes, MM_ALIGN, 0);
+}
 
 /* Devolve o tamanho do bloco solto (0 se ptr nao e um bloco usado daqui). */
 static uint64_t hm_release(void* ptr) {
@@ -584,10 +718,27 @@ static uint64_t hm_release(void* ptr) {
   for (i = 0; i < hm_count; ++i) {
     const struct harena* a = &hm_arenas[i];
     struct hm_hdr* h = (struct hm_hdr*)(uintptr_t)p;
+    struct hm_hdr* nxt;
     uint64_t sz;
     if (p < a->start || p >= a->end) continue;
-    if (!hm_ok(a, h) || h->free) return 0;
+    if (!hm_ok(a, h) || h->free) {
+      /* soltura dupla ou ponteiro que nao e de bloco: o proprio cabecalho
+       * pode ter sido pisado. Os primeiros vao para o serial. */
+      if (hm_bad_frees++ < 20u) {
+        serial_puts("[mm] hfree de bloco invalido ou ja solto ");
+        hm_hex64(p);
+        serial_puts(" quem ");
+        hm_hex64(hm_quem);
+        serial_puts(hm_ok(a, h) ? " (ja livre)\n" : " (cabecalho estragado)\n");
+      }
+      return 0;
+    }
+    /* o vizinho de depois ainda e um cabecalho? Aqui o bloco ainda tem dono:
+     * se ele escreveu alem do fim, o relatorio diz quem. */
+    nxt = (struct hm_hdr*)((uint8_t*)h + h->size);
+    if ((uint64_t)(uintptr_t)nxt < a->end && !hm_ok(a, nxt)) hm_broken(a, h, nxt, "hfree, vizinho");
     sz = h->size;
+    hm_note('L', h, sz, h->owner);
     h->free = 1;
     h->owner = 0;
     hm_merge(i, h);
@@ -596,7 +747,10 @@ static uint64_t hm_release(void* ptr) {
   return 0;
 }
 
-void hfree(void* ptr) { (void)hm_release(ptr); }
+void hfree(void* ptr) {
+  HM_QUEM();
+  (void)hm_release(ptr);
+}
 
 /* ---- RAM acima de 4 GB para programas (64 bits: Firefox) ----
  * Teto = hm_user_pct% de toda a RAM do PC (abaixo + acima de 4 GB), limitado
@@ -629,6 +783,7 @@ void hm_set_user_pct(uint32_t pct) {
 void* hm_user_alloc(uint64_t nbytes, uint64_t align, uint32_t owner) {
   void* p;
   uint64_t need = (nbytes + sizeof(struct hm_hdr) + (MM_ALIGN - 1u)) & ~(uint64_t)(MM_ALIGN - 1u);
+  HM_QUEM();
   if (!hm_count || need < nbytes) return 0;
   if (hm_user_used + need > hm_user_quota) return 0;
   p = hm_alloc(nbytes, align, owner ? owner : 1u);
@@ -637,7 +792,9 @@ void* hm_user_alloc(uint64_t nbytes, uint64_t align, uint32_t owner) {
 }
 
 void hm_user_free(void* ptr) {
-  uint64_t sz = hm_release(ptr);
+  uint64_t sz;
+  HM_QUEM();
+  sz = hm_release(ptr);
   if (sz <= hm_user_used) hm_user_used -= sz;
   else hm_user_used = 0;
 }
@@ -646,19 +803,24 @@ void hm_user_free(void* ptr) {
 void hm_free_owner(uint32_t owner) {
   uint32_t i;
   if (owner == 0) return;
+  HM_QUEM();
   for (i = 0; i < hm_count; ++i) {
     const struct harena* a = &hm_arenas[i];
     struct hm_hdr* h = (struct hm_hdr*)(uintptr_t)a->start;
+    struct hm_hdr* prev = 0;
     while (hm_ok(a, h)) {
       if (!h->free && h->owner == owner) {
         if (h->size <= hm_user_used) hm_user_used -= h->size;
         else hm_user_used = 0;
+        hm_note('D', h, h->size, owner);
         h->free = 1;
         h->owner = 0;
         hm_merge(i, h);
       }
+      prev = h;
       h = (struct hm_hdr*)((uint8_t*)h + h->size);
     }
+    hm_broken(a, prev, h, "fim do dono"); /* no fim da arena nao relata */
   }
 }
 
@@ -674,6 +836,7 @@ void hm_stats(uint64_t* total, uint64_t* used, uint64_t* free_bytes, uint64_t* l
   for (i = 0; i < hm_count; ++i) {
     const struct harena* a = &hm_arenas[i];
     struct hm_hdr* h = (struct hm_hdr*)(uintptr_t)a->start;
+    struct hm_hdr* prev = 0;
     t += a->end - a->start;
     while (hm_ok(a, h)) {
       if (h->free) {
@@ -682,8 +845,10 @@ void hm_stats(uint64_t* total, uint64_t* used, uint64_t* free_bytes, uint64_t* l
       } else {
         u += h->size;
       }
+      prev = h;
       h = (struct hm_hdr*)((uint8_t*)h + h->size);
     }
+    hm_broken(a, prev, h, "conta"); /* o [temp] conta a cada 10 s */
   }
   if (total) *total = t;
   if (used) *used = u;
