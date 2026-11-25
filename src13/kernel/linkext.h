@@ -49,5 +49,8 @@ typedef const struct linkext_ops* (*linkext_entry_fn)(void);
 extern int (*linkext_fn)(const char* file);
 /* env.c chama quando LINKEXT ou PATHSODOS mudam: carrega ou descarrega. */
 void linkext_env_changed(void);
+/* TROCA (kernel/troca.c): recarrega o DLL do disco. 0 ok, 1 desligado, -1 em uso. */
+int linkext_reload(void);
+int linkext_loaded(void);
 /* Pedido de abrir do WIN (visual.c): exe com argumento. */
 int win_launch_arg(const char* exe, const char* arg);

@@ -1226,6 +1226,69 @@ void mm_walk(mm_walk_fn fn, void* arg) {
   }
 }
 
+/* Copia o que ha em stop (o cabecalho que parou o percurso), sem passar do fim. */
+static void chk_raw(struct mm_chk* c) {
+  uint64_t room = c->end - c->stop;
+  int i;
+  c->bad_len = room < sizeof(c->bad_raw) ? (int)room : (int)sizeof(c->bad_raw);
+  for (i = 0; i < c->bad_len; i++) c->bad_raw[i] = ((const uint8_t*)(uintptr_t)c->stop)[i];
+}
+
+int mm_check(int area, struct mm_chk* c) {
+  uint32_t i;
+  if (!c) return 0;
+  for (i = 0; i < sizeof(*c); i++) ((uint8_t*)c)[i] = 0;
+  if (area == 0 || area == 1) {
+    const struct arena* a = area ? &high : &low;
+    struct mm_hdr* h;
+    if (!a->ready) return 0;
+    c->start = a->start;
+    c->end = a->end;
+    h = blk_at(a->start);
+    while (range_ok(a, h)) {
+      c->blocks++;
+      c->last = (uint32_t)(uintptr_t)h;
+      c->last_size = h->size;
+      c->last_free = h->free;
+      c->last_owner = h->owner;
+      h = blk_at((uint32_t)(uintptr_t)h + h->size);
+    }
+    c->stop = (uint32_t)(uintptr_t)h;
+    if (c->stop >= c->end) return 1;
+    chk_raw(c);
+    if (c->bad_len >= (int)sizeof(struct mm_hdr)) {
+      c->bad_size = h->size;
+      c->bad_free = h->free;
+      c->bad_owner = h->owner;
+    }
+    return -1;
+  }
+  if (area < 2 || (uint32_t)(area - 2) >= hm_count) return 0;
+  {
+    const struct harena* a = &hm_arenas[area - 2];
+    struct hm_hdr* h = (struct hm_hdr*)(uintptr_t)a->start;
+    c->start = a->start;
+    c->end = a->end;
+    while (hm_ok(a, h)) {
+      c->blocks++;
+      c->last = (uint64_t)(uintptr_t)h;
+      c->last_size = h->size;
+      c->last_free = h->free;
+      c->last_owner = h->owner;
+      h = (struct hm_hdr*)((uint8_t*)h + h->size);
+    }
+    c->stop = (uint64_t)(uintptr_t)h;
+    if (c->stop >= c->end) return 1;
+    chk_raw(c);
+    if (c->bad_len >= (int)sizeof(struct hm_hdr)) {
+      c->bad_size = h->size;
+      c->bad_free = h->free;
+      c->bad_owner = h->owner;
+    }
+    return -1;
+  }
+}
+
 uint32_t mm_kernel_end(void) { return kernel_reserved_end(bootinfo_get()); }
 
 /* Marca [phys, phys+size) como write-combining (PAT 1: PWT=1, PCD=0, que o

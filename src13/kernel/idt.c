@@ -25,6 +25,7 @@ extern void lapic_timer_stub(void);
 extern void resched_ipi_stub(void);
 extern void rit_irq_stub(void);
 extern void tlb_ipi_stub(void);
+extern void troca_ipi_stub(void);
 extern void spurious_stub(void);
 
 static void set_gate(int n, uint64_t handler, uint16_t sel, uint8_t flags) {
@@ -107,6 +108,7 @@ void idt_init(void) {
   set_gate(0xF3, (uint64_t)resched_ipi_stub, IDT_SEL_CODE, IDT_FLAGS);
   set_gate(0xF4, (uint64_t)tlb_ipi_stub, IDT_SEL_CODE, IDT_FLAGS);
   set_gate(0xF5, (uint64_t)rit_irq_stub, IDT_SEL_CODE, IDT_FLAGS);   /* MSI do xHCI -> RIT */
+  set_gate(0xF6, (uint64_t)troca_ipi_stub, IDT_SEL_CODE, IDT_FLAGS); /* TROCA: para a CPU (troca.c) */
   set_gate(0xFF, (uint64_t)spurious_stub, IDT_SEL_CODE, IDT_FLAGS);
 
   idtp.limit = (uint16_t)(sizeof(idt) - 1);

@@ -32,7 +32,10 @@ typedef void* HANDLE;
 #define TEB_LASTERR 0x68
 #define TEB_TLSSLOTS 0x1480   /* 64 ponteiros */
 #define TEB_DEALLOC 0x1478    /* DeallocationStack */
+#define TEB_OLE 0x1758        /* ReservedForOle: aponta o OleTlsData (o Chromium le direto) */
 #define TEB_WTHREAD 0x1800    /* nosso: struct wobj da thread */
+#define TEB_COINITS 0x1838    /* nosso: CoInitialize sem CoUninitialize nesta thread */
+#define TEB_OLEDATA 0x1840    /* nosso: OleTlsData (64 bytes; flags do apartamento em +0x14) */
 #define TLS_SLOTS 64
 
 #define PEB_IMAGEBASE 0x10
@@ -157,6 +160,9 @@ struct wobj {
   uint64_t pos;
   int writable, dirty, is_dir, append;
   struct ramfile* ram;          /* leitura de um arquivo em RAM (data nao e do handle) */
+  DWORD acc;                    /* arquivo: direitos do handle (GrantedAccess); 0 = pelo writable */
+  struct wobj* real;            /* copia somente leitura de um arquivo (DuplicateHandle sem
+                                 * escrita): o objeto de verdade; wh_get devolve ele */
   /* generico */
   void* p1;
   void* p2;
@@ -190,6 +196,7 @@ struct wproc {
   int natexit;
   int commode, fmode;
   int exiting;
+  int no_detach;                /* wterminate: sai sem DllMain(DLL_PROCESS_DETACH) */
   /* saida do processo: a tarefa principal do SODOS espera aqui */
   volatile int exit_req;
   int unh_reports;              /* exc.c: excecoes ja relatadas sem WINEDEBUG */
@@ -259,6 +266,10 @@ struct wmod* pe_from_handle(void* h);
 void* pe_handle(struct wmod* m);
 struct wmod* pe_find(const char* name);
 struct wmod* pe_from_addr(uint64_t addr);
+int pe_delay_has(struct wmod* m, const char* dll, const char* name); /* m importa dll!name com carga atrasada */
+int pe_delay_dll(struct wmod* m, const char* dll);                   /* m importa algo de dll com carga atrasada */
+int pe_delay_name_is(struct wmod* m, const char* p);                 /* p e o nome de DLL de um descritor atrasado de m */
+struct wmod* pe_load_phantom(const char* name);                     /* DLL ausente: modulo embutido vazio */
 void pe_tls_attach(struct wmod* m, uint8_t* teb);
 void pe_tls_attach_all(uint8_t* teb);
 void pe_call_tls_callbacks(struct wmod* m, uint32_t reason);
@@ -289,6 +300,8 @@ static inline int wptr_ok(const void* p) {
 }
 void* k_malloc_shared(uint32_t n); /* memoria sem dono, vista por todos os processos */
 void k_free_shared(void* p);
+void* wshared_high_alloc(uint64_t n, uint64_t align); /* util.c: sem dono acima de 4 GB; 0 = use a arena baixa */
+void wshared_free(void* p);                            /* solta wshared_high_alloc ou k_malloc_shared */
 void* k_hmalloc(unsigned long long n, unsigned long long align); /* RAM acima de 4 GB (cota SET HIMEM) */
 void k_hfree(void* p);
 int wpipe_cancel(struct wobj* o, void* ov);
@@ -321,6 +334,8 @@ void wspawn_exit(int code);                   /* na saida de qualquer processo *
 DWORD wnew_pid(void);
 void wimg_cache_proc(int delta); /* pe.c */
 struct wobj* wh_get(HANDLE h, int type);           /* type 0 = qualquer */
+struct wobj* wh_raw(HANDLE h);                      /* sem seguir a copia somente leitura */
+DWORD wfile_access(DWORD access);                   /* GENERIC_* -> direitos de arquivo */
 struct wobj* wobj_new(int type);
 int wh_close(HANDLE h);
 DWORD wwait(int n, struct wobj** objs, int all, DWORD timeout_ms);
@@ -363,11 +378,13 @@ wchar16* wdup8to16(const char* s);
 void* wzalloc(size_t n);
 /* heap do programa (util.c): blocos grandes acima de 4 GB */
 void* wheap_alloc(size_t n);
-void wprof_save(int force);   /* profsave.c: WINEAPPDATA -> WINEAPPSAVE */
+void wprof_save(int force);   /* profsave.c: WINEAPPDATA -> WINEAPPSAVE, --user-data-dir -> WINEUDSAVE */
+void wprof_restore(int argc, char** argv); /* na partida do processo de cima */
 void* wheap_realloc(void* p, size_t n);
 void wheap_free(void* p);
 size_t wheap_size(void* p);
 __attribute__((noreturn)) void wexit(int code);    /* ExitProcess, de qualquer thread */
+__attribute__((noreturn)) void wterminate(int code); /* TerminateProcess: sem o detach das DLLs */
 
 void WINAPI wine_unimplemented(const char* what);
 void* wine_make_stub(const char* dll, const char* name);

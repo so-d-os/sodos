@@ -44,7 +44,7 @@ all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/H
 	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
 	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
 	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/TOP.EXE $(O)/COBRA.EXE $(O)/WIFI.EXE $(O)/XCOPY.EXE $(O)/GIT.EXE $(O)/MAKE.EXE \
-	$(O)/AGENT.EXE $(O)/LLAMA.EXE $(O)/FFLAUNCH.EXE $(O)/SMPT.EXE \
+	$(O)/AGENT.EXE $(O)/LLAMA.EXE $(O)/FFLAUNCH.EXE $(O)/SMPT.EXE $(O)/TROCA.EXE \
 	drivers
 
 # GUI.DLL (janela canvas do WIN) e o navegador, em varios arquivos
@@ -380,6 +380,16 @@ $(B)/smpt.o: examples/smpt.c include/so.h | $(B)
 
 $(O)/SMPT.EXE: $(B)/x_crt0_64libc.o $(B)/smpt.o $(LIBC64_OBJ) $(LINK64) $(O)/KERNEL.IMP
 	$(LINK64) /out:$@ $(B)/x_crt0_64libc.o $(B)/smpt.o $(LIBC64_OBJ) $(O)/KERNEL.IMP
+
+# TROCA: troca o kernel e os DLLs do sistema sem reiniciar (../utils/troca.c,
+# ../docs/TROCA.md). 64 bits como o SMPT: le os ELF de 64 bits do kernel. Acha
+# os k_troca_* com k_dl_sym, entao abre (e avisa) num kernel sem a troca.
+$(B)/troca.o: ../utils/troca.c ../kernel/troca.h include/so.h | $(B)
+	gcc -m64 -O2 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -mno-red-zone \
+	  -mcmodel=large -fno-asynchronous-unwind-tables -nostdinc -isystem include -Wall -c $< -o $@
+
+$(O)/TROCA.EXE: $(B)/x_crt0_64libc.o $(B)/troca.o $(LIBC64_OBJ) $(LINK64) $(O)/KERNEL.IMP
+	$(LINK64) /out:$@ $(B)/x_crt0_64libc.o $(B)/troca.o $(LIBC64_OBJ) $(O)/KERNEL.IMP
 
 $(SOXRUN): tools/soxrun.c sox.h | $(B)
 	$(HOSTCC) -no-pie -fno-pie -mstackrealign -D_FILE_OFFSET_BITS=64 $(HCFLAGS) -o $@ tools/soxrun.c

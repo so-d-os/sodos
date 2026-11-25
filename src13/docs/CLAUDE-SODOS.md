@@ -37,10 +37,22 @@ sh /d/WSL/SODOS 'tecla oi{ENTER}'       # digitar no programa
 sh /d/WSL/SODOS 'tecla {F10}'           # sair
 ```
 
+## Trocar kernel ou WINE.DLL sem reiniciar
+
+Num kernel com a troca a quente (`TROCA` sem argumentos responde), um kernel ou WINE.DLL novo não precisa de reboot:
+
+| Linha | O que faz |
+|---|---|
+| `TROCA` | Mostra o build rodando, as trocas desde o boot e as cópias do WINE.DLL. |
+| `TROCA KERNEL /d/TEMP/KRN.ELF /T` | Testa a troca do kernel: monta tudo e diz o que faria. Sem `/T`, troca. O ELF precisa vir do `make kernel_multiboot.elf` do `src13` (liga com `ld -q` e esconde as `.rela.*` do GRUB com `tools/relaoculta`; sem isso o próximo boot para em "ELF files with relocs are not supported yet"). |
+| `TROCA WINE` | Os próximos EXEs do Windows usam o `D:\SODOS\DRV\WINE.DLL` do disco. Os que já rodam, inclusive este Claude Code, ficam na cópia antiga até fechar. |
+
+Não use para mudanças de `struct` ou de tamanho de variável do kernel: aí, reinicie. Detalhes em `src13/docs/TROCA.md`.
+
 ## Cuidados
 
 - `tecla` e `mouse` vão para a janela que tem o foco. Antes de digitar, confira com `janelas` ou clique na janela certa.
 - No desktop, sem janela com foco, `{ESC}` fecha o WIN inteiro. `{CTRL+ALT+DEL}` leva o sistema para a tela 1 (Ctrl+F1); na tela 1 reinicia o computador. Não mande essas teclas sem necessidade.
-- A pasta atual do `sodos` é a do SODOS (vale para o sistema todo), não a do Linux: use caminhos completos ou mande antes `sh /d/WSL/SODOS cd /d/PASTA`.
+- A pasta atual do `sodos` é a do SODOS, não a do Linux: use caminhos completos ou mande antes `sh /d/WSL/SODOS cd /d/PASTA`. Ela é a do desktop do WIN: o `command` aberto depois começa nela. Cada Command e cada programa do WIN tem a sua pasta, e o `cd` de um não muda a dos outros.
 - Os programas do SODOS usam nomes 8.3 e texto em CP850. Para compilar: `sh /d/WSL/SODOS cc -I /d/ -L /d/ -o /d/PASTA/PROG.EXE /d/PASTA/PROG.C`.
 - Mais detalhes no repositório do SODOS: `src13/docs/CONTROLE.md`.

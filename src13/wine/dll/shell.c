@@ -553,11 +553,13 @@ static WINAPI long CoGetMalloc(DWORD ctx, void** out) {
 }
 
 /* ---------- ole32 / comctl32 ---------- */
+long wcom_init(DWORD fl); /* sys.c: apartamento da thread no TEB */
+void wcom_uninit(void);
 static WINAPI long OleInitialize(void* r) {
   (void)r;
-  return 0;
+  return wcom_init(2); /* OLE e sempre STA */
 }
-static WINAPI void OleUninitialize(void) {}
+static WINAPI void OleUninitialize(void) { wcom_uninit(); }
 static WINAPI long CreateStreamOnHGlobal(void* h, BOOL del, void** out) {
   (void)h;
   (void)del;

@@ -31,8 +31,14 @@ struct section {
   struct wobj* file;      /* arquivo de origem (referencia propria) */
   struct wproc* owner;    /* quem alocou mem (VirtualFree so dali) */
   wchar16* name;
-  uint8_t* raw;           /* != 0: mem em memoria sem dono (k_malloc_shared) */
+  uint8_t* raw;           /* != 0: mem em memoria sem dono (wshared_high_alloc ou k_malloc_shared) */
+  uint32_t magic;         /* SEC_MAGIC enquanto viva (section_unref confere) */
 };
+/* O GPU do Chrome caiu em section_unref lendo next = -1: uma secao ja solta
+ * continuava ligada na lista (soltura dupla?). A secao viva tem SEC_MAGIC; a
+ * ultima referencia o apaga, e um section_unref a mais e registrado e
+ * ignorado em vez de soltar de novo. */
+#define SEC_MAGIC 0x54434553u /* "SECT" */
 /* Vistas: lista unica para todos os processos (o WINE.DLL e um so), entao
  * cada vista sabe o dono e fica em memoria sem dono; ao sair, o processo
  * tira as dele (wmap_proc_exit). Antes a vista era memoria do processo e,
@@ -106,6 +112,12 @@ void wfile_close(struct wobj* o); /* file.c */
 static void section_unref(struct section* s) {
   int last;
   mlock();
+  if (!s || s->magic != SEC_MAGIC || s->refs <= 0) {
+    munlock();
+    wlogx("section_unref: secao invalida ou ja solta, ignorada ", (uint64_t)(uintptr_t)s);
+    wwait_note("  chamado de", __builtin_return_address(0), 0);
+    return;
+  }
   last = --s->refs <= 0;
   if (last) {
     struct section** pp;
@@ -114,11 +126,12 @@ static void section_unref(struct section* s) {
         *pp = s->next;
         break;
       }
+    s->magic = 0;
   }
   munlock();
   if (!last) return;
   if (s->raw) {
-    k_free_shared(s->raw);
+    wshared_free(s->raw);
   } else if (s->mem && s->owner == wp()) {
     vf_fn vf = (vf_fn)builtin_lookup("VirtualFree");
     if (vf) vf(s->mem, 0, 0x8000);
@@ -203,9 +216,19 @@ static WINAPI HANDLE CreateFileMappingW(HANDLE f, void* sa, DWORD prot, DWORD hi
   }
   memset(s, 0, sizeof(*s));
   s->size = size;
-  if (size < 0xF0000000ull) s->raw = (uint8_t*)k_malloc_shared((uint32_t)size + 0xFFFFu);
+  if (size < 0xF0000000ull) {
+    /* acima de 4 GB quando o kernel deixa, ja alinhada em 64 KB: os pipes de
+     * 2 MB do Mojo enchiam a arena baixa. Senao, na arena baixa com folga
+     * para alinhar. */
+    s->raw = (uint8_t*)wshared_high_alloc(size ? size : 1, 0x10000);
+    if (s->raw) {
+      s->mem = s->raw;
+    } else {
+      s->raw = (uint8_t*)k_malloc_shared((uint32_t)size + 0xFFFFu);
+      if (s->raw) s->mem = (uint8_t*)(((uintptr_t)s->raw + 0xFFFFu) & ~(uintptr_t)0xFFFFu);
+    }
+  }
   if (s->raw) {
-    s->mem = (uint8_t*)(((uintptr_t)s->raw + 0xFFFFu) & ~(uintptr_t)0xFFFFu);
     memset(s->mem, 0, (size_t)size);
   } else {
     s->mem = va ? (uint8_t*)va(0, (size_t)size, 0x3000, PAGE_READWRITE) : 0; /* zerada */
@@ -218,6 +241,7 @@ static WINAPI HANDLE CreateFileMappingW(HANDLE f, void* sa, DWORD prot, DWORD hi
   }
   s->owner = wp();
   s->refs = 1;
+  s->magic = SEC_MAGIC;
   if (fo) {
     gfs_fn gfs = (gfs_fn)builtin_lookup("GetFileSizeEx");
     int64_t fsz = 0;

@@ -67,7 +67,18 @@ mc-*.png
 disk-antigo.img
 sodos.pak
 tools/mkpak
+tools/relaoculta
 real-stage/
 
 # GRUB EFI do menu do Windows (make winboot-efi)
 sodos-grubx64.efi
+
+# Objetos do cc do SODOS (.obj) e o GIT.EXE compilado no proprio SODOS
+*.[Oo][Bb][Jj]
+git/*.[Ee][Xx][Ee]
+
+# Backups de editor do SODOS
+*.[Bb][Aa][Kk]
+
+# Cookies do navegador (NetSurf): sessoes e logins, nao versionar
+NSCOOKIE.TXT

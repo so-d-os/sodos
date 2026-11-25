@@ -36,3 +36,13 @@ develop/**/*.[Ss][Ee][Ss]
 develop/**/*.[Tt][Mm][Pp]
 # CON e nome reservado no DOS/Windows: o arquivo nao abre la.
 develop/**/[Cc][Oo][Nn]
+
+# Estado local do app do Claude (gravado na pasta onde ele roda) e
+# configuracao pessoal do Claude Code.
+/.claude/settings.local.json
+/ccd-ids.json
+/dump-organizations.json
+/plan-usage-history.json
+/queue-purge-owed
+/remote-control-state.json
+window-state.json

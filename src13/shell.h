@@ -14,6 +14,9 @@ struct cmd_entry {
 extern struct cmd_entry commands[CMD_MAX];
 extern int cmd_count;
 int register_builtin(const char* name, cmd_fn fn);
+/* Todos os comandos internos (boot e depois de um TROCA); nome repetido so
+ * troca a funcao. */
+void shell_register_all(void);
 
 void puts_k(const char* s);
 int serial_log_save(void);   /* COM1 deste boot -> D:\LOG\SERIAL.LOG */
@@ -183,6 +186,16 @@ int cmd_free(int argc, char** argv);
 int cmd_smp(int argc, char** argv);
 int cmd_kill(int argc, char** argv);
 int cmd_killall(int argc, char** argv);
+/* LIMPA (shell/cmd_limpa.c): reinicio leve. limpa_pending: 0 nada, 1 pedido,
+ * 2 o WIN ja encerrou as tarefas. kernel_boot_programs (kernel.c): o fim do
+ * boot (AUTOEXEC.BAT e HTTPD.EXE), no boot e de novo no LIMPA. */
+int cmd_limpa(int argc, char** argv);
+int limpa_pending(void);
+void limpa_win_closing(void);
+void limpa_boot_entry(void);
+void limpa_env_snapshot(void);
+void kernel_boot_programs(int again);
+int kernel_boot_again(void);   /* 1 enquanto o LIMPA roda o AUTOEXEC.BAT de novo */
 int cmd_df(int argc, char** argv);
 int cmd_dstat(int argc, char** argv);
 int cmd_rit(int argc, char** argv);      /* video/visual.c */

@@ -181,6 +181,7 @@ struct wwin {
   intptr_t userdata;
   uint8_t extra[WEXTRA];  /* cbWndExtra; nos dialogos DWLP_* */
   uintptr_t thread;       /* TEB de quem criou */
+  DWORD tid, pid;         /* de quem criou (GetWindowThreadProcessId) */
   struct wdc dc;
   struct wgdi* font;
   /* de topo */
@@ -189,6 +190,8 @@ struct wwin {
   int z;                  /* ordem no canvas */
   int cx, cy;             /* posicao do cliente no canvas */
   int framed;             /* desenhada com moldura propria */
+  int layered;            /* WS_EX_LAYERED: superficie com alfa pre-multiplicado (UpdateLayeredWindow) */
+  int ask_w, ask_h;       /* tamanho que o programa pediu (a principal fica no da janela do WIN) */
   struct wwin* focus;     /* filha com o foco */
   /* dialogo */
   int dlg_end;

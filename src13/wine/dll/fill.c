@@ -393,25 +393,12 @@ static WINAPI BOOL AllowSetForegroundWindow(DWORD pid) {
   (void)pid;
   return 1;
 }
-static WINAPI BOOL SetLayeredWindowAttributes(HANDLE w, DWORD key, uint8_t a, DWORD fl) {
-  (void)w; (void)key; (void)a; (void)fl;
-  return 1;
-}
+/* SetLayeredWindowAttributes e UpdateLayeredWindow: user.c (desenham) */
 static WINAPI BOOL GetLayeredWindowAttributes(HANDLE w, DWORD* key, uint8_t* a, DWORD* fl) {
   (void)w;
   if (key) *key = 0;
   if (a) *a = 255;
   if (fl) *fl = 0;
-  return 1;
-}
-static WINAPI BOOL UpdateLayeredWindow(HANDLE w, HANDLE dd, void* pt, void* sz, HANDLE ds, void* sp, DWORD key,
-                                       void* bl, DWORD fl) {
-  static int said;
-  (void)w; (void)dd; (void)pt; (void)sz; (void)ds; (void)sp; (void)key; (void)bl; (void)fl;
-  if (!said && wine_debug) { /* para saber se o Chromium desenha por aqui */
-    said = 1;
-    wlog("UpdateLayeredWindow chamado (ainda sem desenho)", 0);
-  }
   return 1;
 }
 /* janela sem moldura do Chromium: a regiao recorta cantos; aqui o retangulo todo */
@@ -916,6 +903,7 @@ static WINAPI long NtQueryObject(HANDLE h, int cls, void* buf, DWORD len, DWORD*
   if (!tn) return (long)0xC0000008; /* STATUS_INVALID_HANDLE */
   switch (cls) {
     case 0: { /* ObjectBasicInformation */
+      struct wobj* ro = wh_raw(h); /* o do handle: pode ser copia somente leitura */
       struct wobj* o = wh_get(h, 0);
       need = 56;
       if (ret) *ret = need;
@@ -923,9 +911,13 @@ static WINAPI long NtQueryObject(HANDLE h, int cls, void* buf, DWORD len, DWORD*
       memset(b, 0, need);
       {
         /* GrantedAccess real: o Chromium confere que arquivo/secao recebidos
-         * como "somente leitura" nao tem direito de escrita (CHECK) */
+         * como "somente leitura" nao tem direito de escrita (CHECK). Arquivo:
+         * os direitos pedidos no CreateFile/DuplicateHandle; sem eles, pelo
+         * modo em que o arquivo esta aberto. */
         DWORD acc = 0x001F0FFFu;
-        if (o && o->type == OBJ_FILE) acc = o->writable ? 0x0012019Fu : 0x00120089u; /* FILE_GENERIC_* */
+        if (ro && ro->real) acc = ro->acc;
+        else if (o && o->type == OBJ_FILE)
+          acc = o->acc ? o->acc : o->writable ? 0x0012019Fu : 0x00120089u; /* FILE_GENERIC_* */
         else if (o && o->type == OBJ_SECTION) acc = (o->u1 & 1) ? 0x00020005u : 0x000F001Fu;
         *(DWORD*)(b + 4) = acc;
       }
@@ -1550,8 +1542,7 @@ const struct wine_sym fill_syms[] = {
     S(GetRawInputData), S(GetRawInputDeviceInfoW), S(DefRawInputProc), S(RegisterPowerSettingNotification),
     S(UnregisterPowerSettingNotification), S(RegisterDeviceNotificationW), S(UnregisterDeviceNotification),
     S(NotifyWinEvent), S(AddClipboardFormatListener), S(RemoveClipboardFormatListener),
-    S(AllowSetForegroundWindow), S(SetLayeredWindowAttributes), S(GetLayeredWindowAttributes),
-    S(UpdateLayeredWindow), S(SetWindowRgn), S(GetWindowRgn), S(SetWindowDisplayAffinity),
+    S(AllowSetForegroundWindow), S(GetLayeredWindowAttributes), S(SetWindowRgn), S(GetWindowRgn), S(SetWindowDisplayAffinity),
     S(GetWindowDisplayAffinity), S(IsWindowArranged), S(MapVirtualKeyExW), S(MapVirtualKeyW), S(ToUnicodeEx),
     S(GetPointerType), S(GetPointerDevices), S(GetPointerDevice), S(GetPointerPenInfo),
     S(RegisterPointerDeviceNotifications), S(EnumThreadWindows), S(CopyIcon), S(GetCursorInfo), S(GetGuiResources),

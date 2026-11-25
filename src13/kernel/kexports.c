@@ -27,6 +27,7 @@
 #include "wine.h"
 #include "vmem.h"
 #include "irq.h"
+#include "troca.h"
 
 void mod_exit(int code);
 void shell_read_line(char* buf, int max);
@@ -672,6 +673,13 @@ static void k_free_shared(void* p) { ufree(p); }
 /* RAM acima de 4 GB (so programas de 64 bits enxergam). Teto: SET HIMEM. */
 static void* k_hmalloc(uint64_t n, uint64_t align) { return hm_user_alloc(n, align, um_owner()); }
 static void k_hfree(void* p) { hm_user_free(p); }
+/* RAM acima de 4 GB sem dono (WINE_SHARED_OWNER), como o k_malloc_shared: o
+ * cache de imagens e as secoes do WINE.DLL, que sobrevivem ao processo que
+ * pediu. A arena baixa (3 GB) e de todos e acabava com o Claude e o Chrome
+ * juntos. Sai no k_hfree_shared ou no wine_reset_if_idle. Conta no SET HIMEM.
+ * O WINE.DLL acha estas pelo k_dl_sym (kernel antigo: fica na arena baixa). */
+static void* k_hmalloc_shared(uint64_t n, uint64_t align) { return hm_user_alloc(n, align, WINE_SHARED_OWNER); }
+static void k_hfree_shared(void* p) { hm_user_free(p); }
 /* Encerra a forca um programa (pid) ou, com all=1, todos menos os de inicio
  * e quem chamou; a memoria dele sai junto (TOP: tecla DEL). Quantos
  * encerrou; -1 sem WIN, -2 o WIN nao respondeu. */
@@ -1127,7 +1135,12 @@ static int k_win_launch(const char* path) { return kt_in_thread() ? -1 : win_lau
 /* Programa com um argumento, como tarefa do WIN (roda em paralelo com quem pediu).
  * -1: o WIN nao esta no ar ou ja ha um pedido na fila (tente de novo). */
 static int k_win_launch_arg(const char* exe, const char* arg) {
-  return kt_in_thread() ? -1 : win_launch_arg(exe, arg);
+  int r;
+  if (kt_in_thread()) return -1;
+  r = win_launch_arg(exe, arg);
+  /* filho em paralelo do WINE.DLL: nasce na copia do pai (TROCA WINE) */
+  if (r == 0 && arg) wine_note_spawn(arg);
+  return r;
 }
 
 /* Abrir um arquivo pelo programa associado (LINKEXT.DLL). 0 = abriu; 1 = sem
@@ -1578,6 +1591,19 @@ static int k_futex_wake(volatile int* addr, int n) {
 /* Excecoes do programa vao para entry (sinais da libc; ver isr.c). 0 desliga. */
 static int k_fault_entry(void* entry) { return isr_fault_set((uint64_t)(uintptr_t)entry); }
 
+/* ---------- TROCA.EXE: kernel e DLLs do sistema sem reiniciar (troca.c) ----------
+ * So do mundo (o TROCA roda no shell ou num Command): a troca segura o BKL
+ * e para as outras CPUs. Programas procuram com k_dl_sym(0, "k_troca_info", 0)
+ * para dizer "reinicie uma vez" num kernel sem a troca. */
+static int k_troca_info(struct k_troca_info* out) { return troca_info(out); }
+static void* k_troca_alloc(unsigned n) { return kt_in_thread() ? 0 : troca_alloc(n); }
+static void k_troca_free(void* p) { troca_free(p); }
+static int k_troca_apply(struct k_troca_req* r) { return kt_in_thread() ? TROCA_EINVAL : troca_apply(r); }
+static int k_troca_estado(char* out, int max) { return troca_estado(out, max); }
+static int k_troca_dll(const char* nome, char* msg, int max) {
+  return kt_in_thread() ? TROCA_EINVAL : troca_dll(nome, msg, max);
+}
+
 struct kexp {
   const char* name;
   void* fn;
@@ -1630,6 +1656,8 @@ static const struct kexp table[] = {
   EXP(k_malloc_aligned),
   EXP(k_hmalloc),
   EXP(k_hfree),
+  EXP(k_hmalloc_shared),
+  EXP(k_hfree_shared),
   EXP(k_hminfo),
   EXP(k_nvme_raw_read),
   EXP(k_nvme_raw_sectors),
@@ -1752,31 +1780,71 @@ static const struct kexp table[] = {
   EXP(k_gui_panel),
   EXP(k_exec_capture),
   EXP(k_alttab_wait),
+  EXP(k_troca_info),
+  EXP(k_troca_alloc),
+  EXP(k_troca_free),
+  EXP(k_troca_apply),
+  EXP(k_troca_estado),
+  EXP(k_troca_dll),
 };
 
 #define NEXP (sizeof(table) / sizeof(table[0]))
 
 /* Um thunk por export: mov r11, alvo (49 BB imm64) + jmp bkl_thunk_common
- * (E9 rel32). Programas e .so recebem o thunk no lugar da funcao. */
+ * (E9 rel32). Programas e .so recebem o thunk no lugar da funcao.
+ *
+ * Tamanho fixo e achado pelo alvo, nao pela posicao na tabela: depois de uma
+ * troca a quente (troca.c) a tabela pode ter exports novos ou em outra ordem,
+ * e os thunks ja entregues a programas abertos continuam como estao (o alvo
+ * antigo tem um jmp para a funcao nova). Um thunk vale para fn se o alvo dele
+ * e fn ou chega a fn por esses jmps. Nunca se reescreve um thunk em uso: outra
+ * CPU pode estar executando o mov. */
 extern void bkl_thunk_common(void);
-static uint8_t thunks[NEXP][16] __attribute__((aligned(16)));
-static int thunks_ok;
+#define THUNKS_MAX 1024
+typedef char thunks_cabem[NEXP <= THUNKS_MAX ? 1 : -1];
+static uint8_t thunks[THUNKS_MAX][16] __attribute__((aligned(16)));
 
-static void thunks_build(void) {
-  unsigned i;
-  for (i = 0; i < NEXP; i++) {
-    uint8_t* p = thunks[i];
-    uint64_t fn = (uint64_t)(uintptr_t)table[i].fn;
-    int64_t rel = (int64_t)(uintptr_t)bkl_thunk_common - (int64_t)(uintptr_t)(p + 15);
-    int k;
-    p[0] = 0x49;
-    p[1] = 0xBB;
-    for (k = 0; k < 8; k++) p[2 + k] = (uint8_t)(fn >> (k * 8));
-    p[10] = 0xE9;
-    for (k = 0; k < 4; k++) p[11 + k] = (uint8_t)((uint64_t)rel >> (k * 8));
-    p[15] = 0xCC;
+static int thunk_vale(const uint8_t* p, uint64_t fn) {
+  uint64_t a = 0;
+  int k;
+  if (p[0] != 0x49 || p[1] != 0xBB) return 0;
+  for (k = 0; k < 8; k++) a |= (uint64_t)p[2 + k] << (k * 8);
+  for (k = 0; k < 8; k++) {
+    if (a == fn) return 1;
+    if (!troca_texto(a) || *(const uint8_t*)(uintptr_t)a != 0xE9) return 0;
+    a = a + 5 + (uint64_t)(int64_t)*(const int32_t*)(uintptr_t)(a + 1);
   }
-  thunks_ok = 1;
+  return 0;
+}
+
+static void thunk_make(uint8_t* p, uint64_t fn) {
+  int64_t rel = (int64_t)(uintptr_t)bkl_thunk_common - (int64_t)(uintptr_t)(p + 15);
+  int k;
+  for (k = 0; k < 8; k++) p[2 + k] = (uint8_t)(fn >> (k * 8));
+  p[10] = 0xE9;
+  for (k = 0; k < 4; k++) p[11 + k] = (uint8_t)((uint64_t)rel >> (k * 8));
+  p[15] = 0xCC;
+  p[1] = 0xBB;
+  p[0] = 0x49;                          /* por ultimo: so agora o slot conta como pronto */
+}
+
+static void* thunk_for(unsigned i) {
+  uint64_t fn = (uint64_t)(uintptr_t)table[i].fn;
+  unsigned k;
+  if (i < THUNKS_MAX && thunk_vale(thunks[i], fn)) return thunks[i];
+  for (k = 0; k < THUNKS_MAX; k++)
+    if (thunk_vale(thunks[k], fn)) return thunks[k];
+  if (i < THUNKS_MAX && thunks[i][0] == 0) {
+    thunk_make(thunks[i], fn);
+    return thunks[i];
+  }
+  for (k = 0; k < THUNKS_MAX; k++)
+    if (thunks[k][0] == 0) {
+      thunk_make(thunks[k], fn);
+      return thunks[k];
+    }
+  serial_puts("[kexp] sem lugar para thunks (THUNKS_MAX)\n");
+  return 0;
 }
 
 int rtc_date(void) { return k_date(); }
@@ -1793,8 +1861,7 @@ void* kexport_find(const char* name) {
     }
     if (*a == *b) {
       if (table[i].nolock) return table[i].fn;
-      if (!thunks_ok) thunks_build();
-      return thunks[i];
+      return thunk_for(i);
     }
   }
   return 0;

@@ -179,5 +179,6 @@ int win_vram_info(struct k_vram* v);
 /* Encerra a forca o programa pid (com a janela e a memoria) ou, com all=1,
  * todos menos os de inicio e quem pediu. Quantas tarefas; -1 sem WIN. */
 int win_kill(uint32_t pid, int all);
+int win_open(void);   /* 1 se o WIN esta aberto (na tela ou ao fundo) */
 int win_task_pids(const char* name, uint32_t* out, int max);
 int win_task_list(char (*names)[32], uint32_t* pids, int max);

@@ -17,7 +17,7 @@
 #define RD64(p) (*(const uint64_t*)(p))
 
 /* Diretorios do OptionalHeader */
-enum { DIR_EXPORT = 0, DIR_IMPORT = 1, DIR_EXCEPTION = 3, DIR_BASERELOC = 5, DIR_TLS = 9 };
+enum { DIR_EXPORT = 0, DIR_IMPORT = 1, DIR_EXCEPTION = 3, DIR_BASERELOC = 5, DIR_TLS = 9, DIR_DELAY = 13 };
 
 struct pe_info {
   const uint8_t* nt;        /* "PE\0\0" */
@@ -169,6 +169,84 @@ struct wmod* pe_from_addr(uint64_t addr) {
     if (m->base && addr >= (uint64_t)(uintptr_t)m->base && addr < (uint64_t)(uintptr_t)m->base + m->size)
       return m;
   return 0;
+}
+
+/* ---------- carga atrasada ---------- */
+/* nome de DLL para comparar: sem pasta, minusculas, sem ".dll" */
+static void dll_key(char* d, const char* s, int max) {
+  const char* b = s;
+  const char* q;
+  int n;
+  for (q = s; *q; q++)
+    if (*q == '\\' || *q == '/') b = q + 1;
+  wlower(d, b, max);
+  n = (int)strlen(d);
+  if (n > 4 && strcmp(d + n - 4, ".dll") == 0) d[n - 4] = 0;
+}
+
+/* Tabela de carga atrasada de m (a que o __delayLoadHelper2 dele usa): 1 se
+ * importa dll!name (name <= 0xFFFF = ordinal) ou, com any, qualquer funcao
+ * de dll. */
+static int delay_find(struct wmod* m, const char* dll, const char* name, int any) {
+  struct pe_info pi;
+  uint32_t rva, size;
+  const uint8_t* d;
+  char want[WMOD_NAME];
+  if (!m || !m->base || !dll || pe_parse(m->base, m->size, &pi, m->name) != 0) return 0;
+  dir_of(&pi, DIR_DELAY, &rva, &size);
+  if (!rva || size < 32 || rva + size > m->size) return 0;
+  dll_key(want, dll, (int)sizeof(want));
+  for (d = m->base + rva; d + 32 <= m->base + rva + size && RD32(d + 4); d += 32) {
+    char have[WMOD_NAME];
+    const uint64_t* names;
+    int i;
+    if (!(RD32(d) & 1)) continue; /* descritor antigo (enderecos, nao RVAs): nao existe em x64 */
+    dll_key(have, (const char*)(m->base + RD32(d + 4)), (int)sizeof(have));
+    if (strcmp(have, want) != 0) continue;
+    if (any) return 1;
+    if (!RD32(d + 16)) continue;
+    names = (const uint64_t*)(m->base + RD32(d + 16));
+    for (i = 0; names[i]; i++) {
+      uint64_t t = names[i];
+      if (t >> 63) {
+        if ((uintptr_t)name <= 0xFFFF && (t & 0xFFFF) == (uintptr_t)name) return 1;
+      } else if ((uintptr_t)name > 0xFFFF && strcmp((const char*)(m->base + (uint32_t)t + 2), name) == 0) {
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+int pe_delay_has(struct wmod* m, const char* dll, const char* name) { return delay_find(m, dll, name, 0); }
+int pe_delay_dll(struct wmod* m, const char* dll) { return delay_find(m, dll, 0, 1); }
+/* 1 se p e o proprio nome de DLL guardado num descritor da tabela atrasada
+ * de m: o __delayLoadHelper2 passa esse ponteiro ao LoadLibraryExA. Quem
+ * testa a DLL por conta propria (o GPU do Chrome com "...\SYSTEM32\mf.dll")
+ * passa outra string e continua recebendo NULL. */
+int pe_delay_name_is(struct wmod* m, const char* p) {
+  struct pe_info pi;
+  uint32_t rva, size;
+  const uint8_t* d;
+  if (!m || !m->base || !p || pe_parse(m->base, m->size, &pi, m->name) != 0) return 0;
+  dir_of(&pi, DIR_DELAY, &rva, &size);
+  if (!rva || size < 32 || rva + size > m->size) return 0;
+  for (d = m->base + rva; d + 32 <= m->base + rva + size && RD32(d + 4); d += 32)
+    if ((RD32(d) & 1) && (const char*)(m->base + RD32(d + 4)) == p) return 1;
+  return 0;
+}
+
+/* DLL do Windows que o WINE nao tem (pdh, tbs, winspool...), pedida pela
+ * carga atrasada de um programa: modulo embutido vazio. O GetProcAddress nele
+ * acha a funcao nas tabelas, se houver, ou da o stub da carga atrasada
+ * (k32.c). Com NULL o Chrome derrubava o processo ("Failed to delay load"). */
+struct wmod* pe_load_phantom(const char* name) {
+  struct wmod* m = pe_find(name);
+  if (m) return m;
+  m = mod_new(name);
+  if (!m) return 0;
+  m->builtin = 1;
+  m->is_dll = 1;
+  return m;
 }
 
 /* ---------- exports ---------- */
@@ -450,10 +528,15 @@ void wimg_cache_proc(int delta) {
   ic_lock();
   for (i = 0; i < IMG_CACHE_MAX; i++)
     if (img_cache[i].data) {
-      k_free_shared(img_cache[i].data);
+      wshared_free(img_cache[i].data);
       img_cache[i].data = 0;
     }
   ic_unlock();
+}
+/* o arquivo lido no pe_load: grande = memoria compartilhada (alta ou baixa) */
+static void img_file_free(uint8_t* file, int fsz) {
+  if (fsz >= (int)IMG_CACHE_MIN) wshared_free(file);
+  else k_free(file);
 }
 
 struct wmod* pe_load(const char* name, int is_exe) {
@@ -478,26 +561,32 @@ struct wmod* pe_load(const char* name, int is_exe) {
   fsz = k_fsize(path);
   file = (uint8_t*)img_cache_get(path, fsz);
   cached = file != 0;
-  /* grande: lido direto em memoria compartilhada, que vira o cache */
-  if (!file) file = (uint8_t*)(fsz >= (int)IMG_CACHE_MIN ? k_malloc_shared((unsigned)fsz + 1u)
-                                                          : k_malloc((unsigned)fsz + 1u));
+  /* grande: lido direto em memoria compartilhada, que vira o cache (acima de
+   * 4 GB quando o kernel deixa: Claude.exe, claude.exe e chrome.dll somam
+   * 935 MB que antes ocupavam a arena baixa) */
+  if (!file && fsz >= (int)IMG_CACHE_MIN) {
+    file = (uint8_t*)wshared_high_alloc((uint64_t)fsz + 1u, 16);
+    if (!file) file = (uint8_t*)k_malloc_shared((unsigned)fsz + 1u);
+  } else if (!file) {
+    file = (uint8_t*)k_malloc((unsigned)fsz + 1u);
+  }
   if (!file) {
     wsay("sem memoria para ", path);
     return 0;
   }
   if (!cached && k_fload(path, (char*)file, fsz + 1) != fsz) {
     wsay("erro lendo ", path);
-    k_free(file);
+    img_file_free(file, fsz);
     return 0;
   }
   if (!cached && fsz >= (int)IMG_CACHE_MIN && img_cache_put(path, fsz, file)) cached = 1;
   if (pe_parse(file, (uint32_t)fsz, &pi, path) != 0) {
-    if (!cached) k_free(file);
+    if (!cached) img_file_free(file, fsz);
     return 0;
   }
   if (!is_exe != !!(pi.chars & 0x2000)) {
     wsay(path, is_exe ? ": e uma DLL, nao um EXE" : ": nao e uma DLL");
-    if (!cached) k_free(file);
+    if (!cached) img_file_free(file, fsz);
     return 0;
   }
   {
@@ -508,7 +597,7 @@ struct wmod* pe_load(const char* name, int is_exe) {
       base = (uint8_t*)k_win_lowmem((unsigned)pi.image_base, pi.size_image);
       if (!base) {
         wsay(path, ": base fixa e o endereco nao esta livre no SODOS (outro EXE de base fixa rodando, ou imagem grande demais)");
-        if (!cached) k_free(file);
+        if (!cached) img_file_free(file, fsz);
         return 0;
       }
       fixed = 1;
@@ -523,7 +612,7 @@ struct wmod* pe_load(const char* name, int is_exe) {
   }
   if (!base) {
     wsay("sem memoria para a imagem de ", path);
-    if (!cached) k_free(file);
+    if (!cached) img_file_free(file, fsz);
     return 0;
   }
   memset(base, 0, pi.size_image);
@@ -538,12 +627,12 @@ struct wmod* pe_load(const char* name, int is_exe) {
         if (high) k_hfree(base);
         else k_free(base);
       }
-      if (!cached) k_free(file);
+      if (!cached) img_file_free(file, fsz);
       return 0;
     }
     memcpy(base + va, file + roff, n);
   }
-  if (!cached) k_free(file);
+  if (!cached) img_file_free(file, fsz);
   /* daqui em diante a imagem mapeada tem os cabecalhos */
   if (pe_parse(base, pi.size_image, &pi, path) != 0 || relocate(base, &pi, path) != 0) {
     if (!fixed) {

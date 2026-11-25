@@ -114,3 +114,11 @@ int kt_stopping(void);
 void kt_dump(void);
 /* Tabela de paginas mudou: as outras CPUs recarregam o CR3. */
 void kt_tlb_shootdown(void);
+
+/* TROCA (kernel/troca.c): o isr_dispatch marca o RIP interrompido em volta
+ * dos tiques e IPIs que podem trocar de tarefa; uma thread tirada da CPU ali
+ * fica com ele ate voltar. kt_irq_rips lista os RIPs das que estao fora da
+ * CPU agora (chamado com as outras CPUs paradas). */
+void kt_irq_enter(uint64_t rip);
+void kt_irq_leave(void);
+int kt_irq_rips(uint64_t* out, int max);

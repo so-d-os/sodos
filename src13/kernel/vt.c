@@ -406,6 +406,7 @@ static void vt_log_entry(void) {
  * desliga a VM e sai; a tela fica livre. */
 #define VT_WSL 8                   /* Ctrl+F10 */
 static char wsl_exe[DRV_PATH];
+static int wsl_vt = -1;            /* tela do servico: Ctrl+F10, ou outra (vt_wsl_check) */
 
 static int wsl_wanted(void) {
   const char* v = env_get("WSL");
@@ -430,8 +431,9 @@ static void vt_wsl_entry(void) {
 void vt_wsl_check(void) {
   static const char* const dirs[] = { "D:\\WSL.EXE", "D:\\SODOS\\WSL.EXE", "Z:\\SODOS\\WSL.EXE" };
   unsigned d;
+  int i;
   if (!vt_on || !wsl_wanted()) return;
-  if (vts[VT_WSL].state != VS_FREE && vts[VT_WSL].state != VS_DEAD) return;  /* ja roda (ou prompt) */
+  if (wsl_vt >= 0 && vts[wsl_vt].state != VS_FREE && vts[wsl_vt].state != VS_DEAD) return;  /* ja roda */
   env_sodos_path("WSL.EXE", wsl_exe, (int)sizeof(wsl_exe));
   for (d = 0; file_size(wsl_exe) <= 0 && d < sizeof(dirs) / sizeof(dirs[0]); d++) {
     int k = 0;
@@ -445,14 +447,31 @@ void vt_wsl_check(void) {
     serial_puts("[vt] SET WSL=1, mas WSL.EXE nao foi achado\n");
     return;
   }
-  if (vts[VT_WSL].state == VS_DEAD) {
-    if (vts[VT_WSL].stack) kfree(vts[VT_WSL].stack);
-    vts[VT_WSL].stack = 0;
-    vts[VT_WSL].state = VS_FREE;
+  /* Ctrl+F10 ja aberta como prompt comum (o aviso "veja a tela Ctrl+F10" do
+   * BASH.EXE leva o usuario la antes de o servico subir): antes o SET WSL=1
+   * parava aqui calado e a VM nunca subia ate o proximo boot. Agora o
+   * servico vai para outra tela livre. */
+  i = VT_WSL;
+  if (vts[i].state != VS_FREE && vts[i].state != VS_DEAD) {
+    for (i = VT_SVC - 1; i > 0 && vts[i].state != VS_FREE && vts[i].state != VS_DEAD; i--) { }
+    if (i <= 0) {
+      serial_puts("[vt] SET WSL=1, mas a tela Ctrl+F10 tem um prompt e nao ha outra livre: "
+                  "digite WSL run --service nela\n");
+      return;
+    }
+    serial_puts("[vt] tela Ctrl+F10 ocupada por um prompt: o WSL vai para outra tela\n");
   }
-  if (vt_new(VT_WSL, VT_STACK, vt_wsl_entry) != 0) return;
-  vts[VT_WSL].cpu.bkl = 1;   /* pode vir de um k_setenv (BKL pego pelo thunk) */
-  serial_puts("[vt] WSL na tela Ctrl+F10: ");
+  if (vts[i].state == VS_DEAD) {
+    if (vts[i].stack) kfree(vts[i].stack);
+    vts[i].stack = 0;
+    vts[i].state = VS_FREE;
+  }
+  if (vt_new(i, VT_STACK, vt_wsl_entry) != 0) return;
+  vts[i].cpu.bkl = 1;   /* pode vir de um k_setenv (BKL pego pelo thunk) */
+  wsl_vt = i;
+  serial_puts("[vt] WSL na tela ");
+  serial_hex32((uint32_t)i);
+  serial_puts(" (Ctrl+F10 = 8): ");
   serial_puts(wsl_exe);
   serial_puts("\n");
 }
@@ -722,6 +741,10 @@ static int vt_select_prep(int i) {
 void vt_select(int i) {
   int go;
   if (!vt_on || i < 0 || i >= VT_TASKS) return;
+  /* O WIN acabou de fechar por um LIMPA (vt_win_entry vem para ca): em vez
+   * de voltar a tela de antes, recomeca as telas (nao volta). */
+  if (vt_cur == VT_WIN && vts[VT_WIN].state == VS_DEAD && limpa_pending())
+    vt_limpa_finish(limpa_boot_entry);
   vt_busy++;
   go = vt_select_prep(i);
   vt_busy--;
@@ -817,4 +840,105 @@ int vt_win(void) {
   vt_init();
   vt_select(VT_WIN);
   return vts[VT_WIN].state != VS_DEAD;
+}
+
+/* ---- LIMPA (shell/cmd_limpa.c): reinicio leve ----
+ * As telas de texto ao fundo sempre param num ponto de troca (tecla, saida,
+ * k_yield): nenhuma esta no meio de uma operacao de disco nem segura a trava
+ * do FS (sched_yield nao troca com ela). Daqui elas sao largadas como estao,
+ * com a tarefa atual (a do WIN que fechou ou a tela que pediu): os programas
+ * delas (e quem os chamou) e as pilhas saem ja na tela 1 nova, que comeca
+ * em entry (vt_limpa_after). Nao volta, a nao ser sem memoria para a pilha
+ * nova (ai nada mudou). */
+#define LIMPA_MAX (VT_TASKS + 1)
+static uint8_t* limpa_stk[LIMPA_MAX];
+static uint32_t limpa_pid[LIMPA_MAX];
+static int limpa_nstk, limpa_npid;
+
+/* Telas de texto em uso: indice e pid do programa (0 = prompt). */
+int vt_limpa_list(int* vt, uint32_t* pid, int max) {
+  int i, n = 0;
+  if (!vt_on) return 0;
+  for (i = 0; i < VT_TEXT && n < max; i++) {
+    if (vts[i].state == VS_FREE || vts[i].state == VS_DEAD) continue;
+    vt[n] = i;
+    pid[n] = i == vt_cur ? mod_current_pid() : vts[i].cpu.pid;
+    n++;
+  }
+  return n;
+}
+
+void vt_limpa_finish(void (*entry)(void)) {
+  void rit_vt_leave(void);           /* video/visual.c */
+  int i, me, st0;
+  uint32_t pid0;
+  uint8_t* old0;
+  uint64_t lixo;
+  if (!vt_on || kt_in_thread() || !entry) return;
+  me = vt_cur;
+  serial_puts("[vt] LIMPA: recomecando as telas (da tela ");
+  serial_hex32((uint32_t)me);
+  serial_puts(")\n");
+  /* o programa da tela 1 antes do vt_new, que troca o cpu dela */
+  old0 = vts[0].stack;
+  st0 = vts[0].state;
+  pid0 = me == 0 ? mod_current_pid() : (st0 != VS_FREE && st0 != VS_DEAD ? vts[0].cpu.pid : 0);
+  /* a pilha nova da tela 1 primeiro: sem ela nada muda */
+  vts[0].stack = 0;
+  if (vt_new(0, VT_STACK, entry) != 0) {
+    vts[0].stack = old0;
+    vts[0].state = st0;
+    return;
+  }
+  /* como os servicos: codigo do kernel do mundo, BKL em profundidade 1 (quem
+   * pediu pode ter vindo por um thunk, com mais) */
+  vts[0].cpu.bkl = 1;
+  vt_busy++;
+  limpa_nstk = limpa_npid = 0;
+  if (old0) limpa_stk[limpa_nstk++] = old0;   /* a do boot (estatica) nao e do kmalloc */
+  if (pid0) limpa_pid[limpa_npid++] = pid0;
+  for (i = 0; i < VT_TASKS; i++) {
+    struct vt* v = &vts[i];
+    uint32_t pid;
+    if (i == 0) continue;
+    pid = i == me ? mod_current_pid() : v->cpu.pid;
+    if (pid && v->state != VS_FREE && v->state != VS_DEAD && limpa_npid < LIMPA_MAX)
+      limpa_pid[limpa_npid++] = pid;
+    if (v->stack && limpa_nstk < LIMPA_MAX) limpa_stk[limpa_nstk++] = v->stack;
+    v->stack = 0;
+    v->state = VS_FREE;
+    v->back = -1;
+  }
+  svc_vt = -1;
+  wsl_vt = -1;
+  log_idle = 0;
+  log_svc = 0;
+  if (vt_fg == VT_WIN) rit_vt_leave();
+  vt_fg = 0;
+  vts[0].back = -1;
+  vts[0].kraw = 0;
+  if (kbd_raw()) kbd_raw_set(0);
+  screen_in(0);
+  vt_outn = 0;
+  vt_cur = 0;
+  vt_load(0);
+  vt_busy--;
+  /* ctx_switch direto: a tarefa atual nao volta (a pilha dela sai em
+   * vt_limpa_after, ja na pilha nova) */
+  ctx_switch(&lixo, vts[0].rsp);
+  for (;;) __asm__ volatile ("hlt");
+}
+
+/* Primeira coisa da tela 1 nova: encerra os programas das telas largadas e
+ * solta as pilhas delas. */
+void vt_limpa_after(void) {
+  int i;
+  for (i = 0; i < limpa_npid; i++) {
+    serial_puts("[vt] LIMPA: encerrando pid ");
+    serial_hex32(limpa_pid[i]);
+    serial_puts("\n");
+    mod_kill(limpa_pid[i]);
+  }
+  for (i = 0; i < limpa_nstk; i++) kfree(limpa_stk[i]);
+  limpa_npid = limpa_nstk = 0;
 }

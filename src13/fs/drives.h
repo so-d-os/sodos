@@ -13,13 +13,22 @@ void drives_init(void);
 void fs_lock(void);
 void fs_unlock(void);
 extern volatile int fs_panic;
-/* Unidade e pastas atuais: cada tela do DOS (vt.c) tem as suas. */
+/* Unidade e pastas atuais. Cada tela do DOS (vt.c), cada Command e cada
+ * programa do WIN (visual.c) tem as suas: o mundo (CPU0) usa as de quem
+ * esta rodando, e a thread de um programa (outra CPU) as do programa dela. */
 struct drives_state {
   char letter;
   char dir[26][DRV_PATH];
 };
+/* Copia o estado em uso para s / de s. */
 void drives_state_save(struct drives_state* s);
 void drives_state_load(const struct drives_state* s);
+/* O mundo passa a usar s (0 = as da tela). Devolve o que estava em uso, para
+ * repor depois (pode ser 0). Numa thread nao muda nada. */
+struct drives_state* drives_state_use(struct drives_state* s);
+struct drives_state* drives_state_cur(void);
+/* Thread de programa: fn devolve o estado do programa dela (0 = o do mundo). */
+void drives_set_thread_state(struct drives_state* (*fn)(void));
 char drives_current(void);
 int drives_set_current(char letter);
 int drives_is_mounted(char letter);

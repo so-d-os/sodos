@@ -390,17 +390,62 @@ static WINAPI wchar16** CommandLineToArgvW(const wchar16* cmd, int* argc) {
   return argv;
 }
 
-/* ---------- COM minimo: sem objetos, tudo "classe nao registrada" ---------- */
+/* ---------- COM minimo: sem objetos, tudo "classe nao registrada" ----------
+ * O apartamento de cada thread fica no TEB, onde o combase do Windows guarda:
+ * ReservedForOle aponta um OleTlsData com as flags em +0x14 (0x80 STA, 0x140
+ * MTA). O Chromium le dali direto (base::win::GetComApartmentTypeForThread) e
+ * da CHECK onde exige MTA: sem isso o downloader de componentes (Delivery
+ * Optimization) derrubava o navegador. */
+#define OLE_STA 0x80u
+#define OLE_MTA 0x140u
+static DWORD ole_flags(void) {
+  uint8_t* d = *(uint8_t**)(wteb() + TEB_OLE);
+  return d ? *(DWORD*)(d + 0x14) & (OLE_STA | OLE_MTA) : 0;
+}
+/* fl: COINIT_APARTMENTTHREADED (2) = STA; sem ele, MTA */
+long wcom_init(DWORD fl) {
+  uint8_t* t = wteb();
+  DWORD want = (fl & 2) ? OLE_STA : OLE_MTA;
+  DWORD* n = (DWORD*)(t + TEB_COINITS);
+  DWORD have = ole_flags();
+  if (*n && have) {
+    if (have != want) return (long)0x80010106; /* RPC_E_CHANGED_MODE */
+    ++*n;
+    return 1; /* S_FALSE: ja estava */
+  }
+  memset(t + TEB_OLEDATA, 0, 64);
+  *(DWORD*)(t + TEB_OLEDATA + 0x10) = (DWORD) * (uint64_t*)(t + TEB_TID); /* apartment_id */
+  *(DWORD*)(t + TEB_OLEDATA + 0x14) = want;
+  *(uint8_t**)(t + TEB_OLE) = t + TEB_OLEDATA;
+  *n = 1;
+  return 0;
+}
+void wcom_uninit(void) {
+  uint8_t* t = wteb();
+  DWORD* n = (DWORD*)(t + TEB_COINITS);
+  if (*n && !--*n) *(DWORD*)(t + TEB_OLEDATA + 0x14) = 0; /* o OleTlsData fica, sem apartamento */
+}
 static WINAPI long CoInitializeEx(void* r, DWORD fl) {
   (void)r;
-  (void)fl;
-  return 0;
+  return wcom_init(fl);
 }
 static WINAPI long CoInitialize(void* r) {
   (void)r;
-  return 0;
+  return wcom_init(2);
 }
-static WINAPI void CoUninitialize(void) {}
+static WINAPI void CoUninitialize(void) { wcom_uninit(); }
+/* APTTYPE: 0 STA, 1 MTA; fora do COM, CO_E_NOTINITIALIZED e APTTYPE_CURRENT */
+static WINAPI long CoGetApartmentType(int* type, int* qual) {
+  DWORD f = ole_flags();
+  if (!type || !qual) return (long)0x80070057; /* E_INVALIDARG */
+  *qual = 0;
+  if (f == OLE_STA || f == OLE_MTA) {
+    *type = f == OLE_STA ? 0 : 1;
+    return 0;
+  }
+  *type = -1;
+  return (long)0x800401F0; /* CO_E_NOTINITIALIZED */
+}
 static WINAPI long CoCreateInstance(const void* clsid, void* outer, DWORD ctx, const void* iid, void** out) {
   (void)outer;
   (void)ctx;
@@ -410,11 +455,9 @@ static WINAPI long CoCreateInstance(const void* clsid, void* outer, DWORD ctx, c
   if (wpicker_create(clsid, out)) return 0;
   return (long)0x80040154; /* REGDB_E_CLASSNOTREG */
 }
-static WINAPI long RoInitialize(int type) {
-  (void)type;
-  return 0;
-}
-static WINAPI void RoUninitialize(void) {}
+/* RO_INIT_SINGLETHREADED (0) = STA, RO_INIT_MULTITHREADED (1) = MTA */
+static WINAPI long RoInitialize(int type) { return wcom_init(type ? 0 : 2); }
+static WINAPI void RoUninitialize(void) { wcom_uninit(); }
 
 #define S(n) {#n, (void*)n}
 const struct wine_sym sys_syms[] = {
@@ -427,6 +470,6 @@ const struct wine_sym sys_syms[] = {
     S(EqualSid), S(AllocateAndInitializeSid), S(FreeSid), S(CheckTokenMembership),
     S(GlobalAlloc), S(GlobalFree), S(GlobalLock), S(GlobalUnlock), S(SHGetKnownFolderPath),
     S(SHGetFolderPathW), S(SHGetSpecialFolderPathW), S(SHGetSpecialFolderPathA), S(CoTaskMemFree), S(CoTaskMemAlloc), S(CommandLineToArgvW),
-    S(CoInitializeEx), S(CoInitialize), S(CoUninitialize), S(CoCreateInstance), S(RoInitialize),
+    S(CoInitializeEx), S(CoInitialize), S(CoUninitialize), S(CoGetApartmentType), S(CoCreateInstance), S(RoInitialize),
     S(RoUninitialize),
     {0, 0}};

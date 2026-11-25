@@ -105,6 +105,7 @@ uint32_t mod_current_pid(void);
 /* Encerrar programas (KILL/KILLALL): marca dos de inicio e cadeia de pids. */
 void mod_mark_boot(void);
 uint32_t mod_boot_mark(void);
+void mod_mark_boot_reset(void);   /* LIMPA: proxima marca e a do WIN novo */
 uint32_t mod_root_pid(uint32_t pid);
 int mod_chain_has(uint32_t pid, uint32_t want);
 int mod_kill(uint32_t pid);

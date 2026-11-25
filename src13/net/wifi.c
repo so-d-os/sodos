@@ -1495,6 +1495,12 @@ int wifi_watch(int secs) {
 
 int wifi_start(const char* path) {
   int rc;
+  /* LIMPA rodando o AUTOEXEC.BAT de novo: a placa ja esta ligada e
+   * conectada; religar derrubaria a rede (e a API) a toa. */
+  if (kernel_boot_again() && w_state != W_OFF) {
+    puts_k("NET WIFI START: o Wi-Fi ja esta ligado (reinicio leve), fica como esta.\n");
+    return 0;
+  }
   w_state = W_OFF;
   rtw_log_clear();
   rc = start_steps(path);

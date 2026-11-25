@@ -1248,6 +1248,7 @@ static char launch_path[LINKEXT_PATH_MAX];
  * Enderecos de login passam de 500 caracteres: nao e o LINKEXT_PATH_MAX. */
 static char launch_arg[2048];
 static int launch_pending;
+static void launch_drv_note(void);
 
 static uint32_t gui_col(uint32_t rgb);   /* definido mais abaixo */
 
@@ -4421,6 +4422,79 @@ struct cmd_con {
   int view; /* linhas roladas para cima (roda/PgUp); 0 = o fim, com o prompt */
 };
 
+/* ---------- unidade e pastas de cada Command e de cada programa ----------
+ * Cada Command e cada programa do WIN tem unidade e pastas proprias
+ * (drives.h): o cd de um Command nao muda o dos outros, e o de um programa
+ * (k_chdir, SetCurrentDirectory do WINE, o Claude) nao muda o de ninguem.
+ * O programa comeca nas de quem o abriu (o Command, o desktop) e as threads
+ * dele usam as dele. Em tabelas a parte, nao em struct cmd_con e struct
+ * gui_task: assim o TROCA troca o kernel com Commands e programas abertos
+ * (os de antes usam as em uso, como antes). Numa variavel so, com guardas
+ * nas pontas (docs/TROCA.md). */
+#define DV_CMDS 32
+static struct {
+  uint64_t guarda0[4];
+  struct drives_state** task;              /* [TASK_MAX] por indice de gtasks (task_mem) */
+  struct cmd_con* cmd[DV_CMDS];            /* Command de cmd_drv[i] (0 = livre) */
+  struct drives_state* cmd_drv[DV_CMDS];   /* kmalloc */
+  struct drives_state* launch;             /* de quem pediu a abertura (kmalloc) */
+  int launch_ok;                           /* launch vale para o proximo Command ou programa */
+  uint64_t guarda1[4];
+} DV;
+
+/* Pastas do Command c. Na primeira vez (Command aberto antes deste kernel)
+ * comecam nas em uso. 0 = sem memoria: o Command usa as em uso. */
+static struct drives_state* cmd_drv(struct cmd_con* c) {
+  int i, fr = -1;
+  if (!c) return 0;
+  for (i = 0; i < DV_CMDS; i++) {
+    if (DV.cmd[i] == c) return DV.cmd_drv[i];
+    if (!DV.cmd[i] && fr < 0) fr = i;
+  }
+  if (fr < 0) return 0;
+  DV.cmd_drv[fr] = (struct drives_state*)kmalloc(sizeof(struct drives_state));
+  if (!DV.cmd_drv[fr]) return 0;
+  drives_state_save(DV.cmd_drv[fr]);
+  DV.cmd[fr] = c;
+  return DV.cmd_drv[fr];
+}
+
+/* Solta as pastas dos Commands que ja fecharam (nenhuma janela de wins
+ * aponta para eles). */
+static void cmd_drv_sweep(struct wm_win* wins, int nwins) {
+  int i, j;
+  if (!wins) return;
+  for (i = 0; i < DV_CMDS; i++) {
+    if (!DV.cmd[i]) continue;
+    for (j = 0; j < nwins; j++)
+      if (wins[j].used && wins[j].st == (struct app_state*)DV.cmd[i]) break;
+    if (j < nwins || drives_state_cur() == DV.cmd_drv[i]) continue;
+    kfree(DV.cmd_drv[i]);
+    DV.cmd_drv[i] = 0;
+    DV.cmd[i] = 0;
+  }
+}
+
+/* Pedido de abertura (win_launch, COMMAND pela API ou por um Command): o
+ * Command ou programa novo comeca nas pastas de quem pediu. */
+static void launch_drv_note(void) {
+  if (!DV.launch) DV.launch = (struct drives_state*)kmalloc(sizeof(struct drives_state));
+  DV.launch_ok = DV.launch != 0;
+  if (DV.launch_ok) drives_state_save(DV.launch);
+}
+
+/* Copia para s as pastas de quem pediu a abertura (uma vez), ou as em uso. */
+static void launch_drv_take(struct drives_state* s) {
+  if (DV.launch_ok) {
+    struct drives_state* prev = drives_state_use(DV.launch);
+    drives_state_save(s);
+    drives_state_use(prev);
+    DV.launch_ok = 0;
+  } else {
+    drives_state_save(s);
+  }
+}
+
 static struct cmd_con* cons_cap;
 static int cons_painting;
 static void (*cons_paint)(void);
@@ -4594,12 +4668,27 @@ static void cmd_type_line(struct wm_win* w, const char* line) {
   cmd_run_in(c, buf);
 }
 
-/* Mostra prompt + linha no Command e roda a linha nele. */
+/* As pastas do Command c passam a ser as em uso. Devolve as de antes, para
+ * drives_state_use repor. */
+static struct drives_state* cmd_drv_enter(struct cmd_con* c) {
+  struct drives_state* s = cmd_drv(c);
+  return s ? drives_state_use(s) : drives_state_cur();
+}
+
+/* Prompt do Command (C:\PASTA> ), com a unidade e a pasta dele. */
+static void cmd_prompt(struct cmd_con* c, char* out, int max) {
+  struct drives_state* prev = cmd_drv_enter(c);
+  drives_prompt(out, max);
+  drives_state_use(prev);
+}
+
+/* Mostra prompt + linha no Command e roda a linha nele, com a unidade e a
+ * pasta dele (um .EXE aberto aqui comeca nelas: task_spawn). */
 static void cmd_run_in(struct cmd_con* c, char* buf) {
   char shown[CMD_COLS];
   char prompt[48];
   int i, plen = 0;
-  drives_prompt(prompt, (int)sizeof(prompt));
+  cmd_prompt(c, prompt, (int)sizeof(prompt));
   while (prompt[plen]) plen++;
   for (i = 0; i < plen && i < CMD_COLS - 1; i++) shown[i] = prompt[i];
   for (i = 0; buf[i] && plen + i < CMD_COLS - 1; i++) shown[plen + i] = buf[i];
@@ -4607,6 +4696,7 @@ static void cmd_run_in(struct cmd_con* c, char* buf) {
   cmd_push(c, shown);
   c->ocol = 0;
   if (buf[0]) {
+    struct drives_state* dprev = cmd_drv_enter(c);
     cons_cap = c;
     shell_set_out(cons_emit);
     shell_set_exec(cmd_spawn);
@@ -4617,6 +4707,7 @@ static void cmd_run_in(struct cmd_con* c, char* buf) {
     shell_set_screen_exec(0);
     shell_set_exec(0);
     shell_set_out(0);
+    drives_state_use(dprev);
     cons_cap = 0;
     /* Com cons_cap, cons_paint refaz so esta janela. O desktop so se mudou. */
     if (!desk_refresh()) cons_cap = c;
@@ -4628,10 +4719,10 @@ static void cmd_run_in(struct cmd_con* c, char* buf) {
   cons_cap = 0;
 }
 
-static int cmd_plen(void) {
+static int cmd_plen_of(struct cmd_con* c) {
   char prompt[48];
   int n = 0;
-  drives_prompt(prompt, (int)sizeof(prompt));
+  cmd_prompt(c, prompt, (int)sizeof(prompt));
   while (prompt[n]) n++;
   return n;
 }
@@ -4643,7 +4734,7 @@ static int cmd_row_text(struct cmd_con* c, int r, char* out, int max) {
   if (r >= 0 && r < c->n) {
     for (k = 0; c->line[r][k] && n < max - 1; k++) out[n++] = c->line[r][k];
   } else if (r == c->n) {
-    drives_prompt(out, max);
+    cmd_prompt(c, out, max);
     while (out[n]) n++;
     for (k = 0; k < c->inlen && n < max - 1; k++) out[n++] = c->in[k];
   }
@@ -4687,7 +4778,7 @@ static int cmd_del_sel(struct cmd_con* c) {
     c->sel = 0;
     return 0;
   }
-  plen = cmd_plen();
+  plen = cmd_plen_of(c);
   a = c0 - plen;
   b = c1 - plen;
   c->sel = 0;
@@ -4734,7 +4825,7 @@ static void cmd_move(struct cmd_con* c, uint8_t sc, int shift) {
   int plen;
   if (c->busy) return;
   c->view = 0;
-  plen = cmd_plen();
+  plen = cmd_plen_of(c);
   if (shift && !(c->sel && c->ar == c->n)) {
     c->sel = 1;
     c->ar = c->n;
@@ -4774,13 +4865,17 @@ static void cmd_tab(struct cmd_con* c) {
   for (i = 0; i < tl; i++) tail[i] = c->in[c->cur + i];
   tail[tl] = '\0';
   tab_outn = 0;
-  shell_set_out(tab_cap);
-  shell_complete(buf, &len, CMD_IN - tl);
-  shell_set_out(0);
+  {
+    struct drives_state* dprev = cmd_drv_enter(c);   /* nomes da pasta dele */
+    shell_set_out(tab_cap);
+    shell_complete(buf, &len, CMD_IN - tl);
+    shell_set_out(0);
+    drives_state_use(dprev);
+  }
   tab_out[tab_outn] = '\0';
   if (tab_outn > 0) {
     /* varios: mostra a linha como estava e a lista, igual ao DOS */
-    drives_prompt(prompt, (int)sizeof(prompt));
+    cmd_prompt(c, prompt, (int)sizeof(prompt));
     while (prompt[plen]) plen++;
     for (i = 0; i < plen && i < CMD_COLS - 1; i++) shown[i] = prompt[i];
     for (i = 0; i < c->inlen && plen + i < CMD_COLS - 1; i++) shown[plen + i] = c->in[i];
@@ -4890,7 +4985,7 @@ static void cmd_geom(struct wm_win* w, struct cmd_con* c, int title_h, int scale
   g->maxc = g->cell > 0 ? (w->w - 12) / g->cell : 40;
   if (g->maxc < 8) g->maxc = 8;
   if (g->maxc > CMD_COLS - 1) g->maxc = CMD_COLS - 1;
-  g->plen = cmd_plen();
+  g->plen = cmd_plen_of(c);
   room = g->maxc - g->plen;
   if (room < 1) room = 1;
   g->off = c->inlen > room ? c->inlen - room : 0;
@@ -4953,7 +5048,7 @@ static void cmd_word(struct cmd_con* c, int r, int k) {
   c->ac = a;
   c->bc = b;
   if (r == c->n && !c->busy) {
-    int plen = cmd_plen();
+    int plen = cmd_plen_of(c);
     if (b >= plen) c->cur = b - plen;
   }
 }
@@ -5123,6 +5218,14 @@ static int wm_open_command(struct wm_win* wins, int* focus, int big) {
   c = (struct cmd_con*)kmalloc(sizeof(struct cmd_con));
   if (!c) return -1;
   cons_wipe(c);
+  /* Comeca nas pastas em uso (as do desktop) ou nas de quem pediu o Command
+   * (COMMAND digitado num Command, launch_drv_note). Antes, as dos Commands
+   * que ja fecharam saem; a deste endereco, se havia, e de um Command velho. */
+  cmd_drv_sweep(wins, WM_MAX);
+  {
+    struct drives_state* s = cmd_drv(c);
+    if (s) launch_drv_take(s);
+  }
   cmd_push(c, "SO DOS Command");
   cmd_push(c, "Mesmos comandos do DOS. HELP lista.");
   n = wm_count_kind(wins, WM_KIND_CMD);
@@ -5944,6 +6047,8 @@ static void gui_zero(void* mem, uint32_t n) {
   while (n--) *p++ = 0;
 }
 
+static struct drives_state* gui_thread_drv(void);
+
 /* Fora do BSS: o nucleo tem de acabar antes do slot 0x58000. */
 static int gui_ensure(void) {
   if (!gwins) {
@@ -5954,6 +6059,8 @@ static int gui_ensure(void) {
     gtasks = (struct gui_task*)task_mem(sizeof(struct gui_task) * TASK_MAX);
     if (gtasks) gui_zero(gtasks, (uint32_t)sizeof(struct gui_task) * TASK_MAX);
   }
+  /* threads de programa usam as pastas do programa delas (drives.c) */
+  drives_set_thread_state(gui_thread_drv);
   return gwins && gtasks;
 }
 
@@ -7136,6 +7243,84 @@ static void task_arm(struct gui_task* t, void (*fn)(void)) {
 
 static void cmd_refocus(struct cmd_con* c);
 
+/* Pastas da tarefa ti (0 = nao tem: aberta antes deste kernel, ou sem
+ * memoria; usa as em uso, como antes). */
+static struct drives_state* task_drv(int ti) {
+  return (DV.task && ti >= 0 && ti < TASK_MAX) ? DV.task[ti] : 0;
+}
+
+/* Tarefa nova em ti: pastas proprias, copia das em uso (as do Command que a
+ * abriu, as do desktop) ou das de quem pediu a abertura. */
+static void task_drv_new(int ti, int from_launch) {
+  struct drives_state* s;
+  if (!DV.task) {
+    DV.task = (struct drives_state**)task_mem(sizeof(struct drives_state*) * TASK_MAX);
+    if (!DV.task) return;
+    gui_zero(DV.task, (uint32_t)(sizeof(struct drives_state*) * TASK_MAX));
+  }
+  s = DV.task[ti];
+  if (!s) s = (struct drives_state*)task_mem(sizeof(struct drives_state));
+  DV.task[ti] = s;
+  if (!s) {
+    serial_puts("[visual] sem memoria para as pastas do programa: usa as em uso\n");
+    return;
+  }
+  if (from_launch) launch_drv_take(s);
+  else drives_state_save(s);
+}
+
+/* Programa que ja rodava quando o kernel foi trocado (TROCA): nasceu sem
+ * pastas proprias e o cd dele (o do Claude no WINE, a cada comando) mudava
+ * as do desktop, e o das threads dele as de quem estivesse rodando. Na
+ * proxima fatia ganha as suas, copia das em uso. Sem memoria, tenta de novo
+ * na outra fatia, calado. */
+static void task_drv_adopt(int ti) {
+  struct drives_state* s;
+  if (task_drv(ti)) return;
+  if (!DV.task) {
+    DV.task = (struct drives_state**)task_mem(sizeof(struct drives_state*) * TASK_MAX);
+    if (!DV.task) return;
+    gui_zero(DV.task, (uint32_t)(sizeof(struct drives_state*) * TASK_MAX));
+  }
+  s = (struct drives_state*)task_mem(sizeof(struct drives_state));
+  if (!s) return;
+  drives_state_save(s);
+  DV.task[ti] = s;
+  drives_set_thread_state(gui_thread_drv);   /* sem gui_ensure desde a troca */
+}
+
+/* Solta as pastas da tarefa ti. Se o mundo ainda as usasse (nao deveria: a
+ * tarefa so sai pelo laco do WIN), volta para as da tela em vez de ficar
+ * apontando para memoria livre. */
+static void task_drv_free(int ti) {
+  struct drives_state* s = task_drv(ti);
+  if (!s) return;
+  if (drives_state_cur() == s) {
+    serial_puts("[visual] pastas da tarefa ainda em uso ao sair\n");
+    drives_state_use(0);
+  }
+  DV.task[ti] = 0;
+  task_free(s);
+}
+
+/* Thread de programa (outra CPU): a unidade e as pastas do programa dela.
+ * O mundo pode estar no laco do WIN ou em outro programa nessa hora (as
+ * threads do Claude no WINE trocavam a pasta de um Command qualquer). A
+ * thread segura o BKL: gtasks nao muda enquanto isto roda. */
+static struct drives_state* gui_thread_drv(void) {
+  uint32_t pid = kt_cur_pid();
+  int i;
+  if (!pid || !host_on || !gtasks || !DV.task) return 0;
+  for (i = 0; i < task_n; i++) {
+    struct gui_task* t = &gtasks[i];
+    uint32_t tp;
+    if (!t->used || !DV.task[i] || t->wake == WAKE_DEAD) continue;
+    tp = i == task_cur ? mod_current_pid() : t->cpu.pid;
+    if (tp && mod_chain_has(tp, pid)) return DV.task[i];
+  }
+  return 0;
+}
+
 static void task_reap(int ti) {
   struct gui_task* t = &gtasks[ti];
   if (t->gid >= 0 && t->gid < GUI_MAX && gwins[t->gid].open) {
@@ -7154,6 +7339,7 @@ static void task_reap(int ti) {
     task_free(t->tty);
   }
   t->tty = 0;
+  task_drv_free(ti);
   t->run = 0;
   t->con = 0;
   t->used = 0;
@@ -7192,6 +7378,20 @@ static int task_force_kill(int ti) {
 static void killq_service(void) {
   int i, n = 0, k;
   uint32_t req = killq_req;
+  /* LIMPA (shell/cmd_limpa.c): todas as tarefas, inclusive as de inicio,
+   * saem ja (sem esperar o programa fechar sozinho) e o WIN fecha; o
+   * vt_select do vt_win_entry recomeca as telas. */
+  if (gtasks && limpa_pending() == 1) {
+    for (i = 0; i < task_n; i++)
+      if (gtasks[i].used && gtasks[i].cpu.pid) n += task_force_kill(i);
+    (void)wine_reset_if_idle();
+    serial_puts("[visual] LIMPA: tarefas encerradas: ");
+    serial_hex32((uint32_t)n);
+    serial_puts("; fechando o WIN\n");
+    limpa_win_closing();
+    chrome_leave = 1;
+    n = 0;
+  }
   if (!gtasks || req == killq_ack) return;
   if (killq_all) {
     uint32_t mark;
@@ -7270,6 +7470,9 @@ int win_task_list(char (*names)[32], uint32_t* pids, int max) {
   return n;
 }
 
+/* 1 se o WIN esta aberto (na tela ou parado ao fundo). */
+int win_open(void) { return host_on && gtasks; }
+
 /* pid = 0 e all = 1: KILLALL (menos os de inicio e quem pediu).
  * Devolve quantas tarefas encerrou; -1 se o WIN nao esta aberto, -2 se nao
  * houve resposta (o WIN parado em outra tela). */
@@ -7337,6 +7540,13 @@ static void task_entry(void) {
     cons_cap = 0;
     win_api_dirty = 1;
   }
+  /* .BAT aberto no Command: o cd do script vale para o Command, como no DOS
+   * (o BAT.EXE e um programa; as pastas em uso aqui ainda sao as dele). Os
+   * outros programas nao mudam a pasta de quem os abriu. */
+  if (t->con && task_drv(task_cur) && name_match(t->path, "BAT")) {
+    struct drives_state* cs = cmd_drv(t->con);
+    if (cs) drives_state_save(cs);
+  }
   if (t->run && t->run->used && t->run->st) wm_run_status(t->run, rc);
   if (t->logout && rc != 0) {
     serial_puts("[visual] producao: ");
@@ -7378,6 +7588,7 @@ static void task_shell_leave(const struct task_shell* s, struct gui_task* t) {
 static void task_switch_to(int ti) {
   struct task_shell sh;
   struct gui_task* t = &gtasks[ti];
+  struct drives_state* dprev;
   if (!t->used || t->wake == WAKE_DEAD || t->wake == WAKE_NONE) return;
   mod_cpu_save(&host_cpu);
   mod_cpu_load(&t->cpu);
@@ -7385,7 +7596,11 @@ static void task_switch_to(int ti) {
   gui_ix = (t->gid >= 0 && t->gid < GUI_MAX) ? t->gid : 0;
   task_slice_t0 = (uint32_t)irq_ticks();
   task_shell_enter(&sh, t);
+  /* unidade e pastas do programa enquanto ele roda (fatia, k_yield, fim) */
+  task_drv_adopt(ti);
+  dprev = task_drv(ti) ? drives_state_use(task_drv(ti)) : drives_state_cur();
   ctx_switch(&host_rsp, t->rsp);
+  drives_state_use(dprev);
   task_shell_leave(&sh, t);
   task_cur = -1;
   /* Volta da preempcao com IF=0 (veio do IRQ0). */
@@ -7396,12 +7611,15 @@ static void task_switch_to(int ti) {
 static void task_start(int ti) {
   struct gui_task* t = &gtasks[ti];
   struct task_shell sh;
+  struct drives_state* dprev;
   mod_cpu_save(&host_cpu);
   task_cur = ti;
   gui_ix = 0;
   task_slice_t0 = (uint32_t)irq_ticks();
   task_shell_enter(&sh, t);
+  dprev = task_drv(ti) ? drives_state_use(task_drv(ti)) : drives_state_cur();
   ctx_switch(&host_rsp, t->rsp);
+  drives_state_use(dprev);
   task_shell_leave(&sh, t);
   task_cur = -1;
   __asm__ volatile ("sti");
@@ -7456,6 +7674,9 @@ static int task_spawn(struct wm_win* wins, int* focus, int big, const char* path
   t->con_col = 0;
   t->rsp = 0;
   t->xs_raw = 0;
+  /* pastas do programa: as do Command (em uso no cmd_run_in), as de quem
+   * pediu a abertura (launch_drv_note) ou as do desktop */
+  task_drv_new(ti, con == 0);
   if (con) {
     t->tty = (struct con_tty*)task_mem(sizeof(struct con_tty));
     if (t->tty) {
@@ -7470,6 +7691,7 @@ static int task_spawn(struct wm_win* wins, int* focus, int big, const char* path
     if (t->tty) task_free(t->tty);
     if (con) con->tty = 0;
     t->tty = 0;
+    task_drv_free(ti);
     t->used = 0;
     t->con = 0;
     serial_puts("[visual] sem pilha para o programa\n");
@@ -7559,6 +7781,7 @@ static void tasks_shutdown(void) {
       if (gtasks[i].wake != WAKE_NONE) mod_kill(gtasks[i].cpu.pid);
       if (gtasks[i].stack) task_free(gtasks[i].stack);
       if (gtasks[i].xs_raw) task_free(gtasks[i].xs_raw);
+      task_drv_free(i);
       gtasks[i].used = 0;
       gtasks[i].stack = 0;
       gtasks[i].xs_raw = 0;
@@ -11054,6 +11277,7 @@ static int win_wm_run_u(void) {
       launch_pending = 0;
       if (launch_arg[0]) wm_open_with(wins, &focus, big, launch_path, launch_arg);
       else wm_exec(wins, &focus, big, launch_path);
+      DV.launch_ok = 0;   /* nao abriu Command nem programa: nao fica para o proximo */
       need_draw = 1;
     }
     killq_service();
@@ -12497,7 +12721,7 @@ static int win_wm_run_u(void) {
               if (l == 'a' && !cc->busy) {
                 cc->sel = 1;
                 cc->ar = cc->n;
-                cc->ac = cmd_plen();
+                cc->ac = cmd_plen_of(cc);
                 cc->br = cc->n;
                 cc->bc = cc->ac + cc->inlen;
                 cc->cur = cc->inlen;
@@ -12619,6 +12843,7 @@ int win_launch(const char* path) {
   }
   launch_path[i] = 0;
   launch_arg[0] = 0;
+  launch_drv_note();
   launch_pending = 1;
   return 0;
 }
@@ -12640,6 +12865,7 @@ int win_launch_arg(const char* exe, const char* arg) {
   launch_path[i] = 0;
   for (i = 0; arg[i] && i < (int)sizeof(launch_arg) - 1; i++) launch_arg[i] = arg[i];
   launch_arg[i] = 0;
+  launch_drv_note();
   launch_pending = 1;
   return 0;
 }

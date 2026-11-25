@@ -81,6 +81,7 @@ struct task {
   struct mod_tsave msave;
   uint64_t teb;             /* TEB do Windows (WINE.DLL); 0 = nao e thread Windows */
   int rt;                   /* tempo real (a RIT): fila na frente, CPU propria */
+  uint64_t irq_rip;         /* RIP do tique que a tirou da CPU (troca.c); 0 = nenhum */
 };
 
 /* self e curr nos offsets 0 e 0x18: lidos com um mov %gs:N (atomico frente a
@@ -692,9 +693,11 @@ void* kt_cur_fn(void) {
   t = cur();
   {
     extern char __bss_start[];
-    /* so codigo do kernel (texto abaixo do .bss); threads de programa nao */
+    int troca_bloco(uint64_t a);
+    /* so codigo do kernel (texto abaixo do .bss, ou de um kernel trocado a
+     * quente); threads de programa nao */
     uintptr_t f = (uintptr_t)t->fn;
-    return (t->kind == K_THREAD && f && f < (uintptr_t)__bss_start) ? (void*)t->fn : 0;
+    return (t->kind == K_THREAD && f && (f < (uintptr_t)__bss_start || troca_bloco((uint64_t)f))) ? (void*)t->fn : 0;
   }
 }
 
@@ -1384,6 +1387,7 @@ int kt_thread_create(int (*fn)(void*), void* arg, uint32_t stack_size, uint32_t 
   t->detached = 0;
   t->fw_listed = 0;
   t->slice_ms = 0;
+  t->irq_rip = 0;
   arm_stack(t, t->stack, stack_size, kt_entry);
   dest = pick_cpu(mask);
   fl = irq_save();
@@ -1716,6 +1720,29 @@ void kt_stop_others(void) {
   stop_cpu = this_cpu()->index;
   stopping = 1;
   if (n_online > 1) smp_nmi_others();
+}
+
+/* ---------- TROCA: onde as threads foram interrompidas ----------
+ * Uma thread sem o BKL e preemptada em qualquer ponto, inclusive no codigo
+ * do kernel; o quadro da interrupcao fica na pilha dela ate voltar. A troca a
+ * quente (troca.c) nao pode escrever um jmp em cima de onde ela vai voltar. */
+void kt_irq_enter(uint64_t rip) {
+  if (kt_up) cur()->irq_rip = rip;
+}
+
+void kt_irq_leave(void) {
+  if (kt_up) cur()->irq_rip = 0;
+}
+
+int kt_irq_rips(uint64_t* out, int max) {
+  int i, n = 0;
+  if (!out) return 0;
+  for (i = 0; i < KT_MAX && n < max; i++) {
+    const struct task* t = &kts[i];
+    if (t->state == T_FREE || t->on_cpu || !t->irq_rip) continue;
+    out[n++] = t->irq_rip;
+  }
+  return n;
 }
 
 /* ---------- smp run: o mundo muda de CPU ---------- */

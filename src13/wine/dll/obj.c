@@ -176,14 +176,46 @@ HANDLE wh_new(struct wobj* o) {
   return 0;
 }
 
-struct wobj* wh_get(HANDLE h, int type) {
+struct wobj* wh_raw(HANDLE h) {
   uintptr_t v = (uintptr_t)h;
-  struct wobj* o;
-  if (h == (HANDLE)(intptr_t)-2) o = wthread();
-  else if (v < H_BASE || (v & 3) || (v - H_BASE) / 4 >= WHANDLE_MAX) return 0;
-  else o = wp()->handles[(v - H_BASE) / 4];
+  if (h == (HANDLE)(intptr_t)-2) return wthread();
+  if (v < H_BASE || (v & 3) || (v - H_BASE) / 4 >= WHANDLE_MAX) return 0;
+  return wp()->handles[(v - H_BASE) / 4];
+}
+struct wobj* wh_get(HANDLE h, int type) {
+  struct wobj* o = wh_raw(h);
+  if (o && o->real) o = o->real; /* copia somente leitura: o arquivo de verdade */
   if (!o || (type && o->type != type)) return 0;
   return o;
+}
+
+/* Direitos de um handle de arquivo, como o NtQueryObject do Windows mostra:
+ * GENERIC_* viram FILE_GENERIC_*, e o CreateFile sempre soma SYNCHRONIZE e
+ * FILE_READ_ATTRIBUTES (por isso nunca da 0). */
+DWORD wfile_access(DWORD a) {
+  DWORD r = a & 0x00FFFFFFu & ~0x02000000u; /* sem MAXIMUM_ALLOWED */
+  if (a & 0x80000000u) r |= 0x00120089u;     /* GENERIC_READ */
+  if (a & 0x40000000u) r |= 0x00120116u;     /* GENERIC_WRITE */
+  if (a & 0x20000000u) r |= 0x001200A0u;     /* GENERIC_EXECUTE */
+  if (a & 0x10000000u) r |= 0x001F01FFu;     /* GENERIC_ALL */
+  return r | 0x00100080u;
+}
+/* escrita, apagar, mudar dono ou ACL: o Chromium (ReadOnlyFile do Mojo)
+ * confere que um arquivo "somente leitura" nao tem nenhum destes */
+#define FILE_WRITE_RIGHTS (0x40000000u | 0x10000000u | 0x000D0116u)
+
+/* Outro handle, sem escrita, para o arquivo o (DuplicateHandle sem
+ * FILE_WRITE_DATA): um objeto pequeno que aponta o de verdade, porque os
+ * direitos sao do handle e os dados, a posicao e o buffer sao do arquivo. */
+static struct wobj* file_ro_alias(struct wobj* o, DWORD acc) {
+  struct wobj* a = wobj_new(OBJ_FILE);
+  if (!a) return 0;
+  a->real = o;
+  a->acc = wfile_access(acc) & ~0x000D0116u;
+  wlock();
+  o->refs++;
+  wunlock();
+  return a;
 }
 
 void wfile_close(struct wobj* o);   /* file.c */
@@ -212,6 +244,12 @@ void wobj_unref(struct wobj* o) {
   wlock();
   if (--o->refs > 0) o = 0;
   wunlock();
+  if (o && o->real) { /* copia somente leitura: solta a do arquivo de verdade */
+    struct wobj* r = o->real;
+    k_free(o);
+    wobj_unref(r);
+    return;
+  }
   if (o) {
     if (o->type == OBJ_FILE || o->type == OBJ_FIND) wfile_close(o);
     if (o->type == OBJ_SOCKET) wsock_close(o);
@@ -256,19 +294,35 @@ int wh_is_self(HANDLE h) {
 }
 
 static WINAPI BOOL DuplicateHandle(HANDLE sp, HANDLE h, HANDLE dp, HANDLE* out, DWORD acc, BOOL inh, DWORD opt);
-/* ReOpenFile: outro handle para o mesmo arquivo. Aqui o objeto e um so (sem
- * modos por handle): uma copia do handle basta (o Bun reabre stdio e logs). */
+/* ReOpenFile: outro handle para o mesmo arquivo (o Bun reabre stdio e logs).
+ * O objeto e um so; sem escrita em access vira copia somente leitura. Pedir
+ * escrita reabre o arquivo de verdade, como no Windows (abre pelo nome). */
 static WINAPI HANDLE ReOpenFile(HANDLE h, DWORD access, DWORD share, DWORD flags) {
   HANDLE out = 0;
+  struct wobj* o = wh_raw(h);
   (void)share; (void)flags;
-  if (!DuplicateHandle((HANDLE)(intptr_t)-1, h, (HANDLE)(intptr_t)-1, &out, access, 0, 2 /* SAME_ACCESS */)) {
+  if (o && o->real && (access & FILE_WRITE_RIGHTS)) {
+    out = wh_new(o->real);
+    return out ? out : (HANDLE)(intptr_t)-1;
+  }
+  if (!DuplicateHandle((HANDLE)(intptr_t)-1, h, (HANDLE)(intptr_t)-1, &out, access, 0,
+                       o && o->type == OBJ_FILE ? 0 : 2 /* SAME_ACCESS */)) {
     if (!wget_lasterr()) wset_lasterr(6);
     return (HANDLE)(intptr_t)-1;
   }
   return out;
 }
+/* copia somente leitura que nao chegou a nenhum handle */
+static void alias_drop(struct wobj* a) {
+  struct wobj* r;
+  if (!a || a->refs) return;
+  r = a->real;
+  k_free(a);
+  wobj_unref(r);
+}
 static WINAPI BOOL DuplicateHandle(HANDLE sp, HANDLE h, HANDLE dp, HANDLE* out, DWORD acc, BOOL inh, DWORD opt) {
   struct wobj* o;
+  struct wobj* ro = 0; /* copia somente leitura feita aqui */
   uintptr_t v = (uintptr_t)h;
   if (sp && sp != (HANDLE)(intptr_t)-1 && !wh_is_self(sp) && wh_get(sp, OBJ_PROCESS)) {
     /* de outro processo (um filho) para este: o handle e da tabela dele */
@@ -296,7 +350,24 @@ static WINAPI BOOL DuplicateHandle(HANDLE sp, HANDLE h, HANDLE dp, HANDLE* out, 
     }
     return 1;
   }
-  o = wh_get(h, 0);
+  o = wh_raw(h);
+  if (o && o->type == OBJ_FILE && !(opt & 2) && !(acc & 0x02000000u)) {
+    /* arquivo sem DUPLICATE_SAME_ACCESS: o novo handle tem so os direitos
+     * de acc. O Chromium duplica sem escrita e confere no NtQueryObject. */
+    if (acc & FILE_WRITE_RIGHTS) {
+      if (o->real) { /* de somente leitura nao se tira escrita */
+        wset_lasterr(5); /* ERROR_ACCESS_DENIED */
+        return 0;
+      }
+    } else if (!o->real) {
+      ro = file_ro_alias(o, acc);
+      if (!ro) {
+        wset_lasterr(8); /* ERROR_NOT_ENOUGH_MEMORY */
+        return 0;
+      }
+      o = ro;
+    }
+  }
   if (o && dp && dp != (HANDLE)(intptr_t)-1 && !wh_is_self(dp)) {
     /* para outro processo: so os filhos que este processo abriu */
     HANDLE wdup_to_child(struct wobj* proc, struct wobj* o); /* proc.c */
@@ -307,6 +378,7 @@ static WINAPI BOOL DuplicateHandle(HANDLE sp, HANDLE h, HANDLE dp, HANDLE* out, 
       wlogx("  no outro processo vira ", (uint64_t)(uintptr_t)got);
     }
     if (!got) {
+      alias_drop(ro);
       wset_lasterr(ERROR_INVALID_HANDLE);
       return 0;
     }
@@ -342,6 +414,12 @@ static WINAPI BOOL DuplicateHandle(HANDLE sp, HANDLE h, HANDLE dp, HANDLE* out, 
     *out = wsection_dup(o, !(opt & 2) && !(acc & 2));
   } else if (out) {
     *out = wh_new(o);
+    if (!*out) {
+      alias_drop(ro);
+      return 0;
+    }
+  } else {
+    alias_drop(ro);
   }
   if (opt & 1) wh_close(h); /* DUPLICATE_CLOSE_SOURCE */
   return 1;

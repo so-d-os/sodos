@@ -13,6 +13,7 @@
 #include "fbcon.h"
 #include "smp.h"
 #include "kthread.h"
+#include "troca.h"
 #define VGA vga_text  /* 0xB8000, ou a copia do fbcon no UEFI */
 #define ATTR 0x1F00  /* fundo azul, texto branco */
 
@@ -149,6 +150,15 @@ static int where(uint64_t a) {
   if (a >= KERNEL_LOAD && a < (uint64_t)(uintptr_t)__bss_start) {
     ls("kernel+0x");
     lhex(a - KERNEL_LOAD, 6);
+    return 1;
+  }
+  /* Kernel trocado a quente (TROCA.EXE): "troca2+0x..." = bloco da 2a troca,
+   * na ordem do .text do ELF aplicado (addr2line com o endereco do .text). */
+  if ((i = troca_bloco(a)) != 0) {
+    ls("troca");
+    ldec((uint64_t)i);
+    ls("+0x");
+    lhex(a - troca_bloco_lo(i), 6);
     return 1;
   }
   if (a >= 0x100000000ull) return 0;
@@ -395,7 +405,6 @@ void isr_fault_release(uint32_t pid) {
 }
 
 static uint64_t fault_target(const isr_frame_t* f) {
-  extern char __bss_end[];
   uint32_t pid = kt_in_thread() ? kt_cur_pid() : mod_current_pid();
   uint64_t v = f->int_no;
   int i;
@@ -404,8 +413,9 @@ static uint64_t fault_target(const isr_frame_t* f) {
   /* int3 so vai para programas do Windows (EXCEPTION_BREAKPOINT); a libc nao
    * tem SIGTRAP e os programas do SODOS seguem como antes */
   if (v == 3 && !kt_win_teb_get()) return 0;
-  /* Falta dentro do kernel (num k_* chamado pelo programa): tela de sempre. */
-  if (f->eip >= KERNEL_LOAD && f->eip < (uint64_t)(uintptr_t)__bss_end) return 0;
+  /* Falta dentro do kernel (num k_* chamado pelo programa): tela de sempre.
+   * Inclui o codigo de um kernel trocado a quente (troca.c). */
+  if (troca_texto(f->eip)) return 0;
   /* rip baixo: so programa do Windows (chamada por ponteiro NULL vira excecao dele) */
   if (f->eip < 0x100000 && !kt_win_teb_get()) return 0;
   /* A entrada roda logo abaixo do frame: a pilha tem que existir ali. */
@@ -440,24 +450,37 @@ isr_ret_t isr_dispatch(isr_frame_t* f) {
     smp_ipi_ack();
     return isr_ret0;
   }
+  /* TROCA.EXE trocando o kernel a quente (troca.c): esta CPU espera aqui. */
+  if (f->int_no == TROCA_VETOR) {
+    smp_ipi_ack();
+    troca_ipi(f->eip);
+    return isr_ret0;
+  }
   /* Escalonador SMP: EOI antes, porque a troca de tarefa pode demorar a
-   * voltar por aqui. */
+   * voltar por aqui. kt_irq_enter/leave: se a thread sair da CPU aqui, o RIP
+   * dela fica guardado para a troca a quente (kthread.c, troca.c). */
   if (f->int_no == 0xF2) {
     if (prof_on) prof_hit(f->eip);
     smp_ipi_ack();
+    kt_irq_enter(f->eip);
     kt_tick_lapic(SMP_TICK_MS);
+    kt_irq_leave();
     return isr_ret0;
   }
   if (f->int_no == 0xF3) {
     smp_ipi_ack();
+    kt_irq_enter(f->eip);
     kt_ipi_resched();
+    kt_irq_leave();
     return isr_ret0;
   }
   if (f->int_no == 0xF5) {          /* MSI do xHCI: acorda a RIT */
     void rit_irq(void);
     smp_ipi_ack();
+    kt_irq_enter(f->eip);
     rit_irq();
     kt_ipi_resched();
+    kt_irq_leave();
     return isr_ret0;
   }
   if (f->int_no == 0xF4) {
@@ -482,7 +505,9 @@ isr_ret_t isr_dispatch(isr_frame_t* f) {
       static uint32_t pit_n;
       if ((++pit_n & 3u) == 0) prof_hit(f->eip); /* 1 ms -> 4 ms, como as outras */
     }
+    kt_irq_enter(f->eip);
     irq_handle(f);
+    kt_irq_leave();
     return isr_ret0;
   }
 
@@ -496,8 +521,7 @@ isr_ret_t isr_dispatch(isr_frame_t* f) {
 
   /* Thread de programa que falhou no codigo dele: so ela termina. */
   if (kt_in_thread()) {
-    extern char __bss_end[];
-    if (!(f->eip >= KERNEL_LOAD && f->eip < (uint64_t)(uintptr_t)__bss_end)) {
+    if (!troca_texto(f->eip)) {
       serial_puts("[kt] falta na thread ");
       serial_hex32((uint32_t)kt_thread_self());
       serial_puts(" cpu=");

@@ -1611,6 +1611,15 @@ struct cmd_entry commands[CMD_MAX];
 int cmd_count = 0;
 
 int register_builtin(const char* name, cmd_fn fn) {
+  int i;
+  /* Nome que ja existe: so troca a funcao (shell_register_all de novo,
+   * depois de um TROCA). */
+  for (i = 0; i < cmd_count; i++) {
+    if (commands[i].name && strcmp(commands[i].name, name) == 0) {
+      commands[i].fn = fn;
+      return 0;
+    }
+  }
   if (cmd_count < CMD_MAX) {
     commands[cmd_count].name = name;
     commands[cmd_count].fn = fn;
@@ -2078,7 +2087,84 @@ static void run_autoexec(void) {
   }
   kfree(buf);
 }
+
+/* O fim do boot: AUTOEXEC.BAT (antes do HTTPD: o ambiente, SET FAT32DLL=...,
+ * ja vale para tudo depois) e o HTTPD.EXE. again = 1: o LIMPA
+ * (shell/cmd_limpa.c) rodando de novo, com as variaveis voltadas ao que eram
+ * aqui no boot. */
+static int boot_again;
+int kernel_boot_again(void) { return boot_again; }
+void kernel_boot_programs(int again) {
+  char path[DRV_PATH];
+  if (!again) limpa_env_snapshot();   /* so o que o kernel pos */
+  boot_again = again;
+  run_autoexec();
+  if (mod_find_exe("HTTPD.EXE", path, (int)sizeof(path)) == 0) mod_exec(path, 0, 0);
+  boot_again = 0;
+}
 int shell_exec_quiet(char* line) { return exec_line(line, 0); }
+
+/* Os comandos internos. No boot (kmain) e de novo depois de um TROCA
+ * (troca_depois): um comando novo no kernel trocado a quente aparece sem
+ * reiniciar, e os que ja existiam passam a apontar para o codigo novo. */
+void shell_register_all(void) {
+  register_builtin("help", cmd_help);
+  register_builtin("echo", cmd_echo);
+  register_builtin("ls", cmd_ls);
+  register_builtin("clear", cmd_clear);
+  register_builtin("cls", cmd_cls);
+  register_builtin("history", cmd_history);
+  register_builtin("type", cmd_type);
+  register_builtin("more", cmd_more);
+  register_builtin("keyb", cmd_keyb);
+  register_builtin("pause", cmd_pause);
+  register_builtin("load", cmd_load);
+  register_builtin("edit", cmd_edit);
+  register_builtin("asm", cmd_asm);
+  register_builtin("run", cmd_run);
+  register_builtin("mount", cmd_mount);
+  register_builtin("dir", cmd_dir);
+  register_builtin("cd", cmd_cd);
+  register_builtin("md", cmd_md);
+  register_builtin("rd", cmd_rd);
+  register_builtin("del", cmd_del);
+  register_builtin("erase", cmd_del);
+  register_builtin("cat", cmd_cat);
+  register_builtin("find", cmd_find);
+  register_builtin("grep", cmd_grep);
+  register_builtin("tail", cmd_tail);
+  register_builtin("fdisk", cmd_fdisk);
+  register_builtin("format", cmd_format);
+  register_builtin("copy", cmd_copy);
+  register_builtin("disks", cmd_disks);
+  register_builtin("free", cmd_free);
+  register_builtin("df", cmd_df);
+  register_builtin("dstat", cmd_dstat);
+  register_builtin("rit", cmd_rit);
+  register_builtin("ata", cmd_dstat);
+  register_builtin("visual", cmd_visual);
+  register_builtin("mouse", cmd_mouse);
+  register_builtin("usb", cmd_usb);
+  register_builtin("win", cmd_win);
+  register_builtin("win.exe", cmd_win);
+  register_builtin("ping", cmd_ping);
+  register_builtin("net", cmd_net);
+  register_builtin("api", cmd_api);
+  register_builtin("dlls", cmd_dlls);
+  register_builtin("smp", cmd_smp);
+  register_builtin("kill", cmd_kill);
+  register_builtin("killall", cmd_killall);
+  register_builtin("limpa", cmd_limpa);
+  register_builtin("shutdown", cmd_shutdown);
+  register_builtin("reboot", cmd_reboot);
+  register_builtin("set", cmd_set);
+  register_builtin("ver", cmd_ver);
+  register_builtin("relogio", cmd_relogio);
+  register_builtin("command", cmd_command);
+  register_builtin("prtsc", cmd_prtsc);
+  register_builtin("tecla", cmd_tecla);
+  register_builtin("janelas", cmd_janelas);
+}
 
 extern char __bss_start[];
 extern char __bss_end[];
@@ -2195,61 +2281,7 @@ void kmain(const struct BootInfo* bi) {
   httpd_start(8797);
   update_cursor();
 
-  register_builtin("help", cmd_help);
-  register_builtin("echo", cmd_echo);
-  register_builtin("ls", cmd_ls);
-  register_builtin("clear", cmd_clear);
-  register_builtin("cls", cmd_cls);
-  register_builtin("history", cmd_history);
-  register_builtin("type", cmd_type);
-  register_builtin("more", cmd_more);
-  register_builtin("keyb", cmd_keyb);
-  register_builtin("pause", cmd_pause);
-  register_builtin("load", cmd_load);
-  register_builtin("edit", cmd_edit);
-  register_builtin("asm", cmd_asm);
-  register_builtin("run", cmd_run);
-  register_builtin("mount", cmd_mount);
-  register_builtin("dir", cmd_dir);
-  register_builtin("cd", cmd_cd);
-  register_builtin("md", cmd_md);
-  register_builtin("rd", cmd_rd);
-  register_builtin("del", cmd_del);
-  register_builtin("erase", cmd_del);
-  register_builtin("cat", cmd_cat);
-  register_builtin("find", cmd_find);
-  register_builtin("grep", cmd_grep);
-  register_builtin("tail", cmd_tail);
-  register_builtin("fdisk", cmd_fdisk);
-  register_builtin("format", cmd_format);
-  register_builtin("copy", cmd_copy);
-  register_builtin("disks", cmd_disks);
-  register_builtin("free", cmd_free);
-  register_builtin("df", cmd_df);
-  register_builtin("dstat", cmd_dstat);
-  register_builtin("rit", cmd_rit);
-  register_builtin("ata", cmd_dstat);
-  register_builtin("visual", cmd_visual);
-  register_builtin("mouse", cmd_mouse);
-  register_builtin("usb", cmd_usb);
-  register_builtin("win", cmd_win);
-  register_builtin("win.exe", cmd_win);
-  register_builtin("ping", cmd_ping);
-  register_builtin("net", cmd_net);
-  register_builtin("api", cmd_api);
-  register_builtin("dlls", cmd_dlls);
-  register_builtin("smp", cmd_smp);
-  register_builtin("kill", cmd_kill);
-  register_builtin("killall", cmd_killall);
-  register_builtin("shutdown", cmd_shutdown);
-  register_builtin("reboot", cmd_reboot);
-  register_builtin("set", cmd_set);
-  register_builtin("ver", cmd_ver);
-  register_builtin("relogio", cmd_relogio);
-  register_builtin("command", cmd_command);
-  register_builtin("prtsc", cmd_prtsc);
-  register_builtin("tecla", cmd_tecla);
-  register_builtin("janelas", cmd_janelas);
+  shell_register_all();
 
   drives_init();
   drives_automount();
@@ -2259,13 +2291,7 @@ void kmain(const struct BootInfo* bi) {
   drives_mount_nvme(); /* PC real: particao SODOSHD do SSD vira D: (precisa do FAT32.DLL) */
   keyb_load_cfg();
   net_demo();
-  /* Antes do HTTPD: o ambiente (SET FAT32DLL=...) ja vale para tudo depois. */
-  run_autoexec();
-  {
-    char path[DRV_PATH];
-    if (mod_find_exe("HTTPD.EXE", path, (int)sizeof(path)) == 0)
-      mod_exec(path, 0, 0);
-  }
+  kernel_boot_programs(0);
 
   puts_k("OS Ready. Ctrl+F1..F12: telas do DOS, Ctrl+F7: WIN.\n");
   /* Unico trafego serial depois do boot ate ao visual: shell nao usa COM1 (só VGA). */

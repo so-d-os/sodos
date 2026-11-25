@@ -63,5 +63,25 @@ void hm_user_info(uint64_t* quota, uint64_t* used, uint64_t* total_ram);
 typedef void (*mm_walk_fn)(void* arg, int area, uint64_t addr, uint64_t size, int used,
                            uint32_t owner);
 void mm_walk(mm_walk_fn fn, void* arg);
+
+/* Confere a cadeia de blocos de uma area do jeito que o mm_walk, o TOP e os
+ * alocadores andam nela (FREE). area: 0 = heap do kernel, 1 = arena alta,
+ * 2 + i = regiao i acima de 4 GB. Devolve 0 se a area nao existe, 1 se a
+ * cadeia chega ao fim e -1 se para antes: um cabecalho estragado em stop
+ * deixa a RAM dali ate o fim fora de tudo (nem livre, nem usada, nem solta
+ * quando o programa sai) ate o proximo boot. */
+struct mm_chk {
+  uint64_t start, end;    /* a area */
+  uint64_t stop;          /* onde o percurso parou (= end se inteira) */
+  uint64_t blocks;        /* blocos bons ate ali */
+  uint64_t last;          /* ultimo bloco bom, o vizinho de antes da quebra (0: nenhum) */
+  uint64_t last_size;
+  uint32_t last_free, last_owner;
+  uint64_t bad_size;      /* o cabecalho em stop, como o percurso o leu */
+  uint32_t bad_free, bad_owner;
+  int bad_len;            /* bytes copiados de stop (16, menos se o fim corta) */
+  uint8_t bad_raw[16];
+};
+int mm_check(int area, struct mm_chk* c);
 /* Fim da memoria ocupada pela imagem do kernel (com .bss). */
 uint32_t mm_kernel_end(void);

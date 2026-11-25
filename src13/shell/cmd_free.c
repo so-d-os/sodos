@@ -1,6 +1,10 @@
 #include "shell.h"
 #include "mm.h"
 #include "serial.h"
+#include "visual.h"
+#include "wine.h"
+
+const char* mod_pid_name(uint32_t pid);   /* module.c */
 
 static void put_u32(uint32_t n) {
   char num[16];
@@ -27,6 +31,136 @@ static void put_hex64(uint64_t n) {
 static void put_mb(uint64_t n) {
   put_u32((uint32_t)(n >> 20));
   puts_k(" MB");
+}
+
+/* ---- cadeia de blocos (mm_check) ----
+ * O TOP, o FREE e os alocadores andam de cabecalho em cabecalho. Um cabecalho
+ * estragado (alguem escreveu alem do fim do bloco de antes) para o percurso:
+ * a RAM dali ate o fim da area some ate o proximo boot. No mapa do TOP ela
+ * aparece branca, como se fosse do kernel. */
+static void put_dono(uint32_t owner) {
+  char names[24][32];
+  uint32_t pids[24];
+  const char* nm = 0;
+  int i, n;
+  if (owner == 0) {
+    puts_k("kernel");
+    return;
+  }
+  if (owner == WINE_SHARED_OWNER) {
+    puts_k("WINE (memoria compartilhada)");
+    return;
+  }
+  puts_k("pid ");
+  put_u32(owner);
+  n = win_task_list(names, pids, 24);
+  for (i = 0; i < n && !nm; i++)
+    if (pids[i] == owner) nm = names[i];
+  if (!nm) {
+    nm = mod_pid_name(owner);
+    if (nm && strcmp(nm, "pid?") == 0) nm = 0;
+  }
+  puts_k(" (");
+  puts_k(nm ? nm : "nao roda mais");
+  puts_k(")");
+}
+
+static void put_hex8(uint8_t v) {
+  static const char hex[] = "0123456789ABCDEF";
+  putc(hex[v >> 4]);
+  putc(hex[v & 0xF]);
+}
+
+static void serial_hex64(uint64_t v) {
+  serial_hex32((uint32_t)(v >> 32));
+  serial_hex32((uint32_t)v);
+}
+
+static void put_tam(uint64_t n) {
+  if (n >= (1u << 20)) {
+    put_mb(n);
+  } else if (n >= 1024u) {
+    put_u32((uint32_t)(n >> 10));
+    puts_k(" KB");
+  } else {
+    put_u32((uint32_t)n);
+    puts_k(" bytes");
+  }
+}
+
+static void chk_show(int area) {
+  struct mm_chk c;
+  int r = mm_check(area, &c), i;
+  if (r == 0) return;
+  if (r > 0) {
+    puts_k("Cadeia de blocos inteira (");
+    put_u32((uint32_t)c.blocks);
+    puts_k(" blocos)\n");
+    return;
+  }
+  puts_k("QUEBRA na cadeia de blocos em ");
+  put_hex64(c.stop);
+  puts_k(":\n  dali ate o fim (");
+  put_hex64(c.end);
+  puts_k("), ");
+  put_tam(c.end - c.stop);
+  puts_k(" fora de tudo:\n  nem livres, nem usados; so o reboot devolve.\n  cabecalho: ");
+  if (c.bad_len < (int)sizeof(c.bad_raw)) {
+    puts_k("cortado pelo fim da area\n");
+  } else {
+    puts_k("tamanho ");
+    put_hex64(c.bad_size);
+    puts_k(c.bad_size < sizeof(c.bad_raw) ? " (menor que o cabecalho)\n"
+                                          : " (passa do fim da area)\n");
+    puts_k("             livre ");
+    put_u32(c.bad_free);
+    puts_k(", dono ");
+    put_u32(c.bad_owner);
+    puts_k("\n");
+  }
+  puts_k("  bytes:");
+  for (i = 0; i < c.bad_len; i++) {
+    putc(' ');
+    put_hex8(c.bad_raw[i]);
+  }
+  puts_k("  |");
+  for (i = 0; i < c.bad_len; i++)
+    putc(c.bad_raw[i] >= 32 && c.bad_raw[i] < 127 ? (char)c.bad_raw[i] : '.');
+  puts_k("|\n");
+  if (c.last) {
+    puts_k("  bloco de antes: ");
+    put_hex64(c.last);
+    puts_k(", ");
+    put_tam(c.last_size);
+    if (c.last_free) {
+      puts_k(", livre\n");
+    } else {
+      puts_k(", usado\n  dono: ");
+      put_dono(c.last_owner);
+      puts_k("\n  (se esse bloco escreveu alem do proprio fim, estragou o cabecalho)\n");
+    }
+  } else {
+    puts_k("  a quebra e no primeiro bloco da area\n");
+  }
+  serial_puts("[mm] cadeia quebrada: area ");
+  serial_hex32((uint32_t)area);
+  serial_puts(" em ");
+  serial_hex64(c.stop);
+  serial_puts(", fora ");
+  serial_hex32((uint32_t)((c.end - c.stop) >> 20));
+  serial_puts(" MB, cabecalho ");
+  serial_hex64(c.bad_size);
+  serial_puts(" ");
+  serial_hex32(c.bad_owner);
+  serial_puts(", antes ");
+  serial_hex64(c.last);
+  serial_puts(" tam ");
+  serial_hex64(c.last_size);
+  serial_puts(c.last_free ? " livre\n" : " dono ");
+  if (!c.last_free) {
+    serial_hex32(c.last_owner);
+    serial_puts("\n");
+  }
 }
 
 /* "free teste": escreve e confere uma palavra de 64 bits a cada 4 KB do maior
@@ -194,6 +328,7 @@ int cmd_free(int argc, char** argv) {
   puts_k(" bytes\nMaior bloco livre  ");
   put_u32(largest);
   puts_k(" bytes\n");
+  chk_show(0);
   if (um_ready()) {
     um_stats(&total, &used, &free_b, &largest);
     puts_k("\nHeap alto (programas) ");
@@ -207,6 +342,7 @@ int cmd_free(int argc, char** argv) {
     puts_k(" KB\nLivre  ");
     put_u32(free_b / 1024u);
     puts_k(" KB\n");
+    chk_show(1);
   } else {
     puts_k("\nHeap alto indisponivel (pouca RAM).\n");
   }
@@ -240,6 +376,14 @@ int cmd_free(int argc, char** argv) {
       puts_k(")");
     }
     puts_k("\n");
+    for (i = 0; i < hm_regions(); i++) {
+      if (hm_regions() > 1) {
+        puts_k("Regiao ");
+        put_u32(i);
+        puts_k(": ");
+      }
+      chk_show(2 + (int)i);
+    }
   }
   return 0;
 }

@@ -33,7 +33,7 @@ static WINAPI BOOL TerminateProcess(HANDLE h, DWORD code) {
       wwait_note("TerminateProcess", __builtin_return_address(0), code);
       wstack_note("TerminateProcess", &here);
     }
-    wexit((int)code);
+    wterminate((int)code);
   }
   return 0;
 }
@@ -86,8 +86,21 @@ static WINAPI BOOL GetModuleHandleExW(DWORD flags, const wchar16* name, HANDLE* 
   *out = GetModuleHandleW(name);
   return *out != 0;
 }
-static WINAPI HANDLE LoadLibraryA(const char* name) {
+/* caller: endereco de retorno no programa. DLL que nao existe, pedida pelo
+ * auxiliar de carga atrasada de quem chamou (o nome passado e o da tabela
+ * atrasada dele, o mesmo ponteiro; so no LoadLibrary(Ex)A): modulo vazio em
+ * vez de NULL, porque o Chrome derruba o processo quando a carga atrasada
+ * falha (pdh.dll um minuto depois de abrir). Quem testa uma DLL opcional por
+ * conta propria (mf.dll no GPU) continua recebendo NULL. */
+static HANDLE load_lib(const char* name, void* caller, int ansi) {
   struct wmod* m = pe_load(name, 0);
+  if (!m && name && ansi) {
+    struct wmod* who = pe_from_addr((uint64_t)(uintptr_t)caller);
+    if (who && !who->builtin && pe_delay_name_is(who, name)) {
+      m = pe_load_phantom(name);
+      if (m) wlog("carga atrasada: DLL que o WINE nao tem, modulo vazio: ", name);
+    }
+  }
   if (!m) {
     wlog("LoadLibrary: DLL nao encontrada: ", name ? name : "(nulo)");
     wset_lasterr(ERROR_MOD_NOT_FOUND);
@@ -95,21 +108,23 @@ static WINAPI HANDLE LoadLibraryA(const char* name) {
   }
   return pe_handle(m);
 }
-static WINAPI HANDLE LoadLibraryW(const wchar16* name) {
+static HANDLE load_lib16(const wchar16* name, void* caller) {
   char* n = wdup16to8(name);
-  HANDLE h = n ? LoadLibraryA(n) : 0;
+  HANDLE h = n ? load_lib(n, caller, 0) : 0;
   k_free(n);
   return h;
 }
+static WINAPI HANDLE LoadLibraryA(const char* name) { return load_lib(name, __builtin_return_address(0), 1); }
+static WINAPI HANDLE LoadLibraryW(const wchar16* name) { return load_lib16(name, __builtin_return_address(0)); }
 static WINAPI HANDLE LoadLibraryExA(const char* name, HANDLE f, DWORD fl) {
   (void)f;
   (void)fl;
-  return LoadLibraryA(name);
+  return load_lib(name, __builtin_return_address(0), 1);
 }
 static WINAPI HANDLE LoadLibraryExW(const wchar16* name, HANDLE f, DWORD fl) {
   (void)f;
   (void)fl;
-  return LoadLibraryW(name);
+  return load_lib16(name, __builtin_return_address(0));
 }
 static WINAPI BOOL FreeLibrary(HANDLE h) {
   (void)h;
@@ -124,10 +139,69 @@ static WINAPI long nt_notimpl(const char* name) {
 }
 /* kernel32/user32/advapi32/gdi32: o que falta devolve 0 (FALSE/NULL) com
  * ERROR_CALL_NOT_IMPLEMENTED, como uma versao antiga do Windows sem a funcao */
-static WINAPI uintptr_t api_notimpl(const char* name) {
-  wlog("API sem implementacao (devolve 0): ", name);
-  wset_lasterr(120); /* ERROR_CALL_NOT_IMPLEMENTED */
+/* Funcoes que nao temos cujo "falhou" nao e 0: HRESULT (0 = S_OK), codigos de
+ * erro (0 = ERROR_SUCCESS), NTSTATUS e handles (INVALID_HANDLE_VALUE). Com 0 o
+ * programa entendia sucesso e usava a saida nao preenchida: o Chrome caia
+ * logo depois de SHCreateAssociationRegistration. O resto (BOOL, ponteiros,
+ * contagens, void) devolve 0. Nomes tirados das importacoes do Chrome. */
+#define RV_ENOTIMPL 0x80004001u    /* E_NOTIMPL */
+#define RV_ERR 120u                /* ERROR_CALL_NOT_IMPLEMENTED */
+#define RV_NTSTATUS 0xC0000002u    /* STATUS_NOT_IMPLEMENTED */
+#define RV_SEC 0x80090302u         /* SEC_E_UNSUPPORTED_FUNCTION */
+#define RV_INVALID ((uintptr_t)-1) /* INVALID_HANDLE_VALUE, e -1 dos que devolvem int */
+static const struct {
+  const char* name;
+  uintptr_t rv;
+} notimpl_rv[] = {
+    /* HRESULT: shell32, propsys, uxtheme, comdlg32, ndfapi, ordinais */
+    {"SHCreateAssociationRegistration", RV_ENOTIMPL}, {"SHOpenFolderAndSelectItems", RV_ENOTIMPL},
+    {"SHOpenWithDialog", RV_ENOTIMPL}, {"SHParseDisplayName", RV_ENOTIMPL},
+    {"SHQueryUserNotificationState", RV_ENOTIMPL}, {"InitPropVariantFromStringVector", RV_ENOTIMPL},
+    {"PSGetPropertyKeyFromName", RV_ENOTIMPL}, {"GetThemeBackgroundContentRect", RV_ENOTIMPL},
+    {"PrintDlgExW", RV_ENOTIMPL}, {"NdfCreateWebIncident", RV_ENOTIMPL}, {"NdfExecuteDiagnosis", RV_ENOTIMPL},
+    {"NdfCloseIncident", RV_ENOTIMPL}, {"shlwapi.dll#219", 0x80004002u /* QISearch: E_NOINTERFACE */},
+    {"mmdevapi.dll#17", RV_ENOTIMPL}, {"d3d12.dll#101", RV_ENOTIMPL},
+    /* HRESULT: ole32 */
+    {"CoAllowSetForegroundWindow", RV_ENOTIMPL}, {"CoCreateFreeThreadedMarshaler", RV_ENOTIMPL},
+    {"CoGetClassObject", RV_ENOTIMPL},
+    {"CoGetInterfaceAndReleaseStream", RV_ENOTIMPL}, {"CoMarshalInterThreadInterfaceInStream", RV_ENOTIMPL},
+    {"CoRegisterMessageFilter", RV_ENOTIMPL}, {"CreateILockBytesOnHGlobal", RV_ENOTIMPL},
+    {"GetHGlobalFromILockBytes", RV_ENOTIMPL}, {"GetHGlobalFromStream", RV_ENOTIMPL},
+    {"StgCreateDocfileOnILockBytes", RV_ENOTIMPL}, {"StringFromCLSID", RV_ENOTIMPL},
+    /* codigos de erro do Win32 */
+    {"RegQueryValueExA", RV_ERR}, {"GetAdaptersInfo", RV_ERR}, {"GetIfTable2", RV_ERR},
+    {"IpReleaseAddress", RV_ERR}, {"IpRenewAddress", RV_ERR}, {"WinHttpCreateProxyResolver", RV_ERR},
+    {"WinHttpGetProxyForUrlEx", RV_ERR}, {"WinHttpGetProxyResult", RV_ERR}, {"PowerReadACValue", RV_ERR},
+    {"PowerReadDCValue", RV_ERR}, {"BluetoothGetRadioInfo", RV_ERR}, {"BluetoothSdpGetAttributeValue", RV_ERR},
+    {"BluetoothSdpGetContainerElementData", RV_ERR}, {"CredUIPromptForWindowsCredentialsW", 1223u /* cancelado */},
+    /* CONFIGRET: CR_FAILURE */
+    {"CM_Get_DevNode_PropertyW", 0x13u}, {"CM_Get_Device_IDW", 0x13u}, {"CM_Get_Parent", 0x13u},
+    {"CM_Locate_DevNodeW", 0x13u},
+    /* NTSTATUS e SECURITY_STATUS */
+    {"BCryptOpenAlgorithmProvider", RV_NTSTATUS}, {"LsaConnectUntrusted", RV_NTSTATUS}, {"LsaLogonUser", RV_NTSTATUS},
+    {"AcquireCredentialsHandleW", RV_SEC}, {"InitializeSecurityContextW", RV_SEC},
+    {"QueryContextAttributesW", RV_SEC}, {"QuerySecurityPackageInfoW", RV_SEC},
+    /* handles e int: falha = -1 */
+    {"SetupDiGetClassDevsW", RV_INVALID}, {"SetupDiCreateDeviceInfoList", RV_INVALID},
+    {"SetupDiOpenDevRegKey", RV_INVALID}, {"FindFirstFileExA", RV_INVALID}, {"FindFirstVolumeW", RV_INVALID},
+    {"DocumentPropertiesW", RV_INVALID}, {"DeviceCapabilitiesW", RV_INVALID},
+    {0, 0}};
+static uintptr_t notimpl_value(const char* n) {
+  int i;
+  for (i = 0; notimpl_rv[i].name; i++)
+    if (strcmp(n, notimpl_rv[i].name) == 0) return notimpl_rv[i].rv;
+  /* familias: Media Foundation (HRESULT), ESENT (JET_ERR < 0), HidP (NTSTATUS), NCrypt */
+  if (n[0] == 'M' && n[1] == 'F' && strcmp(n, "MFGetSystemTime") != 0) return RV_ENOTIMPL;
+  if (strncmp(n, "Jet", 3) == 0) return RV_INVALID;
+  if (strncmp(n, "HidP_", 5) == 0) return 0xC0110020u; /* HIDP_STATUS_NOT_IMPLEMENTED */
+  if (strncmp(n, "NCrypt", 6) == 0) return 0x80090029u; /* NTE_NOT_SUPPORTED */
   return 0;
+}
+static WINAPI uintptr_t api_notimpl(const char* name) {
+  uintptr_t rv = notimpl_value(name);
+  wlog(rv ? "API sem implementacao (devolve erro): " : "API sem implementacao (devolve 0): ", name);
+  wset_lasterr(120); /* ERROR_CALL_NOT_IMPLEMENTED */
+  return rv;
 }
 static void* gen_stub(const char* name, void* target) {
   /* 48 B9 imm64  mov rcx, nome ; 48 B8 imm64  mov rax, alvo ; FF E0  jmp rax */
@@ -216,6 +290,35 @@ static WINAPI void* GetProcAddress(HANDLE h, const char* name) {
   if (!f && m && (uintptr_t)name > 0xFFFF && api_dll(m->name) && !keep_absent(name)) {
     f = gen_stub(name, (void*)api_notimpl);
     if (f && wine_debug) wlog("GetProcAddress: sem implementacao (devolve 0): ", name);
+  }
+  /* Carga atrasada: o __delayLoadHelper2 do programa pede a uma DLL embutida
+   * uma funcao que nao temos. Com NULL o auxiliar lanca excecao, e o Chrome
+   * derruba o processo de proposito ("Failed to delay load": int3 no
+   * chrome.dll, depois de NetGetJoinInformation e uxtheme #47). So para o que
+   * esta na tabela atrasada de quem chamou: o stub devolve 0 e registra. */
+  if (!f && m && m->builtin) {
+    struct wmod* who = pe_from_addr((uint64_t)(uintptr_t)__builtin_return_address(0));
+    if (who && !who->builtin && pe_delay_has(who, m->name, name)) {
+      char nm[WMOD_NAME + 12];
+      const char* sn = name;
+      if ((uintptr_t)name <= 0xFFFF) { /* ordinal: "uxtheme.dll#47" */
+        unsigned o = (unsigned)(uintptr_t)name;
+        char num[8];
+        int k = 0, n;
+        strcpy(nm, m->name);
+        strcat(nm, "#");
+        n = (int)strlen(nm);
+        do {
+          num[k++] = (char)('0' + o % 10);
+          o /= 10;
+        } while (o);
+        while (k) nm[n++] = num[--k];
+        nm[n] = 0;
+        sn = nm;
+      }
+      f = gen_stub(sn, (void*)api_notimpl);
+      if (f) wlog("carga atrasada sem implementacao (stub devolve 0): ", sn);
+    }
   }
   if (!f) {
     if (wine_debug && (uintptr_t)name > 0xFFFF) wlog("GetProcAddress: falta ", name);

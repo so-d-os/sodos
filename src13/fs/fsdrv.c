@@ -181,6 +181,35 @@ static void env_name_of(const char* dll, char* out, int max) {
 
 const char* fsdrv_path(void) { return last_path ? last_path : ""; }
 
+/* TROCA FAT32.DLL (troca.c): as copias carregadas de dll deixam de ser
+ * reaproveitadas, e a proxima montagem le o arquivo de novo. Os volumes ja
+ * montados ficam com o driver deles (o DLL continua na memoria). Quantas. */
+static int same_base(const char* path, const char* dll) {
+  const char* b = path;
+  const char* p;
+  for (p = path; *p; p++)
+    if (*p == '\\' || *p == '/' || *p == ':') b = p + 1;
+  return str_eq(b, dll);
+}
+
+int fsdrv_retire(const char* dll) {
+  int i, n = 0;
+  if (!dll) return 0;
+  for (i = 0; i < drv_n; i++)
+    if (drv[i].path[0] != '#' && same_base(drv[i].path, dll)) {
+      drv[i].path[0] = '#';              /* nunca casa com um caminho de verdade */
+      n++;
+    }
+  if (n) {
+    last_path = 0;
+    bad_path[0] = 0;
+    serial_puts("[fsdrv] ");
+    serial_puts(dll);
+    serial_puts(" aposentado: a proxima montagem le o arquivo de novo\n");
+  }
+  return n;
+}
+
 const struct fsdrv_ops* fsdrv_get(const char* dll, char skip) {
   /* Z: tem o que veio no SODOS.PAK; depois os discos. U: monta sozinho ao
    * ser tocado e pode ser justamente quem pediu o driver: fica por ultimo. */

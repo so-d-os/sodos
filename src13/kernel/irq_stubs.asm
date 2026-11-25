@@ -64,6 +64,13 @@ tlb_ipi_stub:
   push qword 0xF4
   jmp isr_common
 
+; TROCA.EXE (kernel/troca.c): para esta CPU enquanto o kernel e trocado a quente.
+global troca_ipi_stub
+troca_ipi_stub:
+  push qword 0
+  push qword 0xF6
+  jmp isr_common
+
 ; Interrupcao espuria do LAPIC: nao leva EOI.
 global spurious_stub
 spurious_stub:

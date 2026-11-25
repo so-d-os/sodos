@@ -37,10 +37,24 @@ typedef const struct wine_ops* (*wine_entry_fn)(void);
 /* 1 se o arquivo e um executavel PE (MZ + "PE\0\0"). */
 int wine_is_pe(const char* path);
 /* Entrada do WINE.DLL para um novo EXE do Windows (carrega se preciso).
- * 0 se WINE nao esta ligado ou o DLL nao foi achado (mod_last_error diz). */
+ * 0 se WINE nao esta ligado ou o DLL nao foi achado (mod_last_error diz).
+ * wine_entry_from: parent = pid de quem chamou o mod_exec; filho de um EXE do
+ * Windows usa a mesma copia do WINE.DLL (TROCA WINE), assim como o filho em
+ * paralelo cujo argv[1] o wine_note_spawn guardou. wine_entry = sem pai. */
 void* wine_entry(void);
-/* O EXE do Windows terminou (normal ou a forca). */
+void* wine_entry_from(uint32_t parent, int argc, char** argv);
+/* O EXE do Windows terminou (normal ou a forca). _pid: o pid dele (o
+ * exec_release roda com o pid de quem chamou ja de volta). */
 void wine_exec_done(void);
+void wine_exec_done_pid(uint32_t pid);
+/* k_win_launch_arg de um EXE do Windows: o filho "--wine-spawn=N" vai nascer
+ * noutra tarefa do WIN e precisa da copia do WINE.DLL de quem pediu. */
+void wine_note_spawn(const char* arg);
+/* TROCA WINE (troca.c): carrega path (0 = o de sempre, PATHSODOS\DRV) numa
+ * copia nova, que passa a ser a dos proximos EXEs. msg = resultado. 0 ok. */
+int wine_swap(const char* path, char* msg, int max);
+/* Copias carregadas, para o TROCA sem argumentos. Bytes escritos. */
+int wine_estado(char* out, int max);
 /* env.c chama quando WINE ou PATHSODOS mudam. */
 void wine_env_changed(void);
 /* Memoria sem processo dono do WINE.DLL (k_malloc_shared: secoes, pipes):

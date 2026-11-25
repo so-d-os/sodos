@@ -67,3 +67,12 @@ void syslog_stamp(void);      /* "hh:mm:ss " comecando uma linha */
 /* SET PRODUCTION=1 (ou ON/SIM/YES/TRUE/PRODUCTION): o WIN nao abre janela de
  * saida para os programas; o texto deles vai para o log (Ctrl+F12). */
 int syslog_production(void);
+
+int vt_cur_index(void);   /* tela que esta rodando (VT_WIN = o WIN) */
+int vt_state(int i);
+/* LIMPA (shell/cmd_limpa.c): telas de texto em uso (indice e pid do programa,
+ * 0 = prompt); recomecar todas, com a tela 1 em entry (nao volta, a nao ser
+ * sem memoria); e, ja na tela 1 nova, encerrar os programas largados. */
+int vt_limpa_list(int* vt, uint32_t* pid, int max);
+void vt_limpa_finish(void (*entry)(void));
+void vt_limpa_after(void);

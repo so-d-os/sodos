@@ -9,6 +9,7 @@ void dstat_path(const char* p);   /* disks/cmd_dstat.c */
 #include "fsdrv.h"
 #include "env.h"
 #include "serial.h"
+#include "kthread.h"
 
 extern void fat_set_drive(uint32_t drive);
 extern void fat_set_partition_offset(uint32_t offset);
@@ -50,6 +51,35 @@ static uint32_t drv_ata[26];
 static char cur_letter = 'C';
 /* Pasta atual de cada unidade, sem a letra e sem barra no inicio. */
 static char cur_dir[26][DRV_PATH];
+/* cur_letter e cur_dir sao as da tela (vt.c troca a cada tela). Cada Command
+ * e cada programa do WIN (visual.c) tem as suas, em uso pelo mundo enquanto
+ * ele roda (drives_state_use); a thread de um programa (outra CPU) usa as do
+ * programa dela (drives_set_thread_state). Numa variavel so, com guardas nas
+ * pontas, para o TROCA (docs/TROCA.md). */
+static struct {
+  uint64_t guarda0[4];
+  struct drives_state* cur;            /* em uso pelo mundo; 0 = cur_letter/cur_dir */
+  struct drives_state* (*thr)(void);   /* thread de programa: as do programa dela */
+  uint64_t guarda1[4];
+} DS;
+
+/* As de quem chama (0 = cur_letter/cur_dir). A thread nao usa as do mundo:
+ * ele pode estar rodando outro programa nessa hora. */
+static struct drives_state* ds(void) {
+  if (DS.thr && kt_in_thread()) {
+    struct drives_state* s = DS.thr();
+    if (s) return s;
+  }
+  return DS.cur;
+}
+
+static char* ds_letter(struct drives_state* s) {
+  return s ? &s->letter : &cur_letter;
+}
+
+static char (*ds_dir(struct drives_state* s))[DRV_PATH] {
+  return s ? s->dir : cur_dir;
+}
 static uint32_t drv_lba[26];   /* inicio da particao FAT */
 /* fat.c guarda um FAT por vez: a unidade dele agora (-1 = nenhuma valida). */
 static int fat_cur = -1;
@@ -215,7 +245,7 @@ static int usb_mount(void) {
   if (fat_cur == idx) fat_cur = -1;
   ext_drop(idx);
   drv_kind[idx] = DRV_NONE;
-  cur_dir[idx][0] = '\0';
+  ds_dir(ds())[idx][0] = '\0';
   if (disk_read_sector(DISK_USB, 0, s0) != 0) return -1;
   if ((s0[54] == 'F' && s0[55] == 'A' && s0[56] == 'T') ||
       (s0[82] == 'F' && s0[83] == 'A' && s0[84] == 'T') || fsdrv_is_fat32(s0)) {
@@ -320,12 +350,13 @@ static int drives_mount_usb_u(void) {
 /* Solta o pendrive da letra atual (se for dele). */
 static void usb_unmount(void) {
   int idx = letter_idx(USB_LETTER);
+  struct drives_state* s = ds();
   if (drv_kind[idx] == DRV_NONE || drv_ata[idx] != DISK_USB) return;
   if (fat_cur == idx) fat_cur = -1;
   ext_drop(idx);
   drv_kind[idx] = DRV_NONE;
-  cur_dir[idx][0] = '\0';
-  if (cur_letter == USB_LETTER) cur_letter = 'C';
+  ds_dir(s)[idx][0] = '\0';
+  if (*ds_letter(s) == USB_LETTER) *ds_letter(s) = 'C';
 }
 
 int drives_usb_letter(void) { return pendrive_on() ? USB_LETTER : 0; }
@@ -497,31 +528,50 @@ void drives_init(void) {
 }
 
 char drives_current(void) {
-  return cur_letter;
+  return *ds_letter(ds());
+}
+
+/* De (sl, sd) para (dl, dd), cada pasta so ate o NUL: a troca de tela
+ * (vt.c) e cada Command ou programa novo chamam isto. */
+static void ds_copy(char* dl, char (*dd)[DRV_PATH], const char* sl, char (*sd)[DRV_PATH]) {
+  int i, k;
+  if (dd == sd) return;
+  *dl = *sl;
+  for (i = 0; i < 26; i++)
+    for (k = 0; k < DRV_PATH; k++)
+      if ((dd[i][k] = sd[i][k]) == '\0') break;
 }
 
 void drives_state_save(struct drives_state* s) {
-  int i, k;
-  s->letter = cur_letter;
-  /* so ate o NUL: a troca de tela (vt.c) chama isto a cada vez */
-  for (i = 0; i < 26; i++)
-    for (k = 0; k < (int)sizeof(cur_dir[0]); k++)
-      if ((s->dir[i][k] = cur_dir[i][k]) == '\0') break;
+  struct drives_state* c = ds();
+  if (s) ds_copy(&s->letter, s->dir, ds_letter(c), ds_dir(c));
 }
 
 void drives_state_load(const struct drives_state* s) {
-  int i, k;
-  cur_letter = s->letter;
-  for (i = 0; i < 26; i++)
-    for (k = 0; k < (int)sizeof(cur_dir[0]); k++)
-      if ((cur_dir[i][k] = s->dir[i][k]) == '\0') break;
+  struct drives_state* c = ds();
+  struct drives_state* from = (struct drives_state*)s;
+  if (s) ds_copy(ds_letter(c), ds_dir(c), &from->letter, from->dir);
+}
+
+struct drives_state* drives_state_use(struct drives_state* s) {
+  struct drives_state* old = DS.cur;
+  if (!kt_in_thread()) DS.cur = s;   /* o estado em uso e o do mundo */
+  return old;
+}
+
+struct drives_state* drives_state_cur(void) {
+  return DS.cur;
+}
+
+void drives_set_thread_state(struct drives_state* (*fn)(void)) {
+  DS.thr = fn;
 }
 
 int drives_set_current(char letter) {
   char L = norm_letter(letter);
   int i = letter_idx(L);
   if (!drv_present(i)) return -1;
-  cur_letter = L;
+  *ds_letter(ds()) = L;
   return 0;
 }
 
@@ -625,7 +675,7 @@ int drives_mount_nvme(void) {
   }
   drv_ata[idx] = DISK_NVME;
   drv_lba[idx] = 0;
-  cur_dir[idx][0] = '\0';
+  ds_dir(ds())[idx][0] = '\0';
   puts_k(L);
   puts_k(" NVMe montado (");
   puts_k(nvme_name());
@@ -731,7 +781,9 @@ static void path_norm(char* s, int max) {
 
 void path_parse(const char* path, char* letter_out, char* name_out, int name_max) {
   const char* p = path ? path : "";
-  char L = cur_letter;
+  struct drives_state* cs = ds();
+  char (*cd)[DRV_PATH] = ds_dir(cs);
+  char L = *ds_letter(cs);
   int absolute = 0;
   int i = 0;
   int li;
@@ -750,8 +802,8 @@ void path_parse(const char* path, char* letter_out, char* name_out, int name_max
   }
   *letter_out = L;
   li = letter_idx(L);
-  if (!absolute && li >= 0 && cur_dir[li][0]) {
-    const char* b = cur_dir[li];
+  if (!absolute && li >= 0 && cd[li][0]) {
+    const char* b = cd[li];
     while (*b && i < name_max - 1) name_out[i++] = *b++;
   }
   if (*p && i > 0 && name_out[i - 1] != '\\' && i < name_max - 1) name_out[i++] = '\\';
@@ -1024,11 +1076,13 @@ static void copy_str(char* dst, int max, const char* src) {
 }
 
 void drives_pwd(char* out, int max) {
+  struct drives_state* cs = ds();
+  char L = *ds_letter(cs);
   int i = 0;
-  int li = letter_idx(cur_letter);
-  const char* d = (li >= 0) ? cur_dir[li] : "";
+  int li = letter_idx(L);
+  const char* d = (li >= 0) ? ds_dir(cs)[li] : "";
   if (!out || max < 4) return;
-  out[i++] = cur_letter;
+  out[i++] = L;
   out[i++] = ':';
   out[i++] = '\\';
   while (*d && i < max - 1) out[i++] = *d++;
@@ -1071,8 +1125,11 @@ static int drives_chdir_u(const char* spec) {
       return -1;
     }
   }
-  cur_letter = L;
-  copy_str(cur_dir[idx], (int)sizeof(cur_dir[idx]), name);
+  {
+    struct drives_state* cs = ds();
+    *ds_letter(cs) = L;
+    copy_str(ds_dir(cs)[idx], DRV_PATH, name);
+  }
   return 0;
 }
 
@@ -1810,8 +1867,9 @@ static int drives_names_u(char letter, char out[][32], int max) {
   if (is_tree(idx)) {
     char tmp[1024];
     int pos = 0;
-    int rc = drv_kind[idx] == DRV_EXT ? ext_list(idx, cur_dir[idx], tmp, (int)sizeof(tmp))
-                                      : fat_list_dir(cur_dir[idx], tmp, (int)sizeof(tmp));
+    const char* d = ds_dir(ds())[idx];
+    int rc = drv_kind[idx] == DRV_EXT ? ext_list(idx, d, tmp, (int)sizeof(tmp))
+                                      : fat_list_dir(d, tmp, (int)sizeof(tmp));
     if (rc < 0) return 0;
     while (tmp[pos] && n < max) {
       char name[32];

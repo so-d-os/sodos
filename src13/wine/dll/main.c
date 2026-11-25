@@ -212,10 +212,8 @@ static int start(int argc, char** argv) {
     wcon_write("\r\n", 2);
   }
 
-  if (!is_child) { /* perfil salvo de outro boot (profsave.c, SET WINEAPPSAVE) */
-    void wprof_restore(void);
-    wprof_restore();
-  }
+  /* perfil salvo de outro boot (profsave.c, SET WINEAPPSAVE e WINEUDSAVE) */
+  if (!is_child) wprof_restore(argc, argv);
   /* depois do restore: resolver o APPDATA cria Z:\WINEAPP e o restore achava
    * que o perfil ja existia neste boot */
   wenv_publish();
@@ -269,7 +267,7 @@ __attribute__((noreturn)) void wexit(int code) {
       wpipe_proc_exit();
     }
     wimg_cache_proc(-1);
-    pe_detach_all();
+    if (!p->no_detach) pe_detach_all();
     p->exit_code = code;
     __sync_lock_test_and_set(&p->exit_req, 1);
     k_futex_wake(&p->exit_req, -1);
@@ -285,6 +283,16 @@ __attribute__((noreturn)) void wexit(int code) {
   k_thread_exit(code);
   for (;;) {
   }
+}
+
+/* TerminateProcess do proprio processo, excecao nao tratada e fail fast: no
+ * Windows o processo acaba sem DllMain(DLL_PROCESS_DETACH) (so o ExitProcess
+ * roda o detach). O Chrome, depois de um CHECK, chamava TerminateProcess; o
+ * detach do chrome.dll quebrado dava acesso invalido e o processo nao saia
+ * (o .BAT ficava parado). */
+__attribute__((noreturn)) void wterminate(int code) {
+  wp()->no_detach = 1;
+  wexit(code);
 }
 
 static const struct wine_ops ops = {WINE_ABI, start};

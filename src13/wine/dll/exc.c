@@ -291,7 +291,7 @@ static int exc_dispatch(struct exc_record* rec, uint8_t* ctx) {
 static void exc_fatal(const struct exc_record* rec, const uint8_t* ctx) {
   exc_report("excecao nao tratada, codigo ", rec, ctx);
   k_puts("wine: excecao do Windows nao tratada (detalhes na serial)\n");
-  wexit((int)rec->code);
+  wterminate((int)rec->code);
 }
 
 void wine_fault_dispatch(const uint64_t* fr, uint64_t cr2, uint8_t* ctx) {
@@ -506,7 +506,7 @@ static WINAPI void RaiseFailFastException(struct exc_record* rec, uint8_t* ctx, 
   (void)fl;
   wlogx("RaiseFailFastException, codigo ", rec ? rec->code : 0);
   k_puts("wine: o programa abortou (fail fast)\n");
-  wexit(rec ? (int)rec->code : (int)0xC0000409);
+  wterminate(rec ? (int)rec->code : (int)0xC0000409);
 }
 static WINAPI __attribute__((noreturn)) void RtlRestoreContext(uint8_t* ctx, void* rec) {
   (void)rec;

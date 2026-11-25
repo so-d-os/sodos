@@ -11,6 +11,7 @@
 #include "serial.h"
 #include "mm.h"
 #include "kthread.h"
+#include "drives.h"
 
 int win_task_current(void); /* video/visual.c: tarefa do WIN rodando, -1 = o laco */
 
@@ -144,6 +145,7 @@ static int run_cmd(const char* cmd, char* out, int* outn, int max) {
   int gen;
   int nested;
   void (*prev)(char c);
+  struct drives_state* dprev;
   while (cmd[i] && cmd[i] != '\r' && cmd[i] != '\n' && i < (int)sizeof(line) - 1) {
     line[i] = cmd[i];
     i++;
@@ -169,7 +171,12 @@ static int run_cmd(const char* cmd, char* out, int* outn, int max) {
   gen = (int)net_srv_gen();
   in_cmd = 1;
   poll_lock = 0;
+  /* Unidade e pastas da tela (no WIN, as do desktop), nunca as do Command
+   * ou programa que estiver rodando quando o pedido chega: o cd da API
+   * mudava a pasta dele. O Command aberto pelo COMMAND da API comeca nelas. */
+  dprev = drives_state_use(0);
   shell_exec_line(line);
+  drives_state_use(dprev);
   poll_lock = 1;
   in_cmd = nested;
   shell_set_out(prev);

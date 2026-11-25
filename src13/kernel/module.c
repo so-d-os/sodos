@@ -636,7 +636,7 @@ static void exec_release(uint32_t pid, int id) {
   hm_free_owner(pid);
   isr_fault_release(pid);
   wine_low_release_pid(pid);      /* imagem de base fixa (sem pedidos: so um if) */
-  if (id < 0) wine_exec_done();   /* EXE do Windows: pode soltar o WINE.DLL */
+  if (id < 0) wine_exec_done_pid(pid);   /* EXE do Windows: pode soltar o WINE.DLL */
 }
 
 /* Programas de inicio (AUTOEXEC, servicos e o que o WIN abre sozinho) tem
@@ -651,6 +651,8 @@ void mod_mark_boot(void) {
   serial_puts("\n");
 }
 uint32_t mod_boot_mark(void) { return boot_mark; }
+/* LIMPA: o boot roda de novo; o WIN novo marca outra vez. */
+void mod_mark_boot_reset(void) { boot_mark = 0; }
 
 /* Primeiro programa da cadeia (quem chamou quem, ate o de fora). */
 uint32_t mod_root_pid(uint32_t pid) {
@@ -760,7 +762,8 @@ static int mod_exec_run(const char* path, int argc, char** argv) {
   pe = wine_is_pe(path);
   if (pe) {
     id = -1;
-    entry = wine_entry();
+    /* filho de um EXE do Windows: a mesma copia do WINE.DLL (TROCA WINE) */
+    entry = wine_entry_from(prev_pid, argc, argv);
     if (!entry) {
       um_set_owner(prev_owner);
       cur_pid = prev_pid;
@@ -796,7 +799,7 @@ static int mod_exec_run(const char* path, int argc, char** argv) {
   stack = (uint8_t*)umalloc_owned(ssz, pid);
   if (!stack) {
     set_err("sem memoria para a pilha", 0);
-    if (pe) wine_exec_done();
+    if (pe) wine_exec_done_pid(pid);
     unload(id);
     um_set_owner(prev_owner);
     cur_pid = prev_pid;
@@ -832,7 +835,7 @@ static int mod_exec_run(const char* path, int argc, char** argv) {
     av = pack_user_argv(&nargc, argv, stack, ssz, is64);
     if (!av) {
       set_err("argumentos nao cabem na pilha", 0);
-      if (pe) wine_exec_done();
+      if (pe) wine_exec_done_pid(pid);
       unload(id);
       um_set_owner(prev_owner);
       cur_pid = prev_pid;

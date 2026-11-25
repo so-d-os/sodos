@@ -294,6 +294,36 @@ int wutf8_to_16(const char* s8, int n, wchar16* d, int max) {
   return o;
 }
 
+/* Memoria compartilhada acima de 4 GB (sobrevive ao processo que pediu): o
+ * cache de imagens (pe.c) e as secoes (map.c). A arena baixa (3 GB) e de
+ * todos os programas e acabava com o Claude e o Chrome juntos (1,7 GB so de
+ * cache e secoes do Mojo, com 21 GB livres acima de 4 GB). O kernel novo
+ * exporta k_hmalloc_shared (dono WINE_SHARED_OWNER, solto quando nao ha mais
+ * EXE do Windows); no antigo, ou sem cota no SET HIMEM, devolve 0 e quem
+ * chama usa a arena baixa como antes. */
+typedef void* (*hms_fn)(uint64_t n, uint64_t align);
+typedef void (*hfs_fn)(void* p);
+static hms_fn hms;
+static hfs_fn hfs;
+static volatile int hms_tried;
+void* wshared_high_alloc(uint64_t n, uint64_t align) {
+  if (!hms_tried) {
+    hms = (hms_fn)k_dl_sym(0, "k_hmalloc_shared", 0);
+    hfs = (hfs_fn)k_dl_sym(0, "k_hfree_shared", 0);
+    hms_tried = 1;
+  }
+  return hms && hfs && n ? hms(n, align ? align : 16) : 0;
+}
+/* solta o que veio de wshared_high_alloc ou do k_malloc_shared */
+void wshared_free(void* p) {
+  if (!p) return;
+  if ((uintptr_t)p >= 0x100000000ull) {
+    if (hfs) hfs(p);
+  } else {
+    k_free_shared(p);
+  }
+}
+
 void* wzalloc(size_t n) {
   void* p = k_malloc((unsigned)(n ? n : 1));
   if (p) memset(p, 0, n);

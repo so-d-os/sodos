@@ -254,6 +254,109 @@ static WINAPI void RtlFreeUnicodeString(struct ustr* u) {
   u->buf = 0;
   u->len = u->max = 0;
 }
+
+/* netapi32: o Chrome pergunta na partida se a maquina esta num dominio ou
+ * no Azure AD (base/win/win_util.cc). Resposta: grupo de trabalho WORKGROUP,
+ * sem Azure AD. Os buffers vem do heap do programa (NetApiBufferFree). */
+static WINAPI DWORD NetGetJoinInformation(const wchar16* server, wchar16** name, DWORD* status) {
+  static const char wg[] = "WORKGROUP";
+  wchar16* b;
+  size_t i;
+  (void)server;
+  if (!name || !status) return 87; /* ERROR_INVALID_PARAMETER */
+  b = (wchar16*)wheap_alloc(sizeof(wg) * 2);
+  if (!b) return 8; /* ERROR_NOT_ENOUGH_MEMORY */
+  for (i = 0; i < sizeof(wg); i++) b[i] = (wchar16)(unsigned char)wg[i];
+  *name = b;
+  *status = 2; /* NetSetupWorkgroupName */
+  return 0;    /* NERR_Success */
+}
+static WINAPI DWORD NetApiBufferFree(void* p) {
+  if (p) wheap_free(p);
+  return 0;
+}
+static WINAPI long NetGetAadJoinInformation(const wchar16* tenant, void** info) {
+  (void)tenant;
+  if (info) *info = 0; /* S_OK com NULL: nao esta no Azure AD */
+  return 0;
+}
+static WINAPI void NetFreeAadJoinInformation(void* info) { (void)info; }
+static WINAPI DWORD NetUserGetInfo(const wchar16* server, const wchar16* user, DWORD level, uint8_t** buf) {
+  (void)server; (void)user; (void)level;
+  if (buf) *buf = 0;
+  return 2221; /* NERR_UserNotFound */
+}
+static WINAPI DWORD DsRoleGetPrimaryDomainInformation(const wchar16* server, int level, uint8_t** buf) {
+  (void)server; (void)level;
+  if (buf) *buf = 0;
+  return 50; /* ERROR_NOT_SUPPORTED */
+}
+static WINAPI void DsRoleFreeMemory(void* p) {
+  if (p) wheap_free(p);
+}
+/* api-ms-win-core-realtime-l1-1-1 (carga atrasada do Chrome): em 100 ns */
+static WINAPI void QueryInterruptTimePrecise(uint64_t* t) {
+  if (t) *t = wnow_ms() * 10000ull;
+}
+static WINAPI void QueryInterruptTime(uint64_t* t) {
+  if (t) *t = wnow_ms() * 10000ull;
+}
+
+/* DLLs que o WINE nao tem, pedidas pela carga atrasada do Chrome (modulo
+ * vazio, pe.c pe_load_phantom). Aqui "devolve 0" seria sucesso com a saida
+ * sem preencher, entao cada uma falha com o erro que o Chrome ja trata. */
+/* pdh.dll: o Chrome mede a CPU (CpuProbeWin) um minuto depois de abrir */
+#define PDH_NOT_IMPLEMENTED 0xC0000BD3u
+static WINAPI DWORD PdhOpenQueryW(const wchar16* src, uintptr_t user, HANDLE* q) {
+  (void)src; (void)user;
+  if (q) *q = 0;
+  return PDH_NOT_IMPLEMENTED;
+}
+static WINAPI DWORD PdhAddEnglishCounterW(HANDLE q, const wchar16* path, uintptr_t user, HANDLE* c) {
+  (void)q; (void)path; (void)user;
+  if (c) *c = 0;
+  return PDH_NOT_IMPLEMENTED;
+}
+static WINAPI DWORD PdhCollectQueryData(HANDLE q) {
+  (void)q;
+  return PDH_NOT_IMPLEMENTED;
+}
+static WINAPI DWORD PdhGetFormattedCounterValue(HANDLE c, DWORD fmt, DWORD* type, void* val) {
+  (void)c; (void)fmt; (void)type; (void)val;
+  return PDH_NOT_IMPLEMENTED;
+}
+static WINAPI DWORD PdhCloseQuery(HANDLE q) {
+  (void)q;
+  return 0;
+}
+static WINAPI DWORD PdhRemoveCounter(HANDLE c) {
+  (void)c;
+  return 0;
+}
+/* tbs.dll (TPM): sem TPM */
+static WINAPI DWORD Tbsi_GetDeviceInfo(DWORD size, void* info) {
+  (void)size; (void)info;
+  return 0x8028400Fu; /* TBS_E_TPM_NOT_FOUND */
+}
+static WINAPI DWORD Tbsip_Submit_Command(void* ctx, DWORD loc, DWORD prio, const uint8_t* cmd, DWORD n, uint8_t* res,
+                                         DWORD* rn) {
+  (void)ctx; (void)loc; (void)prio; (void)cmd; (void)n; (void)res;
+  if (rn) *rn = 0;
+  return 0x80284004u; /* TBS_E_INVALID_CONTEXT */
+}
+/* dhcpcsvc.dll: proxy automatico (WPAD) pelo DHCP. Sem a opcao 252. Os
+ * parametros (9, dois arrays por referencia) nao sao lidos. */
+static WINAPI DWORD DhcpCApiInitialize(DWORD* ver) {
+  if (ver) *ver = 2;
+  return 0;
+}
+static WINAPI DWORD DhcpRequestParams(void) { return 50; /* ERROR_NOT_SUPPORTED */ }
+/* urlmon.dll: zonas de seguranca do IE (downloads) */
+static WINAPI long CoInternetCreateSecurityManager(void* sp, void** sm, DWORD res) {
+  (void)sp; (void)res;
+  if (sm) *sm = 0;
+  return (long)0x80004001L; /* E_NOTIMPL */
+}
 static WINAPI long NtQueryInformationProcess(HANDLE h, int cls, void* buf, DWORD len, DWORD* ret) {
   (void)h;
   memset(buf, 0, len);
@@ -777,6 +880,12 @@ const struct wine_sym misc_syms[] = {
     S(FindResourceW), S(LoadResource),
     S(LockResource), S(SizeofResource), S(RtlInitUnicodeString), S(NtQueryInformationProcess),
     S(RtlFormatCurrentUserKeyPath), S(RtlFreeUnicodeString),
+    S(NetGetJoinInformation), S(NetApiBufferFree), S(NetGetAadJoinInformation), S(NetFreeAadJoinInformation),
+    S(NetUserGetInfo), S(DsRoleGetPrimaryDomainInformation), S(DsRoleFreeMemory),
+    S(QueryInterruptTimePrecise), S(QueryInterruptTime),
+    S(PdhOpenQueryW), S(PdhAddEnglishCounterW), S(PdhCollectQueryData), S(PdhGetFormattedCounterValue),
+    S(PdhCloseQuery), S(PdhRemoveCounter), S(Tbsi_GetDeviceInfo), S(Tbsip_Submit_Command),
+    S(DhcpCApiInitialize), S(DhcpRequestParams), S(CoInternetCreateSecurityManager),
     S(NtQuerySystemInformation), S(RtlNtStatusToDosErrorNoTeb), S(WinHttpOpen),
     S(WinHttpCloseHandle), S(WinHttpGetIEProxyConfigForCurrentUser), S(WinHttpGetProxyForUrl),
     S(WinHttpDetectAutoProxyConfigUrl), S(GetProfilesDirectoryW), S(GetUserNameExW),

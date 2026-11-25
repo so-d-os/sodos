@@ -468,12 +468,41 @@ static int visible_tops(struct wgui* g, struct wwin** out, int max) {
   return n;
 }
 
+#define WS_EX_LAYERED 0x00080000u
+#define WS_EX_NOACTIVATE 0x08000000u
+/* Pop-up do programa (menu, balao, lista do omnibox, dica do Chromium): fica
+ * onde ele pediu, sem moldura. So as de topo com barra de titulo (dialogos,
+ * MessageBox) vao para o meio do canvas com a moldura desenhada aqui. Antes os
+ * menus do Chrome apareciam no meio, com titulo e vazios. */
+static int win_popup(struct wwin* w) {
+  return (w->exstyle & WS_EX_LAYERED) || ((w->style & WS_POPUP) && (w->style & WS_CAPTION) != WS_CAPTION);
+}
+static int win_placed(struct wgui* g, struct wwin* w) {
+  return w && g && g->canvas_main && !w->parent && w != g->canvas_main && win_popup(w);
+}
+static struct wwin* active_after(struct wgui* g, struct wwin* w);
+/* posicao pedida (w->x, w->y em coordenadas de tela = do canvas), dentro do canvas */
+static void placed_pos(struct wgui* g, struct wwin* w, int* x, int* y) {
+  int px = w->x, py = w->y;
+  if (g->canvas.w > 0 && px + w->s.w > g->canvas.w) px = g->canvas.w - w->s.w;
+  if (g->canvas.h > 0 && py + w->s.h > g->canvas.h) py = g->canvas.h - w->s.h;
+  if (px < 0) px = 0;
+  if (py < 0) py = 0;
+  *x = px;
+  *y = py;
+}
+
 static void layout(struct wgui* g) {
   struct wwin* v[32];
   int n = visible_tops(g, v, 32), i;
   for (i = 0; i < n; i++) {
     struct wwin* w = v[i];
     int fw = w->s.w, fh = w->s.h;
+    if (win_placed(g, w)) {
+      w->framed = 0;
+      placed_pos(g, w, &w->cx, &w->cy);
+      continue;
+    }
     w->framed = w != g->canvas_main;
     if (w->framed) {
       fw += 2 * FRAME_BORDER;
@@ -505,7 +534,8 @@ static void top_resize(struct wwin* w, int cw, int ch, int maxed) {
   struct winpos wp;
   if (cw < 1 || ch < 1 || (cw == w->w && ch == w->h && cw == w->s.w && ch == w->s.h)) return;
   if (!surf_alloc(&ns, cw, ch, 1)) return;
-  surf_fill(&ns, 0, 0, cw, ch, sys_color(15));
+  if (w->layered) memset(ns.px, 0, (size_t)cw * (size_t)ch * 4); /* transparente ate o UpdateLayeredWindow */
+  else surf_fill(&ns, 0, 0, cw, ch, sys_color(15));
   if (w->s.px) {
     surf_blit(&ns, 0, 0, w->s.w < cw ? w->s.w : cw, w->s.h < ch ? w->s.h : ch, &w->s, 0, 0,
               w->s.w < cw ? w->s.w : cw, w->s.h < ch ? w->s.h : ch, 0);
@@ -525,11 +555,29 @@ static void top_resize(struct wwin* w, int cw, int ch, int maxed) {
   win_invalidate(w);
 }
 
+/* A principal: a de baixo que nao e pop-up; so com pop-ups, a de baixo. */
+static struct wwin* main_pick(struct wwin** v, int n) {
+  int i;
+  for (i = 0; i < n; i++)
+    if (!win_popup(v[i])) return v[i];
+  return v[0];
+}
+static void main_log(struct wwin* m) {
+  char t8[96];
+  int k = m->text ? wutf16_to_8(m->text, -1, t8, 95) : 0;
+  t8[k] = 0;
+  wlog(win_popup(m) ? "janela principal (pop-up): " : "janela principal: ", t8);
+  wlogx("  largura ", (uint64_t)(uint32_t)m->s.w);
+  wlogx("  altura ", (uint64_t)(uint32_t)m->s.h);
+}
+
 /* Abre, troca ou fecha a janela do WIN conforme as janelas de topo visiveis. */
 static void canvas_update(struct wgui* g) {
   struct wwin* v[32];
   int n = visible_tops(g, v, 32);
   struct wwin* main = 0;
+  struct wwin* popup = 0;
+  struct wwin* before = g->canvas_main;
   int i;
   if (g->canvas_main && (!g->canvas_main->visible || g->canvas_main->destroyed)) g->canvas_main = 0;
   if (!n) {
@@ -540,13 +588,31 @@ static void canvas_update(struct wgui* g) {
     g->canvas_main = 0;
     return;
   }
-  main = g->canvas_main ? g->canvas_main : v[0];
+  /* Um pop-up so fica de principal enquanto nao ha janela de verdade. O
+   * balao "Restore pages?" do Chrome aparecia antes da janela do navegador e
+   * virava a principal: esticado na janela do WIN, com o titulo dele, e o
+   * navegador desenhado dentro, com moldura e "x". Quando a de verdade
+   * aparece, ela assume e o pop-up volta ao tamanho que o programa pediu.
+   * Dialogo do proprio pop-up (MessageBox de um programa cuja janela e um
+   * pop-up sem titulo) nao conta: a principal continua a mesma. */
+  main = main_pick(v, n);
+  if (g->canvas_main && win_popup(g->canvas_main) && !win_popup(main) && win_top(main->owner) != g->canvas_main) {
+    popup = g->canvas_main;
+    popup->z = ++g->zseq; /* por cima da nova principal, que cobre a janela do WIN */
+    g->canvas_main = 0;
+  }
+  main = g->canvas_main ? g->canvas_main : main_pick(v, n);
   if (g->canvas_open && main != g->canvas_main &&
       (main->s.w > g->canvas.w || main->s.h > g->canvas.h || main->s.w < g->canvas.w / 2)) {
     world_request(g, 2); /* a nova principal nao cabe (ou sobra demais): reabre */
     g->canvas_open = 0;
   }
   g->canvas_main = main;
+  if (wine_debug && main != before) main_log(main);
+  if (popup && popup->ask_w > 0 && popup->ask_h > 0) top_resize(popup, popup->ask_w, popup->ask_h, 0);
+  /* a janela do WIN continua aberta: a nova principal ocupa a area toda */
+  if (popup && g->canvas_open && (main->s.w != g->canvas.w || main->s.h != g->canvas.h))
+    top_resize(main, g->canvas.w, g->canvas.h, 0);
   if (!g->canvas_open) {
     int cw = 0, ch = 0;
     int i2, n8 = 0;
@@ -575,6 +641,31 @@ static void canvas_update(struct wgui* g) {
   layout(g);
   for (i = 0; i < n; i++) v[i]->dirty = 1;
   g->canvas_dirty = 1;
+}
+
+/* src (RGBA pre-multiplicado, de uma janela em camadas) sobre dst em (dx,dy) */
+static void surf_blend_pm(struct surf* dst, int dx, int dy, const struct surf* src) {
+  int x, y, x0 = dx < 0 ? -dx : 0, y0 = dy < 0 ? -dy : 0, x1 = src->w, y1 = src->h;
+  if (dx + x1 > dst->w) x1 = dst->w - dx;
+  if (dy + y1 > dst->h) y1 = dst->h - dy;
+  for (y = y0; y < y1; y++) {
+    const uint8_t* s = src->px + ((size_t)y * (size_t)src->w + (size_t)x0) * 4;
+    uint8_t* d = dst->px + ((size_t)(dy + y) * (size_t)dst->w + (size_t)(dx + x0)) * 4;
+    for (x = x0; x < x1; x++, s += 4, d += 4) {
+      unsigned a = s[3], k, c, j;
+      if (a == 255) {
+        d[0] = s[0];
+        d[1] = s[1];
+        d[2] = s[2];
+      } else if (a) {
+        k = 255 - a;
+        for (j = 0; j < 3; j++) {
+          c = s[j] + (d[j] * k + 127) / 255;
+          d[j] = (uint8_t)(c > 255 ? 255 : c);
+        }
+      }
+    }
+  }
 }
 
 static void compose(struct wgui* g) {
@@ -606,7 +697,8 @@ static void compose(struct wgui* g) {
       if (w->text) text_box(&g->canvas, 0, &tr, w->text, -1, 0, 0, DT_SINGLELINE | DT_VCENTER);
       text_box(&g->canvas, 0, &xr, x, 1, 0x404040, 0, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
     }
-    surf_blit(&g->canvas, w->cx, w->cy, w->s.w, w->s.h, &w->s, 0, 0, w->s.w, w->s.h, 0);
+    if (w->layered) surf_blend_pm(&g->canvas, w->cx, w->cy, &w->s);
+    else surf_blit(&g->canvas, w->cx, w->cy, w->s.w, w->s.h, &w->s, 0, 0, w->s.w, w->s.h, 0);
   }
   g->canvas_dirty = 0;
 }
@@ -721,6 +813,8 @@ struct wwin* win_create(DWORD ex, const wchar16* cls, const wchar16* title, DWOR
   w->id = id;
   w->enabled = !(style & WS_DISABLED);
   w->thread = me();
+  w->tid = (DWORD) * (uint64_t*)(wteb() + TEB_TID);
+  w->pid = (DWORD) * (uint64_t*)(wteb() + TEB_PID);
   w->cur = -1;
   w->pmax = 100;
   if (cw == (int)0x80000000 || cw <= 0) cw = parent ? 0 : 640;
@@ -757,6 +851,8 @@ struct wwin* win_create(DWORD ex, const wchar16* cls, const wchar16* title, DWOR
       w->w = cw - 16 > 80 ? cw - 16 : cw;
       w->h = ch - 39 > 60 ? ch - 39 : ch;
     }
+    w->ask_w = w->w;
+    w->ask_h = w->h;
     w->owner = parent;
     w->z = ++g->zseq;
     if (!surf_alloc(&w->s, w->w, w->h, 1)) {
@@ -765,7 +861,12 @@ struct wwin* win_create(DWORD ex, const wchar16* cls, const wchar16* title, DWOR
       k_free(w);
       return 0;
     }
-    surf_fill(&w->s, 0, 0, w->s.w, w->s.h, sys_color(15));
+    if (ex & WS_EX_LAYERED) { /* no Windows so aparece quando ganha pixels (UpdateLayeredWindow) */
+      w->layered = 1;
+      memset(w->s.px, 0, (size_t)w->s.w * (size_t)w->s.h * 4);
+    } else {
+      surf_fill(&w->s, 0, 0, w->s.w, w->s.h, sys_color(15));
+    }
     wlock();
     w->next = g->wins;
     g->wins = w;
@@ -837,7 +938,7 @@ void win_destroy(struct wwin* w) {
     if (win_top(w)->focus == w) win_top(w)->focus = 0;
   }
   if (g->capture == w) g->capture = 0;
-  if (g->active == w) g->active = 0;
+  if (g->active == w) g->active = active_after(g, w);
   wunlock();
   if (!w->parent) {
     /* a dona volta a valer (modal) */
@@ -848,7 +949,18 @@ void win_destroy(struct wwin* w) {
   }
 }
 
-void win_show(struct wwin* w, int show) {
+/* Quem fica ativa (recebe o teclado) quando w some: a dona, senao a principal. */
+static struct wwin* active_after(struct wgui* g, struct wwin* w) {
+  struct wwin* o = w->owner ? win_top(w->owner) : 0;
+  if (o && o != w && o->visible && !o->destroyed) return o;
+  return g->canvas_main && g->canvas_main != w && !g->canvas_main->destroyed ? g->canvas_main : 0;
+}
+
+/* activate = 0: SW_SHOWNOACTIVATE/SW_SHOWNA/SWP_NOACTIVATE. Os pop-ups do
+ * Chromium (menu, lista do omnibox, balao) aparecem assim e com
+ * WS_EX_NOACTIVATE: antes viravam a janela ativa e o teclado ia para eles
+ * (digitar na barra de enderecos parava ao abrir a lista). */
+static void win_show_ex(struct wwin* w, int show, int activate) {
   struct wgui* g = gui_get();
   int was = w->visible;
   w->visible = show != 0;
@@ -857,13 +969,16 @@ void win_show(struct wwin* w, int show) {
   if (!w->parent) {
     if (w->visible) {
       w->z = ++g->zseq;
-      g->active = w;
+      if (activate && !(w->exstyle & WS_EX_NOACTIVATE)) g->active = w;
       wsend(w, WM_SIZE, 0, ((intptr_t)w->h << 16) | (w->w & 0xFFFF));
+    } else if (g->active == w) {
+      g->active = active_after(g, w);
     }
     canvas_update(g);
   }
   win_invalidate(w->parent ? w->parent : w);
 }
+void win_show(struct wwin* w, int show) { win_show_ex(w, show, 1); }
 
 void win_set_text(struct wwin* w, const wchar16* t) {
   wchar16* old = w->text;
@@ -935,7 +1050,8 @@ static WINAPI BOOL ShowWindow(HANDLE h, int cmd) {
   int was;
   if (!w) return 0;
   was = w->visible;
-  win_show(w, cmd != 0); /* SW_HIDE = 0 */
+  /* SW_HIDE = 0; SW_SHOWMINNOACTIVE 7, SW_SHOWNA 8, SW_SHOWNOACTIVATE 4 nao ativam */
+  win_show_ex(w, cmd != 0, cmd != 4 && cmd != 7 && cmd != 8);
   return was;
 }
 static WINAPI BOOL UpdateWindow(HANDLE h) {
@@ -1006,11 +1122,20 @@ static WINAPI BOOL GetClientRect(HANDLE h, struct rect* r) {
   r->bottom = w->h;
   return 1;
 }
-/* Coordenadas de "tela" = do canvas. */
+/* Coordenadas de "tela" = do canvas. Pop-up: a posicao pedida (o Chromium
+ * le o GetWindowRect antes de cada UpdateLayeredWindow; com o cx/cy do
+ * layout, ainda 0 antes de aparecer, o menu pularia para o canto). */
 static void to_screen(struct wwin* w, int* x, int* y) {
-  int ax = 0, ay = 0;
+  int ax = 0, ay = 0, px, py;
   struct wwin* t = win_top(w);
+  struct wgui* g = gui_get();
   win_abs_client(w, &ax, &ay);
+  if (t && win_placed(g, t)) {
+    placed_pos(g, t, &px, &py);
+    *x += ax + px;
+    *y += ay + py;
+    return;
+  }
   *x += ax + (t ? t->cx : 0);
   *y += ay + (t ? t->cy : 0);
 }
@@ -1060,6 +1185,12 @@ static WINAPI BOOL SetWindowPos(HANDLE h, HANDLE after, int x, int y, int cx, in
   struct wwin* w = win_of(h);
   (void)after;
   if (!w) return 0;
+  if (!w->parent && !(fl & 2)) { /* de topo: a posicao vale para os pop-ups (win_placed) */
+    struct wgui* g0 = gui_get();
+    w->x = x;
+    w->y = y;
+    if (g0) g0->canvas_dirty = 1;
+  }
   if (w->parent) {
     if (!(fl & 2)) { /* SWP_NOMOVE */
       w->x = x;
@@ -1080,6 +1211,8 @@ static WINAPI BOOL SetWindowPos(HANDLE h, HANDLE after, int x, int y, int cx, in
       if (cx - 16 > 80) cx -= 16;
       if (cy - 39 > 60) cy -= 39;
     }
+    w->ask_w = cx;
+    w->ask_h = cy;
     /* a principal ocupa sempre a janela do WIN inteira (quem muda o tamanho
      * dela e o usuario, pela janela do WIN): o pedido do programa so vale
      * para as outras. O Chromium tira a moldura no WM_NCCALCSIZE e pede o
@@ -1091,7 +1224,7 @@ static WINAPI BOOL SetWindowPos(HANDLE h, HANDLE after, int x, int y, int cx, in
     top_resize(w, cx, cy, 0);
     if (!w->parent) g->canvas_dirty = 1;
   }
-  if (fl & 0x40) win_show(w, 1);  /* SWP_SHOWWINDOW */
+  if (fl & 0x40) win_show_ex(w, 1, !(fl & 0x10)); /* SWP_SHOWWINDOW; SWP_NOACTIVATE */
   if (fl & 0x80) win_show(w, 0);  /* SWP_HIDEWINDOW */
   win_invalidate(w->parent ? w->parent : w);
   return 1;
@@ -1227,8 +1360,17 @@ static WINAPI long GetWindowLongW(HANDLE h, int idx) {
   }
   return (long)GetWindowLongPtrW(h, idx);
 }
+/* Dono da janela. O Chromium (gfx::GetWindowUserData) ignora a janela se o
+ * pid nao for o dele, e o WindowImpl::Init da CHECK. Antes a resposta era
+ * sempre 0x100 (o primeiro programa do Windows do boot): o Chrome aberto
+ * depois do Claude caia ao criar a primeira janela. Handle que nao e janela
+ * do WINE (area de trabalho...): como antes. */
 static WINAPI DWORD GetWindowThreadProcessId(HANDLE h, DWORD* pid) {
-  (void)h;
+  struct wwin* w = win_any(h, 0);
+  if (w && w->pid) {
+    if (pid) *pid = w->pid;
+    return w->tid;
+  }
   if (pid) *pid = 0x100;
   return (DWORD) * (uint64_t*)(wteb() + TEB_TID);
 }
@@ -1389,9 +1531,14 @@ static struct wwin* hit_top(struct wgui* g, int x, int y, int* title) {
   return 0;
 }
 
+/* Quem recebe teclado, roda do rato e o fechar do WIN: a ativa, se visivel;
+ * senao a de cima. Os pop-ups que nao ativam (menu, lista do omnibox) ficam
+ * por cima sem tirar o teclado da janela onde se digita. */
 static struct wwin* top_active(struct wgui* g) {
   struct wwin* v[32];
-  int n = visible_tops(g, v, 32);
+  int n = visible_tops(g, v, 32), i;
+  for (i = 0; i < n; i++)
+    if (v[i] == g->active) return v[i];
   return n ? v[n - 1] : 0;
 }
 
@@ -1497,7 +1644,7 @@ static void mouse_msg(struct wgui* g, DWORD m, int key, int cxp, int cyp) {
     target = hit_child(t, cxp - t->cx, cyp - t->cy, &x, &y);
     if (!target->enabled) return;
     if (m == WM_LBUTTONDOWN && g->active != t) {
-      g->active = t;
+      if (!(t->exstyle & WS_EX_NOACTIVATE)) g->active = t; /* clicar num menu nao ativa */
       t->z = ++g->zseq;
       g->canvas_dirty = 1;
     }
@@ -2231,6 +2378,104 @@ static WINAPI BOOL UnionRect(struct rect* d, const struct rect* a, const struct 
   return 1;
 }
 
+/* ---------- janelas em camadas (WS_EX_LAYERED) ----------
+ * O Chromium desenha menus, baloes, a lista do omnibox e os dialogos dele
+ * num bitmap (secao compartilhada com o processo GPU) e manda para a janela
+ * com UpdateLayeredWindow(hwnd, 0, &pos, &tam, dc_do_bitmap, &origem, 0,
+ * &blend, ULW_ALPHA): BGRA pre-multiplicado. Os pixels vao para a superficie
+ * da janela (RGBA, com o alfa) e o compose mistura com o que esta atras.
+ * Antes era um esboco que nao copiava nada: os menus ficavam vazios. */
+struct blendfn {
+  uint8_t op, flags, const_alpha, alpha_fmt;
+};
+static WINAPI BOOL UpdateLayeredWindow(HANDLE h, HANDLE dd, const struct point* pt, const int32_t* sz, HANDLE ds,
+                                       const struct point* sp, DWORD key, const struct blendfn* bl, DWORD fl) {
+  struct wgui* g = gui_get();
+  struct wwin* w = win_of(h);
+  struct wdc* d = ds ? dc_of(ds) : 0;
+  struct surf* src = d ? dc_surf(d) : 0;
+  int pm = (fl & 2) && bl && (bl->alpha_fmt & 1); /* ULW_ALPHA com AC_SRC_ALPHA */
+  unsigned ca = (fl & 2) && bl ? bl->const_alpha : 255;
+  int x, y, sx = sp ? sp->x : 0, sy = sp ? sp->y : 0;
+  (void)dd;
+  (void)key;
+  if (!w || w->parent || !g) {
+    wset_lasterr(87); /* ERROR_INVALID_PARAMETER */
+    return 0;
+  }
+  if (pt) {
+    w->x = pt->x;
+    w->y = pt->y;
+  }
+  w->layered = 1;
+  if (sz && sz[0] > 0 && sz[1] > 0) {
+    w->ask_w = sz[0];
+    w->ask_h = sz[1];
+  }
+  if (sz && sz[0] > 0 && sz[1] > 0 && (sz[0] != w->s.w || sz[1] != w->s.h)) top_resize(w, sz[0], sz[1], 0);
+  if (src && src->px && w->s.px) {
+    for (y = 0; y < w->s.h; y++) {
+      int yy = sy + y;
+      const uint8_t* srow;
+      uint8_t* o = w->s.px + (size_t)y * (size_t)w->s.w * 4;
+      if (yy < 0 || yy >= src->h) {
+        memset(o, 0, (size_t)w->s.w * 4);
+        continue;
+      }
+      srow = src->px + (size_t)(src->bottom_up ? src->h - 1 - yy : yy) * (size_t)src->w * 4;
+      for (x = 0; x < w->s.w; x++, o += 4) {
+        int xx = sx + x;
+        const uint8_t* p;
+        unsigned a;
+        if (xx < 0 || xx >= src->w) {
+          o[0] = o[1] = o[2] = o[3] = 0;
+          continue;
+        }
+        p = srow + (size_t)xx * 4;
+        a = pm ? p[3] : 255;
+        if (src->rgba) {
+          o[0] = p[0];
+          o[1] = p[1];
+          o[2] = p[2];
+        } else { /* DIB: B,G,R,A */
+          o[0] = p[2];
+          o[1] = p[1];
+          o[2] = p[0];
+        }
+        o[3] = (uint8_t)a;
+        if (ca < 255) { /* SourceConstantAlpha: tudo (ja pre-multiplicado) vezes ca */
+          o[0] = (uint8_t)(o[0] * ca / 255);
+          o[1] = (uint8_t)(o[1] * ca / 255);
+          o[2] = (uint8_t)(o[2] * ca / 255);
+          o[3] = (uint8_t)(o[3] * ca / 255);
+        }
+      }
+    }
+  }
+  /* so recompor: um WM_PAINT aqui faria o Chromium desenhar de novo, em laco */
+  g->canvas_dirty = 1;
+  g->present_pending = 1;
+  wsignal_global();
+  return 1;
+}
+/* Janela em camadas pintada pelo WM_PAINT (alfa constante ou cor-chave):
+ * aqui opaca, como uma janela comum. */
+static WINAPI BOOL SetLayeredWindowAttributes(HANDLE h, DWORD key, uint8_t a, DWORD fl) {
+  struct wwin* w = win_of(h);
+  struct wgui* g = gui_get();
+  (void)key;
+  (void)a;
+  (void)fl;
+  if (!w) return 0;
+  if (w->layered && !w->parent) {
+    w->layered = 0;
+    surf_fill(&w->s, 0, 0, w->s.w, w->s.h, sys_color(15));
+    w->dirty = 1;
+    if (g) g->canvas_dirty = 1;
+  }
+  return 1;
+}
+
 #define S(n) {#n, (void*)n}
 const struct wine_sym gui_syms[] = {
     S(RegisterClassExW), S(RegisterClassW), S(UnregisterClassW), S(GetClassInfoExW), S(GetClassInfoW),
@@ -2256,5 +2501,6 @@ const struct wine_sym gui_syms[] = {
     S(MonitorFromWindow), S(MonitorFromPoint), S(GetMonitorInfoW), S(MessageBeep), S(SetUserObjectInformationW),
     S(WaitForInputIdle), S(SetProcessDefaultLayout), S(GetSystemMenu), S(EnableMenuItem), S(FlashWindowEx),
     S(IsWindowUnicode), S(SetRect), S(SetRectEmpty), S(CopyRect), S(OffsetRect), S(InflateRect), S(PtInRect),
-    S(IsRectEmpty), S(EqualRect), S(IntersectRect), S(UnionRect),
+    S(IsRectEmpty), S(EqualRect), S(IntersectRect), S(UnionRect), S(UpdateLayeredWindow),
+    S(SetLayeredWindowAttributes),
     {0, 0}};

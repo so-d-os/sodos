@@ -11,7 +11,9 @@
  * Memoria por volume: um cluster (pastas e pontas de arquivo), uma janela de
  * 16 KB da FAT e a posicao do ultimo arquivo lido (k_fread em sequencia nao
  * anda a cadeia toda de novo). Trechos inteiros de clusters seguidos vao
- * direto para o buffer de quem pediu.
+ * direto para o buffer de quem pediu. As pastas lidas ficam num cache de ate
+ * 8 MB (dc_*): stat e abertura de um caminho ja visto nao vao ao disco. Toda
+ * gravacao passa por vwrite, que poe no cache o que gravou.
  *
  * O driver so cede a CPU (host->yield) entre trechos, sem ponteiro guardado
  * para os caches: outra chamada pode usar o volume nesse meio tempo.
@@ -32,6 +34,12 @@
 #define RC_N 4u                        /* janelas so de leitura para fat_next */
 #define RUN_MAX (1024u * 1024u)        /* leitura direta: ate 1 MB por vez */
 #define POS_N 8u                       /* posicoes de leitura guardadas */
+/* Cache de pastas: sem ele cada stat/abertura relia do disco um cluster por
+ * nivel do caminho, e quem vigia arquivos (o fs.watchFile do Claude Code, a
+ * PONTE) deixava a luz do disco piscando sem parar. */
+#define DC_BYTES (8u * 1024u * 1024u)
+#define DC_MIN 16u
+#define DC_MAX 1024u
 #define CL_END 0x0FFFFFF8u
 
 struct vol {
@@ -78,6 +86,15 @@ struct vol {
     uint32_t first, n, stamp;
   } rc[RC_N];
   uint32_t rc_tick;
+  /* Cache de pastas (dc_*): clusters de pasta lidos, ate DC_BYTES. Toda
+   * gravacao do volume passa por vwrite, que copia para o cache o que foi
+   * para o disco; assim o cache e sempre igual ao disco. */
+  struct dcent {
+    uint32_t clus;     /* 0 = livre (data pode ficar para reuso) */
+    uint32_t stamp;
+    uint8_t* data;     /* csize bytes */
+  } * dc;
+  uint32_t dc_n, dc_tick;
 };
 
 /* Uma entrada achada numa pasta. */
@@ -215,6 +232,8 @@ static uint32_t clus_lba(const struct vol* v, uint32_t c) {
   return v->data_lba + (c - 2) * v->spc;
 }
 
+static int vwrite(struct vol* v, uint32_t lba, uint32_t n, const void* buf);
+
 /* Setores sujos da janela vao para a FAT ativa (e as copias, se espelhadas).
  * 0 ok. */
 static int fat_flush(struct vol* v) {
@@ -227,7 +246,7 @@ static int fat_flush(struct vol* v) {
   for (i = 0; i < v->nfats; i++) {
     uint32_t base = v->fat0_lba + i * v->fatsz;
     if (!v->mirror && base != v->fat_lba) continue;
-    if (v->h->write(v->disk, base + d0, d1 - d0, v->fatc + (d0 - v->fatc_first) * 128u) != 0)
+    if (vwrite(v, base + d0, d1 - d0, v->fatc + (d0 - v->fatc_first) * 128u) != 0)
       rc = -1;
   }
   v->fatc_d1 = 0;
@@ -307,6 +326,102 @@ static int load_clus(struct vol* v, uint32_t c) {
   return 0;
 }
 
+/* ---------- cache de pastas ---------- */
+static void qcopy(void* d, const void* s, uint32_t n) {   /* n multiplo de 8 */
+  uint64_t* a = (uint64_t*)d;
+  const uint64_t* b = (const uint64_t*)s;
+  n /= 8u;
+  while (n--) *a++ = *b++;
+}
+
+static struct dcent* dc_find(struct vol* v, uint32_t c) {
+  uint32_t i;
+  if (!v->dc) return 0;
+  for (i = 0; i < v->dc_n; i++)
+    if (v->dc[i].clus == c && v->dc[i].data) return &v->dc[i];
+  return 0;
+}
+
+/* Guarda o cluster c (conteudo em src, igual ao disco). Sem memoria, nada. */
+static void dc_put(struct vol* v, uint32_t c, const uint8_t* src) {
+  struct dcent* e;
+  uint32_t i, best = 0;
+  if (!v->dc) return;
+  e = dc_find(v, c);
+  if (!e) {
+    for (i = 0; i < v->dc_n; i++) {
+      if (!v->dc[i].clus) {
+        best = i;
+        break;
+      }
+      if (v->dc[i].stamp < v->dc[best].stamp) best = i;
+    }
+    e = &v->dc[best];
+    e->clus = 0;
+    if (!e->data) e->data = (uint8_t*)v->h->alloc(v->csize);
+    if (!e->data) return;
+  }
+  qcopy(e->data, src, v->csize);
+  e->clus = c;
+  e->stamp = ++v->dc_tick;
+}
+
+/* Depois de gravar n setores em lba (ok = a gravacao deu certo): o cache
+ * fica com o que foi para o disco; se falhou, esquece os clusters tocados. */
+static void dc_written(struct vol* v, uint32_t lba, uint32_t n, const uint8_t* buf, int ok) {
+  uint64_t a = lba, b = (uint64_t)lba + n;
+  uint32_t i;
+  if (!v->dc || !n || b <= v->data_lba) return;
+  for (i = 0; i < v->dc_n; i++) {
+    struct dcent* e = &v->dc[i];
+    uint64_t el, s, t;
+    if (!e->clus || !e->data) continue;
+    el = clus_lba(v, e->clus);
+    s = a > el ? a : el;
+    t = b < el + v->spc ? b : el + v->spc;
+    if (s >= t) continue;
+    if (!ok) {
+      e->clus = 0;
+      continue;
+    }
+    qcopy(e->data + (s - el) * 512u, buf + (s - a) * 512u, (uint32_t)(t - s) * 512u);
+  }
+}
+
+/* Toda gravacao do volume passa por aqui (o cache de pastas acompanha). */
+static int vwrite(struct vol* v, uint32_t lba, uint32_t n, const void* buf) {
+  int rc = v->h->write(v->disk, lba, n, buf);
+  dc_written(v, lba, n, (const uint8_t*)buf, rc == 0);
+  return rc;
+}
+
+/* Cluster de pasta em cbuf: do cache se estiver la, senao do disco (e entra
+ * no cache). 0 ok. */
+static int load_dir(struct vol* v, uint32_t c) {
+  struct dcent* e;
+  if (v->cbuf_clus == c) return 0;
+  e = dc_find(v, c);
+  if (e && valid_clus(v, c)) {
+    qcopy(v->cbuf, e->data, v->csize);
+    v->cbuf_clus = c;
+    e->stamp = ++v->dc_tick;
+    return 0;
+  }
+  if (load_clus(v, c) != 0) return -1;
+  dc_put(v, c, v->cbuf);
+  return 0;
+}
+
+static void dc_free(struct vol* v) {
+  uint32_t i;
+  if (!v->dc) return;
+  for (i = 0; i < v->dc_n; i++)
+    if (v->dc[i].data) v->h->free(v->dc[i].data);
+  v->h->free(v->dc);
+  v->dc = 0;
+  v->dc_n = 0;
+}
+
 /* ---------- pastas ---------- */
 /* Chama fn para cada arquivo/pasta (sem . e .., sem rotulo). fn devolvendo
  * nao zero para; scan devolve esse valor (0 no fim, -1 erro de disco). */
@@ -319,7 +434,7 @@ static int dir_scan(struct vol* v, uint32_t clus, scan_fn fn, void* ctx, struct 
   while (valid_clus(v, clus)) {
     uint32_t off;
     if (++guard > v->nclus) return -1;   /* cadeia em laco */
-    if (load_clus(v, clus) != 0) return -1;
+    if (load_dir(v, clus) != 0) return -1;
     for (off = 0; off < v->csize; off += 32) {
       const uint8_t* d = v->cbuf + off;
       uint8_t attr = d[11];
@@ -443,6 +558,7 @@ static void f_umount(void* p) {
   const struct fsdrv_host* h;
   if (!v) return;
   h = v->h;
+  dc_free(v);
   h->free(v->cbuf);
   h->free(v->fatc);
   {
@@ -502,8 +618,22 @@ static void* f_mount(const struct fsdrv_host* h, uint32_t disk, uint32_t lba) {
     uint32_t i; /* cache de leitura da FAT: sem memoria, fica sem */
     for (i = 0; i < RC_N; i++) v->rc[i].buf = (uint32_t*)h->alloc(FATC_SECS * 512u);
   }
+#ifndef FAT32_NODC   /* -DFAT32_NODC: sem cache (teste de comparacao) */
+  {
+    /* cache de pastas: a tabela agora, cada cluster quando entra; sem
+     * memoria, fica sem (tudo do disco, como antes) */
+    uint32_t n = DC_BYTES / v->csize;
+    if (n < DC_MIN) n = DC_MIN;
+    if (n > DC_MAX) n = DC_MAX;
+    v->dc = (struct dcent*)h->alloc(n * (uint32_t)sizeof(struct dcent));
+    if (v->dc) {
+      for (i = 0; i < n * (uint32_t)sizeof(struct dcent); i++) ((uint8_t*)v->dc)[i] = 0;
+      v->dc_n = n;
+    }
+  }
+#endif
   h->free(b);
-  h->log("[fat32] volume montado\n");
+  h->log(v->dc ? "[fat32] volume montado (cache de pastas)\n" : "[fat32] volume montado\n");
   return v;
 fail:
   if (b) h->free(b);
@@ -765,7 +895,7 @@ static void fsinfo_save(struct vol* v, uint8_t* sbuf) {
   if (rd32(sbuf) != 0x41615252u || rd32(sbuf + 484) != 0x61417272u) return;
   wr32(sbuf + 488, v->free_clus);
   wr32(sbuf + 492, v->next_free);
-  v->h->write(v->disk, v->fsinfo_lba, 1, sbuf);
+  vwrite(v, v->fsinfo_lba, 1, sbuf);
 }
 
 /* Cluster novo, zerado no disco e marcado como fim de cadeia; prev != 0 e
@@ -788,7 +918,7 @@ static uint32_t clus_alloc(struct vol* v, uint32_t prev, uint8_t* sbuf, int* err
   /* zera antes de ligar: uma pasta nunca aponta para lixo */
   mzero(v->cbuf, v->csize);
   v->cbuf_clus = 0;
-  if (v->h->write(v->disk, clus_lba(v, c), v->spc, v->cbuf) != 0) {
+  if (vwrite(v, clus_lba(v, c), v->spc, v->cbuf) != 0) {
     *err = -3;
     return 0;
   }
@@ -806,7 +936,7 @@ static uint32_t clus_alloc(struct vol* v, uint32_t prev, uint8_t* sbuf, int* err
 static int slot_put(struct vol* v, uint32_t* clus, uint32_t* off, const uint8_t* e) {
   if (load_clus(v, *clus) != 0) return -1;
   mcopy(v->cbuf + *off, e, 32);
-  if (v->h->write(v->disk, clus_lba(v, *clus) + *off / 512u, 1, v->cbuf + (*off & ~511u)) != 0) {
+  if (vwrite(v, clus_lba(v, *clus) + *off / 512u, 1, v->cbuf + (*off & ~511u)) != 0) {
     v->cbuf_clus = 0;
     return -1;
   }
@@ -985,7 +1115,7 @@ static int dir_add(struct vol* v, uint32_t dir, const char* leaf, const uint8_t*
   clus = dir;
   while (valid_clus(v, clus)) {
     if (++guard > v->nclus) return -3;
-    if (load_clus(v, clus) != 0) return -3;
+    if (load_dir(v, clus) != 0) return -3;
     for (off = 0; off < v->csize; off += 32) {
       uint8_t b0 = v->cbuf[off];
       if (b0 == 0x00 || b0 == 0xE5) {
@@ -1096,7 +1226,7 @@ static int f_mkdir(void* p, const char* path, uint16_t date, uint16_t time) {
   wr16(ent + 20, (uint16_t)(i >> 16));
   wr16(ent + 26, (uint16_t)i);
   mcopy(v->cbuf + 32, ent, 32);
-  if (v->h->write(v->disk, clus_lba(v, newc), 1, v->cbuf) != 0) {
+  if (vwrite(v, clus_lba(v, newc), 1, v->cbuf) != 0) {
     v->cbuf_clus = 0;
     goto out;
   }
@@ -1200,14 +1330,14 @@ static int f_write(void* p, const char* path, const void* data, uint32_t len, ui
         cc = nx;
         n++;
       }
-      if (v->h->write(v->disk, clus_lba(v, c), n * v->spc, src + done) != 0) goto undo;
+      if (vwrite(v, clus_lba(v, c), n * v->spc, src + done) != 0) goto undo;
       done += n * v->csize;
       c = fat_next(v, cc);
     } else {
       uint32_t k = left < v->csize ? left : v->csize;
       mcopy(v->cbuf, src + done, k);
       if (k < v->csize) mzero(v->cbuf + k, v->csize - k);
-      if (v->h->write(v->disk, clus_lba(v, c), v->spc, v->cbuf) != 0) goto undo;
+      if (vwrite(v, clus_lba(v, c), v->spc, v->cbuf) != 0) goto undo;
       v->cbuf_clus = 0;
       done += k;
       c = fat_next(v, c);
@@ -1231,7 +1361,7 @@ static int f_write(void* p, const char* path, const void* data, uint32_t len, ui
       wr16(d + 26, (uint16_t)first);
       wr32(d + 28, len);
     }
-    if (v->h->write(v->disk, clus_lba(v, e.pos_clus) + e.pos_off / 512u, 1,
+    if (vwrite(v, clus_lba(v, e.pos_clus) + e.pos_off / 512u, 1,
                     v->cbuf + (e.pos_off & ~511u)) != 0) {
       v->cbuf_clus = 0;
       goto undo;
@@ -1331,7 +1461,7 @@ static int f_write_at(void* p, const char* path, uint32_t off, const void* data,
           c = nx;
           n++;
         }
-        if (v->h->write(v->disk, clus_lba(v, clus), n * v->spc, src + (cs - off)) != 0) {
+        if (vwrite(v, clus_lba(v, clus), n * v->spc, src + (cs - off)) != 0) {
           err = -3;
           goto fail;
         }
@@ -1348,7 +1478,7 @@ static int f_write_at(void* p, const char* path, uint32_t off, const void* data,
         }
         if (z1 > z0) mzero(v->cbuf + (z0 - cs), z1 - z0);
         if (w1 > w0) mcopy(v->cbuf + (w0 - cs), src + (w0 - off), w1 - w0);
-        if (v->h->write(v->disk, clus_lba(v, clus), v->spc, v->cbuf) != 0) {
+        if (vwrite(v, clus_lba(v, clus), v->spc, v->cbuf) != 0) {
           v->cbuf_clus = 0;
           err = -3;
           goto fail;
@@ -1395,7 +1525,7 @@ static int f_write_at(void* p, const char* path, uint32_t off, const void* data,
       wr16(d + 26, (uint16_t)first);
       wr32(d + 28, fin);
     }
-    if (v->h->write(v->disk, clus_lba(v, e.pos_clus) + e.pos_off / 512u, 1,
+    if (vwrite(v, clus_lba(v, e.pos_clus) + e.pos_off / 512u, 1,
                     v->cbuf + (e.pos_off & ~511u)) != 0) {
       v->cbuf_clus = 0;
       err = -3;
@@ -1418,7 +1548,7 @@ static int ent_unlink(struct vol* v, const struct ent* e) {
   for (i = 0; i < e->nslots && valid_clus(v, clus); i++) {
     if (load_clus(v, clus) != 0) return -5;
     v->cbuf[off] = 0xE5;
-    if (v->h->write(v->disk, clus_lba(v, clus) + off / 512u, 1, v->cbuf + (off & ~511u)) != 0) {
+    if (vwrite(v, clus_lba(v, clus) + off / 512u, 1, v->cbuf + (off & ~511u)) != 0) {
       v->cbuf_clus = 0;
       return -5;
     }

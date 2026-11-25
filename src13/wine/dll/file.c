@@ -434,6 +434,7 @@ static HANDLE open_file(const char* name, DWORD access, DWORD disp, DWORD flags)
         return INVALID_HANDLE_VALUE;
       }
       f->path = sdup(path);
+      f->acc = wfile_access(access); /* GrantedAccess do NtQueryObject */
       if (want_write || disp == 2 || disp == 5) {
         /* reabrir para escrever: o handle volta a ser dono dos dados
          * (so no processo que gravou) */
@@ -471,6 +472,7 @@ static HANDLE open_file(const char* name, DWORD access, DWORD disp, DWORD flags)
     if (!f) return INVALID_HANDLE_VALUE;
     f->is_dir = 1;
     f->path = sdup(path);
+    f->acc = wfile_access(access); /* GrantedAccess do NtQueryObject */
     return wh_new(f);
   }
   if (!st && (disp == 3 || disp == 5)) {
@@ -484,6 +486,7 @@ static HANDLE open_file(const char* name, DWORD access, DWORD disp, DWORD flags)
   f = wobj_new(OBJ_FILE);
   if (!f) return INVALID_HANDLE_VALUE;
   f->path = sdup(path);
+  f->acc = wfile_access(access); /* GrantedAccess do NtQueryObject */
   f->writable = want_write || disp == 2 || disp == 5 || (!st && (disp == 4 || disp == 1));
   f->append = (access & 4u) && !(access & 0x40000000u) && !(access & 2u);
   if (f->writable) {

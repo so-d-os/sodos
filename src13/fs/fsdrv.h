@@ -130,4 +130,7 @@ int fsdrv_is_fat32(const uint8_t* boot);
 const struct fsdrv_ops* fsdrv_get(const char* dll, char skip);
 /* Caminho do ultimo driver devolvido por fsdrv_get. */
 const char* fsdrv_path(void);
+/* TROCA (kernel/troca.c): a proxima montagem le o DLL do disco de novo; os
+ * volumes montados ficam com o driver antigo. Quantas copias aposentou. */
+int fsdrv_retire(const char* dll);
 const struct fsdrv_host* fsdrv_host(void);

@@ -11,6 +11,14 @@
  * Um arquivo so (e nao a arvore) porque o D: do notebook e FAT32 pelo
  * FAT32.DLL: nomes longos, pastas e renomear ali nao sao garantidos.
  *
+ * O Chrome (RODACHRM.BAT) usa --user-data-dir=Z:\CHROMEUD, fora do
+ * WINEAPPDATA: o login do Google sumia a cada boot. Com SET
+ * WINEUDSAVE=D:\CHROME.SAV o processo de cima que recebeu --user-data-dir
+ * restaura e salva essa pasta do mesmo jeito, num arquivo seu. Esse processo
+ * salva so o perfil dele (o do Claude fica com o Claude: o D: nao recebe a
+ * mesma gravacao duas vezes), mas ainda restaura o WINEAPPDATA, que ele cria
+ * ao resolver o APPDATA e o Claude aberto depois nao restauraria mais.
+ *
  * Formato: "SODOSPRF1\n", depois por entrada: u32 tamanho do caminho, caminho
  * relativo (com \), u32 tamanho (0xFFFFFFFF = pasta), dados.
  */
@@ -112,7 +120,14 @@ static int pf_skip(const char* name) {
                                      "GrShaderCache", "ShaderCache", "Crashpad", "blob_storage",
                                      "CacheStorage", "ScriptCache", "component_crx_cache", "Shared Dictionary",
                                      "Crash Reports", "lockfile", "SingletonLock", "SingletonCookie",
-                                     "SingletonSocket", "LOCK", 0};
+                                     "SingletonSocket", "LOCK",
+                                     /* Chrome: componentes que o updater baixa de novo, metricas e
+                                      * logs (o --enable-logging cresce sem parar: cada minuto
+                                      * seria uma gravacao nova no D:) */
+                                     "GPUPersistentCache", "BrowserMetrics", "chrome_debug.log", "debug.log",
+                                     "OptGuideOnDeviceModel", "OptGuidePredictionModels",
+                                     "OnDeviceHeadSuggestModel", "optimization_guide_model_store", "SODA",
+                                     "SODALanguagePacks", "WidevineCdm", "screen_ai", "extensions_crx_cache", 0};
   int i;
   for (i = 0; skip[i]; i++)
     if (!strcmp(name, skip[i])) return 1;
@@ -187,12 +202,24 @@ static int pf_walk(struct pbuf* b, const char* root, const char* rel, int depth)
   return 0;
 }
 
-static int pf_env(char* data, int nd, char* save, int ns) {
-  int a = k_getenv("WINEAPPDATA", data, nd), s = k_getenv("WINEAPPSAVE", save, ns);
-  return a > 0 && a < nd && s > 0 && s < ns;
-}
+/* um perfil: a pasta (no ramdisk) e o arquivo que a guarda no D: */
+struct pf_prof {
+  char data[260], save[260];
+  uint64_t last_ms, hash;
+};
+static struct pf_prof pf_app; /* WINEAPPDATA -> WINEAPPSAVE (o Claude) */
+static struct pf_prof pf_ud;  /* --user-data-dir -> WINEUDSAVE (o Chrome) */
+static int pf_ud_on;          /* decidido na partida (wprof_restore) */
 
-static uint64_t pf_last_ms, pf_hash;
+/* o SET pode mudar com o programa aberto: le de novo a cada vez */
+static int pf_app_env(struct pf_prof* f) {
+  int a = k_getenv("WINEAPPDATA", f->data, (int)sizeof(f->data));
+  int s = k_getenv("WINEAPPSAVE", f->save, (int)sizeof(f->save));
+  if (a <= 0 || a >= (int)sizeof(f->data) || s <= 0 || s >= (int)sizeof(f->save)) return 0;
+  f->data[a] = 0;
+  f->save[s] = 0;
+  return 1;
+}
 
 static uint64_t pf_fnv(const uint8_t* p, size_t n) {
   uint64_t h = 1469598103934665603ull;
@@ -202,13 +229,13 @@ static uint64_t pf_fnv(const uint8_t* p, size_t n) {
 }
 
 /* empacota e grava se mudou; force = no ExitProcess (sem esperar o minuto) */
-void wprof_save(int force) {
-  char data[260], save[260];
+static void pf_save_one(struct pf_prof* f, int force) {
+  const char* data = f->data;
+  const char* save = f->save;
   struct pbuf b = {0, 0, 0, 0};
   uint64_t now = wnow_ms(), h;
-  if (!pf_env(data, sizeof(data), save, sizeof(save))) return;
-  if (!force && now - pf_last_ms < 60000) return;
-  pf_last_ms = now;
+  if (!force && now - f->last_ms < 60000) return;
+  f->last_ms = now;
   if (!pf_isdir(data)) return;
   pb_put(&b, PF_MAGIC, sizeof(PF_MAGIC) - 1);
   pf_save_path = save;
@@ -216,7 +243,7 @@ void wprof_save(int force) {
   pf_save_path = 0;
   if (b.fail) {
     wlog("perfil: grande demais ou sem memoria, nao salvo: ", save);
-  } else if ((h = pf_fnv(b.p, b.n)) != pf_hash) {
+  } else if ((h = pf_fnv(b.p, b.n)) != f->hash) {
     /* grava ao lado e so depois troca: se a maquina desligar no meio (o
      * notebook desligou sozinho; a VM de teste e morta a toda hora) o arquivo
      * antigo continua inteiro. wprof_restore tenta save, .NEW e .OLD. */
@@ -229,13 +256,24 @@ void wprof_save(int force) {
         if (k_frename(save, od) != 0) k_fdelete(save);
       }
       if (k_frename(nw, save) != 0) wlog("perfil: nao trocou o nome, ficou em ", nw);
-      pf_hash = h;
+      f->hash = h;
+      wlog("perfil salvo em ", save);
       wlogx("perfil salvo, bytes ", b.n);
     } else {
       wlog("perfil: falhou gravar ", save);
     }
   }
   wheap_free(b.p);
+}
+
+void wprof_save(int force) {
+  /* com --user-data-dir (o Chrome) so o perfil dele: o do Claude e o
+   * processo do Claude que salva */
+  if (pf_ud_on) {
+    pf_save_one(&pf_ud, force);
+    return;
+  }
+  if (pf_app_env(&pf_app)) pf_save_one(&pf_app, force);
 }
 
 static void pf_mkdirs(const char* path) {
@@ -295,13 +333,14 @@ static uint8_t* pf_load(const char* path, int* psz) {
   return p;
 }
 
-/* partida do programa de cima: desempacota se o perfil ainda nao existe */
-void wprof_restore(void) {
-  char data[260], save[260], full[600], alt[280];
+/* desempacota se o perfil ainda nao existe neste boot */
+static void pf_restore_one(struct pf_prof* f) {
+  const char* data = f->data;
+  const char* save = f->save;
+  char full[600], alt[280];
   int sz = 0, files = 0;
   uint8_t* p;
   size_t o;
-  if (!pf_env(data, sizeof(data), save, sizeof(save))) return;
   if (pf_isdir(data)) return; /* ja existe neste boot: o de agora vale */
   p = pf_load(save, &sz);
   if (!p) {
@@ -349,8 +388,44 @@ void wprof_restore(void) {
     o += n;
     files++;
   }
-  pf_hash = pf_fnv(p, (size_t)sz);
-  pf_last_ms = wnow_ms();
+  f->hash = pf_fnv(p, (size_t)sz);
+  f->last_ms = wnow_ms();
+  wlog("perfil restaurado em ", data);
   wlogx("perfil restaurado, arquivos ", (uint64_t)files);
   wheap_free(p);
+}
+
+/* --user-data-dir=X (com ou sem aspas) da linha de comando, em d; 1 se achou
+ * um caminho completo (X:\...) */
+static int pf_ud_arg(int argc, char** argv, char* d, int n) {
+  static const char opt[] = "--user-data-dir=";
+  int i, k;
+  for (i = 1; i < argc; i++) {
+    const char* s;
+    if (!argv[i] || strncmp(argv[i], opt, sizeof(opt) - 1)) continue;
+    s = argv[i] + sizeof(opt) - 1;
+    if (*s == '"') s++;
+    for (k = 0; s[k] && s[k] != '"' && k < n - 1; k++) d[k] = s[k] == '/' ? '\\' : s[k];
+    d[k] = 0;
+    while (k > 3 && d[k - 1] == '\\') d[--k] = 0;
+    return k >= 3 && d[1] == ':' && d[2] == '\\';
+  }
+  return 0;
+}
+
+/* partida do programa de cima: o perfil do WINEAPPDATA e, com SET WINEUDSAVE,
+ * o --user-data-dir deste programa */
+void wprof_restore(int argc, char** argv) {
+  int app = pf_app_env(&pf_app), s;
+  if (app) pf_restore_one(&pf_app);
+  s = k_getenv("WINEUDSAVE", pf_ud.save, (int)sizeof(pf_ud.save));
+  if (s <= 0 || s >= (int)sizeof(pf_ud.save) || !pf_ud_arg(argc, argv, pf_ud.data, (int)sizeof(pf_ud.data))) return;
+  pf_ud.save[s] = 0;
+  /* o mesmo arquivo ou a mesma pasta do Claude: um apagaria o outro */
+  if (app && (wstreq(pf_ud.save, pf_app.save) || wstreq(pf_ud.data, pf_app.data))) {
+    wlog("perfil: WINEUDSAVE igual ao do WINEAPPDATA, ignorado: ", pf_ud.save);
+    return;
+  }
+  pf_ud_on = 1;
+  pf_restore_one(&pf_ud);
 }

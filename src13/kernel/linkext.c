@@ -122,6 +122,18 @@ static int lx_retry(const char* file) {
   return lx_call(file);
 }
 
+/* TROCA LINKEXT.DLL (troca.c): descarrega e le o arquivo de novo. 0 ok, 1
+ * desligado (SET LINKEXT=1 ja carrega o novo), -1 em uso agora. */
+int linkext_reload(void) {
+  if (!wanted()) return 1;
+  if (lx_busy) return -1;
+  unload_now();
+  linkext_fn = load() ? lx_call : lx_retry;
+  return 0;
+}
+
+int linkext_loaded(void) { return lx_ops != 0; }
+
 void linkext_env_changed(void) {
   if (!wanted()) {
     linkext_fn = 0;
