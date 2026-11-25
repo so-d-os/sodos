@@ -56,6 +56,11 @@ int pack_load(unsigned char* data, int len, char* err);
 /* Objeto pelo sha. O ponteiro vale ate a proxima chamada. 0 se nao tem. */
 unsigned char* pack_get(const unsigned char* sha, int* type, int* size);
 void pack_free(void);
+/* 1 se o pack carregado tem o objeto (sem descomprimir) */
+int pack_has(const unsigned char* sha);
+/* troca o pack carregado pelo guardado (o primeiro guarda o atual; nenhum
+ * fica carregado). pack_get/pack_free valem para o carregado. */
+void pack_swap(void);
 /* Grava o .idx (versao 2) do pack carregado em path. 0 ok. */
 int pack_write_idx(const char* path);
 extern int pack_quiet;

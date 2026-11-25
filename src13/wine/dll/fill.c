@@ -694,6 +694,26 @@ static WINAPI BOOL WTSQuerySessionInformationW(HANDLE s, DWORD id, int cls, wcha
 static WINAPI void WTSFreeMemory(void* p) { (void)p; }
 
 /* ---------- ole32 / shell32 / shlwapi ---------- */
+/* shlwapi #437 (o Chrome pede por ordinal, delay-load: sem ele, int3 na
+ * checagem de dominio/gerencia). Windows 10 de estacao, fora de dominio, 64 bits
+ * nativo: verdadeiro so para as familias "NT" e "ou mais novo". */
+static WINAPI BOOL IsOS(DWORD os) {
+  switch (os) {
+    case 0:  /* OS_WIN32SORGREATER */
+    case 1:  /* OS_NT */
+    case 2:  /* OS_WIN95ORGREATER */
+    case 3:  /* OS_NT4ORGREATER */
+    case 4:  /* OS_WIN2000ORGREATER_ALT */
+    case 5:  /* OS_WIN98ORGREATER */
+    case 7:  /* OS_WIN2000ORGREATER */
+    case 8:  /* OS_WIN2000PRO */
+    case 18: /* OS_XPORGREATER */
+    case 20: /* OS_PROFESSIONAL */
+      return 1;
+    default: /* OS_DOMAINMEMBER 28, OS_ANYSERVER 29, OS_WOW6432 30, servidor... */
+      return 0;
+  }
+}
 static WINAPI long PropVariantClear(void* pv) {
   if (pv) memset(pv, 0, 24);
   return 0;
@@ -1547,7 +1567,7 @@ const struct wine_sym fill_syms[] = {
     S(PropVariantClear), S(PropVariantCopy), S(CoRegisterInitializeSpy), S(CoRevokeInitializeSpy),
     S(RoGetAgileReference), S(SetCurrentProcessExplicitAppUserModelID), S(GetCurrentProcessExplicitAppUserModelID),
     S(SHGetPropertyStoreForWindow), S(PathFindFileNameW), S(PathFindExtensionW), S(PathRemoveExtensionW),
-    S(PathMatchSpecW), S(CreateEnvironmentBlock), S(DestroyEnvironmentBlock),
+    S(PathMatchSpecW), S(IsOS), S(CreateEnvironmentBlock), S(DestroyEnvironmentBlock),
     S(CreateDXGIFactory), S(CreateDXGIFactory1), S(CreateDXGIFactory2), S(DXGIGetDebugInterface1),
     S(D3D11CreateDevice), S(DCompositionCreateDevice), S(DCompositionCreateDevice2), S(DCompositionCreateDevice3),
     S(DCompositionCreateSurfaceHandle), S(ReadProcessMemory), S(WriteProcessMemory), S(AccessibleObjectFromWindow), S(AccessibleChildren),

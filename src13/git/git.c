@@ -1,6 +1,7 @@
 /* git.c - comandos do git do SODOS.
  *   git clone https://github.com/dono/projeto [pasta]
  *   git pull [pasta]       busca o commit novo e atualiza os arquivos
+ *   git pull --rebase [--autostash]   refaz os commits daqui por cima do servidor
  *   git status [pasta]     o que mudou (staged, nao staged, nao rastreado)
  *   git add -u | -A | arquivo...   prepara o proximo commit
  *   git commit [-a] -m mensagem    grava o commit (objetos soltos em .git\objects)
@@ -31,6 +32,15 @@
  *           o load_file confirma pela entrada da pasta (k_dir_entry).
  *           Prototipo do git_file no topo: acabou o aviso "funcao 'git_file'
  *           sem declaracao" na compilacao.
+ *   1.0.16  git pull --rebase (-r, --rebase=..., git config pull.rebase true):
+ *           os commits daqui sao refeitos por cima do commit novo do servidor;
+ *           arquivo mudado dos dois lados e juntado por linha (diff3), e
+ *           conflito cancela tudo sem mexer na pasta nem no .git. --autostash
+ *           (ou rebase.autoStash) junta as mudancas sem commit; conflito ali
+ *           fica marcado com <<<<<<< no arquivo. --no-rebase, --ff-only.
+ *           git pull com commits daqui e o servidor parado dizia "o servidor
+ *           mudou". git reset origin gravava a versao do servidor por cima do
+ *           que o commit local tinha mudado: agora a pasta nao muda mesmo.
  *
  * Repositorio no formato padrao, em .git:
  *   HEAD, config, refs\heads\<ramo>, refs\remotes\origin\<ramo>, logs\HEAD
@@ -51,7 +61,7 @@
  * O que e so do git do SODOS (estado, lista de nomes, o que vai no
  * commit) fica em .git\sodos. Repositorios antigos (_GIT) sao migrados
  * sozinhos no primeiro comando. */
-#define GIT_SODOS_VER "1.0.15"
+#define GIT_SODOS_VER "1.0.16"
 #define GITDIR ".git\\sodos"
 #define OLDDIR "_GIT"
 #define PATHMAX 260
@@ -600,12 +610,26 @@ struct co {
   const char* root;      /* "D:\\SODOS" */
   struct sbuf names;
   int keep;              /* so refaz a lista: nao grava nada que ja existia */
+  int loose;             /* pull --rebase: arvores e blobs tambem de .git\objects */
   int files;
   int written;
   int skipped;           /* de proposito: caminho longo demais */
   int failed;            /* erro: objeto sem pack ou k_fsave falhou */
   int kept;
 };
+
+static unsigned char* obj_read(const char* root, const unsigned char* sha, int* type, int* len);
+
+/* objeto para o checkout: o pack carregado; com loose tambem os soltos.
+ * *own = 1: e malloc (quem chamou libera) */
+static unsigned char* co_get(struct co* c, const unsigned char* sha, int* type, int* size, int* own) {
+  unsigned char* d = pack_get(sha, type, size);
+  *own = 0;
+  if (d || !c->loose) return d;
+  d = obj_read(c->root, sha, type, size);
+  if (d) *own = 1;
+  return d;
+}
 
 static int depth_of(const char* path) {
   int n = 0;
@@ -646,7 +670,7 @@ static void put_file(struct co* c, const char* dosrel, const char* lng, const un
   char full[PATHMAX + 40], hex[41];
   struct nent* o = olds.n ? list_find(&olds, lng) : 0;
   unsigned char* data;
-  int type, size;
+  int type, size, own;
   c->files++;
   sha_hex(sha, hex);
   path_join(full, c->root, dosrel);
@@ -658,28 +682,39 @@ static void put_file(struct co* c, const char* dosrel, const char* lng, const un
     return;
   }
   names_line(c, dosrel, lng, sha, mode);
+  /* keep (git reset origin, NAMES.TXT antigo): so a lista; a pasta nao muda.
+   * Antes o reset gravava a versao do servidor por cima do que o commit
+   * local tinha mudado (e dizia que a pasta nao mudava). */
+  if (c->keep) {
+    if (o) o->seen = 1;
+    return;
+  }
   if (o) {
     unsigned char now[20];
     o->seen = 1;
     if (memcmp(o->sha, sha, 20) == 0 && strcmp(o->dos, dosrel) == 0 && (c->keep || k_fsize(full) >= 0)) return;
     if (file_sha(full, now) == 0 && memcmp(now, o->sha, 20) != 0 && memcmp(now, sha, 20) != 0) {
-      printf("  mudado aqui, mantido: %s\n", lng);
+      /* no rebase so chega aqui o que o --autostash junta depois */
+      if (!c->loose) printf("  mudado aqui, mantido: %s\n", lng);
       c->kept++;
       return;
     }
   }
-  data = pack_get(sha, &type, &size);
+  data = co_get(c, sha, &type, &size, &own);
   if (!data || type != OBJ_BLOB) {
     printf("  objeto %s nao veio no pack: %s\n", hex, lng);
+    if (own) free(data);
     c->failed++;
     return;
   }
   make_parents(c->root, full);
   if (k_fsave(full, (const char*)data, size) != 0) {
     printf("  nao gravou %s (%s)\n", full, lng);
+    if (own) free(data);
     c->failed++;
     return;
   }
+  if (own) free(data);
   c->written++;
   if ((c->written & 15) == 0) printf("\r  %d arquivos", c->written);
 }
@@ -687,20 +722,23 @@ static void put_file(struct co* c, const char* dosrel, const char* lng, const un
 static int checkout_tree(struct co* c, const unsigned char* tsha, const char* dosrel, const char* lngrel) {
   unsigned char* t;
   unsigned char* tree;
-  int type, size, p, n = 0, nused = 0;
+  int type, size, p, n = 0, nused = 0, own;
   char (*used)[256];
-  t = pack_get(tsha, &type, &size);
+  t = co_get(c, tsha, &type, &size, &own);
   if (!t || type != OBJ_TREE) {
+    if (own) free(t);
     sprintf(err, "arvore que nao veio no pack");
     return -1;
   }
   tree = (unsigned char*)malloc((size_t)size + 1);
   if (!tree) {
+    if (own) free(t);
     sprintf(err, "sem memoria");
     return -1;
   }
   memcpy(tree, t, (size_t)size);
   tree[size] = 0;
+  if (own) free(t);
   for (p = 0; p < size; p++)
     if (tree[p] == 0) n++;
   used = 0; /* nomes trocados nesta pasta: so se algum nome nao servir */
@@ -997,6 +1035,10 @@ static unsigned char* obj_read(const char* root, const unsigned char* sha, int* 
   return out;
 }
 
+/* objetos novos que o obj_write gravou (wr_on): o pull --rebase cancelado apaga */
+static int wr_on, wr_n, wr_cap;
+static unsigned char (*wr_sha)[20];
+
 static int obj_write(const char* root, int type, const void* data, int len, unsigned char* sha) {
   char path[PATHMAX], hdr[32];
   char* b;
@@ -1043,6 +1085,13 @@ static int obj_write(const char* root, int type, const void* data, int len, unsi
   if (r != 0) {
     sprintf(err, "nao gravou %s", path);
     return -1;
+  }
+  if (wr_on) {
+    if (wr_n == wr_cap) {
+      wr_cap = wr_cap ? wr_cap * 2 : 64;
+      wr_sha = (unsigned char (*)[20])realloc(wr_sha, 20 * (size_t)wr_cap);
+    }
+    memcpy(wr_sha[wr_n++], sha, 20);
   }
   return 0;
 }
@@ -1306,37 +1355,23 @@ static int cfg_set(const char* path, const char* key, const char* val) {
 
 /* ---------- comandos ---------- */
 
-/* Busca o commit de r e grava os arquivos em root.
- * keep = 1: so refaz NAMES.TXT/HEAD.PCK do commit atual (nao mexe no INDEX nem em OBJ).
- * Devolve 0 ok, -1 erro (nada atualizado), 1 = estado gravado mas arquivos
- * ficaram sem gravar (err diz quantos). */
-static int fetch_checkout(const char* root, struct remote* r, int keep) {
-  char* resp;
-  unsigned char* pack;
-  int plen, type, size, i, removed = 0;
-  unsigned char* cm;
-  unsigned char tsha[20];
+/* Com o pack de r->head carregado (resp e a resposta que o contem): grava a
+ * arvore tsha na pasta, guarda o pack em .git\objects\pack (o anterior sai),
+ * NAMES.TXT e STATE.TXT (commit = local, remote = r->head).
+ * rebase = 1: a arvore e de commits daqui (objetos soltos tambem valem).
+ * keep = 1: so refaz NAMES.TXT do commit atual (nao mexe no INDEX nem em OBJ).
+ * Libera o pack e resp. Devolve 0 ok, -1 erro (nada atualizado), 1 = estado
+ * gravado mas arquivos ficaram sem gravar (err diz quantos). */
+static int checkout_save(const char* root, struct remote* r, char* resp, unsigned char* pack, int plen,
+                         const unsigned char* tsha, const unsigned char* local, int keep, int rebase,
+                         unsigned t0) {
+  int i, removed = 0;
   char path[PATHMAX], hex[41];
   struct co c;
-  unsigned t0 = k_ms();
-  dotgit_dirs(root);
-  if (get_pack(r, &resp, &pack, &plen) != 0) return -1;
-  printf("  pack de %d KB\n", plen / 1024);
-  if (pack_load(pack, plen, err) < 0) {
-    free(resp);
-    return -1;
-  }
-  cm = pack_get(r->head, &type, &size);
-  if (!cm || type != OBJ_COMMIT || size < 46 || memcmp(cm, "tree ", 5) != 0 || hex_sha((char*)cm + 5, tsha) != 0) {
-    sprintf(err, "o commit nao veio no pack");
-    free(resp);
-    return -1;
-  }
-  git_file(root, "COMMIT.TXT", path);
-  k_fsave(path, (char*)cm, size);
   memset(&c, 0, sizeof(c));
   c.root = root;
   c.keep = keep;
+  c.loose = rebase;
   printf(keep ? "refazendo a lista de arquivos\n" : "gravando arquivos\n");
   if (checkout_tree(&c, tsha, "", "") != 0) {
     free(resp);
@@ -1400,17 +1435,44 @@ static int fetch_checkout(const char* root, struct remote* r, int keep) {
       k_fdelete(path);
     }
   }
-  state_write(root, r, r->head, r->head);
+  state_write(root, r, local, r->head);
   if (c.failed) sprintf(err, "%d arquivo(s) nao foram gravados (veja acima)", c.failed);
   if (keep) return c.failed ? 1 : 0;
-  sha_hex(r->head, hex);
+  sha_hex(local, hex);
   printf("\r%d arquivos (%d gravados", c.files, c.written);
   if (removed) printf(", %d apagados", removed);
-  if (c.kept) printf(", %d mantidos", c.kept);
+  if (c.kept && !rebase) printf(", %d mantidos", c.kept);
   if (c.skipped) printf(", %d pulados", c.skipped);
   if (c.failed) printf(", %d com erro", c.failed);
   printf(") em %u s\ncommit %.12s (%s)\n", (k_ms() - t0) / 1000, hex, r->ref);
   return c.failed ? 1 : 0;
+}
+
+/* Busca o commit de r e grava os arquivos em root (keep: veja checkout_save). */
+static int fetch_checkout(const char* root, struct remote* r, int keep) {
+  char* resp;
+  unsigned char* pack;
+  int plen, type, size;
+  unsigned char* cm;
+  unsigned char tsha[20];
+  char path[PATHMAX];
+  unsigned t0 = k_ms();
+  dotgit_dirs(root);
+  if (get_pack(r, &resp, &pack, &plen) != 0) return -1;
+  printf("  pack de %d KB\n", plen / 1024);
+  if (pack_load(pack, plen, err) < 0) {
+    free(resp);
+    return -1;
+  }
+  cm = pack_get(r->head, &type, &size);
+  if (!cm || type != OBJ_COMMIT || size < 46 || memcmp(cm, "tree ", 5) != 0 || hex_sha((char*)cm + 5, tsha) != 0) {
+    sprintf(err, "o commit nao veio no pack");
+    free(resp);
+    return -1;
+  }
+  git_file(root, "COMMIT.TXT", path);
+  k_fsave(path, (char*)cm, size);
+  return checkout_save(root, r, resp, pack, plen, tsha, r->head, keep, 0, t0);
 }
 
 static int cmd_clone(int argc, char** argv) {
@@ -1499,11 +1561,36 @@ static int cmd_clone(int argc, char** argv) {
 }
 
 static const char* path_arg(int argc, char** argv);
+static int count_ahead(const char* root, const unsigned char* cur, const unsigned char* base);
+static int pull_rebase(const char* root, struct remote* r, const unsigned char* cur, const unsigned char* base,
+                       int autostash);
+
+/* valor de config ligado: true, yes, on, 1, merges, interactive... */
+static int cfg_on(const char* root, const char* key) {
+  char v[32];
+  if (!cfg_get(root, key, v, sizeof(v)) || !v[0]) return -1;
+  return !(ci_cmp(v, "false") == 0 || ci_cmp(v, "no") == 0 || ci_cmp(v, "off") == 0 || strcmp(v, "0") == 0);
+}
+
+/* git pull [--rebase|-r|--no-rebase] [--ff-only] [--autostash] [origin [ramo]] [pasta]
+ * Sem commits daqui: so baixa o commit novo. Com commits daqui e o servidor
+ * mudado: --rebase (ou git config pull.rebase true) refaz os commits daqui
+ * em cima do servidor; sem ele nada muda. */
 static int cmd_pull(int argc, char** argv) {
   struct remote r;
   char root[PATHMAX], hex[41];
   unsigned char cur[20], base[20];
-  int gr;
+  int gr, i, rebase = -1, ffonly = 0, autostash = -1;
+  for (i = 2; i < argc; i++) {
+    const char* a = argv[i];
+    if (strcmp(a, "--rebase") == 0 || strcmp(a, "-r") == 0) rebase = 1;
+    else if (strncmp(a, "--rebase=", 9) == 0) rebase = !(strcmp(a + 9, "false") == 0 || strcmp(a + 9, "no") == 0);
+    else if (strcmp(a, "--no-rebase") == 0) rebase = 0;
+    else if (strcmp(a, "--ff-only") == 0) ffonly = 1;
+    else if (strcmp(a, "--autostash") == 0) autostash = 1;
+    else if (strcmp(a, "--no-autostash") == 0) autostash = 0;
+    /* -q, -v, --ff, --no-ff, --prune, --tags...: ignorados */
+  }
   if (find_root(path_arg(argc, argv), root) != 0) {
     printf("%s\n", err);
     return 1;
@@ -1511,6 +1598,12 @@ static int cmd_pull(int argc, char** argv) {
   if (state_read(root, &r, cur, base) != 0) {
     printf("%s\\%s\\STATE.TXT invalido\n", root, GITDIR);
     return 1;
+  }
+  if (rebase < 0) rebase = cfg_on(root, "pull.rebase") > 0;
+  if (autostash < 0) {
+    autostash = cfg_on(root, "rebase.autoStash");
+    if (autostash < 0) autostash = cfg_on(root, "rebase.autostash");
+    autostash = autostash > 0;
   }
   if (!k_net_ready()) {
     printf("rede nao pronta\n");
@@ -1526,14 +1619,27 @@ static int cmd_pull(int argc, char** argv) {
     return 1;
   }
   if (memcmp(cur, r.head, 20) == 0) {
+    /* os commits daqui ja estao no servidor (push de outro jeito) */
+    if (memcmp(base, cur, 20) != 0) state_write(root, &r, cur, cur);
     sha_hex(cur, hex);
     printf("Ja esta atualizado (%.12s).\n", hex);
     return 0;
   }
+  if (memcmp(base, r.head, 20) == 0) {
+    sha_hex(cur, hex);
+    printf("Ja esta atualizado: o servidor nao mudou (%.12s). %d commit(s) daqui para o git push.\n", hex,
+           count_ahead(root, cur, base));
+    return 0;
+  }
+  if (rebase && !ffonly) return pull_rebase(root, &r, cur, base, autostash);
   if (memcmp(cur, base, 20) != 0) {
     printf("Ha commits locais que nao foram para o servidor e o servidor mudou.\n");
-    printf("Este git nao faz merge: guarde os arquivos mudados, apague a pasta e\n");
-    printf("faca o clone de novo, ou mande os commits antes (git push).\n");
+    if (ffonly) {
+      printf("--ff-only: nada foi mudado.\n");
+    } else {
+      printf("Rode  git pull --rebase  para refazer os commits daqui em cima dos do servidor\n");
+      printf("(ou  git config pull.rebase true  para o git pull fazer sempre assim).\n");
+    }
     return 1;
   }
   list_load(root, "NAMES.TXT", &olds);
@@ -2369,10 +2475,12 @@ static int split_lines(const char* s, int len, struct line** out) {
   return k;
 }
 
+static int line_exact; /* 1 = \r no fim conta (o merge do pull --rebase) */
+
 static int line_eq(const struct line* a, const struct line* b) {
   int x = a->n, y = b->n;
-  if (x && a->p[x - 1] == '\r') x--;
-  if (y && b->p[y - 1] == '\r') y--;
+  if (!line_exact && x && a->p[x - 1] == '\r') x--;
+  if (!line_exact && y && b->p[y - 1] == '\r') y--;
   return x == y && memcmp(a->p, b->p, (size_t)x) == 0;
 }
 
@@ -2916,6 +3024,840 @@ static int cmd_commit(int argc, char** argv) {
     return 1;
   }
   return 0;
+}
+
+/* ---------- pull --rebase ----------
+ * Os commits daqui (de base ate cur, objetos soltos) sao refeitos em cima do
+ * commit novo do servidor (r->head), um por um, como no git rebase: cada um
+ * leva so o que ele mudou em relacao ao pai. Arquivo mudado aqui e no
+ * servidor e juntado por linha (diff3); mudancas que se encostam sao
+ * conflito, e entao nada muda (nem a pasta nem o .git). O pack do pull
+ * anterior (onde esta a base) e o novo ficam os dois carregados (pack_swap).
+ * Arquivo mudado sem commit que o rebase precisa mudar: para, ou com
+ * --autostash e juntado do mesmo jeito (conflito fica com <<<<<<< no arquivo). */
+
+struct val {
+  int has;
+  unsigned char sha[20];
+  char mode[8];
+};
+
+static void val_of(const struct nent* e, struct val* v) {
+  memset(v, 0, sizeof(*v));
+  if (!e || e->gone) return;
+  v->has = 1;
+  memcpy(v->sha, e->sha, 20);
+  strcpy(v->mode, e->mode);
+}
+
+static int val_eq(const struct val* a, const struct val* b) {
+  if (a->has != b->has) return 0;
+  return !a->has || (memcmp(a->sha, b->sha, 20) == 0 && strcmp(a->mode, b->mode) == 0);
+}
+
+static int rb_old; /* 1 = o pack anterior esta guardado (pack_swap) */
+
+static unsigned char* dup_n(const unsigned char* d, int n) {
+  unsigned char* o = (unsigned char*)malloc((size_t)n + 1);
+  if (!o) return 0;
+  memcpy(o, d, (size_t)n);
+  o[n] = 0;
+  return o;
+}
+
+/* objeto de qualquer lugar: pack novo, pack anterior ou .git\objects. malloc. */
+static unsigned char* rb_get(const char* root, const unsigned char* sha, int* type, int* len) {
+  unsigned char* d = pack_get(sha, type, len);
+  if (d) return dup_n(d, *len);
+  if (rb_old) {
+    unsigned char* o = 0;
+    pack_swap();
+    d = pack_get(sha, type, len);
+    if (d) o = dup_n(d, *len);
+    pack_swap();
+    if (o) return o;
+  }
+  return obj_read(root, sha, type, len);
+}
+
+/* o pack do clone/pull anterior, guardado com pack_swap. Devolve o buffer. */
+static char* rb_load_old(const char* root) {
+  char path[PATHMAX];
+  int n;
+  char* t;
+  char* buf;
+  git_file(root, "PACK.TXT", path);
+  t = load_file(path, &n);
+  if (t) {
+    char* nl = strchr(t, '\n');
+    if (nl) *nl = 0;
+    sprintf(path, "%s\\%s", root, t);
+    free(t);
+  } else {
+    git_file(root, "HEAD.PCK", path);
+  }
+  buf = load_file(path, &n);
+  if (!buf) return 0;
+  printf("lendo o pack anterior\n");
+  if (pack_load((unsigned char*)buf, n, err) < 0) {
+    printf("aviso: %s\n", err);
+    pack_free();
+    free(buf);
+    return 0;
+  }
+  pack_swap();
+  rb_old = 1;
+  return buf;
+}
+
+/* arvore -> lista de arquivos (caminho inteiro, sha, modo; sem nome no disco) */
+static int flat_tree(const char* root, const unsigned char* tsha, const char* pre, struct list* l) {
+  int type, size, p = 0;
+  unsigned char* t = rb_get(root, tsha, &type, &size);
+  if (!t || type != OBJ_TREE) {
+    char hex[41];
+    free(t);
+    sha_hex(tsha, hex);
+    sprintf(err, "nao achei a arvore %.12s (nem nos packs nem em .git\\objects)", hex);
+    return -1;
+  }
+  while (p < size) {
+    char mode[8], name[256], lng[PATHMAX + 256];
+    const unsigned char* sha;
+    int k = 0;
+    while (p < size && t[p] != ' ' && k < 7) mode[k++] = (char)t[p++];
+    mode[k] = 0;
+    p++;
+    k = 0;
+    while (p < size && t[p] && k < 255) name[k++] = (char)t[p++];
+    name[k] = 0;
+    p++;
+    if (p + 20 > size) break;
+    sha = t + p;
+    p += 20;
+    if (pre[0]) snprintf(lng, sizeof(lng), "%s/%s", pre, name);
+    else snprintf(lng, sizeof(lng), "%s", name);
+    if (strcmp(mode, "40000") == 0) {
+      if (flat_tree(root, sha, lng, l) != 0) {
+        free(t);
+        return -1;
+      }
+    } else {
+      struct nent* e = list_push(l);
+      e->dos = (char*)"";
+      e->lng = xstrdup(lng);
+      memcpy(e->sha, sha, 20);
+      strcpy(e->mode, mode);
+      e->hasmode = 1;
+    }
+  }
+  free(t);
+  return 0;
+}
+
+static int flat_commit_tree(const char* root, const unsigned char* tsha, struct list* l) {
+  memset(l, 0, sizeof(*l));
+  if (flat_tree(root, tsha, "", l) != 0) return -1;
+  list_sort(l);
+  return 0;
+}
+
+static void flat_free(struct list* l) {
+  int i;
+  for (i = 0; i < l->n; i++) free(l->e[i].lng);
+  free(l->e);
+  memset(l, 0, sizeof(*l));
+}
+
+/* pelo caminho, mesmo apagada (gone) */
+static struct nent* rb_find(struct list* l, const char* lng) {
+  int lo = 0, hi = l->n - 1;
+  while (lo <= hi) {
+    int m = (lo + hi) / 2, c = strcmp(l->e[m].lng, lng);
+    if (!c) return &l->e[m];
+    if (c < 0) lo = m + 1;
+    else hi = m - 1;
+  }
+  return 0;
+}
+
+/* --- diff3 --- */
+
+struct hunk {
+  int s, e;   /* linhas da base [s,e) */
+  int bs, be; /* viram estas do lado [bs,be) */
+};
+
+/* linhas com o \n de cada uma: juntar de volta da o mesmo texto */
+static int split_keep(const char* s, int len, struct line** out) {
+  int n = 0, i, k = 0;
+  struct line* v;
+  for (i = 0; i < len; i++)
+    if (s[i] == '\n') n++;
+  v = (struct line*)malloc(sizeof(struct line) * (size_t)(n + 2));
+  for (i = 0; i < len;) {
+    int j = i;
+    while (j < len && s[j] != '\n') j++;
+    if (j < len) j++;
+    v[k].p = s + i;
+    v[k].n = j - i;
+    k++;
+    i = j;
+  }
+  *out = v;
+  return k;
+}
+
+static int to_hunks(const struct op* ops, int no, struct hunk** out) {
+  struct hunk* h = (struct hunk*)malloc(sizeof(struct hunk) * (size_t)(no + 1));
+  int i = 0, n = 0, a = 0, b = 0;
+  while (i < no) {
+    if (ops[i].t == 0) {
+      a++;
+      b++;
+      i++;
+      continue;
+    }
+    h[n].s = a;
+    h[n].bs = b;
+    while (i < no && ops[i].t != 0) {
+      if (ops[i].t < 0) a++;
+      else b++;
+      i++;
+    }
+    h[n].e = a;
+    h[n].be = b;
+    n++;
+  }
+  *out = h;
+  return n;
+}
+
+static void put_lines(struct sbuf* s, const struct line* v, int from, int to) {
+  int i;
+  for (i = from; i < to; i++) sb_add(s, v[i].p, v[i].n);
+}
+
+/* a base [cs,ce) com os hunks h[i0,i1) de um lado aplicados */
+static void side_text(struct sbuf* s, const struct line* B, const struct line* S, const struct hunk* h, int i0,
+                      int i1, int cs, int ce) {
+  int k = cs, i;
+  for (i = i0; i < i1; i++) {
+    put_lines(s, B, k, h[i].s);
+    put_lines(s, S, h[i].bs, h[i].be);
+    k = h[i].e;
+  }
+  put_lines(s, B, k, ce);
+}
+
+static void conflict_part(struct sbuf* out, const char* mark, const struct sbuf* t) {
+  sb_add(out, mark, -1);
+  sb_add(out, t->p, t->len);
+  if (t->len && t->p[t->len - 1] != '\n') sb_add(out, "\n", 1);
+}
+
+/* Junta as mudancas base->lt e base->xt. 0 ok (out = texto), -1 conflito,
+ * -2 binario. markers = 1: conflito vira <<<<<<< aqui / ======= / >>>>>>>
+ * servidor no texto e devolve o numero de conflitos (> 0). */
+static int merge3(const char* bt, int bn, const char* lt, int ln, const char* xt, int xn, int markers,
+                  struct sbuf* out) {
+  struct line* B;
+  struct line* L;
+  struct line* X;
+  struct op* o1;
+  struct op* o2;
+  struct hunk* h1;
+  struct hunk* h2;
+  int nb, nl, nx, n1, n2, i = 0, j = 0, pos = 0, nconf = 0;
+  memset(out, 0, sizeof(*out));
+  if (is_binary((const unsigned char*)bt, bn) || is_binary((const unsigned char*)lt, ln) ||
+      is_binary((const unsigned char*)xt, xn))
+    return -2;
+  nb = split_keep(bt, bn, &B);
+  nl = split_keep(lt, ln, &L);
+  nx = split_keep(xt, xn, &X);
+  line_exact = 1;
+  n1 = diff_ops(B, nb, L, nl, &o1);
+  n2 = diff_ops(B, nb, X, nx, &o2);
+  line_exact = 0;
+  n1 = to_hunks(o1, n1, &h1);
+  n2 = to_hunks(o2, n2, &h2);
+  free(o1);
+  free(o2);
+  sb_add(out, "", 0);
+  while (i < n1 || j < n2) {
+    int i0 = i, j0 = j, cs, ce;
+    if (j >= n2 || (i < n1 && h1[i].s <= h2[j].s)) {
+      cs = h1[i].s;
+      ce = h1[i].e;
+      i++;
+    } else {
+      cs = h2[j].s;
+      ce = h2[j].e;
+      j++;
+    }
+    /* o que encosta (mesma linha ou vizinha) entra no mesmo bloco */
+    for (;;) {
+      if (i < n1 && h1[i].s <= ce) {
+        if (h1[i].e > ce) ce = h1[i].e;
+        i++;
+      } else if (j < n2 && h2[j].s <= ce) {
+        if (h2[j].e > ce) ce = h2[j].e;
+        j++;
+      } else {
+        break;
+      }
+    }
+    put_lines(out, B, pos, cs);
+    if (j == j0) {
+      side_text(out, B, L, h1, i0, i, cs, ce);
+    } else if (i == i0) {
+      side_text(out, B, X, h2, j0, j, cs, ce);
+    } else {
+      struct sbuf a, b;
+      memset(&a, 0, sizeof(a));
+      memset(&b, 0, sizeof(b));
+      sb_add(&a, "", 0);
+      sb_add(&b, "", 0);
+      side_text(&a, B, L, h1, i0, i, cs, ce);
+      side_text(&b, B, X, h2, j0, j, cs, ce);
+      if (a.len == b.len && memcmp(a.p, b.p, (size_t)a.len) == 0) {
+        sb_add(out, a.p, a.len); /* a mesma mudanca dos dois lados */
+      } else {
+        nconf++;
+        if (markers) {
+          conflict_part(out, "<<<<<<< aqui (sem commit)\n", &a);
+          conflict_part(out, "=======\n", &b);
+          sb_add(out, ">>>>>>> servidor\n", -1);
+        }
+      }
+      free(a.p);
+      free(b.p);
+      if (nconf && !markers) break;
+    }
+    pos = ce;
+  }
+  put_lines(out, B, pos, nb);
+  free(B);
+  free(L);
+  free(X);
+  free(h1);
+  free(h2);
+  if (nconf && !markers) {
+    free(out->p);
+    memset(out, 0, sizeof(*out));
+    return -1;
+  }
+  return nconf;
+}
+
+/* Mudanca de um commit (b -> l) num caminho que o servidor deixou em x.
+ * 0 = res e o resultado (blob juntado ja gravado), -1 = conflito (impresso). */
+static int rb_merge(const char* root, const char* lng, const struct val* b, const struct val* l,
+                    const struct val* x, struct val* res) {
+  const char* why = 0;
+  memcpy(res, x, sizeof(*res));
+  if (!b->has) why = "criado aqui e no servidor, diferentes";
+  else if (!l->has) why = "apagado aqui e mudado no servidor";
+  else if (!x->has) why = "mudado aqui e apagado no servidor";
+  else if (strcmp(l->mode, b->mode) == 0) strcpy(res->mode, x->mode);
+  else if (strcmp(x->mode, b->mode) == 0 || strcmp(x->mode, l->mode) == 0) strcpy(res->mode, l->mode);
+  else why = "o modo mudou aqui e no servidor";
+  if (!why) {
+    if (memcmp(l->sha, b->sha, 20) == 0) {
+      memcpy(res->sha, x->sha, 20);
+    } else if (memcmp(x->sha, b->sha, 20) == 0 || memcmp(x->sha, l->sha, 20) == 0) {
+      memcpy(res->sha, l->sha, 20);
+    } else if (strcmp(res->mode, "100644") != 0 && strcmp(res->mode, "100755") != 0) {
+      why = "link ou submodulo mudado aqui e no servidor";
+    } else {
+      int t1, t2, t3, n1 = 0, n2 = 0, n3 = 0, m;
+      unsigned char* d1 = rb_get(root, b->sha, &t1, &n1);
+      unsigned char* d2 = rb_get(root, l->sha, &t2, &n2);
+      unsigned char* d3 = rb_get(root, x->sha, &t3, &n3);
+      struct sbuf o;
+      memset(&o, 0, sizeof(o));
+      if (!d1 || !d2 || !d3) {
+        why = "objeto que nao esta aqui";
+      } else {
+        m = merge3((char*)d1, n1, (char*)d2, n2, (char*)d3, n3, 0, &o);
+        if (m == -2) why = "arquivo binario mudado aqui e no servidor";
+        else if (m != 0) why = "as mudancas daqui e do servidor mexem nas mesmas linhas";
+        else if (obj_write(root, OBJ_BLOB, o.p, o.len, res->sha) != 0) why = err;
+        else printf("  juntado: %s\n", lng);
+      }
+      free(d1);
+      free(d2);
+      free(d3);
+      free(o.p);
+    }
+  }
+  if (why) {
+    printf("  conflito: %s (%s)\n", lng, why);
+    return -1;
+  }
+  return 0;
+}
+
+/* o commit orig refeito com outra arvore e outro pai; o author fica, o
+ * committer e quem esta aqui (who), ou o mesmo se who = 0 */
+static int rb_commit(const char* root, const char* orig, const unsigned char* tree, const unsigned char* parent,
+                     const char* who, unsigned char* out) {
+  struct sbuf s;
+  char hex[41];
+  const char* body = strstr(orig, "\n\n");
+  const char* p;
+  int r;
+  memset(&s, 0, sizeof(s));
+  sha_hex(tree, hex);
+  sb_add(&s, "tree ", 5);
+  sb_add(&s, hex, 40);
+  sha_hex(parent, hex);
+  sb_add(&s, "\nparent ", 8);
+  sb_add(&s, hex, 40);
+  sb_add(&s, "\n", 1);
+  for (p = orig; *p && (!body || p <= body);) {
+    const char* nl = strchr(p, '\n');
+    int n = nl ? (int)(nl - p) + 1 : (int)strlen(p);
+    if (strncmp(p, "author ", 7) == 0 || (!who && strncmp(p, "committer ", 10) == 0)) sb_add(&s, p, n);
+    if (!nl) break;
+    p = nl + 1;
+  }
+  if (who) sb_add(&s, who, -1);
+  sb_add(&s, body ? body + 1 : "\n", -1);
+  r = obj_write(root, OBJ_COMMIT, s.p, s.len, out);
+  free(s.p);
+  return r;
+}
+
+/* primeira linha da mensagem */
+static void subject_of(const char* t, char* out, int max) {
+  const char* b = strstr(t, "\n\n");
+  int n = 0;
+  if (b) {
+    b += 2;
+    while (b[n] && b[n] != '\n' && n < max - 1) n++;
+    memcpy(out, b, (size_t)n);
+  }
+  out[n] = 0;
+}
+
+struct stash {
+  char* dos;
+  char* lng;
+  char* data;
+  int len;
+  int conflicts;
+};
+
+/* A pasta pode ir de olds (o HEAD daqui) para N? Arquivo mudado sem commit
+ * que o rebase muda: conta como problema, ou (autostash) e juntado em st.
+ * Devolve o numero de problemas (ja impressos). */
+static int rb_worktree(const char* root, struct list* old, struct list* N, int autostash, struct stash** st,
+                       int* nst) {
+  int i = 0, j = 0, bad = 0, cap = 0;
+  *st = 0;
+  *nst = 0;
+  while (i < old->n || j < N->n) {
+    struct nent* o;
+    struct nent* e;
+    char full[PATHMAX + 40];
+    unsigned char now[20];
+    int c;
+    if (j < N->n && N->e[j].gone) {
+      j++;
+      continue;
+    }
+    c = i >= old->n ? 1 : j >= N->n ? -1 : strcmp(old->e[i].lng, N->e[j].lng);
+    o = c <= 0 ? &old->e[i] : 0;
+    e = c >= 0 ? &N->e[j] : 0;
+    if (o) i++;
+    if (e) j++;
+    if (o && e && memcmp(o->sha, e->sha, 20) == 0) continue; /* igual (ou so o modo) */
+    if (o) {
+      int t1, t2, n0, n1, n2, m;
+      char* d0;
+      unsigned char* d1;
+      unsigned char* d2;
+      struct sbuf mo;
+      if (!on_disk(o)) continue;
+      path_join(full, root, o->dos);
+      d0 = load_file(full, &n0);
+      if (!d0) {
+        if (e) {
+          printf("  apagado aqui (sem commit) e mudado pelo pull: %s\n", o->lng);
+          bad++;
+        }
+        continue;
+      }
+      git_hash("blob", (unsigned char*)d0, n0, now);
+      if (memcmp(now, o->sha, 20) == 0 || !e || memcmp(now, e->sha, 20) == 0) {
+        /* sem mudanca, ou o pull apaga (o checkout mantem o mudado) */
+        free(d0);
+        continue;
+      }
+      if (!autostash) {
+        printf("  mudado aqui (sem commit) e mudado pelo pull: %s\n", o->lng);
+        free(d0);
+        bad++;
+        continue;
+      }
+      d1 = rb_get(root, o->sha, &t1, &n1);
+      d2 = rb_get(root, e->sha, &t2, &n2);
+      m = d1 && d2 ? merge3((char*)d1, n1, d0, n0, (char*)d2, n2, 1, &mo) : -3;
+      free(d1);
+      free(d2);
+      free(d0);
+      if (m < 0) {
+        printf("  mudado aqui (sem commit) e pelo pull, %s: %s\n", m == -2 ? "binario" : "nao junta", o->lng);
+        bad++;
+        continue;
+      }
+      if (*nst == cap) {
+        cap = cap ? cap * 2 : 16;
+        *st = (struct stash*)realloc(*st, sizeof(struct stash) * (size_t)cap);
+      }
+      (*st)[*nst].dos = xstrdup(o->dos);
+      (*st)[*nst].lng = xstrdup(o->lng);
+      (*st)[*nst].data = mo.p;
+      (*st)[*nst].len = mo.len;
+      (*st)[*nst].conflicts = m;
+      (*nst)++;
+    } else {
+      /* arquivo novo do pull: um nao rastreado com o mesmo nome seria perdido */
+      char rel[PATHMAX + 256];
+      int k;
+      snprintf(rel, sizeof(rel), "%s", e->lng);
+      for (k = 0; rel[k]; k++)
+        if (rel[k] == '/') rel[k] = '\\';
+      path_join(full, root, rel);
+      if ((int)strlen(full) > 250 || k_fsize(full) < 0) continue;
+      if (file_sha(full, now) == 0 && memcmp(now, e->sha, 20) != 0) {
+        printf("  arquivo nao rastreado no lugar de um novo do servidor: %s\n", e->lng);
+        bad++;
+      }
+    }
+  }
+  return bad;
+}
+
+struct lcommit {
+  unsigned char sha[20];
+  unsigned char tree[20];
+  char* text;
+};
+
+static int pull_rebase(const char* root, struct remote* r, const unsigned char* cur, const unsigned char* base,
+                       int autostash) {
+  struct lcommit* lc = 0;
+  struct list P, C, N, A, idx, nm;
+  struct tctx tt;
+  struct stash* st = 0;
+  unsigned char c[20], tree[20], parent[20], head[20], utree[20], ntree[20], chk[20];
+  char path[PATHMAX], hex[41], hex2[41], who[400], subj[200];
+  char* resp = 0;
+  char* oldbuf = 0;
+  char* utext = 0;
+  unsigned char* pack;
+  unsigned char* cm;
+  int nlc = 0, caplc = 0, i, k, rc = 1, nconf = 0, nskip = 0, nst = 0, nmade = 0, plen, type, usize, gr, sconf = 0;
+  unsigned t0 = k_ms();
+  memset(&P, 0, sizeof(P));
+  memset(&C, 0, sizeof(C));
+  memset(&N, 0, sizeof(N));
+  memset(&tt, 0, sizeof(tt));
+  /* 0) o stage (git add) tem que estar igual ao HEAD */
+  if (list_load(root, "INDEX.TXT", &idx) >= 0) {
+    int same;
+    list_load(root, "NAMES.TXT", &nm);
+    same = idx.n == nm.n;
+    for (i = 0; same && i < idx.n; i++)
+      same = strcmp(idx.e[i].lng, nm.e[i].lng) == 0 && memcmp(idx.e[i].sha, nm.e[i].sha, 20) == 0;
+    free(idx.e);
+    free(idx.text);
+    free(nm.e);
+    free(nm.text);
+    if (!same) {
+      printf("Ha mudancas no stage (git add) sem commit: faca o git commit (ou git restore --staged .)\n");
+      printf("e rode o git pull --rebase de novo. Nada foi mudado.\n");
+      return 1;
+    }
+    git_file(root, "INDEX.TXT", path);
+    k_fdelete(path);
+  }
+  /* 1) os commits daqui, do mais novo ao mais velho */
+  memcpy(c, cur, 20);
+  while (memcmp(c, base, 20) != 0) {
+    int len;
+    char* t = (char*)obj_read(root, c, &type, &len);
+    if (!t || type != OBJ_COMMIT || commit_parse(t, tree, parent) != 0) {
+      sha_hex(c, hex);
+      printf("erro: o commit %s nao esta em .git\\objects\n", hex);
+      free(t);
+      goto out;
+    }
+    if (nlc == caplc) {
+      caplc = caplc ? caplc * 2 : 16;
+      lc = (struct lcommit*)realloc(lc, sizeof(*lc) * (size_t)caplc);
+    }
+    memcpy(lc[nlc].sha, c, 20);
+    memcpy(lc[nlc].tree, tree, 20);
+    lc[nlc].text = t;
+    nlc++;
+    if (sha_zero(parent)) {
+      if (!sha_zero(base)) {
+        printf("erro: os commits daqui nao chegam no ultimo commit do servidor\n");
+        goto out;
+      }
+      break;
+    }
+    if (nlc > 10000) {
+      printf("erro: mais de 10000 commits daqui\n");
+      goto out;
+    }
+    memcpy(c, parent, 20);
+  }
+  /* 2) o pack anterior (a base dos commits daqui; o --autostash tambem le
+   * dele) e o novo (o servidor) */
+  if (nlc || autostash) oldbuf = rb_load_old(root);
+  dotgit_dirs(root);
+  if (get_pack(r, &resp, &pack, &plen) != 0) {
+    resp = 0;
+    printf("\nerro: %s\n", err);
+    goto out;
+  }
+  printf("  pack de %d KB\n", plen / 1024);
+  if (pack_load(pack, plen, err) < 0) {
+    printf("erro: %s\n", err);
+    goto out;
+  }
+  cm = pack_get(r->head, &type, &usize);
+  if (!cm || type != OBJ_COMMIT || commit_parse((char*)cm, utree, 0) != 0) {
+    printf("erro: o commit nao veio no pack\n");
+    goto out;
+  }
+  utext = (char*)dup_n(cm, usize);
+  sha_hex(r->head, hex);
+  if (nlc) printf("rebase: %d commit(s) daqui por cima de %.12s\n", nlc, hex);
+  /* 3) as arvores: base (P), servidor (N) */
+  if (nlc && !sha_zero(base)) {
+    int bl;
+    char* bt = commit_get(root, base, &bl);
+    if (!bt || commit_parse(bt, tree, 0) != 0) {
+      free(bt);
+      printf("erro: nao achei o commit anterior do servidor (COMMIT.TXT)\n");
+      goto out;
+    }
+    free(bt);
+    if (flat_commit_tree(root, tree, &P) != 0) {
+      printf("erro: %s\n", err);
+      goto out;
+    }
+  }
+  if (flat_commit_tree(root, utree, &N) != 0) {
+    printf("erro: %s\n", err);
+    goto out;
+  }
+  tt.root = root;
+  list_tree(&N, &tt, chk); /* as arvores do servidor ficam conhecidas: nao viram objetos soltos */
+  if (memcmp(chk, utree, 20) != 0) {
+    printf("erro: a arvore do servidor refeita aqui nao confere; nada foi mudado\n");
+    goto out;
+  }
+  tt.write = 1;
+  wr_on = 1;
+  wr_n = 0;
+  {
+    char name[128], email[128], tz[16];
+    int t = now_epoch();
+    cfg_get(root, "user.name", name, sizeof(name));
+    cfg_get(root, "user.email", email, sizeof(email));
+    if (!cfg_get(root, "tz", tz, sizeof(tz))) strcpy(tz, "+0000");
+    if (name[0] && email[0] && t >= 0) sprintf(who, "committer %s <%s> %d %s\n", name, email, t, tz);
+    else who[0] = 0;
+  }
+  memcpy(head, r->head, 20);
+  memcpy(ntree, utree, 20);
+  /* 4) cada commit daqui, do mais velho ao mais novo */
+  for (k = nlc - 1; k >= 0 && !nconf; k--) {
+    int a = 0, b = 0;
+    subject_of(lc[k].text, subj, sizeof(subj));
+    if (flat_commit_tree(root, lc[k].tree, &C) != 0) {
+      printf("erro: %s\n", err);
+      goto undo;
+    }
+    memset(&A, 0, sizeof(A));
+    while (a < P.n || b < C.n) {
+      int cmpv = a >= P.n ? 1 : b >= C.n ? -1 : strcmp(P.e[a].lng, C.e[b].lng);
+      struct nent* pe = cmpv <= 0 ? &P.e[a] : 0;
+      struct nent* ce = cmpv >= 0 ? &C.e[b] : 0;
+      struct nent* xe;
+      struct val vb, vl, vx, res;
+      const char* lng = pe ? pe->lng : ce->lng;
+      if (pe) a++;
+      if (ce) b++;
+      val_of(pe, &vb);
+      val_of(ce, &vl);
+      if (val_eq(&vb, &vl)) continue;
+      xe = rb_find(&N, lng);
+      val_of(xe, &vx);
+      if (val_eq(&vx, &vb)) memcpy(&res, &vl, sizeof(res));
+      else if (val_eq(&vx, &vl)) continue;
+      else if (rb_merge(root, lng, &vb, &vl, &vx, &res) != 0) {
+        nconf++;
+        continue;
+      }
+      if (!res.has) {
+        if (xe) xe->gone = 1;
+      } else {
+        struct nent* e = xe;
+        if (!e) {
+          e = list_push(&A);
+          e->lng = xstrdup(lng);
+          e->dos = (char*)"";
+        }
+        e->gone = 0;
+        memcpy(e->sha, res.sha, 20);
+        strcpy(e->mode, res.mode);
+        e->hasmode = 1;
+      }
+    }
+    for (i = 0; i < A.n; i++) {
+      struct nent* e = list_push(&N);
+      memcpy(e, &A.e[i], sizeof(*e));
+    }
+    free(A.e);
+    if (A.n) list_sort(&N);
+    flat_free(&P);
+    memcpy(&P, &C, sizeof(P));
+    memset(&C, 0, sizeof(C));
+    if (nconf) {
+      printf("O commit \"%s\" daqui e o servidor mudaram as mesmas partes.\n", subj);
+      break;
+    }
+    if (list_tree(&N, &tt, tree) != 0) {
+      printf("erro: %s\n", err);
+      goto undo;
+    }
+    if (memcmp(tree, ntree, 20) == 0) {
+      printf("  pulado (o servidor ja tem essa mudanca): %s\n", subj);
+      nskip++;
+      continue;
+    }
+    if (rb_commit(root, lc[k].text, tree, head, who[0] ? who : 0, head) != 0) {
+      printf("erro: %s\n", err);
+      goto undo;
+    }
+    memcpy(ntree, tree, 20);
+    nmade++;
+    sha_hex(head, hex2);
+    printf("  %.7s %s\n", hex2, subj);
+  }
+  if (nconf) {
+    printf("Rebase cancelado: nada mudou (pasta e .git como antes do pull).\n");
+    printf("Para juntar a mao: git reset origin (a pasta fica com o que foi feito aqui),\n");
+    printf("git pull --rebase --autostash (o conflito fica marcado com <<<<<<< nos arquivos),\n");
+    printf("arrume os arquivos, git commit -a -m ... e git push.\n");
+    goto undo;
+  }
+  /* 5) a pasta: o que mudou aqui sem commit */
+  list_load(root, "NAMES.TXT", &olds);
+  if (rb_worktree(root, &olds, &N, autostash, &st, &nst) != 0) {
+    printf("Nada foi mudado. Faca o git commit -a desses arquivos (ou guarde-os) e rode o pull de novo,\n");
+    printf("ou  git pull --rebase --autostash  para juntar as mudancas sem commit.\n");
+    goto undo;
+  }
+  /* 6) arquivo do resultado que so existia no pack anterior vira objeto solto */
+  for (i = 0; i < N.n; i++) {
+    struct nent* e = &N.e[i];
+    unsigned char* d;
+    int len;
+    if (e->gone || strcmp(e->mode, "160000") == 0 || pack_has(e->sha) || obj_exists(root, e->sha)) continue;
+    d = rb_get(root, e->sha, &type, &len);
+    if (!d || obj_write(root, OBJ_BLOB, d, len, chk) != 0) {
+      free(d);
+      sha_hex(e->sha, hex2);
+      printf("erro: o objeto %s (%s) nao esta em lugar nenhum\n", hex2, e->lng);
+      goto undo;
+    }
+    free(d);
+  }
+  wr_on = 0;
+  /* 7) grava: COMMIT.TXT (o do servidor), pasta, pack, NAMES, STATE */
+  git_file(root, "COMMIT.TXT", path);
+  k_fsave(path, utext, usize);
+  if (rb_old) {
+    pack_swap();
+    pack_free();
+    pack_swap();
+    rb_old = 0;
+  }
+  free(oldbuf);
+  oldbuf = 0;
+  gr = checkout_save(root, r, resp, pack, plen, ntree, head, 0, 1, t0);
+  resp = 0;
+  for (i = 0; i < nst; i++) {
+    char full[PATHMAX + 40];
+    path_join(full, root, st[i].dos);
+    if (k_fsave(full, st[i].data, st[i].len) != 0) {
+      printf("  NAO GRAVOU a mudanca sem commit de %s\n", st[i].lng);
+      gr = 1;
+    } else if (st[i].conflicts) {
+      printf("  conflito marcado (<<<<<<< aqui / >>>>>>> servidor): %s\n", st[i].lng);
+      sconf++;
+    } else {
+      printf("  mudanca sem commit reaplicada: %s\n", st[i].lng);
+    }
+  }
+  if (gr < 0) {
+    printf("\nerro: %s\n", err);
+    goto out;
+  }
+  sha_hex(head, hex2);
+  if (nlc) {
+    printf("Rebase feito: %s agora em %.7s, %d commit(s) daqui por cima de %.7s", branch_of(r), hex2, nmade, hex);
+    if (nskip) printf(" (%d pulado(s))", nskip);
+    printf(".\n");
+    if (nmade) printf("Falta o git push.\n");
+  }
+  if (sconf) printf("%d arquivo(s) com conflito: arrume e faca git commit -a.\n", sconf);
+  rc = gr || sconf ? 1 : 0;
+  goto out;
+undo:
+  /* cancelado: os objetos novos saem */
+  for (i = 0; i < wr_n; i++) {
+    obj_path(root, wr_sha[i], path);
+    k_fdelete(path);
+  }
+  rc = 1;
+out:
+  wr_on = 0;
+  wr_n = 0;
+  if (resp) {
+    pack_free();
+    free(resp);
+  }
+  if (rb_old) {
+    pack_swap();
+    pack_free();
+    pack_swap();
+    rb_old = 0;
+  }
+  free(oldbuf);
+  free(utext);
+  flat_free(&P);
+  flat_free(&C);
+  flat_free(&N);
+  free(tt.known);
+  for (i = 0; i < nlc; i++) free(lc[i].text);
+  free(lc);
+  for (i = 0; i < nst; i++) {
+    free(st[i].dos);
+    free(st[i].lng);
+    free(st[i].data);
+  }
+  free(st);
+  return rc;
 }
 
 /* ---------- push ---------- */
@@ -4047,6 +4989,8 @@ static void usage(void) {
   printf("git do SODOS %s (clone raso)\n", GIT_SODOS_VER);
   printf("  git clone https://github.com/dono/projeto [pasta]\n");
   printf("  git pull [pasta]        atualiza para o ultimo commit\n");
+  printf("  git pull --rebase       refaz os commits daqui por cima dos do servidor\n");
+  printf("        [--autostash]     junta tambem as mudancas sem commit\n");
   printf("  git status [pasta]      o que mudou\n");
   printf("  git add -u              poe no commit os rastreados mudados/apagados\n");
   printf("  git add -A              idem, mais os arquivos novos\n");

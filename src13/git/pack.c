@@ -426,4 +426,46 @@ void pack_free(void) {
   obj = 0;
   by_sha = 0;
   nobj = 0;
+  pk = 0;
+  pklen = 0;
+}
+
+int pack_has(const unsigned char* sha) { return obj && lookup(sha) >= 0; }
+
+/* ---------- um segundo pack guardado ----------
+ * O git pull --rebase le o pack do pull anterior (a base dos commits locais)
+ * e o novo ao mesmo tempo: pack_swap troca o pack carregado pelo guardado
+ * (o primeiro pack_swap guarda o atual e deixa nenhum carregado). */
+struct pstate {
+  unsigned char* pk;
+  int pklen;
+  struct pobj* obj;
+  int nobj;
+  int* by_sha;
+  struct centry cache[CACHE_N];
+  int c_head, c_count, c_bytes;
+};
+static struct pstate other;
+
+void pack_swap(void) {
+  static struct pstate t;
+  t.pk = pk;
+  t.pklen = pklen;
+  t.obj = obj;
+  t.nobj = nobj;
+  t.by_sha = by_sha;
+  memcpy(t.cache, cache, sizeof(cache));
+  t.c_head = c_head;
+  t.c_count = c_count;
+  t.c_bytes = c_bytes;
+  pk = other.pk;
+  pklen = other.pklen;
+  obj = other.obj;
+  nobj = other.nobj;
+  by_sha = other.by_sha;
+  memcpy(cache, other.cache, sizeof(cache));
+  c_head = other.c_head;
+  c_count = other.c_count;
+  c_bytes = other.c_bytes;
+  memcpy(&other, &t, sizeof(t));
 }

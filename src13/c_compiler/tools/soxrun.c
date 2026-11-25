@@ -303,6 +303,35 @@ static int k_fread(const char* path, unsigned offset, char* buf, int len) {
   fclose(f);
   return n;
 }
+/* Como o kernel: valor da variavel (aqui, do ambiente do Linux); -1 se nao tem. */
+static int k_getenv(const char* name, char* out, int max) {
+  const char* v = getenv(name);
+  int n = 0;
+  if (!v) return -1;
+  while (v[n] && out && n < max - 1) {
+    out[n] = v[n];
+    n++;
+  }
+  if (out && max > 0) out[n] = 0;
+  while (v[n]) n++;
+  return n;
+}
+/* Como o kernel: grava len bytes em off; o arquivo fica com nsize bytes. */
+static int k_fwrite_at(const char* path, unsigned off, const char* data, int len, unsigned nsize) {
+  char hp[300];
+  FILE* f = fopen(host_path(path, hp, sizeof hp), "r+b");
+  if (!f) {
+    make_parents(hp);
+    f = fopen(hp, "w+b");
+  }
+  if (!f) return -1;
+  if (fseek(f, (long)off, SEEK_SET) != 0 || (len > 0 && fwrite(data, 1, (size_t)len, f) != (size_t)len)) {
+    fclose(f);
+    return -1;
+  }
+  fclose(f);
+  return truncate(hp, (off_t)nsize) == 0 ? 0 : -1;
+}
 static int k_flist(int letter, char* out, int max) {
   DIR* d = opendir(root_dir);
   struct dirent* e;
@@ -1098,7 +1127,7 @@ static const struct {
   void* fn;
 } ktab[] = {
   E(k_putc), E(k_write), E(k_puts), E(k_dbg), E(k_getc), E(k_trygetc), E(k_readline), E(k_clear), E(k_yield),
-  E(k_fsize), E(k_fload), E(k_fread), E(k_fsave), E(k_flist), E(k_dirlist), E(k_pwd), E(k_chdir),
+  E(k_fsize), E(k_fload), E(k_fread), E(k_fsave), E(k_fwrite_at), E(k_getenv), E(k_flist), E(k_dirlist), E(k_pwd), E(k_chdir),
   E(k_drive), E(k_set_drive), E(k_exe_drive), E(k_dir), E(k_dir_long), E(k_dir_entry), E(k_fdelete), E(k_frename), E(k_mkdir), E(k_rmdir), E(k_dfree),
   E(k_vput), E(k_cursor), E(k_font_get), E(k_font_set), E(k_font_reset), E(k_blink),
   E(k_malloc), E(k_free), E(k_realloc), E(k_msize), E(k_meminfo), E(k_ps), E(k_kill), E(k_memmap), E(k_vram),

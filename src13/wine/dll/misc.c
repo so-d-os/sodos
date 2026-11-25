@@ -323,6 +323,40 @@ static WINAPI BOOL GetUserNameExW(int fmt, wchar16* buf, DWORD* n) {
   *n = len;
   return 1;
 }
+/* Politica de grupo (o PolicyLoaderWin do Chrome, delay-load da userenv: sem
+ * elas o gancho de falha do delay-load do Chrome da int3). Nao ha GPO no
+ * SODOS: o evento do RegisterGPNotification nunca e sinalizado e a secao
+ * critica e so um handle para o Leave soltar. */
+static WINAPI BOOL RegisterGPNotification(HANDLE ev, BOOL machine) {
+  (void)ev;
+  (void)machine;
+  return 1;
+}
+static WINAPI BOOL UnregisterGPNotification(HANDLE ev) {
+  (void)ev;
+  return 1;
+}
+static WINAPI HANDLE EnterCriticalPolicySection(BOOL machine) {
+  struct wobj* o = wobj_new(OBJ_MISC);
+  (void)machine;
+  return o ? wh_new(o) : 0;
+}
+static WINAPI BOOL LeaveCriticalPolicySection(HANDLE h) {
+  if (!h || !wh_close(h)) {
+    wset_lasterr(ERROR_INVALID_HANDLE);
+    return 0;
+  }
+  return 1;
+}
+/* 0 = perfil local (sem PT_TEMPORARY, PT_ROAMING, PT_MANDATORY) */
+static WINAPI BOOL GetProfileType(DWORD* flags) {
+  if (!flags) {
+    wset_lasterr(ERROR_INVALID_PARAMETER);
+    return 0;
+  }
+  *flags = 0;
+  return 1;
+}
 static WINAPI DWORD GetModuleFileNameExW(HANDLE proc, HANDLE mod, wchar16* buf, DWORD n) {
   struct wmod* m = pe_from_handle(mod);
   (void)proc;
@@ -746,6 +780,8 @@ const struct wine_sym misc_syms[] = {
     S(NtQuerySystemInformation), S(RtlNtStatusToDosErrorNoTeb), S(WinHttpOpen),
     S(WinHttpCloseHandle), S(WinHttpGetIEProxyConfigForCurrentUser), S(WinHttpGetProxyForUrl),
     S(WinHttpDetectAutoProxyConfigUrl), S(GetProfilesDirectoryW), S(GetUserNameExW),
+    S(RegisterGPNotification), S(UnregisterGPNotification), S(EnterCriticalPolicySection),
+    S(LeaveCriticalPolicySection), S(GetProfileType),
     S(GetModuleFileNameExW), S(GetProcessMemoryInfo), S(GetFileVersionInfoSizeW),
     S(GetFileVersionInfoW), S(VerQueryValueW), S(GetFileVersionInfoSizeExW), S(GetFileVersionInfoExW), 
     S(OpenSCManagerW), S(OpenServiceW), S(CloseServiceHandle), S(QueryServiceStatus),
