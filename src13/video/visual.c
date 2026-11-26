@@ -6981,7 +6981,25 @@ static uint32_t woke_n;     /* ... e quantas escolhas seguidas */
 static int pick_woke;       /* a ultima task_pick escolheu por "acordada" */
 static uint32_t gui_woke_picks, gui_woke_preempts;
 
-static int woke_budget(void) { return woke_ms < GUI_SLICE_MS && woke_n < WOKE_MAX_PICKS; }
+/* SET WINWOKE=0 desliga tudo isso (task_pick, a preempcao de 2 ms e o laco
+ * do WIN voltam ao round-robin de antes do build 64), para comparar quando um
+ * programa trava. Variavel nova numa struct com guardas (TROCA). */
+static struct {
+  uint64_t guarda0[4];
+  volatile int off;
+  uint64_t guarda1[4];
+} WK;
+
+void gui_woke_env_changed(void) {
+  const char* v = env_get("WINWOKE");
+  WK.off = v && v[0] == '0';
+}
+
+int gui_woke_off(void) { return WK.off; }
+
+static int woke_budget(void) {
+  return !WK.off && woke_ms < GUI_SLICE_MS && woke_n < WOKE_MAX_PICKS;
+}
 
 static int tasks_woken_other(int self) {
   int i;

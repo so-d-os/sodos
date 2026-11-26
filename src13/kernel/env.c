@@ -16,6 +16,8 @@
 #include "vt.h"
 #include "audio.h"
 
+void gui_woke_env_changed(void);   /* video/visual.c */
+
 #define ENV_N 32
 
 /* PATHSODOS ja vem com o padrao (pasta do sistema no pendrive); o
@@ -88,6 +90,8 @@ int env_set(const char* name, const char* val) {
   /* AUDIO=0 (ou sem a variavel): driver nulo, nada carregado; AUDIO=1 carrega
    * o AUDIO.DLL e acha a placa (audio.c). */
   if (gen != g && (name_is(name, "AUDIO") || name_is(name, "PATHSODOS"))) audio_env_changed();
+  /* WINWOKE=0: o WIN volta ao round-robin sem a vez das acordadas (visual.c) */
+  if (gen != g && name_is(name, "WINWOKE")) gui_woke_env_changed();
   if (gen != g && name_is(name, "DISKSYNC")) vt_service_check();
   if (gen != g && name_is(name, "WSL")) vt_wsl_check();
   if (gen != g && name_is(name, "SYSTEMLOG")) syslog_service_check();

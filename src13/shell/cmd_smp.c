@@ -3,6 +3,8 @@
  *   smp                      lista as CPUs e o uso de cada uma
  *   smp run <cpu> <comando>  roda o comando (interno ou .EXE) naquela CPU
  *   smp win <cpu>            abre o WIN naquela CPU
+ *   smp wine                 grava na serial o que cada thread do Windows
+ *                            espera (o [wine-dump] do REBOOT, sem reiniciar)
  *   smp travar laco|cli|bkl [s]  trava de proposito (teste do Ctrl+Alt+Del,
  *                            kernel/hang.c): o mundo num laco com IF=1, com
  *                            IF=0, ou uma thread com o BKL; s = espera antes
@@ -17,6 +19,7 @@
 #include "visual.h"
 #include "kthread.h"
 #include "hang.h"
+#include "wine.h"
 
 extern int shell_exec_line(char* line);
 
@@ -96,16 +99,18 @@ static void lista(void) {
     /* video/visual.c: tarefas do WIN acordadas por futex (thread principal
      * do Firefox) que passaram na frente e que tiraram a da vez */
     extern void gui_woke_stats(uint32_t* picks, uint32_t* preempts);
+    extern int gui_woke_off(void);
     uint32_t picks = 0, preempts = 0;
     gui_woke_stats(&picks, &preempts);
     puts_k("  WIN: acordadas na frente ");
     put_u(picks);
     puts_k(", tiraram a da vez ");
     put_u(preempts);
-    puts_k("\n");
+    puts_k(gui_woke_off() ? " (desligado: SET WINWOKE=0)\n" : "\n");
   }
   puts_k("\n  smp run <cpu> <comando>   roda um comando naquela CPU\n");
   puts_k("  smp win <cpu>             abre o WIN naquela CPU\n");
+  puts_k("  smp wine                  grava na serial o que cada thread do Windows espera\n");
 }
 
 extern uint64_t prof_buf[];
@@ -159,6 +164,14 @@ int cmd_smp(int argc, char** argv) {
       puts_k("Uso: smp travar laco|cli|bkl [segundos]\n");
       return 1;
     }
+    return 0;
+  }
+  /* smp wine: o [wine-dump] do REBOOT na hora, com os programas vivos (um
+   * Claude que nao abre a janela: o que cada thread do Windows espera) */
+  if (argc >= 2 && seq(argv[1], "wine")) {
+    wine_dump_waits();
+    puts_k("O que cada thread do Windows espera foi para a serial:\n");
+    puts_k("D:\\LOG\\SERIAL.LOG, linhas [wine-dump].\n");
     return 0;
   }
   /* smp prof on|off|save: amostra onde as CPUs estao (isr.c) */
