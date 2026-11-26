@@ -1496,7 +1496,10 @@ static void snapshot_pre(void) {
  * tem energia propria e so esquece quando a energia e cortada. Hipotese: o EC
  * solta o amplificador do alto-falante quando o sistema liga o modo ACPI
  * (FADT: SMI_CMD <- ACPI_ENABLE), o que o Linux faz no boot e o SODOS nunca
- * fez. A SCI (IRQ 9) continua mascarada no PIC do SODOS. */
+ * fez. A SCI (IRQ 9) continua mascarada no PIC do SODOS.
+ * 26/11/2026: os bytes nao sao a causa. O Linux toca no alto-falante com
+ * 0x12 = 00 e 0x2D = 00 (D:\TEMP\LINUX3), igual ao boot frio, e o 0x2B e um
+ * contador. Ver docs/AUDIO.md. */
 static inline uint16_t inw(uint16_t port) {
   uint16_t v;
   __asm__ volatile ("inw %1, %0" : "=a"(v) : "Nd"(port));

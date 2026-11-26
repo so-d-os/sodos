@@ -93,7 +93,15 @@ O `AUDIO.DLL` agora faz no init o reset do grupo de áudio e a energia D3 → D0
 - ACPI da placa (`_PS0` do `AZAL` só age com `APGE`/`ACGE`, que são 0 nesta BIOS); GPIOs de saída da AMD; ACP (o init do `snd_rn_pci_acp3x` repetido no SODOS); ciclo PCI D0 → D3hot → D0 do HDA;
 - PCI de todas as funções do dispositivo, registradores do HDA e dos nós próprios da Conexant (1C, 1B, 28): **idênticos** entre frio e quente (`D:\TEMP\FOTOF.TXT` e `FOTOQ.TXT`, a "fotografia" que o driver grava).
 
-O que **difere** é só a memória do **EC** (fora temperatura e ventoinha): bytes `0x12` (00 → FF), `0x2B` (D7 → 6E) e `0x2D` (00 → 03), que o ACPI nem nomeia. O EC tem energia própria e só esquece ao cortar a energia. Hipótese em teste: o EC solta o amplificador quando o sistema liga o **modo ACPI** (FADT: `SMI_CMD` ← `ACPI_ENABLE`), o que o Linux faz no boot ("ACPI: Interpreter enabled") e o SODOS nunca fez. O `AUDIO.DLL` de teste liga o modo ACPI (`acpi_enable_test`) e grava os três bytes antes e depois.
+O que **difere** é só a memória do **EC** (fora temperatura e ventoinha): bytes `0x12` (00 → FF), `0x2B` (D7 → 6E) e `0x2D` (00 → 03), que o ACPI nem nomeia. O EC tem energia própria e só esquece ao cortar a energia. A hipótese era que o EC soltasse o amplificador quando o sistema liga o **modo ACPI** (FADT: `SMI_CMD` ← `ACPI_ENABLE`), o que o Linux faz no boot ("ACPI: Interpreter enabled") e o SODOS nunca fez. O `AUDIO.DLL` de teste liga o modo ACPI (`acpi_enable_test`) e grava os três bytes antes e depois.
+
+**EC descartado (26/11).** O `D:\TEMP\COLETA3.SH`, rodado no Linux, leu o EC pelo `ec_sys` (mesmas portas 62/66 e mesmo `RD_EC` do driver) enquanto tocava (resultado em `D:\TEMP\LINUX3`). O kernel do Linux do notebook não traz o `ec_sys`, então o script carrega o `D:\TEMP\EC_SYS.KO`.
+
+- Com o Linux tocando no alto-falante, `0x12` = 00 e `0x2D` = 00, iguais ao boot frio mudo. O FF/03 do boot quente deve ser só uma marca que o reboot vindo do Linux deixa.
+- O `0x2B` é um contador: sobe cerca de 1,2 por segundo.
+- O passo que zera o `0x12` não testou nada, porque ele já era 00.
+- No log do `acpi_enable_test` (`D:\LOG\SERIAL.OLD`), o SCI_EN sobe e os três bytes não mudam. Se o alto-falante toca depois disso, num boot frio, ainda não foi anotado.
+- Os outros bytes que diferem entre frio e quente são, pelo mapa do EC no DSDT (região `ECF2`), temperatura, ventoinha, bateria (`B1FC`, `B1RC`) e `WOLE` (0xA7). Sobra o `0x6D`, sem nome, entre `TBAT` e `TMPC`: o bit 6 vale 0 no frio e 1 nos dois casos que tocam. É uma pista fraca, porque pela vizinhança deve ser temperatura ou carga.
 
 ## Limites
 
