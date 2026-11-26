@@ -21,6 +21,11 @@ for f in main wslcore wslcli ntfs vhdx ext4 vmm/vmm vmm/dev vmm/term vmm/nat vmm
   OBJS="$OBJS $o"
 done
 gcc -m64 -c "$S/vmm/svm.S" -o "$B/obj/svm.o"
-"$C/build/link64" /out:"$B/WSL.EXE" "$C/build/x_crt0_64libc.o" $OBJS "$B/obj/svm.o" \
+# WSL.EXE antigo: o 9p nao dava bit x ao link64 (o novo da a arquivo sem extensao)
+L=$C/build/link64
+if [ ! -x "$L" ]; then
+  mkdir -p /tmp/wslbuild && cp "$L" /tmp/wslbuild/link64 && chmod +x /tmp/wslbuild/link64 && L=/tmp/wslbuild/link64
+fi
+"$L" /out:"$B/WSL.EXE" "$C/build/x_crt0_64libc.o" $OBJS "$B/obj/svm.o" \
   "$C"/build/x64_*.o "$C/out/KERNEL.IMP" 2>&1 | grep -v "undef .*sodos_" || true
 ls -l "$B/WSL.EXE"

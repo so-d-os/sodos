@@ -1551,6 +1551,54 @@ static void ec_bytes_log(const char* quando) {
   logs("\n");
 }
 
+/* Eventos pendentes do EC (SCI_EVT, bit 5 do estado): o Linux pergunta qual e
+ * (QR_EC, 0x84) a cada SCI; o SODOS nunca perguntou. So le os numeros. */
+static void ec_events(void) {
+  int n;
+  logs("ec estado ");
+  logx(inb(0x66));
+  logs("\n");
+  for (n = 0; n < 32 && (inb(0x66) & 0x20u); n++) {
+    uint8_t q;
+    if (inb(0x66) & 1u) (void)inb(0x62);
+    if (ec_wait(2, 0)) break;
+    outb(0x66, 0x84);                               /* QR_EC */
+    if (ec_wait(1, 1)) break;
+    q = inb(0x62);
+    logs("ec evento _Q");
+    logx(q);
+    logs("\n");
+    delay_ms(5);
+  }
+  logs(n ? "ec: eventos atendidos\n" : "ec: nenhum evento pendente\n");
+}
+
+static int ec_write(uint8_t addr, uint8_t v) {
+  if (inb(0x66) & 1u) (void)inb(0x62);
+  if (ec_wait(2, 0)) return -1;
+  outb(0x66, 0x81);                                 /* WR_EC */
+  if (ec_wait(2, 0)) return -1;
+  outb(0x62, addr);
+  if (ec_wait(2, 0)) return -1;
+  outb(0x62, v);
+  return ec_wait(2, 0);
+}
+
+/* Teste de 26/11/2026 (com o OK do dono do notebook): os bytes 0x12 e 0x2D
+ * do EC valem FF e 03 depois de um boot no Linux (alto-falante toca) e 00
+ * num boot frio (mudo). Grava os valores do Linux, so se estiverem em 0. */
+static void ec_linux_bytes(void) {
+  uint8_t a = 0xEE, b = 0xEE;
+  if (ec_read(0x12, &a) || ec_read(0x2D, &b)) {
+    logs("ec: sem resposta para gravar\n");
+    return;
+  }
+  if (a == 0 && ec_write(0x12, 0xFF)) logs("ec: falhou gravar 0x12\n");
+  if (b == 0 && ec_write(0x2D, 0x03)) logs("ec: falhou gravar 0x2D\n");
+  delay_ms(300);
+  ec_bytes_log("depois de gravar");
+}
+
 static void acpi_enable_test(void) {
   const volatile uint8_t* rsdp = rsdp_find();
   const volatile uint8_t* fadt = 0;
@@ -1604,6 +1652,10 @@ static void acpi_enable_test(void) {
   }
   delay_ms(500);
   ec_bytes_log("depois");
+  ec_events();
+  delay_ms(200);
+  ec_bytes_log("depois dos eventos");
+  ec_linux_bytes();
 }
 
 /* Registradores do no 1C (vendor) da Conexant: o Linux le os do CX8070/SN6140

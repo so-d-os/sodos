@@ -29,13 +29,54 @@ Num PC só com Linux (sem NTFS) o WSL usa a distro **SODOS-Debian**, em
 
 ```
 D:\WSL\DEBIAN.IMG   ext4 com Debian 12 mínimo (bash, git, curl, python3, ...)
+  ou DEBIAN.000, DEBIAN.001...   a mesma imagem em partes (ganham do .IMG)
 D:\WSL\VMLINUZ      kernel (o do Linux que gerou a imagem)
 D:\WSL\INITRD.IMG   initrd pequeno: busybox + virtio_blk, monta /dev/vda
 ```
 
+**Partes.** O `k_fsize` do SODOS devolve `int` (arquivo < 2 GB) e o 9p grava
+o arquivo inteiro de uma vez, então a imagem pode vir em partes `DEBIAN.000`,
+`.001`... (até 64; cada uma menos a última com tamanho múltiplo de 2 MB). O
+`WSL list` mostra quantas são. `/etc/sodos-imagem` na VM diz de quando é a
+imagem e o que ela tem.
+
+**Imagem com as ferramentas de compilação** (gcc 12, binutils, libc6-dev,
+make, nasm; feita em 26/11/2026). A camada de escrita some a cada boot, então
+o que se instala na VM não fica. Para levar o que está na VM para uma imagem
+nova, sem rede:
+
+```
+sh /d/SOURCE/SODOS/src13/wsl/scripts/nova-imagem.sh /d/WSL/NOVA
+```
+
+Ele extrai o `D:\WSL\FERRAM.TGZ` se faltar o gcc, congela o `/`
+(`fsfreeze`), copia o `/dev/vda` em partes de 128 MB para a pasta, confere o
+sha256 de cada parte relendo pelo 9p e copia `VMLINUZ` e `INITRD.IMG`. Uns
+2 a 5 minutos. Para testar sem mexer no serviço, numa VM à parte (em outra
+CPU, sem rede, desliga sozinha):
+
+```
+command D:\WSL.EXE run -D D:\WSL\NOVA -n -p 6 -t 180 -a "sodos-wsl:~#" -x "sh //d/TEMP/TESTE.SH\n"
+```
+
+O `TESTE.SH` grava o resultado num arquivo em `/d/TEMP` e termina com `sync`
+e `/usr/local/bin/busybox poweroff -f`. Pelo `sh /d/WSL/SODOS`, escreva
+`//d/...` dentro do `-x`: o script troca `/d/x` por `D:\x`, mas não `//d/x`.
+
+Para usar: mover as partes para `D:\WSL` (o serviço com o `DEBIAN.IMG` não é
+afetado) ou `SET WSLDIR=`, depois `SET WSL=0`, esperar o `WSL status` dizer
+"servico parado" e `SET WSL=1`. O `SET WSL=1` só sobe o serviço quando o
+valor muda, então ele não pode vir antes de o antigo parar. A PONTE faz essa
+troca sem depender da VM. Para outros pacotes: `apt-get install` na VM (lista e cache em
+`/tmp`, porque a camada é de 512 MB), depois `nova-imagem.sh` de novo.
+Recriar do zero num Debian 12: `build-image.sh` (abaixo), que já inclui as
+ferramentas e grava em partes.
+
 Gerada sem root por `sh wsl/scripts/build-image.sh` (Linux Debian 12 com o
-mesmo kernel; `MB=` tamanho, menor que 2048 porque o `k_fsize` do SODOS é
-`int`; `OUT=` outra pasta). O script desempacota os pacotes com
+mesmo kernel; `MB=` tamanho; `OUT=` outra pasta; sai em partes de 128 MB,
+ou `PARTS=0` para um `DEBIAN.IMG` só, menor que 2048 MB porque o `k_fsize`
+do SODOS é `int`; já vem com gcc, binutils, libc6-dev, make, nasm e
+e2fsprogs). O script desempacota os pacotes com
 `mmdebstrap --mode=chrootless --variant=extract` dentro do `fakeroot`, grava
 o ext4 com `mke2fs -d` num `unshare -r` e termina a instalação (`dpkg -i`)
 num boot da própria imagem no QEMU. O init é `/sbin/sodos-init`: monta
@@ -77,6 +118,10 @@ o `sodos-init` monta em `/mnt/sodos` e cria `/mnt/d`, `/mnt/z`, `/mnt/u`...
 fica em RAM e vai inteiro ao disco no close/fsync, porque o `k_fsave` grava
 o arquivo todo), criar, apagar, renomear, `mkdir`/`rmdir`, `df` e `git`
 funcionam. Datas são as do FAT (sem mudar mtime), dono root, sem links.
+O FAT não guarda o bit x: arquivo sem extensão no nome (`link64`,
+`relaoculta`, `build/cc`) aparece como 0755, o resto como 0644, e o `chmod`
+não muda nada. Os repositórios usam `core.filemode=false`, então o git não vê
+diferença de modo.
 O `BASH.EXE` traduz caminhos do Windows no comando: `D:\WINE\TEMP` vira
 `/mnt/d/WINE/TEMP` (o Claude Code passa caminhos assim).
 
@@ -143,6 +188,12 @@ SSD NVMe (cru, só leitura: k_nvme_raw_read)
 | `-a "texto"` | | espera este texto na saída antes do `-x` |
 | `-v` | | mostra portas/MMIO sem dispositivo e o total de saídas |
 | `-n` | | sem rede (sem a placa virtio-net) |
+| `-D PASTA` | `SET WSLDIR` ou `D:\WSL` | pasta da imagem própria só nesta VM |
+
+O serviço (`SET WSL=1`) sobe com a linha fixa `WSL.EXE run --service`; para
+dar opções a ele, `SET WSLOPT=-m 2048 -w 1024` antes do `SET WSL=1` (vão
+depois das da linha; aspas juntam um argumento: `-c "a b"`). A tela Ctrl+F10
+mostra `WSL: SET WSLOPT=...` quando elas valem.
 
 ## Requisitos e limites
 

@@ -5,12 +5,13 @@
  * WSL (C:\Program Files\WSL\tools\kernel). Ver wsl/README.md.
  *
  *   WSL list | info | ls /x | cat /x | cp /x D:\DEST
- *   WSL run [-m MB] [-w MB] [-i INIT] [-k KERNEL] [-c "params"] [-t s] [-x "texto"] [-v]
+ *   WSL run [-m MB] [-w MB] [-i INIT] [-k KERNEL] [-c "params"] [-t s] [-x "texto"] [-v] [-D PASTA]
  *
  * Sem Windows no PC (notebook so com Linux): a imagem propria em D:\WSL
- * (SET WSLDIR muda a pasta) - DEBIAN.IMG (ext4), VMLINUZ e INITRD.IMG, feitos
- * por wsl/scripts/build-image.sh - e a distro "SODOS-Debian", a padrao quando
- * existe. -d escolhe uma distro do Windows pelo nome. */
+ * (SET WSLDIR muda a pasta, -D so numa VM) - DEBIAN.IMG ou DEBIAN.000,
+ * .001... (ext4), VMLINUZ e INITRD.IMG, feitos por wsl/scripts/build-image.sh
+ * ou nova-imagem.sh - e a distro "SODOS-Debian", a padrao quando existe. -d
+ * escolhe uma distro do Windows pelo nome. SET WSLOPT da opcoes ao servico. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,8 +23,15 @@
 #include "wslbox.h"
 
 /* ---------- imagem propria (D:\WSL\DEBIAN.IMG) ---------- */
+/* A imagem e um arquivo so (DEBIAN.IMG) ou partes DEBIAN.000, DEBIAN.001...
+ * (as partes ganham, se existirem). Partes porque o k_fsize do SODOS devolve
+ * int (arquivo < 2 GB) e porque o 9p grava o arquivo inteiro de uma vez: a
+ * VM consegue gravar uma imagem nova em pedacos (wsl/scripts/nova-imagem.sh).
+ * Cada parte, menos a ultima, tem tamanho multiplo de 2 MB (IMG_CHUNK): um
+ * bloco nunca fica entre duas partes. */
 #define IMG_NAME "SODOS-Debian"
 #define IMG_CHUNK (2u << 20) /* le a imagem em blocos de 2 MB, guardados em RAM */
+#define IMG_PARTS 64
 static char img_dir[96];
 
 static void img_path(char* out, int max, const char* file) {
@@ -32,8 +40,22 @@ static void img_path(char* out, int max, const char* file) {
   snprintf(out, (size_t)max, "%s\\%s", img_dir, file);
 }
 
+static void img_part_name(char* out, int max, int i) {
+  char f[16];
+  snprintf(f, sizeof f, "DEBIAN.%03d", i);
+  img_path(out, max, f);
+}
+
+/* 1 se a imagem esta em partes (DEBIAN.000 existe) */
+static int img_split(void) {
+  char p[128];
+  img_part_name(p, sizeof p, 0);
+  return k_fsize(p) > 0;
+}
+
 static int img_present(void) {
   char p[128];
+  if (img_split()) return 1;
   img_path(p, sizeof p, "DEBIAN.IMG");
   return k_fsize(p) > 0;
 }
@@ -55,10 +77,13 @@ static int img_wanted(const char* which) {
 }
 
 typedef struct {
-  char path[128];
-  uint64_t size;
+  char path[128];              /* DEBIAN.IMG ou DEBIAN.000 (mensagens) */
+  uint64_t size;               /* total */
   uint8_t** chunk;
   uint32_t n;
+  int nparts;                  /* 1 = arquivo so */
+  uint64_t part_off[IMG_PARTS];
+  uint32_t part_size[IMG_PARTS];
 } img_file;
 static img_file g_img;
 
@@ -78,14 +103,25 @@ static int img_read(void* ctx, uint64_t off, void* buf, uint32_t len) {
     if (!f->chunk[ci]) {
       uint64_t base = (uint64_t)ci * IMG_CHUNK;
       uint32_t want = f->size - base < IMG_CHUNK ? (uint32_t)(f->size - base) : IMG_CHUNK;
-      uint8_t* p = (uint8_t*)k_hmalloc(IMG_CHUNK, 4096);
+      char pp[128];
+      const char* path = f->path;
+      uint64_t poff = base;
+      uint8_t* p;
+      if (f->nparts > 1) {
+        int i = f->nparts - 1;
+        while (i > 0 && f->part_off[i] > base) i--;
+        img_part_name(pp, sizeof pp, i);
+        path = pp;
+        poff = base - f->part_off[i];
+      }
+      p = (uint8_t*)k_hmalloc(IMG_CHUNK, 4096);
       if (!p) {
-        wsl_seterr("imagem: sem memoria (SET HIMEM) para ", f->path);
+        wsl_seterr("imagem: sem memoria (SET HIMEM) para ", path);
         return -1;
       }
-      if (k_fread(f->path, (unsigned)base, (char*)p, (int)want) != (int)want) {
+      if (k_fread(path, (unsigned)poff, (char*)p, (int)want) != (int)want) {
         k_hfree(p);
-        wsl_seterr("imagem: erro lendo ", f->path);
+        wsl_seterr("imagem: erro lendo ", path);
         return -1;
       }
       f->chunk[ci] = p;
@@ -98,15 +134,46 @@ static int img_read(void* ctx, uint64_t off, void* buf, uint32_t len) {
   return 0;
 }
 
-static int img_open(wsl_io* out) {
+/* acha as partes DEBIAN.000... ou o DEBIAN.IMG e soma o tamanho */
+static int img_scan(img_file* f) {
   int n;
-  img_path(g_img.path, sizeof g_img.path, "DEBIAN.IMG");
-  n = k_fsize(g_img.path);
+  f->nparts = 0;
+  f->size = 0;
+  if (img_split()) {
+    char p[128];
+    int i;
+    for (i = 0; i < IMG_PARTS; i++) {
+      img_part_name(p, sizeof p, i);
+      n = k_fsize(p);
+      if (n <= 0) break;
+      if (i > 0 && f->part_size[i - 1] % IMG_CHUNK) {
+        img_part_name(p, sizeof p, i - 1);
+        wsl_seterr("imagem: parte do meio com tamanho que nao e multiplo de 2 MB: ", p);
+        return -1;
+      }
+      f->part_off[i] = f->size;
+      f->part_size[i] = (uint32_t)n;
+      f->size += (uint64_t)(uint32_t)n;
+      f->nparts = i + 1;
+    }
+    img_part_name(f->path, sizeof f->path, 0);
+    return 0;
+  }
+  img_path(f->path, sizeof f->path, "DEBIAN.IMG");
+  n = k_fsize(f->path);
   if (n <= 0) {
-    wsl_seterr("imagem nao encontrada: ", g_img.path);
+    wsl_seterr("imagem nao encontrada: ", f->path);
     return -1;
   }
-  g_img.size = (uint64_t)(uint32_t)n;
+  f->nparts = 1;
+  f->part_off[0] = 0;
+  f->part_size[0] = (uint32_t)n;
+  f->size = (uint64_t)(uint32_t)n;
+  return 0;
+}
+
+static int img_open(wsl_io* out) {
+  if (img_scan(&g_img)) return -1;
   g_img.n = (uint32_t)((g_img.size + IMG_CHUNK - 1) / IMG_CHUNK);
   if (!g_img.chunk) g_img.chunk = (uint8_t**)calloc(g_img.n, sizeof(uint8_t*));
   if (!g_img.chunk) {
@@ -178,9 +245,18 @@ static int cmd_winlist(int verbose) {
 
 static int img_list(void) {
   char p[128];
-  img_path(p, sizeof p, "DEBIAN.IMG");
+  img_file f;
   if (!img_present()) return 1;
-  printf("Imagem propria: %s (padrao)\n  %s, %d MB\n", IMG_NAME, p, k_fsize(p) >> 20);
+  memset(&f, 0, sizeof f);
+  if (img_scan(&f)) {
+    printf("Imagem propria: %s\n", wsl_err);
+    return 1;
+  }
+  if (f.nparts > 1)
+    printf("Imagem propria: %s (padrao)\n  %s e mais %d partes, %llu MB\n", IMG_NAME, f.path, f.nparts - 1,
+           (unsigned long long)(f.size >> 20));
+  else
+    printf("Imagem propria: %s (padrao)\n  %s, %llu MB\n", IMG_NAME, f.path, (unsigned long long)(f.size >> 20));
   img_path(p, sizeof p, "VMLINUZ");
   printf("  kernel %s %s\n", p, k_fsize(p) > 0 ? "" : "(FALTA)");
   img_path(p, sizeof p, "INITRD.IMG");
@@ -498,6 +574,42 @@ static int is_script(ext4_fs* fs, const char* p) {
          ext4_pread(fs, &in, 0, b, 2) == 0 && b[0] == '#' && b[1] == '!';
 }
 
+/* SET WSLOPT=-m 2048 -w 1024: opcoes a mais para o "run --service" (o kernel
+ * sobe o servico com a linha fixa "WSL.EXE run --service"). Vao depois das
+ * da linha; aspas juntam um argumento com espacos (-c "a b"). */
+static int run_wslopt(int argc, char*** argvp) {
+  static char buf[512];
+  static char* nv[96];
+  char** argv = *argvp;
+  char* s;
+  int i, n = 0, service = 0;
+  for (i = 2; i < argc; i++)
+    if (!strcmp(argv[i], "--service")) service = 1;
+  if (!service || argc >= 64 || k_getenv("WSLOPT", buf, (int)sizeof buf) <= 0) return argc;
+  for (i = 0; i < argc; i++) nv[n++] = argv[i];
+  s = buf;
+  while (*s && n < (int)(sizeof nv / sizeof nv[0]) - 1) {
+    char* t;
+    while (*s == ' ' || *s == '\t') s++;
+    if (!*s) break;
+    if (*s == '"') {
+      t = ++s;
+      while (*s && *s != '"') s++;
+    } else {
+      t = s;
+      while (*s && *s != ' ' && *s != '\t') s++;
+    }
+    if (*s) *s++ = 0;
+    nv[n++] = t;
+  }
+  nv[n] = 0;
+  if (n > argc) {
+    printf("WSL: SET WSLOPT=%s\n", buf);
+    *argvp = nv;
+  }
+  return n;
+}
+
 static int cmd_run(int argc, char** argv, const wsl_io* disk) {
   vmm_config cfg;
   wsl_stack st;
@@ -516,10 +628,19 @@ static int cmd_run(int argc, char** argv, const wsl_io* disk) {
   cfg.ram_mb = 1024;
   cfg.cow_mb = 512;
   cfg.cpu = -1;
+  argc = run_wslopt(argc, &argv);
   for (i = 2; i < argc; i++) {
     const char* a = argv[i];
     const char* v = i + 1 < argc ? argv[i + 1] : 0;
     if (!strcmp(a, "-m") && v) cfg.ram_mb = (uint32_t)atoi(v), i++;
+    else if (!strcmp(a, "-D") && v) {
+      /* pasta da imagem so nesta VM (testar uma imagem nova sem SET WSLDIR) */
+      size_t l;
+      snprintf(img_dir, sizeof img_dir, "%s", v);
+      l = strlen(img_dir);
+      while (l > 3 && img_dir[l - 1] == '\\') img_dir[--l] = 0;
+      i++;
+    }
     else if (!strcmp(a, "-w") && v) cfg.cow_mb = (uint32_t)atoi(v), i++;
     else if (!strcmp(a, "-i") && v) init = v, i++;
     else if (!strcmp(a, "-k") && v) kpath = v, i++;

@@ -284,8 +284,18 @@ static uint32_t rhdr(uint8_t type, uint16_t tag, uint8_t* end) {
   return n;
 }
 
+/* O FAT nao guarda o bit x. Arquivo sem extensao no nome (link64,
+ * relaoculta, build/cc, scripts sem .sh) aparece executavel, como os
+ * programas do Linux; o resto fica 0644. O repo usa core.filemode=false,
+ * entao o git nao ve mudanca de modo. */
+static int sem_extensao(const char* path) {
+  const char* b = strrchr(path, '\\');
+  b = b ? b + 1 : path;
+  return *b && !strchr(b, '.');
+}
+
 static uint8_t* attr(uint8_t* p, const char* path, const struct st* st) {
-  uint32_t mode = st->dir ? 0040755u : 0100644u;
+  uint32_t mode = st->dir ? 0040755u : sem_extensao(path) ? 0100755u : 0100644u;
   p64(p, 0x7FFull); /* basico */
   p = pqid(p + 8, st->dir, path);
   p32(p, mode);

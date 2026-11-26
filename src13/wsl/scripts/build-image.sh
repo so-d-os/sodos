@@ -19,22 +19,32 @@
 #      e apaga /sodos-debs. Mesmo kernel e initrd que o WSL.EXE usa.
 # mmdebstrap, busybox-static e fakeroot vem de "apt-get download" em ~/wsltools.
 #
-#   sh wsl/scripts/build-image.sh            (MB=2000 tamanho da imagem, < 2048)
+#   sh wsl/scripts/build-image.sh            (MB=2000 tamanho da imagem)
 #   KVER=6.10.7-policorp-amd64 sh ...        (outro kernel de /boot)
 #   FRESH=1 sh ...                           (baixa os pacotes de novo)
+#   PARTS=0 sh ...                           (um DEBIAN.IMG so, MB < 2048)
+# Saida em partes DEBIAN.000, .001... de 128 MB (o WSL.EXE novo le assim; o
+# k_fsize do SODOS e int, entao um arquivo so fica abaixo de 2 GB). Com partes
+# o MB pode passar de 2048. A imagem ja vem com gcc 12, binutils, libc6-dev,
+# make, nasm e e2fsprogs (compilar o SODOS na VM, sem o FERRAM.SH).
+# Para so acrescentar pacotes a imagem atual, sem este PC: nova-imagem.sh.
 set -e
 S=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${OUT:-$S/build/image}
 W=${WORK:-$HOME/wsltools/image-work}
 T=$HOME/wsltools
 KVER=${KVER:-$(uname -r)}
-MB=${MB:-2000}   # < 2 GB: k_fsize do SODOS devolve int
+MB=${MB:-2000}
+PARTS=${PARTS:-1}
+[ "$PARTS" = 1 ] || [ "$MB" -lt 2048 ] || { echo "PARTS=0 pede MB < 2048 (k_fsize do SODOS e int)"; exit 1; }
 SUITE=${SUITE:-bookworm}
 MIRROR=${MIRROR:-http://deb.debian.org/debian}
 PKGS=bash,bash-completion,coreutils,procps,iproute2,iputils-ping,kmod,less,nano,ca-certificates,curl,wget,git
 PKGS=$PKGS,openssh-client,python3,file,xz-utils,unzip,util-linux,dpkg,apt,base-files,base-passwd,debianutils
 PKGS=$PKGS,init-system-helpers,login,passwd,sed,grep,tar,gzip,findutils,diffutils,hostname,ncurses-base
 PKGS=$PKGS,ncurses-bin,perl-base,mawk,dash,usrmerge,libc-bin,sysvinit-utils,mount
+# compilar o SODOS na VM (kernel, c_compiler, DLLs, WSL.EXE)
+PKGS=$PKGS,gcc,cpp,binutils,libc6-dev,make,nasm,e2fsprogs
 
 mkdir -p "$OUT" "$W" "$T/debs"
 if [ ! -x "$T/mm/usr/bin/mmdebstrap" ] || [ ! -x "$T/bb/bin/busybox" ] || [ ! -x "$T/fk/usr/bin/faked-sysv" ]; then
@@ -315,4 +325,9 @@ timeout 900 qemu-system-x86_64 -accel kvm -cpu host -m 2048 -nographic -no-reboo
   -drive file="$OUT/DEBIAN.IMG",format=raw,if=virtio > "$W/setup.log" 2>&1 < /dev/null || true
 grep -a "sodos-setup\|SODOS-SETUP-OK\|Kernel panic\|initrd:" "$W/setup.log" | tail -8
 grep -aq SODOS-SETUP-OK "$W/setup.log" || { echo "build-image: o primeiro boot falhou (ver $W/setup.log)"; exit 1; }
+if [ "$PARTS" = 1 ]; then
+  rm -f "$OUT"/DEBIAN.[0-9][0-9][0-9]
+  split -b 128M -d -a 3 "$OUT/DEBIAN.IMG" "$OUT/DEBIAN."
+  rm -f "$OUT/DEBIAN.IMG"
+fi
 ls -la "$OUT"
