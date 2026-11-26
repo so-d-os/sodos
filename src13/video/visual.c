@@ -12730,6 +12730,10 @@ static int win_wm_run_u(void) {
        * programa receber a combinacao. */
       if (!(sc & 0x80) && sc == 0x0E && kbd_ctrl_down()) {
         serial_puts("[visual] Ctrl+Backspace: fim do WIN\n");
+        /* Antes de encerrar os programas: o que cada thread do Windows
+         * espera. Quem sai pelo Ctrl+Backspace costuma ser quem viu um
+         * programa parado (o Claude sem janela logo depois do boot). */
+        wine_dump_waits();
         if (focus >= 0 && wins[focus].used && wins[focus].kind == WM_KIND_NOTE && note_dirty)
           note_save();
         win_session_free(wins);
