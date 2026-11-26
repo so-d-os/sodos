@@ -41,6 +41,32 @@
  *           git pull com commits daqui e o servidor parado dizia "o servidor
  *           mudou". git reset origin gravava a versao do servidor por cima do
  *           que o commit local tinha mudado: agora a pasta nao muda mesmo.
+ *   1.0.17  Convive com outro git no mesmo .git (o da VM do WSL, o Git for
+ *           Windows). Antes, depois de QUALQUER comando (ate o rev-parse e o
+ *           config que o Claude Desktop chama sem parar) o .git era regravado
+ *           do STATE.TXT: refs, config inteiro, logs\HEAD e .git\shallow.
+ *           Commit, fetch ou rebase do outro git sumiam, o config perdia
+ *           user.name, e o shallow regravado cortava o historico (merge sem
+ *           base comum). Agora: (1) o .git so e escrito depois de um comando
+ *           que mudou o estado (commit, add, pull, push, reset, restore); o
+ *           config ganha so o que falta e o logs\HEAD so ganha linha; o
+ *           shallow so recebe o commit que o clone/pull baixou raso, e so se
+ *           o pai dele nao estiver em nenhum objeto/pack. (2) Se o outro git
+ *           mudou o .git\refs\heads\<ramo> ou o origin, o GIT.EXE adota:
+ *           refaz o NAMES.TXT da arvore nova (a pasta nao muda) e o remote=
+ *           vira o origin dele. (3) push: anda por todos os pais (merge) e
+ *           aceita quando o commit do servidor ja esta no historico daqui
+ *           (o outro git fez merge/rebase); o "servidor mudou" so sai quando
+ *           falta mesmo, e manda rodar git pull. (4) git pull refaz os
+ *           commits daqui por cima do servidor por padrao (pull.rebase=false
+ *           volta ao antigo). (5) for-each-ref (o Claude Desktop pede).
+ *           (6) .gitignore de cada pasta (o do SODOS esta em src13): o
+ *           status listava os .o/.obj e o add -A os punha no commit; ** casa
+ *           com nenhuma pasta. (7) commit -F arquivo (mensagem de varias
+ *           linhas) e -m repetido vira paragrafo. (8) git status colorido
+ *           (verde no stage, vermelho fora e nao rastreado) quando a saida
+ *           vai para a tela (k_con_color do kernel; color.status/color.ui,
+ *           --color, --no-color); nao rastreado sai com /.
  *
  * Repositorio no formato padrao, em .git:
  *   HEAD, config, refs\heads\<ramo>, refs\remotes\origin\<ramo>, logs\HEAD
@@ -61,12 +87,18 @@
  * O que e so do git do SODOS (estado, lista de nomes, o que vai no
  * commit) fica em .git\sodos. Repositorios antigos (_GIT) sao migrados
  * sozinhos no primeiro comando. */
-#define GIT_SODOS_VER "1.0.16"
+#define GIT_SODOS_VER "1.0.17"
 #define GITDIR ".git\\sodos"
 #define OLDDIR "_GIT"
 #define PATHMAX 260
 
 static char err[320];
+/* 1 depois de gravar STATE.TXT, NAMES.TXT ou INDEX.TXT: so ai o .git padrao
+ * e posto em dia (sync_dotgit). Consulta nao escreve no .git. */
+static int st_dirty;
+/* adopt_dotgit sem mensagem: comandos de maquina (rev-parse, config...) */
+static int adopt_quiet;
+static void adopt_dotgit(const char* root);
 static void sync_dotgit(const char* root);
 static int gh_auth(const char* url);
 static void git_file(const char* root, const char* name, char* out);
@@ -154,6 +186,12 @@ static int sha_zero(const unsigned char* s) {
   for (i = 0; i < 20; i++)
     if (s[i]) return 0;
   return 1;
+}
+
+/* sha em hexa no buffer out (41 bytes), para usar dentro de um printf */
+static const char* hex_of(const unsigned char* sha, char* out) {
+  sha_hex(sha, out);
+  return out;
 }
 
 struct sbuf {
@@ -573,6 +611,7 @@ static int list_save(const char* root, const char* file, struct list* l) {
   sprintf(path, "%s\\%s\\%s", root, GITDIR, file);
   r = k_fsave(path, s.p ? s.p : "", s.len);
   free(s.p);
+  st_dirty = 1;
   return r;
 }
 
@@ -616,6 +655,7 @@ struct co {
   int skipped;           /* de proposito: caminho longo demais */
   int failed;            /* erro: objeto sem pack ou k_fsave falhou */
   int kept;
+  int quiet;             /* adopt_dotgit: sem mensagem por arquivo */
 };
 
 static unsigned char* obj_read(const char* root, const unsigned char* sha, int* type, int* len);
@@ -676,7 +716,7 @@ static void put_file(struct co* c, const char* dosrel, const char* lng, const un
   path_join(full, c->root, dosrel);
   /* caminho do FAT: ate 259 caracteres (DRV_PATH do kernel) */
   if ((int)strlen(full) > 250 || depth_of(full) > 40) {
-    if (c->skipped < 8) printf("  caminho longo demais, pulado: %s\n", lng);
+    if (c->skipped < 8 && !c->quiet) printf("  caminho longo demais, pulado: %s\n", lng);
     c->skipped++;
     names_line(c, "*", lng, sha, mode);
     return;
@@ -759,7 +799,7 @@ static int checkout_tree(struct co* c, const unsigned char* tsha, const char* do
     if (lngrel[0]) sprintf(lng, "%s/%s", lngrel, name);
     else strcpy(lng, name);
     if (strcmp(mode, "160000") == 0) {
-      printf("  submodulo ignorado: %s\n", lng);
+      if (!c->quiet) printf("  submodulo ignorado: %s\n", lng);
       names_line(c, "*", lng, sha, mode);
       continue;
     }
@@ -776,7 +816,7 @@ static int checkout_tree(struct co* c, const unsigned char* tsha, const char* do
       }
       disk_name(name, tree, size, used, nused, fixed);
       strcpy(used[nused++], fixed);
-      printf("  nome que o FAT nao aceita: %s gravado como %s\n", lng, fixed);
+      if (!c->quiet) printf("  nome que o FAT nao aceita: %s gravado como %s\n", lng, fixed);
     }
     if (dosrel[0]) snprintf(dos, sizeof(dos), "%s\\%s", dosrel, fixed);
     else snprintf(dos, sizeof(dos), "%s", fixed);
@@ -831,6 +871,7 @@ static int state_write(const char* root, const struct remote* r, const unsigned 
   sha_hex(base, bhex);
   sprintf(text, "url=%s\nref=%s\ncommit=%s\nremote=%s\n", r->url, r->ref, hex, bhex);
   sprintf(path, "%s\\%s\\STATE.TXT", root, GITDIR);
+  st_dirty = 1;
   return k_fsave(path, text, (int)strlen(text));
 }
 
@@ -944,7 +985,13 @@ static int find_root(const char* arg, char* root) {
     }
     sprintf(path, "%s%s%s\\STATE.TXT", root, n > 3 ? "\\" : "", GITDIR);
     if (k_fsize(path) >= 0) {
+      static char adopted[PATHMAX];
       if (n == 3) root[2] = 0;   /* "D:" para juntar com "\\_GIT" */
+      /* outro git mexeu no .git? uma vez por processo e por pasta */
+      if (strcmp(adopted, root) != 0) {
+        strcpy(adopted, root);
+        adopt_dotgit(root);
+      }
       return 0;
     }
     if (arg || n <= 3) break;
@@ -1180,6 +1227,225 @@ static int commit_parse(const char* t, unsigned char* tree, unsigned char* paren
     p++;
   }
   return have_tree ? 0 : -1;
+}
+
+/* todos os "parent X" de um commit (merge tem mais de um). Devolve quantos. */
+static int commit_parents(const char* t, unsigned char (*par)[20], int max) {
+  const char* p = t;
+  int n = 0;
+  while (*p && *p != '\n') {
+    if (strncmp(p, "parent ", 7) == 0 && n < max && hex_sha(p + 7, par[n]) == 0) n++;
+    p = strchr(p, '\n');
+    if (!p) break;
+    p++;
+  }
+  return n;
+}
+
+/* ---------- outro git no mesmo .git ----------
+ * O .git e o formato padrao: o git da VM do WSL (e o Git for Windows) usam
+ * a mesma pasta. O que eles fazem (commit, rebase, merge, fetch) fica nos
+ * refs e em objetos soltos ou packs novos em .git\objects\pack. */
+
+/* sha de um ref do .git padrao: .git\refs\... ou .git\packed-refs. 0 ok. */
+static int ref_read(const char* root, const char* ref, unsigned char* sha) {
+  char path[PATHMAX + 200];
+  int len, i, found = -1;
+  char* t;
+  char* p;
+  sprintf(path, "%s\\.git\\%s", root, ref);
+  for (i = 0; path[i]; i++)
+    if (path[i] == '/') path[i] = '\\';
+  t = load_file(path, &len);
+  if (t) {
+    int ok = len >= 40 && hex_sha(t, sha) == 0;
+    free(t);
+    return ok ? 0 : -1;
+  }
+  sprintf(path, "%s\\.git\\packed-refs", root);
+  t = load_file(path, &len);
+  if (!t) return -1;
+  for (p = t; *p;) {
+    char* nl = strchr(p, '\n');
+    int rl = (int)strlen(ref);
+    if (nl) *nl = 0;
+    if ((int)strlen(p) >= 41 + rl && p[40] == ' ' && strncmp(p + 41, ref, (size_t)rl) == 0 &&
+        (p[41 + rl] == 0 || p[41 + rl] == '\r'))
+      found = hex_sha(p, sha);
+    if (!nl) break;
+    p = nl + 1;
+  }
+  free(t);
+  return found == 0 ? 0 : -1;
+}
+
+static unsigned be32(const unsigned char* b) {
+  return ((unsigned)b[0] << 24) | ((unsigned)b[1] << 16) | ((unsigned)b[2] << 8) | b[3];
+}
+
+/* 1 se o .idx (versao 2) tem o objeto: fanout e busca binaria, lendo so
+ * os pedacos (k_fread), sem carregar o pack. */
+static int idx_has(const char* path, const unsigned char* sha) {
+  unsigned char h[8], f[4], s[20];
+  unsigned lo = 0, hi;
+  if (k_fread(path, 0, (char*)h, 8) != 8) return 0;
+  if (memcmp(h, "\377tOc", 4) != 0 || be32(h + 4) != 2) return 0;
+  if (sha[0] > 0) {
+    if (k_fread(path, 8 + 4 * (unsigned)(sha[0] - 1), (char*)f, 4) != 4) return 0;
+    lo = be32(f);
+  }
+  if (k_fread(path, 8 + 4 * (unsigned)sha[0], (char*)f, 4) != 4) return 0;
+  hi = be32(f);
+  while (lo < hi) {
+    unsigned m = (lo + hi) / 2;
+    int c;
+    if (k_fread(path, 8 + 1024 + 20 * m, (char*)s, 20) != 20) return 0;
+    c = memcmp(s, sha, 20);
+    if (!c) return 1;
+    if (c < 0) lo = m + 1;
+    else hi = m;
+  }
+  return 0;
+}
+
+/* 1 se o objeto esta aqui: solto, ou em qualquer pack de .git\objects\pack
+ * (o do clone/pull ou os do outro git). Nao le o conteudo. */
+static int obj_anywhere(const char* root, const unsigned char* sha) {
+  char d[PATHMAX + 40], p[PATHMAX + 300];
+  struct k_direntl* e;
+  int i, n;
+  if (obj_exists(root, sha)) return 1;
+  sprintf(d, "%s\\.git\\objects\\pack", root);
+  e = (struct k_direntl*)malloc(sizeof(*e) * 64);
+  if (!e) return 0;
+  n = k_dir_long(d, e, 64);
+  for (i = 0; i < n; i++) {
+    int l = (int)strlen(e[i].name);
+    if (e[i].dir || l < 5 || ci_cmp(e[i].name + l - 4, ".idx") != 0) continue;
+    sprintf(p, "%s\\%s", d, e[i].name);
+    if (idx_has(p, sha)) {
+      free(e);
+      return 1;
+    }
+  }
+  free(e);
+  return 0;
+}
+
+/* .git\shallow: o commit que o clone/pull baixou raso (deepen 1) entra so
+ * se algum pai dele nao esta aqui. As linhas que ja estao ficam: antes o
+ * arquivo era regravado com uma linha so a cada comando, e se o outro git
+ * tinha o historico mais fundo, ele passava a achar que o historico acabava
+ * ali (merge sem base comum). */
+static void shallow_note(const char* root) {
+  char f[PATHMAX + 40], chex[41];
+  unsigned char cs[20], par[8][20];
+  int cl, sl = 0, np, i, need = 0;
+  char* ct;
+  char* old;
+  git_file(root, "COMMIT.TXT", f);
+  ct = load_file(f, &cl);
+  if (!ct) return;
+  git_hash("commit", (unsigned char*)ct, cl, cs);
+  np = commit_parents(ct, par, 8);
+  free(ct);
+  for (i = 0; i < np && !need; i++)
+    if (!obj_anywhere(root, par[i])) need = 1;
+  if (!need) return;
+  sha_hex(cs, chex);
+  sprintf(f, "%s\\.git\\shallow", root);
+  old = load_file(f, &sl);
+  if (!old || !strstr(old, chex)) {
+    struct sbuf s;
+    memset(&s, 0, sizeof(s));
+    sb_add(&s, "", 0);
+    if (old && sl) {
+      sb_add(&s, old, sl);
+      if (old[sl - 1] != '\n') sb_add(&s, "\n", 1);
+    }
+    sb_add(&s, chex, 40);
+    sb_add(&s, "\n", 1);
+    k_fsave(f, s.p, s.len);
+    free(s.p);
+  }
+  free(old);
+}
+
+/* Outro git mexeu no .git (commit, rebase, merge, fetch)? O ramo dele vale.
+ * Se .git\refs\heads\<ramo> nao e o commit= do STATE.TXT, o GIT.EXE passa a
+ * usar o commit de la: refaz o NAMES.TXT da arvore (a pasta nao muda) e o
+ * INDEX.TXT, que era do commit antigo, sai. O refs\remotes\origin\<ramo>
+ * vira o remote=. Antes era o contrario: o STATE.TXT regravava os refs e o
+ * trabalho do outro git sumia. Sem conseguir ler a arvore (objeto num pack
+ * que o GIT.EXE nao le), so avisa e nao muda nada. */
+static void adopt_dotgit(const char* root) {
+  struct remote r;
+  unsigned char cur[20], base[20], h[20], o[20], tree[20];
+  char ref[200], hex[41];
+  int changed = 0, dirty = st_dirty, have_o = 0, qp = quiet_pack;
+  if (state_read(root, &r, cur, base) != 0) return;
+  if (strncmp(r.ref, "refs/heads/", 11) != 0) return;
+  sprintf(ref, "refs/remotes/origin/%s", r.ref + 11);
+  if (ref_read(root, ref, o) == 0 && !sha_zero(o)) have_o = 1;
+  if (ref_read(root, r.ref, h) == 0 && !sha_zero(h) && memcmp(h, cur, 20) != 0) {
+    int len;
+    char* t = commit_get(root, h, &len);
+    sha_hex(h, hex);
+    if (!t || commit_parse(t, tree, 0) != 0) {
+      free(t);
+      if (!adopt_quiet)
+        printf("git: %s foi para %.12s por outro git, e o GIT.EXE nao le esse commit\n"
+               "     (esta num pack do outro git): continue com o mesmo git.\n",
+               r.ref, hex);
+      st_dirty = dirty;
+      return;
+    }
+    free(t);
+    {
+      struct co c;
+      char path[PATHMAX];
+      int type, l2;
+      unsigned char* x;
+      memset(&c, 0, sizeof(c));
+      c.root = root;
+      c.keep = 1;
+      c.loose = 1;
+      c.quiet = 1;
+      {
+        /* carrega o pack do clone/pull sem o "lendo"/"indexando" na saida */
+        int pq = pack_quiet;
+        quiet_pack = 1;
+        pack_quiet = 1;
+        x = headpack_get(root, tree, &type, &l2);
+        free(x);
+        quiet_pack = qp;
+        pack_quiet = pq;
+      }
+      if (checkout_tree(&c, tree, "", "") != 0) {
+        free(c.names.p);
+        if (!adopt_quiet)
+          printf("git: %s foi para %.12s por outro git; falta objeto da arvore (%s): nada mudou\n", r.ref,
+                 hex, err);
+        st_dirty = dirty;
+        return;
+      }
+      git_file(root, "NAMES.TXT", path);
+      k_fsave(path, c.names.p ? c.names.p : "", c.names.len);
+      free(c.names.p);
+      git_file(root, "INDEX.TXT", path);
+      if (k_fsize(path) >= 0) k_fdelete(path);
+    }
+    memcpy(cur, h, 20);
+    changed = 1;
+    if (!adopt_quiet) printf("git: %s mudou por outro git (commit, rebase ou merge): agora %.12s\n", r.ref, hex);
+  }
+  if (have_o && memcmp(o, base, 20) != 0) {
+    memcpy(base, o, 20);
+    changed = 1;
+  }
+  if (changed) state_write(root, &r, cur, base);
+  /* adotar nao e motivo para regravar o .git (o index do outro git fica) */
+  st_dirty = dirty;
 }
 
 /* ---------- arvores a partir de uma lista ---------- */
@@ -1436,6 +1702,7 @@ static int checkout_save(const char* root, struct remote* r, char* resp, unsigne
     }
   }
   state_write(root, r, local, r->head);
+  if (!keep) shallow_note(root);
   if (c.failed) sprintf(err, "%d arquivo(s) nao foram gravados (veja acima)", c.failed);
   if (keep) return c.failed ? 1 : 0;
   sha_hex(local, hex);
@@ -1574,8 +1841,8 @@ static int cfg_on(const char* root, const char* key) {
 
 /* git pull [--rebase|-r|--no-rebase] [--ff-only] [--autostash] [origin [ramo]] [pasta]
  * Sem commits daqui: so baixa o commit novo. Com commits daqui e o servidor
- * mudado: --rebase (ou git config pull.rebase true) refaz os commits daqui
- * em cima do servidor; sem ele nada muda. */
+ * mudado: refaz os commits daqui em cima do servidor (o padrao desde a
+ * 1.0.17; --no-rebase ou git config pull.rebase false: nada muda). */
 static int cmd_pull(int argc, char** argv) {
   struct remote r;
   char root[PATHMAX], hex[41];
@@ -1599,7 +1866,13 @@ static int cmd_pull(int argc, char** argv) {
     printf("%s\\%s\\STATE.TXT invalido\n", root, GITDIR);
     return 1;
   }
-  if (rebase < 0) rebase = cfg_on(root, "pull.rebase") > 0;
+  if (rebase < 0) {
+    /* este git nao faz commit de merge: refazer os commits daqui por cima
+     * do servidor e o jeito de juntar, entao e o padrao. pull.rebase=false
+     * (ou --no-rebase) volta ao antigo: com os dois lados mudados, nada. */
+    int pr = cfg_on(root, "pull.rebase");
+    rebase = pr < 0 ? 1 : pr;
+  }
   if (autostash < 0) {
     autostash = cfg_on(root, "rebase.autoStash");
     if (autostash < 0) autostash = cfg_on(root, "rebase.autostash");
@@ -1865,19 +2138,29 @@ static int add_new(struct addst* a, const char* rel, int lower) {
 typedef int (*untracked_cb)(struct addst* a, const char* rel);
 
 /* ---------- .gitignore ----------
- * Da raiz do repositorio e de .git\info\exclude: um padrao por linha (#
- * comentario), com * ? [..]; "nome/" so pastas; "/x" so na raiz; com /
- * no meio vale o caminho inteiro; sem / vale o nome em qualquer pasta;
- * "!x" volta a incluir. Sem diferenciar maiusculas (FAT). */
-#define IGN_MAX 128
+ * Da raiz, de .git\info\exclude e de cada pasta (o .gitignore de uma
+ * subpasta vale para o que esta dentro dela e manda mais que o de cima; o
+ * do SODOS esta quase todo em src13\.gitignore, e antes so o da raiz era
+ * lido: o status listava os .o e .obj e o git add -A punha tudo no commit).
+ * Um padrao por linha (# comentario), com * ? [..] e **; "nome/" so pastas;
+ * "/x" so na pasta do .gitignore; com / no meio vale o caminho a partir
+ * dela; sem / vale o nome em qualquer pasta abaixo dela; "!x" volta a
+ * incluir. Sem diferenciar maiusculas (FAT). */
+#define IGN_MAX 1024
 static char* ign_pat[IGN_MAX];
+static char* ign_base[IGN_MAX];   /* pasta do .gitignore, com / no fim ("" = raiz) */
 static int ign_n, ign_loaded;
 static char ign_root[PATHMAX];
+#define IGN_DIRS 256
+static char* ign_dirs[IGN_DIRS];  /* pastas cujo .gitignore ja foi lido */
+static int ign_ndirs;
 
 static int globi(const char* p, const char* s) {
   for (;;) {
     if (!*p) return !*s;
     if (*p == '*') {
+      /* "**\/" tambem casa com nenhuma pasta: develop/**\/x.obj pega develop/x.obj */
+      if (p[1] == '*' && p[2] == '/' && globi(p + 3, s)) return 1;
       while (*p == '*') p++;
       if (!*p) return 1;
       for (; *s; s++)
@@ -1917,7 +2200,8 @@ static int globi(const char* p, const char* s) {
   }
 }
 
-static void ign_add_file(const char* path) {
+/* base: a pasta do .gitignore relativa a raiz, com / no fim ("" = raiz) */
+static void ign_add_file(const char* path, const char* base) {
   int len;
   char* t = load_file(path, &len);
   char* p;
@@ -1928,7 +2212,10 @@ static void ign_add_file(const char* path) {
     if (nl) *nl = 0;
     l = (int)strlen(p);
     while (l && (p[l - 1] == '\r' || p[l - 1] == ' ' || p[l - 1] == '\t')) p[--l] = 0;
-    if (l && p[0] != '#') ign_pat[ign_n++] = xstrdup(p);
+    if (l && p[0] != '#') {
+      ign_pat[ign_n] = xstrdup(p);
+      ign_base[ign_n++] = xstrdup(base);
+    }
     if (!nl) break;
     p = nl + 1;
   }
@@ -1938,13 +2225,33 @@ static void ign_add_file(const char* path) {
 static void ign_load(const char* root) {
   char path[PATHMAX + 40];
   if (ign_loaded && strcmp(ign_root, root) == 0) return;
-  while (ign_n) free(ign_pat[--ign_n]);
+  while (ign_n) {
+    ign_n--;
+    free(ign_pat[ign_n]);
+    free(ign_base[ign_n]);
+  }
+  while (ign_ndirs) free(ign_dirs[--ign_ndirs]);
   strcpy(ign_root, root);
   ign_loaded = 1;
   path_join(path, root, ".gitignore");
-  ign_add_file(path);
+  ign_add_file(path, "");
   path_join(path, root, ".git\\info\\exclude");
-  ign_add_file(path);
+  ign_add_file(path, "");
+}
+
+/* o .gitignore da pasta rel (com \, relativa a raiz), uma vez so */
+static void ign_load_dir(const char* root, const char* rel) {
+  char path[PATHMAX * 2 + 40], base[PATHMAX * 2];
+  int i;
+  for (i = 0; i < ign_ndirs; i++)
+    if (ci_cmp(ign_dirs[i], rel) == 0) return;
+  if (ign_ndirs < IGN_DIRS) ign_dirs[ign_ndirs++] = xstrdup(rel);
+  sprintf(path, "%s\\%s\\.gitignore", root, rel);
+  if (k_fsize(path) < 0) return;
+  for (i = 0; rel[i] && i < (int)sizeof(base) - 2; i++) base[i] = rel[i] == '\\' ? '/' : rel[i];
+  base[i++] = '/';
+  base[i] = 0;
+  ign_add_file(path, base);
 }
 
 /* rel com \ (relativo a raiz); 1 = ignorado */
@@ -1959,7 +2266,15 @@ static int ignored(const char* rel, int is_dir) {
   for (i = 0; i < ign_n; i++) {
     char pt[300];
     const char* p = ign_pat[i];
-    int neg = 0, dir_only = 0, anchored = 0, l, m;
+    const char* sub = r;   /* o caminho a partir da pasta do .gitignore */
+    int neg = 0, dir_only = 0, anchored = 0, l, m, bl = (int)strlen(ign_base[i]);
+    if (bl) {
+      int k;
+      for (k = 0; k < bl && r[k] && lowc((unsigned char)r[k]) == lowc((unsigned char)ign_base[i][k]); k++) {
+      }
+      if (k < bl) continue;   /* fora da pasta desse .gitignore */
+      sub = r + bl;
+    }
     if (*p == '!') {
       neg = 1;
       p++;
@@ -1976,7 +2291,7 @@ static int ignored(const char* rel, int is_dir) {
       memmove(pt, pt + 1, (size_t)l);
     }
     if (!pt[0] || (dir_only && !is_dir)) continue;
-    if (anchored || strchr(pt, '/')) m = globi(pt, r);
+    if (anchored || strchr(pt, '/')) m = globi(pt, sub);
     else m = globi(pt, base);
     if (m) ign = !neg;
   }
@@ -1991,6 +2306,9 @@ static int scan_untracked(struct addst* a, const char* rel, untracked_cb cb) {
   if (rel[0]) path_join(path, a->root, rel);
   else if (!a->root[2]) sprintf(path, "%s\\", a->root);   /* "D:" -> "D:\" */
   else strcpy(path, a->root);
+  /* o .gitignore desta pasta vale para o que esta dentro dela */
+  ign_load(a->root);
+  if (rel[0]) ign_load_dir(a->root, rel);
   /* k_dir_long: o nome longo inteiro (o k_dirlist dava o apelido 8.3 dos
    * nomes com mais de 31 letras e eles pareciam nao rastreados) */
   {
@@ -2052,11 +2370,51 @@ static int cb_add_new(struct addst* a, const char* rel) { return add_new(a, rel,
 /* git status --porcelain / -s: formato de maquina (o Claude Desktop le) */
 static int g_porc;   /* 1 = porcelain v1 / -s, 2 = porcelain v2 */
 static char g_sterm = '\n';
+
+/* Cores do git status (como o git: verde = vai no commit, vermelho = fora
+ * dele e nao rastreado). Vazias sem cor. */
+static const char* c_add = "";
+static const char* c_out = "";
+static const char* c_hi = "";
+static const char* c_end = "";
+
+/* cor? --color[=always|never|auto], color.status / color.ui (always, never,
+ * false, auto, true); auto = o kernel diz que a saida vai para uma tela que
+ * mostra cor (k_con_color: tela do DOS ou janela do Command; nao com |, >,
+ * captura da API/PONTE/WINE). Kernel antigo sem k_con_color: sem cor. */
+static int want_color(const char* root, int argc, char** argv) {
+  char v[32];
+  int i, mode = -1; /* -1 auto, 0 nunca, 1 sempre */
+  int (*cc)(void);
+  if ((cfg_get(root, "color.status", v, sizeof(v)) && v[0]) || (cfg_get(root, "color.ui", v, sizeof(v)) && v[0])) {
+    if (ci_cmp(v, "never") == 0 || ci_cmp(v, "false") == 0 || ci_cmp(v, "off") == 0 || strcmp(v, "0") == 0)
+      mode = 0;
+    else if (ci_cmp(v, "always") == 0)
+      mode = 1;
+  }
+  for (i = 2; i < argc; i++) {
+    if (strcmp(argv[i], "--no-color") == 0 || strcmp(argv[i], "--color=never") == 0) mode = 0;
+    else if (strcmp(argv[i], "--color") == 0 || strcmp(argv[i], "--color=always") == 0) mode = 1;
+    else if (strcmp(argv[i], "--color=auto") == 0) mode = -1;
+  }
+  if (mode >= 0) return mode;
+  cc = (int (*)(void))k_dl_sym(0, "k_con_color", 0);
+  return cc ? cc() : 0;
+}
+
+/* caminho do disco (\) como o git mostra (/) */
+static void print_rel(const char* rel) {
+  for (; *rel; rel++) putchar(*rel == '\\' ? '/' : *rel);
+}
+
 static int cb_print(struct addst* a, const char* rel) {
   (void)a;
-  if (g_porc == 2) printf("? %s%c", rel, g_sterm);
-  else if (g_porc) printf("?? %s%c", rel, g_sterm);
-  else printf("  %s\n", rel);
+  if (g_porc == 2) printf("? ");
+  else if (g_porc) printf("?? ");
+  else printf("  %s", c_out);
+  print_rel(rel);
+  if (g_porc) putchar(g_sterm);
+  else printf("%s\n", c_end);
   return 0;
 }
 /* uma linha do status de maquina: v1 "XY nome", v2 "1 XY N... modos shas nome" */
@@ -2363,6 +2721,17 @@ static int cmd_status(int argc, char** argv) {
     printf("fatal: %s\n", err);
     return 128;
   }
+  if (!g_porc && want_color(root, argc, argv)) {
+    /* ESC [ ... m com o 27 explicito (o cc do SODOS e proprio) */
+    static char g[] = {27, '[', '3', '2', 'm', 0};
+    static char rd[] = {27, '[', '3', '1', 'm', 0};
+    static char hi[] = {27, '[', '1', 'm', 0};
+    static char e0[] = {27, '[', '0', 'm', 0};
+    c_add = g;
+    c_out = rd;
+    c_hi = hi;
+    c_end = e0;
+  }
   state_read(root, &r, cur, base);
   sha_hex(cur, hex);
   ahead = count_ahead(root, cur, base);
@@ -2381,7 +2750,7 @@ static int cmd_status(int argc, char** argv) {
   } else if (sha_zero(cur)) {
     printf("No ramo %s, ainda sem commits\n", branch_of(&r));
   } else {
-    printf("No ramo %s, commit %.12s\n", r.ref, hex);
+    printf("No ramo %s%s%s, commit %.12s\n", c_hi, r.ref, c_end, hex);
     if (ahead) printf("%d commit(s) local(is) para mandar (git push)\n", ahead);
   }
   list_load(root, "NAMES.TXT", &head);
@@ -2399,7 +2768,7 @@ static int cmd_status(int argc, char** argv) {
         continue;
       }
       if (!staged++) printf("Para o commit (staged):\n");
-      printf("  %s %s\n", h ? "modificado:" : "novo:      ", e->lng);
+      printf("  %s%s %s%s\n", c_add, h ? "modificado:" : "novo:      ", e->lng, c_end);
     }
   }
   for (i = 0; i < head.n; i++)
@@ -2410,7 +2779,7 @@ static int cmd_status(int argc, char** argv) {
         continue;
       }
       if (!staged++) printf("Para o commit (staged):\n");
-      printf("  apagado:    %s\n", head.e[i].lng);
+      printf("  %sapagado:    %s%s\n", c_add, head.e[i].lng, c_end);
     }
   /* disco x index */
   for (i = 0; i < idx.n; i++) {
@@ -2427,7 +2796,7 @@ static int cmd_status(int argc, char** argv) {
         continue;
       }
       if (!unstaged++) printf("Fora do commit (git add -u para incluir):\n");
-      printf("  %s %s\n", what, e->lng);
+      printf("  %s%s %s%s\n", c_out, what, e->lng, c_end);
     }
   }
   memset(&a, 0, sizeof(a));
@@ -2982,17 +3351,43 @@ static int cmd_commit(int argc, char** argv) {
       all = 1;
       continue;
     }
+    /* -F arquivo / --file=arquivo: a mensagem inteira, com as linhas (o
+     * shell do SODOS nao passa quebra de linha num argumento; antes um
+     * commit com "Co-Authored-By:" so saia certo pelo git da VM) */
+    if ((strcmp(a, "-F") == 0 || strcmp(a, "--file") == 0) && i + 1 < argc) a = argv[++i];
+    else if (strncmp(a, "--file=", 7) == 0) a += 7;
+    else a = 0;
+    if (a) {
+      int fl, e;
+      char* ft = load_file(a, &fl);
+      if (!ft) {
+        printf("nao li a mensagem de %s\n", a);
+        return 1;
+      }
+      for (e = 0; e < fl; e++)
+        if (ft[e] != '\r') sb_byte(&msg, ft[e]);
+      free(ft);
+      while (msg.len && (msg.p[msg.len - 1] == '\n' || msg.p[msg.len - 1] == ' ')) msg.p[--msg.len] = 0;
+      continue;
+    }
+    a = argv[i];
     if (strcmp(a, "-m") == 0 || strcmp(a, "-am") == 0 || strcmp(a, "-ma") == 0) {
       if (strcmp(a, "-m") != 0) all = 1;
+      /* o resto da linha e a mensagem (sem aspas tambem serve); cada -m a
+       * mais comeca um paragrafo, como no git: -m "titulo" -m "corpo" */
       for (i++; i < argc; i++) {
-        if (msg.len) sb_add(&msg, " ", 1);
+        if (strcmp(argv[i], "-m") == 0) {
+          if (msg.len) sb_add(&msg, "\n\n", 2);
+          continue;
+        }
+        if (msg.len && msg.p[msg.len - 1] != '\n') sb_add(&msg, " ", 1);
         sb_add(&msg, argv[i], -1);
       }
       break;
     }
   }
   if (!msg.len) {
-    printf("uso: git commit [-a] -m mensagem\n");
+    printf("uso: git commit [-a] -m mensagem [-m paragrafo]  ou  git commit [-a] -F arquivo\n");
     return 1;
   }
   if (find_root(0, root) != 0) {
@@ -4272,25 +4667,6 @@ static int cmd_push(int argc, char** argv) {
   sprintf(line, "%s:%s", login, token);
   base64((unsigned char*)line, (int)strlen(line), cred);
   sprintf(http_auth, "Authorization: Basic %s", cred);
-  /* objetos dos commits locais */
-  memset(&o, 0, sizeof(o));
-  memcpy(c, cur, 20);
-  while (memcmp(c, base, 20) != 0) {
-    int type, l;
-    char* t = (char*)obj_read(root, c, &type, &l);
-    if (!t || type != OBJ_COMMIT || commit_parse(t, tree, parent) != 0) {
-      sha_hex(c, hex);
-      printf("commit %s nao esta em .git\\objects\n", hex);
-      free(t);
-      return 1;
-    }
-    free(t);
-    oset_add(&o, c, OBJ_COMMIT);
-    walk_tree(root, tree, &o);
-    ncommits++;
-    if (sha_zero(parent)) break;
-    memcpy(c, parent, 20);
-  }
   if (!k_net_ready()) {
     printf("rede nao pronta\n");
     return 1;
@@ -4299,14 +4675,68 @@ static int cmd_push(int argc, char** argv) {
     printf("erro: %s\n", err);
     return 1;
   }
-  if (memcmp(r.head, base, 20) != 0) {
-    sha_hex(r.head, hex);
-    printf("O servidor mudou: %s esta em %.12s, e os commits daqui saem de outro.\n", r.ref, hex);
-    printf("Este git nao faz merge; o push foi cancelado.\n");
-    return 1;
+  if (memcmp(r.head, cur, 20) == 0) {
+    printf("O servidor ja tem este commit (%.12s).\n", hex_of(cur, hex));
+    state_write(root, &r, cur, cur);
+    return 0;
+  }
+  /* objetos dos commits locais: de cur para tras por TODOS os pais (um
+   * merge feito por outro git tem dois), parando no que o servidor ja tem
+   * (o commit dele agora, o remote= daqui). Commit que nao esta solto aqui
+   * (num pack: veio do servidor) tambem para. server_in = o commit do
+   * servidor esta no historico daqui: o push e um avanco simples. */
+  {
+    unsigned char (*q)[20] = 0;
+    int nq = 0, cq = 0, qi = 0, server_in = sha_zero(r.head) || memcmp(r.head, base, 20) == 0;
+    memset(&o, 0, sizeof(o));
+    q = (unsigned char (*)[20])malloc(20 * 64);
+    cq = 64;
+    memcpy(q[nq++], cur, 20);
+    while (qi < nq) {
+      int type, l, np, k;
+      unsigned char par[8][20];
+      char* t;
+      memcpy(c, q[qi++], 20);
+      if (memcmp(c, r.head, 20) == 0) {
+        server_in = 1;
+        continue;
+      }
+      if (memcmp(c, base, 20) == 0 || oset_has(&o, c)) continue;
+      t = (char*)obj_read(root, c, &type, &l);
+      if (!t || type != OBJ_COMMIT || commit_parse(t, tree, parent) != 0) {
+        free(t);
+        if (memcmp(c, cur, 20) == 0) {
+          printf("commit %s nao esta em .git\\objects\n", hex_of(c, hex));
+          free(q);
+          return 1;
+        }
+        continue; /* num pack: o servidor ja tem */
+      }
+      np = commit_parents(t, par, 8);
+      free(t);
+      oset_add(&o, c, OBJ_COMMIT);
+      walk_tree(root, tree, &o);
+      ncommits++;
+      for (k = 0; k < np; k++) {
+        if (nq == cq) {
+          cq *= 2;
+          q = (unsigned char (*)[20])realloc(q, 20 * (size_t)cq);
+        }
+        memcpy(q[nq++], par[k], 20);
+      }
+    }
+    free(q);
+    if (!server_in) {
+      printf("O servidor mudou: %s esta em %.12s, e esse commit nao esta no historico daqui.\n", r.ref,
+             hex_of(r.head, hex));
+      printf("Rode  git pull  (refaz os commits daqui por cima dos do servidor) e depois git push.\n");
+      return 1;
+    }
   }
   memset(&req, 0, sizeof(req));
-  sha_hex(base, bhex);
+  /* o valor velho do ref e o que o servidor tem agora (pode ser mais novo
+   * que o remote=, quando outro git fez merge ou rebase com ele) */
+  sha_hex(r.head, bhex);
   sha_hex(cur, hex);
   {
     int n = sprintf(line, "%s %s %s", bhex, hex, r.ref);
@@ -4604,6 +5034,76 @@ static void write_index(const char* root) {
   free(v);
 }
 
+/* .git\config: o que outro git gravou fica (user.name, pull.rebase...);
+ * so entra o que falta: [core], o origin e o ramo. Antes era regravado
+ * inteiro a cada comando. */
+static void config_ensure(const char* path, const char* url, const char* b) {
+  int len = 0;
+  char* old = load_file(path, &len);
+  struct sbuf s;
+  char sec[200];
+  memset(&s, 0, sizeof(s));
+  sb_add(&s, "", 0);
+  if (old) {
+    sb_add(&s, old, len);
+    if (len && old[len - 1] != '\n') sb_add(&s, "\n", 1);
+  }
+  if (!old || !strstr(old, "[core]"))
+    sb_add(&s, "[core]\n\trepositoryformatversion = 0\n\tfilemode = false\n\tbare = false\n", -1);
+  if (!old || !strstr(old, "[remote \"origin\"]")) {
+    sb_add(&s, "[remote \"origin\"]\n\turl = ", -1);
+    sb_add(&s, url, -1);
+    sb_add(&s, "\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n", -1);
+  }
+  if (b) {
+    sprintf(sec, "[branch \"%s\"]", b);
+    if (!old || !strstr(old, sec)) {
+      sb_add(&s, sec, -1);
+      sb_add(&s, "\n\tremote = origin\n\tmerge = refs/heads/", -1);
+      sb_add(&s, b, -1);
+      sb_add(&s, "\n", 1);
+    }
+  }
+  if (!old || s.len != len) k_fsave(path, s.p, s.len);
+  free(old);
+  free(s.p);
+}
+
+/* .git\logs\HEAD: uma linha a mais quando o ramo andou; as do outro git
+ * ficam (antes o arquivo virava uma linha so). */
+static void reflog_add(const char* path, const char* hex) {
+  int len = 0, e, s;
+  char* old = load_file(path, &len);
+  char prev[41], line[200];
+  struct sbuf b;
+  strcpy(prev, "0000000000000000000000000000000000000000");
+  if (old) {
+    e = len;
+    while (e > 0 && (old[e - 1] == '\n' || old[e - 1] == '\r')) e--;
+    s = e;
+    while (s > 0 && old[s - 1] != '\n') s--;
+    if (e - s >= 81 && old[s + 40] == ' ') {
+      memcpy(prev, old + s + 41, 40);
+      prev[40] = 0;
+    }
+    if (strcmp(prev, hex) == 0) {
+      free(old);
+      return;
+    }
+  }
+  sprintf(line, "%s %s SODOS <sodos@localhost> 0 +0000\tgit do SODOS\n", prev, hex);
+  memset(&b, 0, sizeof(b));
+  sb_add(&b, "", 0);
+  if (old && len) {
+    sb_add(&b, old, len);
+    if (old[len - 1] != '\n') sb_add(&b, "\n", 1);
+  }
+  sb_add(&b, line, -1);
+  k_fsave(path, b.p, b.len);
+  free(b.p);
+  free(old);
+}
+
 static void sync_dotgit(const char* root) {
   char d[PATHMAX + 40], f[PATHMAX + 200], t[1200], hex[41], bhex[41];
   struct remote r;
@@ -4621,11 +5121,7 @@ static void sync_dotgit(const char* root) {
     sprintf(t, "ref: refs/heads/%s\n", b);
     put_if_diff(f, t);
     sprintf(f, "%s\\config", d);
-    sprintf(t,
-            "[core]\n\trepositoryformatversion = 0\n\tfilemode = false\n\tbare = false\n"
-            "[remote \"origin\"]\n\turl = %s\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n",
-            r.url);
-    put_if_diff(f, t);
+    config_ensure(f, r.url, 0);
     write_index(root);
     return;
   }
@@ -4640,33 +5136,10 @@ static void sync_dotgit(const char* root) {
   if (sha_zero(base)) k_fdelete(f); /* o servidor ainda nao tem o ramo */
   else put_if_diff(f, t);
   sprintf(f, "%s\\config", d);
-  sprintf(t,
-          "[core]\n\trepositoryformatversion = 0\n\tfilemode = false\n\tbare = false\n"
-          "[remote \"origin\"]\n\turl = %s\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
-          "[branch \"%s\"]\n\tremote = origin\n\tmerge = refs/heads/%s\n",
-          r.url, b, b);
-  put_if_diff(f, t);
+  config_ensure(f, r.url, b);
   sprintf(f, "%s\\logs\\HEAD", d);
-  sprintf(t, "0000000000000000000000000000000000000000 %s SODOS <sodos@localhost> 0 +0000\tgit do SODOS\n", hex);
-  put_if_diff(f, t);
-  /* clone raso: o commit do clone/pull nao tem os pais aqui. Sem o
-   * .git\shallow outro git acha o repositorio quebrado (fsck, log, status) */
-  {
-    int cl;
-    char* ct;
-    git_file(root, "COMMIT.TXT", f);
-    ct = load_file(f, &cl);
-    if (ct) {
-      unsigned char cs[20];
-      char chex[41];
-      git_hash("commit", (unsigned char*)ct, cl, cs);
-      sha_hex(cs, chex);
-      sprintf(f, "%s\\shallow", d);
-      sprintf(t, "%s\n", chex);
-      put_if_diff(f, t);
-      free(ct);
-    }
-  }
+  reflog_add(f, hex);
+  /* o .git\shallow e do clone/pull (shallow_note): aqui nao mexe mais */
   sprintf(f, "%s\\description", d);
   put_if_diff(f, "Repositorio do git do SODOS (GIT.EXE); dados proprios em .git\\sodos.\n");
   write_index(root);
@@ -4989,14 +5462,15 @@ static void usage(void) {
   printf("git do SODOS %s (clone raso)\n", GIT_SODOS_VER);
   printf("  git clone https://github.com/dono/projeto [pasta]\n");
   printf("  git pull [pasta]        atualiza para o ultimo commit\n");
-  printf("  git pull --rebase       refaz os commits daqui por cima dos do servidor\n");
+  printf("  git pull                com commits daqui, refaz por cima dos do servidor\n");
+  printf("  git pull --rebase       (o mesmo; --no-rebase nao junta)\n");
   printf("        [--autostash]     junta tambem as mudancas sem commit\n");
   printf("  git status [pasta]      o que mudou\n");
   printf("  git add -u              poe no commit os rastreados mudados/apagados\n");
   printf("  git add -A              idem, mais os arquivos novos\n");
   printf("  git add arquivo|pasta   poe esse no commit\n");
   printf("  git diff [--cached] [arquivo]\n");
-  printf("  git commit [-a] -m mensagem\n");
+  printf("  git commit [-a] -m mensagem [-m paragrafo]   ou   -F arquivo (varias linhas)\n");
   printf("  git push                manda os commits (o primeiro pede o login)\n");
   printf("  git login               entra no GitHub: abre github.com/login/device e digita o codigo\n");
   printf("  git logout              apaga o token guardado\n");
@@ -5008,11 +5482,83 @@ static int git_main(int argc, char** argv);
 int main(int argc, char** argv) {
   char root[PATHMAX];
   int rc = git_main(argc, argv);
-  /* depois do comando: os arquivos padrao do .git em dia. No clone a pasta
-   * atual nao e o repositorio (ja foi feito no proprio clone): mexer nela
-   * migrava um _GIT antigo que estivesse ali sem ninguem pedir */
-  if (!(argc > 1 && strcmp(argv[1], "clone") == 0) && find_root(0, root) == 0) sync_dotgit(root);
+  /* depois do comando: os arquivos padrao do .git em dia, mas so se o
+   * comando mudou o estado (commit, add, pull, push, reset, restore).
+   * Antes era depois de qualquer um: o rev-parse/config que o Claude
+   * Desktop chama sem parar regravava os refs e desfazia o que outro git
+   * (o da VM) tinha acabado de fazer. No clone a pasta atual nao e o
+   * repositorio (ja foi feito no proprio clone). */
+  if (st_dirty && !(argc > 1 && strcmp(argv[1], "clone") == 0) && find_root(0, root) == 0) sync_dotgit(root);
   return rc;
+}
+
+/* git for-each-ref [--count=N] [--format=...] [padrao...]: o ramo local e o
+ * origin. O Claude Desktop pede --count=1 --format=%(objectname) para saber
+ * se o repositorio ja tem commit. Formato: %(objectname), %(objectname:short),
+ * %(refname), %(refname:short), %(objecttype); sem formato, como o git. */
+static int cmd_for_each_ref(int argc, char** argv) {
+  char root[PATHMAX], refs[2][200], hex[41];
+  unsigned char cur[20], base[20], sha[2][20];
+  struct remote r;
+  const char* fmt = 0;
+  int i, k, n = 0, max = 1 << 30, shown = 0, npat = 0;
+  const char* pat[8];
+  for (i = 2; i < argc; i++) {
+    if (strncmp(argv[i], "--count=", 8) == 0) max = atoi(argv[i] + 8);
+    else if (strncmp(argv[i], "--format=", 9) == 0) fmt = argv[i] + 9;
+    else if (argv[i][0] != '-' && npat < 8) pat[npat++] = argv[i];
+  }
+  if (find_root(0, root) != 0) return not_repo();
+  if (state_read(root, &r, cur, base) != 0) return 0;
+  if (!sha_zero(cur)) {
+    strcpy(refs[n], r.ref);
+    memcpy(sha[n++], cur, 20);
+  }
+  if (!sha_zero(base) && strncmp(r.ref, "refs/heads/", 11) == 0) {
+    sprintf(refs[n], "refs/remotes/origin/%s", r.ref + 11);
+    memcpy(sha[n++], base, 20);
+  }
+  for (k = 0; k < n && shown < max; k++) {
+    const char* p;
+    int ok = npat == 0;
+    for (i = 0; i < npat && !ok; i++) ok = strncmp(refs[k], pat[i], strlen(pat[i])) == 0;
+    if (!ok) continue;
+    sha_hex(sha[k], hex);
+    if (!fmt) {
+      printf("%s commit\t%s\n", hex, refs[k]);
+      shown++;
+      continue;
+    }
+    for (p = fmt; *p;) {
+      if (strncmp(p, "%(objectname:short)", 19) == 0) {
+        printf("%.7s", hex);
+        p += 19;
+      } else if (strncmp(p, "%(objectname)", 13) == 0) {
+        printf("%s", hex);
+        p += 13;
+      } else if (strncmp(p, "%(refname:short)", 16) == 0) {
+        const char* s = refs[k];
+        if (strncmp(s, "refs/heads/", 11) == 0) s += 11;
+        else if (strncmp(s, "refs/remotes/", 13) == 0) s += 13;
+        printf("%s", s);
+        p += 16;
+      } else if (strncmp(p, "%(refname)", 10) == 0) {
+        printf("%s", refs[k]);
+        p += 10;
+      } else if (strncmp(p, "%(objecttype)", 13) == 0) {
+        printf("commit");
+        p += 13;
+      } else if (p[0] == '%' && p[1] == '%') {
+        putchar('%');
+        p += 2;
+      } else {
+        putchar(*p++);
+      }
+    }
+    putchar('\n');
+    shown++;
+  }
+  return 0;
 }
 
 static int git_main(int argc, char** argv) {
@@ -5048,6 +5594,21 @@ static int git_main(int argc, char** argv) {
     printf("git version 2.45.0.sodos (GIT.EXE %s)\n", GIT_SODOS_VER);
     return 0;
   }
+  /* comandos de maquina (o Claude Desktop le a saida): a adocao do que
+   * outro git fez acontece igual, mas sem mensagem */
+  {
+    static const char* quiet[] = {"rev-parse", "branch",   "symbolic-ref", "remote",       "worktree",
+                                  "ls-files",  "config",   "for-each-ref", "log"};
+    int q;
+    for (q = 0; q < (int)(sizeof(quiet) / sizeof(quiet[0])); q++)
+      if (strcmp(argv[1], quiet[q]) == 0 && (q != 8 || log_wants_fmt(argc, argv))) adopt_quiet = 1;
+    for (q = 2; q < argc; q++)
+      if (strncmp(argv[q], "--porcelain", 11) == 0 || strcmp(argv[q], "-z") == 0 ||
+          strcmp(argv[q], "--numstat") == 0 || strcmp(argv[q], "--name-only") == 0 ||
+          strcmp(argv[q], "--name-status") == 0 || strcmp(argv[q], "--short") == 0)
+        adopt_quiet = 1;
+  }
+  if (strcmp(argv[1], "for-each-ref") == 0) return cmd_for_each_ref(argc, argv);
   if (strcmp(argv[1], "rev-parse") == 0) return cmd_rev_parse(argc, argv);
   if (strcmp(argv[1], "branch") == 0) return cmd_branch(argc, argv);
   if (strcmp(argv[1], "symbolic-ref") == 0) return cmd_symbolic_ref(argc, argv);

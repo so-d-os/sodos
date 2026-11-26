@@ -610,6 +610,79 @@ static int brk_hit;
 static int brk_in;
 static unsigned brk_tick;
 
+/* ---------- cores ANSI no console ----------
+ * ESC [ n ; n ... m (SGR), o que o git status colorido e os programas do
+ * Linux mandam: 0 volta ao padrao, 1 claro, 22 normal, 30-37 e 90-97 frente,
+ * 40-47 e 100-107 fundo, 39/49 padrao. Outras sequencias ESC [ ... letra sao
+ * engolidas (antes viravam lixo na tela). A janela do Command (visual.c)
+ * usa o mesmo leitor. fg/bg guardam cor + 1 (0 = padrao da tela). */
+static const unsigned char sgr_vga[8] = {0, 4, 2, 6, 1, 5, 3, 7};   /* ANSI -> VGA */
+
+int sgr_feed(struct sgr* s, unsigned char ch) {
+  int i, n;
+  if (s->st == 0) {
+    if (ch != 27) return 0;
+    s->st = 1;
+    return 1;
+  }
+  if (s->st == 1) {
+    s->st = ch == '[' ? 2 : 0;
+    s->np = 0;
+    s->par[0] = 0;
+    return 1;
+  }
+  if (ch >= '0' && ch <= '9') {
+    if (s->par[s->np] < 10000) s->par[s->np] = s->par[s->np] * 10 + (ch - '0');
+    return 1;
+  }
+  if (ch == ';') {
+    if (s->np < SGR_PARS - 1) s->par[++s->np] = 0;
+    return 1;
+  }
+  if (ch == '?' || ch == ' ') return 1;
+  s->st = 0;
+  if (ch != 'm') return 1;
+  n = s->np + 1;
+  for (i = 0; i < n; i++) {
+    int p = s->par[i];
+    if (p == 0) {
+      s->fg = s->bg = 0;
+      s->bright = 0;
+    } else if (p == 1) {
+      s->bright = 1;
+      if (s->fg >= 1 && s->fg <= 8) s->fg += 8;
+    } else if (p == 22) {
+      s->bright = 0;
+      if (s->fg > 8) s->fg -= 8;
+    } else if (p >= 30 && p <= 37) {
+      s->fg = sgr_vga[p - 30] + (s->bright ? 8 : 0) + 1;
+    } else if (p == 39) {
+      s->fg = 0;
+    } else if (p >= 40 && p <= 47) {
+      s->bg = sgr_vga[p - 40] + 1;
+    } else if (p == 49) {
+      s->bg = 0;
+    } else if (p >= 90 && p <= 97) {
+      s->fg = sgr_vga[p - 90] + 8 + 1;
+    } else if (p >= 100 && p <= 107) {
+      s->bg = sgr_vga[p - 100] + 8 + 1;
+    }
+  }
+  return 1;
+}
+
+/* atributo VGA (fundo << 4 | frente) com o padrao def onde nao ha cor */
+unsigned char sgr_attr(const struct sgr* s, unsigned char def) {
+  unsigned char fg = s->fg ? (unsigned char)(s->fg - 1) : (unsigned char)(def & 15);
+  unsigned char bg = s->bg ? (unsigned char)(s->bg - 1) : (unsigned char)(def >> 4);
+  return (unsigned char)((bg << 4) | fg);
+}
+
+/* 1 se ha cor diferente do padrao */
+int sgr_colored(const struct sgr* s) { return s->fg || s->bg; }
+
+static struct sgr con_sgr;   /* tela de texto do DOS */
+
 void putc(char c) {
   if (brk_depth && !mod_depth) {
     if (!brk_in && (++brk_tick & 63) == 0) shell_break();
@@ -620,7 +693,8 @@ void putc(char c) {
     shell_out_fn(c);
     return;
   }
-  if (c == '\n') { 
+  if (sgr_feed(&con_sgr, (unsigned char)c)) return;
+  if (c == '\n') {
     row++; 
     col = 0; 
     if (row >= 25) { 
@@ -647,7 +721,7 @@ void putc(char c) {
     update_cursor();
     return;
   }
-  VGA[row * 80 + col] = (uint16_t)(uint8_t)c | (uint16_t)(0x07 << 8);
+  VGA[row * 80 + col] = (uint16_t)(uint8_t)c | (uint16_t)((uint16_t)sgr_attr(&con_sgr, 0x07) << 8);
   col++;
   if (col >= 80) { 
     col = 0; 
@@ -1831,6 +1905,8 @@ static char* find_pipe(char* line) {
 
 static int exec_pipe(char* left, char* right) {
   void (*prev)(char) = shell_out_fn;
+  int (*prev_exec)(const char*, int, char**) = shell_exec_fn;
+  void (*hook)(char) = kexp_get_console_hook();
   int rc;
   if (pipe_on || find_pipe(right)) {
     puts_k("pipe: so um | por linha\n");
@@ -1849,9 +1925,16 @@ static int exec_pipe(char* left, char* right) {
   pipe_len = 0;
   pipe_pos = 0;
   pipe_full = 0;
+  /* Como no >: o .EXE da esquerda roda aqui e escreve pelo putc (sem a hook
+   * da janela do Command, sem abrir tarefa no WIN). Antes so comando interno
+   * entrava no pipe: "git status | grep x" mostrava tudo e o grep nada. */
+  kexp_set_console_hook(0);
+  shell_exec_fn = 0;
   shell_out_fn = pipe_out;
   exec_line(left, 0);
   shell_out_fn = prev;
+  shell_exec_fn = prev_exec;
+  kexp_set_console_hook(hook);
   if (pipe_full) puts_k("pipe: saida cortada em 256 KB\n");
   pipe_on = 1;
   rc = exec_line(right, 0);

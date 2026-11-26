@@ -92,6 +92,18 @@ static void lista(void) {
     puts_k("\n");
   }
   kt_dump();
+  {
+    /* video/visual.c: tarefas do WIN acordadas por futex (thread principal
+     * do Firefox) que passaram na frente e que tiraram a da vez */
+    extern void gui_woke_stats(uint32_t* picks, uint32_t* preempts);
+    uint32_t picks = 0, preempts = 0;
+    gui_woke_stats(&picks, &preempts);
+    puts_k("  WIN: acordadas na frente ");
+    put_u(picks);
+    puts_k(", tiraram a da vez ");
+    put_u(preempts);
+    puts_k("\n");
+  }
   puts_k("\n  smp run <cpu> <comando>   roda um comando naquela CPU\n");
   puts_k("  smp win <cpu>             abre o WIN naquela CPU\n");
 }

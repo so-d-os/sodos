@@ -1189,6 +1189,13 @@ int kt_futex_wake(volatile int* addr, int n) {
   }
   spin_unlock(&fx_lock);
   irq_restore(fl);
+  /* Ninguem na fila: quem espera pode ser uma tarefa do WIN (world_wait ->
+   * gui_coop_wait), que o laco do WIN confere. Se o mundo esta emprestando a
+   * CPU0 (kt_world_idle), acorda agora em vez de no proximo tique: a thread
+   * principal do Firefox espera as threads dela milhares de vezes por pagina. */
+  if (cnt == 0 && addr != &world_idle_word && world.state == T_BLOCKED &&
+      world.fw_addr == &world_idle_word)
+    kt_futex_wake(&world_idle_word, 1);
   return cnt;
 }
 

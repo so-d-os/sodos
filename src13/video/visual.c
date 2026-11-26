@@ -4533,9 +4533,104 @@ static void cons_refresh(void) {
   if (cons_tsc() - cons_last >= CONS_GAP) cons_flush();
 }
 
+/* ---------- cores das linhas do Command ----------
+ * ESC [ ... m que os programas mandam (git status colorido): o leitor ANSI
+ * de cada Command (kernel.c, sgr_feed) e a cor de cada caractere das linhas
+ * (CMD_ROWS x CMD_COLS bytes, umalloc_top, so quando aparece a primeira cor;
+ * 0 = cor padrao da janela). Fora da struct cmd_con, que esta viva (TROCA),
+ * numa variavel com guardas nas pontas. */
+#define CA_N 32
+static struct {
+  uint64_t guarda0[4];
+  struct cmd_con* cmd[CA_N];
+  struct sgr sgr[CA_N];
+  uint8_t* attr[CA_N];
+  uint64_t guarda1[4];
+} CA;
+
+static struct wm_win* c_wins;   /* as janelas do WIN aberto (mais abaixo) */
+
+/* Fechar um Command da kfree nele sem ca_forget (varios caminhos): a
+ * entrada de quem nao tem mais janela volta a ficar livre. */
+static void ca_sweep(void) {
+  int i, j;
+  if (!c_wins) return;
+  for (i = 0; i < CA_N; i++) {
+    if (!CA.cmd[i]) continue;
+    for (j = 0; j < WM_MAX; j++)
+      if (c_wins[j].used && c_wins[j].st == (struct app_state*)CA.cmd[i]) break;
+    if (j < WM_MAX) continue;
+    if (CA.attr[i]) ufree(CA.attr[i]);
+    CA.attr[i] = 0;
+    CA.cmd[i] = 0;
+  }
+}
+
+static int ca_slot(struct cmd_con* c, int make) {
+  int i, fr = -1;
+  for (i = 0; i < CA_N; i++)
+    if (CA.cmd[i] == c) return i;
+  if (!make) return -1;
+  ca_sweep();
+  for (i = 0; i < CA_N && fr < 0; i++)
+    if (!CA.cmd[i]) fr = i;
+  if (fr < 0) return -1;
+  {
+    unsigned char* z = (unsigned char*)&CA.sgr[fr];
+    for (i = 0; i < (int)sizeof(CA.sgr[fr]); i++) z[i] = 0;
+  }
+  CA.cmd[fr] = c;
+  CA.attr[fr] = 0;
+  return fr;
+}
+
+/* Command novo (o endereco pode ser de um que fechou) ou cls: sem cor */
+static void ca_forget(struct cmd_con* c) {
+  int s = ca_slot(c, 0);
+  if (s < 0) return;
+  if (CA.attr[s]) ufree(CA.attr[s]);
+  CA.attr[s] = 0;
+  CA.cmd[s] = 0;
+}
+
+/* cor (atributo do VGA: frente | fundo << 4) de line[row][col]; 0x07 e a
+ * cor padrao da janela */
+static void ca_set(int s, int row, int col, unsigned a) {
+  if (s < 0 || row < 0 || row >= CMD_ROWS || col < 0 || col >= CMD_COLS) return;
+  if (a == 0x07) a = 0;
+  if (!CA.attr[s]) {
+    int i;
+    if (!a) return;
+    CA.attr[s] = (uint8_t*)umalloc_top((uint32_t)(CMD_ROWS * CMD_COLS));
+    if (!CA.attr[s]) return;
+    for (i = 0; i < CMD_ROWS * CMD_COLS; i++) CA.attr[s][i] = 0;
+  }
+  CA.attr[s][row * CMD_COLS + col] = (uint8_t)a;
+}
+
+/* cor do caractere que acabou de ir para line[row][col] */
+static void ca_put(int s, int row, int col) {
+  ca_set(s, row, col, sgr_colored(&CA.sgr[s]) ? sgr_attr(&CA.sgr[s], 0x07) : 0x07);
+}
+
+/* cmd_push: as cores sobem junto com as linhas; a linha nova vem sem cor */
+static void ca_push(struct cmd_con* c, int scrolled, int row) {
+  int s = ca_slot(c, 0), i;
+  uint8_t* a;
+  if (s < 0 || !(a = CA.attr[s])) return;
+  if (scrolled)
+    for (i = 0; i < (CMD_ROWS - 1) * CMD_COLS; i++) a[i] = a[i + CMD_COLS];
+  if (row >= 0 && row < CMD_ROWS)
+    for (i = 0; i < CMD_COLS; i++) a[row * CMD_COLS + i] = 0;
+}
+
 static void cons_emit(char ch) {
   struct cmd_con* c = cons_cap;
+  int s;
   if (!c) return;
+  /* ESC [ ... m: muda a cor e nao vai para a tela */
+  s = ca_slot(c, (unsigned char)ch == 27);
+  if (s >= 0 && sgr_feed(&CA.sgr[s], (unsigned char)ch)) return;
   if (tty_emit(c, ch)) return;
   if (ch == '\f') {
     int busy = c->busy;
@@ -4571,18 +4666,23 @@ static void cons_emit(char ch) {
   }
   c->line[c->n - 1][c->ocol++] = ch;
   c->line[c->n - 1][c->ocol] = '\0';
+  if (s >= 0) ca_put(s, c->n - 1, c->ocol - 1);
   /* Numa tarefa so marca: um prompt sem \n aparece quando ela ceder a vez. */
   if (in_task()) cons_refresh();
 }
 
+/* k_con_color (kexports.c): a saida vai para a janela de um Command */
+int cons_hook_is_cmd(void (*h)(char c)) { return h == cons_emit; }
+
 static void cons_wipe(struct cmd_con* c) {
   unsigned char* p = (unsigned char*)c;
   int i;
+  ca_forget(c);
   for (i = 0; i < (int)sizeof(*c); i++) p[i] = 0;
 }
 
 static void cmd_push(struct cmd_con* c, const char* s) {
-  int row, i;
+  int row, i, scrolled = 0;
   if (c->n >= CMD_ROWS) {
     /* sobe tudo uma linha (rep movsq: com 400 linhas o laco por byte pesa) */
     void* d = c->line[0];
@@ -4590,11 +4690,13 @@ static void cmd_push(struct cmd_con* c, const char* s) {
     uint64_t q = (uint64_t)(CMD_ROWS - 1) * CMD_COLS / 8u;
     __asm__ volatile ("rep movsq" : "+D"(d), "+S"(src), "+c"(q) : : "memory");
     c->n = CMD_ROWS - 1;
+    scrolled = 1;
   } else if (c->view) {
     c->view++; /* quem esta lendo la em cima nao ve o texto andar */
   }
   c->sel = 0; /* as linhas mudam: a marcacao nao vale mais */
   row = c->n++;
+  ca_push(c, scrolled, row);
   for (i = 0; i < CMD_COLS - 1 && s[i]; i++) c->line[row][i] = s[i];
   c->line[row][i] = '\0';
 }
@@ -5157,6 +5259,7 @@ static void cmd_draw(struct wm_win* w, int focus, int title_h, int scale,
   int r0 = 0, c0 = 0, r1 = 0, c1 = 0;
   int has;
   int li, k, last;
+  const uint8_t* attr;
   if (c->tty && c->tty->on) {
     tty_draw(w, c->tty, focus, title_h, scale);
     return;
@@ -5164,6 +5267,10 @@ static void cmd_draw(struct wm_win* w, int focus, int title_h, int scale,
   has = cmd_sel_span(c, &r0, &c0, &r1, &c1);
   cmd_geom(w, c, title_h, scale, &g);
   fill_rect(w->x, g.y0, w->w, w->h - title_h, col_black);
+  {
+    int s = ca_slot(c, 0);
+    attr = s >= 0 ? CA.attr[s] : 0;   /* cores ANSI das linhas (ca_put) */
+  }
   last = c->busy ? g.prompt_row - 1 : g.prompt_row;
   if (last > g.vis - 1) last = g.vis - 1;
   for (li = 0; li <= last; li++) {
@@ -5177,9 +5284,17 @@ static void cmd_draw(struct wm_win* w, int focus, int title_h, int scale,
       int on = has && (r > r0 || (r == r0 && src >= c0)) && (r < r1 || (r == r1 && src < c1));
       int px = g.x0 + k * g.cell;
       char chr = src < len ? row[src] : ' ';
+      uint32_t fg = col_white, bg = col_black;
       if (src >= len && !on) break;
+      if (attr && r < c->n && src < CMD_COLS) {
+        uint8_t a = attr[r * CMD_COLS + src];
+        if (a) {
+          fg = gui_col(tty_pal[a & 15]);
+          if (a >> 4) bg = gui_col(tty_pal[a >> 4]);
+        }
+      }
       if (on) draw_char_scaled(px, py, chr, col_black, col_white, scale);
-      else draw_char_scaled(px, py, chr, col_white, col_black, scale);
+      else draw_char_scaled(px, py, chr, fg, bg, scale);
     }
     if (r == c->n && focus) {
       int px = g.x0 + (g.plen + c->cur - g.off) * g.cell;
@@ -5841,9 +5956,11 @@ static int tty_emit(struct cmd_con* c, char ch) {
   } else if (u == '\t') {
     y->c = (y->c + 8) & ~7;
   } else if (u >= 32) {
+    int s = ca_slot(c, 0);   /* cor ANSI atual do Command (cons_emit) */
+    unsigned at = s >= 0 ? sgr_attr(&CA.sgr[s], 0x07) : 0x07;
     if (y->r < 0) y->r = 0;
     if (y->c < 0) y->c = 0;
-    TCELL(y, y->r, y->c) = (uint16_t)(0x0700 | u);
+    TCELL(y, y->r, y->c) = (uint16_t)((at << 8) | u);
     y->c++;
   }
   if (y->c >= y->cols) {
@@ -6017,9 +6134,10 @@ static int tty_key_of(uint8_t sc, int e0, int kp) {
   }
 }
 
-/* O programa acabou: o que ficou na grade vira o texto do Command. */
+/* O programa acabou: o que ficou na grade vira o texto do Command, com a cor
+ * de cada celula (o git status colorido nao fica branco no fim). */
 static void tty_to_log(struct cmd_con* c, struct con_tty* y) {
-  int r, k, last = y->c > 0 ? y->r : y->r - 1;
+  int r, k, sl = -1, last = y->c > 0 ? y->r : y->r - 1;
   int busy = c->busy;
   for (r = 0; r < y->rows; r++)
     for (k = 0; k < y->cols; k++) {
@@ -6039,6 +6157,12 @@ static void tty_to_log(struct cmd_con* c, struct con_tty* y) {
     }
     s[n] = '\0';
     cmd_push(c, s);
+    for (k = 0; k < n; k++) {
+      unsigned a = (unsigned)(TCELL(y, r, k) >> 8) & 0xFFu;
+      if (a == 0x07) continue;
+      if (sl < 0) sl = ca_slot(c, 1);
+      ca_set(sl, c->n - 1, k, a);
+    }
   }
 }
 
@@ -6821,6 +6945,15 @@ static int task_wait_ready(const struct gui_task* t) {
   return (int32_t)((uint32_t)irq_ticks() - t->wait_until) >= 0;
 }
 
+/* WAKE_WAIT acordada: o valor mudou (alguem chamou o futex_wake), nao foi o
+ * prazo. Quem espera assim e a thread principal de um programa esperando as
+ * threads dele (Firefox: rede, DNS, cache), e cada volta pelo laco do WIN
+ * custava ate uma fatia inteira de outra tarefa: ~8 ms medidos com o
+ * PINGPONG.EXE num Command, contra microssegundos fora do WIN (2026-11-26). */
+static int task_woken(const struct gui_task* t) {
+  return t->used && t->wake == WAKE_WAIT && t->wait_addr && *t->wait_addr != t->wait_val;
+}
+
 /* ---------- preempcao das janelas de programa ----------
  * As tarefas do WIN sao cooperativas: um programa que calcula sem ceder a vez
  * (layout/JS do Firefox, por exemplo) prendia o laco do WIN, e com ele o
@@ -6834,6 +6967,35 @@ static volatile uint32_t task_slice_t0;
 static int xs_mode = -1;      /* -1 = nao sondado, 0 = fxsave, 1 = xsave */
 static uint32_t xs_lo, xs_hi; /* XCR0 */
 static uint32_t gui_preempts;
+
+/* Tarefa acordada passa na frente (task_pick) e tira a da vez depois de
+ * WOKE_PREEMPT_MS em vez da fatia inteira (gui_preempt_tick). Para nao matar
+ * de fome quem calcula, as escolhidas por "acordada" so passam na frente
+ * enquanto somam menos de GUI_SLICE_MS e menos de WOKE_MAX_PICKS escolhas
+ * seguidas (o irq_ticks e de 1 ms: uma acordada que roda microssegundos
+ * somaria 0); dai uma volta normal do round-robin zera a conta (tasks_pump). */
+#define WOKE_PREEMPT_MS 2
+#define WOKE_MAX_PICKS 32
+static uint32_t woke_ms;    /* tempo seguido das tarefas escolhidas por "acordada" */
+static uint32_t woke_n;     /* ... e quantas escolhas seguidas */
+static int pick_woke;       /* a ultima task_pick escolheu por "acordada" */
+static uint32_t gui_woke_picks, gui_woke_preempts;
+
+static int woke_budget(void) { return woke_ms < GUI_SLICE_MS && woke_n < WOKE_MAX_PICKS; }
+
+static int tasks_woken_other(int self) {
+  int i;
+  for (i = 0; i < task_n; i++)
+    if (i != self && task_woken(&gtasks[i])) return 1;
+  return 0;
+}
+
+/* Para o "smp": quantas vezes uma tarefa acordada foi escolhida e quantas
+ * tirou a da vez antes do fim da fatia. */
+void gui_woke_stats(uint32_t* picks, uint32_t* preempts) {
+  if (picks) *picks = gui_woke_picks;
+  if (preempts) *preempts = gui_woke_preempts;
+}
 
 static void xs_probe(void) {
   uint64_t cr4;
@@ -6952,9 +7114,18 @@ static void gui_preempt_tick(uint64_t rip) {
   t = &gtasks[task_cur];
   if (!t->used || t->wake == WAKE_DEAD || t->wake == WAKE_NONE) return;
   /* Entrada esperando (tecla, mouse): o WIN precisa da CPU ja, sem esperar a
-   * fatia acabar. */
-  if (!in_pend_t && (uint32_t)irq_ticks() - task_slice_t0 < GUI_SLICE_MS) return;
-  if (!mod_rip_preemptible(rip)) return;
+   * fatia acabar. Outra tarefa acordada por futex tambem, depois de
+   * WOKE_PREEMPT_MS (e so enquanto as acordadas tem a vez, ver woke_ms). */
+  {
+    uint32_t ran = (uint32_t)irq_ticks() - task_slice_t0;
+    int early = 0;
+    if (!in_pend_t && ran < GUI_SLICE_MS) {
+      if (ran < WOKE_PREEMPT_MS || !woke_budget() || !tasks_woken_other(task_cur)) return;
+      early = 1;
+    }
+    if (!mod_rip_preemptible(rip)) return;
+    if (early) gui_woke_preempts++;
+  }
   if (xs_mode < 0) xs_probe();
   /* Fora da pilha do programa: a de uma thread do Firefox pode ser pequena.
    * Uma area por tarefa basta: ela so e preemptada uma vez de cada vez. */
@@ -6980,6 +7151,19 @@ static void gui_preempt_tick(uint64_t rip) {
   }
 }
 
+/* Olhada na fila sem esperar (k_gui_event com prazo 0) que achou a fila
+ * vazia: so cede a vez depois de GUI_POLL_FREE olhadas ou GUI_POLL_FREE_MS
+ * na mesma vez da tarefa. O Firefox olha a fila entre um evento do Gecko e
+ * outro (nsBaseAppShell -> PumpEvents): ceder sempre custava uma volta do
+ * laco do WIN (ate o proximo tique, ~1 ms) por evento, milhares por pagina.
+ * Quem so fica olhando a fila em laco ainda cede logo, e a preempcao do IRQ0
+ * (entrada esperando, fim da fatia) vale para o resto. A contagem recomeca a
+ * cada vez (task_slice_t0 muda quando a tarefa volta a CPU). */
+#define GUI_POLL_FREE 64
+#define GUI_POLL_FREE_MS 2
+static uint32_t poll_free_t0;
+static int poll_free_n;
+
 static int gui_event_coop(int* ev, int timeout_ms) {
   uint32_t t0 = net_ms();
   int i;
@@ -6993,6 +7177,13 @@ static int gui_event_coop(int* ev, int timeout_ms) {
     }
     if (gui_q_pop(ev)) return ev[0];
     if (timeout_ms == 0) {
+      if (poll_free_t0 != task_slice_t0) {
+        poll_free_t0 = task_slice_t0;
+        poll_free_n = 0;
+      }
+      if (++poll_free_n <= GUI_POLL_FREE &&
+          (uint32_t)irq_ticks() - task_slice_t0 < GUI_POLL_FREE_MS)
+        return GUI_EV_NONE;
       gui_yield(WAKE_POLL);
       if (!gui_ok()) return -1;
       if (gui.ask_close) {
@@ -7733,7 +7924,21 @@ static int task_pick(void) {
       best = i;
     }
   }
-  if (best >= 0) return best;
+  if (best >= 0) {
+    pick_woke = 0;
+    return best;
+  }
+  /* Acordada por futex: na frente de quem calcula (ver woke_budget). */
+  if (woke_budget()) {
+    for (n = 0; n < task_n; n++) {
+      i = (task_rr + n) % task_n;
+      if (task_woken(&gtasks[i])) {
+        pick_woke = 1;
+        return i;
+      }
+    }
+  }
+  pick_woke = 0;
   for (n = 0; n < task_n; n++) {
     i = (task_rr + n) % task_n;
     if (!gtasks[i].used) continue;
@@ -7741,6 +7946,12 @@ static int task_pick(void) {
     if (gtasks[i].wake == WAKE_WAIT && task_wait_ready(&gtasks[i])) return i;
   }
   return -1;
+}
+
+/* alguma tarefa acordada por futex esperando a vez (e as acordadas ainda
+ * podem passar na frente)? */
+static int tasks_woken_any(void) {
+  return gtasks && gwins && woke_budget() && tasks_woken_other(-1);
 }
 
 /* alguma tarefa do WIN quer CPU ja (evento na fila ou calculando)? */
@@ -7756,9 +7967,20 @@ static int tasks_want_cpu(void) {
 
 static void tasks_pump(void) {
   int ti = task_pick();
+  int woke = pick_woke;
+  uint32_t t0;
   if (ti < 0) return;
   task_rr = ti + 1;
+  t0 = (uint32_t)irq_ticks();
   task_switch_to(ti);
+  if (woke) {
+    gui_woke_picks++;
+    woke_n++;
+    woke_ms += (uint32_t)irq_ticks() - t0;
+  } else {
+    woke_ms = 0;
+    woke_n = 0;
+  }
 }
 
 static void tasks_shutdown(void) {
@@ -11249,6 +11471,16 @@ static int win_wm_run_u(void) {
       if ((!pend || now - pump_ms >= 30) && task_pick() >= 0) {
         pump_ms = now;
         tasks_pump();
+        /* Acordadas por futex (a thread principal do Firefox esperando as
+         * threads dela): rodam em seguida, sem esperar um quadro nem a volta
+         * inteira do laco, por ate 2 ms. */
+        if (!pend) {
+          int k;
+          for (k = 0; k < 16 && (uint32_t)irq_ticks() - now < 2u && tasks_woken_any(); k++) {
+            kt_bkl_breathe();
+            tasks_pump();
+          }
+        }
         prof_pump += (uint32_t)irq_ticks() - now;
       }
     }

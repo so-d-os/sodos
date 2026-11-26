@@ -71,6 +71,14 @@ static int cap_task = -2;
 /* Cada chamada de console e um ponto de Ctrl+C (con_break_poll). */
 static void con_out(int c) {
   if (cap_task != -2 && cap_buf && win_task_current() == cap_task) {
+    /* Um | ou > dentro da linha capturada (git status | grep pela API ou
+     * pela PONTE): o shell trocou a saida; o .EXE escreve nela, e o que sair
+     * do lado direito volta para a captura. */
+    void (*o)(char) = shell_get_out();
+    if (o && o != cap_out) {
+      putc((char)c);
+      return;
+    }
     cap_out((char)c);
     return;
   }
@@ -96,6 +104,19 @@ static void k_write(const char* s, int n) {
   con_break_poll();
   if (!s) return;
   for (i = 0; i < n; i++) con_out(s[i]);
+}
+
+/* 1 se o que o programa escreve vai para uma tela que mostra cor ANSI
+ * (ESC [ ... m): a tela de texto do DOS ou a janela do Command. 0 com pipe,
+ * >, captura (API, PONTE, WINE) ou no log do WIN (sem janela): ai a cor
+ * viraria lixo no arquivo. Programas novos procuram com
+ * k_dl_sym(0, "k_con_color", 0); kernel antigo = sem cor. */
+int cons_hook_is_cmd(void (*h)(char c));   /* video/visual.c */
+static int k_con_color(void) {
+  if (cap_task != -2 && cap_buf && win_task_current() == cap_task) return 0;
+  if (shell_get_out()) return 0;
+  if (!con_hook) return 1;
+  return cons_hook_is_cmd(con_hook);
 }
 
 /* Depuracao de programas: vai direto para a serial (COM1), sem passar pelo
@@ -1795,6 +1816,8 @@ static const struct kexp table[] = {
   EXP(k_audio_volume),
   EXP(k_audio_beep),
   EXP(k_audio_info),
+  /* console com cor ANSI? (git status colorido) */
+  EXP(k_con_color),
 };
 
 #define NEXP (sizeof(table) / sizeof(table[0]))

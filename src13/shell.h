@@ -46,6 +46,21 @@ int shell_exec_quiet(char* line);
 void vga_put_at(int r, int c, unsigned char ch);
 void clear_screen(void);
 
+/* Cores ANSI (ESC [ ... m) no console: kernel.c (tela de texto) e visual.c
+ * (janela do Command). Zerado = sem cor. sgr_feed devolve 1 se o caractere
+ * era da sequencia (nao vai para a tela). */
+#define SGR_PARS 8
+struct sgr {
+  int st;
+  int par[SGR_PARS];
+  int np;
+  int fg, bg;   /* cor VGA + 1; 0 = padrao */
+  int bright;
+};
+int sgr_feed(struct sgr* s, unsigned char ch);
+unsigned char sgr_attr(const struct sgr* s, unsigned char def);
+int sgr_colored(const struct sgr* s);
+
 static inline int name_eq(const char* a, const char* b) {
   int i = 0;
   if (!a || !b) return 0;
