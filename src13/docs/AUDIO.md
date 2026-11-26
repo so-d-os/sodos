@@ -43,6 +43,8 @@ int k_audio_info(char* out, int max);                /* texto do comando AUDIO *
 
 Um programa por vez tem o som. Quando ele termina (ou é morto) sem `k_audio_close`, o kernel para a placa e libera o som. O `k_audio_write` dorme (futex) enquanto a fila está cheia: não gasta CPU.
 
+O Firefox usa essas funções pelo backend do cubeb (`firefox/sodos/cubeb/cubeb_sodos.c`; como funciona e como recompilar em `firefox/docs/05-firefox-build.md`, seção "Som").
+
 O kernel converte o que o programa manda para o que o driver recebe (sempre 16 bits estéreo): 8 bits sem sinal, mono, e taxas que a placa não tem (vai a 48 kHz por interpolação linear, sem filtro). No notebook (Conexant), a placa só tem 48, 96 e 192 kHz: WAV de 44,1 kHz passa pela conversão.
 
 ## Como funciona

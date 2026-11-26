@@ -9,6 +9,8 @@ copia  src13/c_compiler/out/MENUCFG.EXE   D:\SODOS\
 copia  src13/c_compiler/out/TEMAS.EXE     D:\SODOS\
 # Alt+Tab do WIN: o WIN abre o WINTAB.EXE so enquanto o Alt esta apertado
 copia  src13/c_compiler/out/WINTAB.EXE    D:\SODOS\
+# Tecla Win do WIN: busca transparente, fica residente depois da 1a vez
+copia  src13/c_compiler/out/WINMENU.EXE   D:\SODOS\
 # Servico SET DISKSYNC=1 (Z:\SAVE -> pendrive), aberto pelo kernel
 copia  src13/c_compiler/out/DISKSYNC.EXE  D:\SODOS\
 

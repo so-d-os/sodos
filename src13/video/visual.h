@@ -104,6 +104,11 @@ int alttab_api(int* tabs);
 int alttab_wait_api(int seq, int ms);
 /* Janela sem titulo nem moldura no retangulo (painel do WINTAB). */
 int gui_panel_open(const char* title, int x, int y, int w, int h);
+/* Tecla Win: WINMENU.EXE residente (op 0 espera, 1 fechou, 2 altura da barra). */
+int winmenu_api(int op, int arg);
+/* Janela do programa transparente (alfa por pixel, clique passa no invisivel);
+ * bit 2: o que esta atras dela em preto e branco. */
+int gui_transp_set(int on);
 /* Injeta uma tecla ASCII na janela GUI com foco (automacao/testes). */
 int win_api_key(int ch);
 /* Linha y em BGR. Devolve a largura, ou -1. */

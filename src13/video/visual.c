@@ -3595,6 +3595,8 @@ struct wm_win {
   char title[24];
   struct app_state* st;
   int auto_close;   /* RUN terminou com 0: o laco do WIN fecha a janela */
+  int min;          /* minimizada: fora da tela e do clique, so o botao na barra
+                       (1 = pelo botao "_", 2 = pelo "mostrar desktop") */
 };
 
 /* z maior fica na frente. gui_focus >= 0 quando a janela da frente e um .EXE. */
@@ -3606,6 +3608,7 @@ static int run_close_pending;   /* alguma janela RUN marcada com auto_close */
 
 static void wm_raise(struct wm_win* w) {
   w->z = ++zseq;
+  w->min = 0;   /* trazer para a frente tambem restaura */
   gui_focus = -1;
   gui_stole = 0;
 }
@@ -5359,6 +5362,7 @@ static int wm_open_command(struct wm_win* wins, int* focus, int big) {
 }
 
 static void title_max_btn(int x, int y, int s, int maxed);
+static void title_min_btn(int x, int y, int s);
 static int wm_is_max(struct wm_win* w);
 /* X e maximizar ficam TB_PAD pixels longe da borda direita: o canto de cima
  * a direita fica livre para redimensionar. */
@@ -5477,7 +5481,7 @@ static void wm_draw_inner(struct wm_win* w, int focus, int title_h, int scale,
   fill_rect(w->x, w->y + title_h, w->w, w->h - title_h, col_win);
   if (wf_on())
     wf_text(w->x + 12, w->y + (title_h - wfont_height()) / 2, w->title, gui_col(UI_TTEXT),
-            close_x - close_s - 10);
+            close_x - 2 * close_s - 14);
   else
     draw_text_t(w->x + 12, ty, w->title, gui_col(UI_TTEXT), scale);
   fill_round(close_x, w->y + 3, close_s, close_s, ui_th.modern ? close_s / 2 : 5,
@@ -5485,6 +5489,7 @@ static void wm_draw_inner(struct wm_win* w, int focus, int title_h, int scale,
   draw_text_t(close_x + (close_s > FONT_W * scale ? (close_s - FONT_W * scale) / 2 : 0),
               ty, "x", gui_col(ui_th.modern ? 0xFFFFFFu : UI_TEXT), scale);
   title_max_btn(close_x - close_s - 4, w->y + 3, close_s, wm_is_max(w));
+  title_min_btn(close_x - 2 * close_s - 8, w->y + 3, close_s);
   fill_rect(w->x + w->w - 12, w->y + w->h - 12, 10, 10, col_black);
   fill_rect(w->x + w->w - 11, w->y + w->h - 11, 8, 8, col_btn);
   if (w->kind == WM_KIND_NOTE) {
@@ -5604,6 +5609,7 @@ static int wm_alloc(struct wm_win* wins) {
       /* vaga de uma janela RUN que fechou sem passar pelo laco do auto_close:
        * a marca velha fecharia a janela nova no proximo programa que acabar */
       wins[i].auto_close = 0;
+      wins[i].min = 0;
       return i;
     }
   return -1;
@@ -5825,6 +5831,16 @@ struct gui_win {
   int maxed;    /* maximizada pelo botao/duplo clique no titulo */
   int panel;    /* k_gui_panel: sem titulo nem moldura (WINTAB) */
   uint32_t pid; /* programa que abriu: as threads dele pintam aqui (gui_thread_enter) */
+  /* Campos novos so no fim: o TROCA nao percebe struct com layout mudado
+   * (docs/TROCA.md); aqui min ocupa o enchimento do fim e o sizeof fica. */
+  int min;      /* minimizada (como em wm_win: 1 = botao "_", 2 = mostrar desktop) */
+  /* k_gui_transp: o byte alto de cada pixel e a transparencia (0 opaco, 255
+   * invisivel); a janela se mistura com o que esta atras e o clique num
+   * pixel invisivel passa para tras (WINMENU sobre os icones do desktop). */
+  int transp;
+  /* k_gui_transp bit 2: antes de desenhar esta janela o quadro inteiro (o
+   * que esta atras dela) vira preto e branco; ela e a barra ficam coloridas. */
+  int cinza;
 };
 
 static int (*task_pending_cmd)(int, char**); /* proximo task_spawn roda isto */
@@ -6304,6 +6320,7 @@ int gui_open(const char* title) {
     gui.pid = mod_current_pid();   /* programa aninhado (k_exec) herda a janela */
     gui_title(title);
     gui.z = ++zseq;
+    gui.min = 0;
     gui_focus = gui_ix;
     gui_stole = 1;
     win_api_dirty = 1;
@@ -6417,6 +6434,9 @@ int gui_open(const char* title) {
   gui.clip = 0;
   gui.maxed = 0;
   gui.panel = 0;
+  gui.min = 0;
+  gui.transp = 0;
+  gui.cinza = 0;
   gui.pid = mod_current_pid();
   gui.z = ++zseq;
   gui_focus = gui_ix;
@@ -6439,6 +6459,9 @@ void gui_close(void) {
   gui.pix = 0;
   gui.open = 0;
   gui.pid = 0;
+  gui.min = 0;
+  gui.transp = 0;
+  gui.cinza = 0;
   gui.ask_close = 0;
   gui.drag = 0;
   gui.qn = 0;
@@ -6477,6 +6500,13 @@ void gui_pixels(int x, int y, int w, int h, const void* rgba, int stride) {
       int dx = x + xx;
       const uint8_t* p = row + xx * 4;
       if (dx < 0 || dx >= gui.cw) continue;
+      if (gui.transp) {
+        /* janela transparente: guarda o alfa (como transparencia no byte
+         * alto); a mistura e com o que estiver atras, na hora de desenhar */
+        gui.pix[dy * gui.cw + dx] = ((uint32_t)(255u - p[3]) << 24) |
+                                    ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+        continue;
+      }
       if (gfx_quality < 1 && !ui_th.modern) {
         /* retro: alfa binario (custo zero, como sempre foi) */
         if (p[3] < 128) continue;
@@ -6498,6 +6528,20 @@ void gui_pixels(int x, int y, int w, int h, const void* rgba, int stride) {
       }
     }
   }
+}
+
+/* k_gui_transp(1): a janela do programa vira transparente (comeca toda
+ * invisivel); k_gui_pixels passa a gravar o alfa e o WIN mistura com o que
+ * esta atras. k_gui_fill e k_gui_text continuam opacos. Bit 2: o que esta
+ * atras da janela (a tela inteira) aparece em preto e branco. */
+int gui_transp_set(int on) {
+  if (!gui_ok() || kt_in_thread()) return -1;
+  gui.transp = (on & 1) ? 1 : 0;
+  gui.cinza = (on & 2) ? 1 : 0;
+  if (gui.pix)
+    fill32(gui.pix, gui.transp ? 0xFF000000u : 0u, (uint32_t)gui.cw * (uint32_t)gui.ch);
+  win_api_dirty = 1;
+  return 0;
 }
 
 void gui_fill(int x, int y, int w, int h, uint32_t rgb) {
@@ -6563,6 +6607,25 @@ static void gui_blit_win(struct gui_win* w) {
   if (x0 >= x1 || y0 >= y1) return;
   for (y = y0; y < y1; y++) {
     uint32_t* src = w->pix + y * w->cw;
+    if (w->transp && gfx_bochs) {
+      /* transparente: pula o invisivel, mistura o meio-termo com o quadro */
+      volatile uint32_t* dst = (volatile uint32_t*)gfx_at(left + x0, y + top);
+      int x;
+      for (x = x0; x < x1; x++, dst++) {
+        uint32_t s = src[x], t = s >> 24, a, d;
+        if (t >= 255u) continue;
+        if (!t) {
+          *dst = s;
+          continue;
+        }
+        a = 255u - t;
+        a += a >> 7;                         /* 0..256 */
+        d = *dst;
+        *dst = ((((s & 0xFF00FFu) * a + (d & 0xFF00FFu) * (256u - a)) >> 8) & 0xFF00FFu) |
+               ((((s & 0x00FF00u) * a + (d & 0x00FF00u) * (256u - a)) >> 8) & 0x00FF00u);
+      }
+      continue;
+    }
     if (gfx_bochs) {
       uint32_t* s = src + x0;
       volatile uint32_t* dst = gfx_offscreen
@@ -6576,8 +6639,13 @@ static void gui_blit_win(struct gui_win* w) {
       int x;
       uint32_t last = 0xFFFFFFFFu, idx = 0;
       for (x = x0; x < x1; x++) {
-        if (src[x] != last) {
-          last = src[x];
+        uint32_t v = src[x];
+        if (w->transp) {
+          if ((v >> 24) >= 128u) continue;   /* 256 cores: alfa binario */
+          v &= 0xFFFFFFu;
+        }
+        if (v != last) {
+          last = v;
           idx = gui_col(last);
         }
         put_pixel(x + left, y + top, idx);
@@ -6637,11 +6705,13 @@ void gui_present(void) {
    * (task_cur < 0) ela cairia no desenho sem WIN, que limpa a tela inteira. */
   if (kt_in_thread()) {
     if (!host_on || !gui_ok()) return;
+    if (gui.min) return;   /* minimizada: nada a mostrar ate restaurar */
     win_api_dirty |= 2;
     if (gpu_drv) gfx_dmg_add(gui.ox, gui.oy, gui.cw, gui.title_h + gui.ch);
     return;
   }
   if (host_on && task_cur >= 0) {
+    if (gui.min) return;   /* minimizada: nada a mostrar ate restaurar */
     /* 2 = so o conteudo desta janela mudou; qualquer outro "= 1" vence */
     win_api_dirty |= 2;
     if (gpu_drv) gfx_dmg_add(gui.ox, gui.oy, gui.cw, gui.title_h + gui.ch);
@@ -8073,6 +8143,7 @@ static int gui_raise_title(const char* title) {
   for (i = 0; i < GUI_MAX; i++) {
     if (!gwins[i].open || !win_ieq(gwins[i].title, title)) continue;
     gwins[i].z = ++zseq;
+    gwins[i].min = 0;
     gui_focus = i;
     gui_stole = 1;
     win_api_dirty = 1;
@@ -9462,6 +9533,9 @@ static uint32_t c_desk, c_win, c_title, c_bar, c_white, c_black, c_btn, c_inacti
 /* A janela de texto do .EXE fica escondida enquanto a janela grafica dele esta aberta. */
 static int at_res_alive(void);
 static int at_res_task = -1; /* WINTAB.EXE residente, esperando o proximo Alt+Tab */
+static int wk_res_alive(void);
+static int wk_res_task = -1; /* WINMENU.EXE residente, esperando a proxima tecla Win */
+static int wk_res_pid = -1;
 
 static int run_hidden(struct wm_win* w) {
   int i;
@@ -9469,6 +9543,7 @@ static int run_hidden(struct wm_win* w) {
   for (i = 0; i < task_n; i++) {
     if (!gtasks[i].used || gtasks[i].run != w) continue;
     if (i == at_res_task && at_res_alive()) return 1; /* WINTAB parado: sem janela */
+    if (i == wk_res_task && wk_res_alive()) return 1; /* WINMENU idem */
     if (gtasks[i].gid >= 0 && gtasks[i].gid < GUI_MAX && gwins[gtasks[i].gid].open) return 1;
   }
   return 0;
@@ -9478,10 +9553,11 @@ static int stack_top_z(struct wm_win* wins) {
   int i, top = 0;
   if (wins) {
     for (i = 0; i < WM_MAX; i++)
-      if (wins[i].used && !run_hidden(&wins[i]) && wins[i].z > top) top = wins[i].z;
+      if (wins[i].used && !wins[i].min && !run_hidden(&wins[i]) && wins[i].z > top)
+        top = wins[i].z;
   }
   if (gwins) for (i = 0; i < GUI_MAX; i++)
-    if (gwins[i].open && gwins[i].z > top) top = gwins[i].z;
+    if (gwins[i].open && !gwins[i].min && gwins[i].z > top) top = gwins[i].z;
   return top;
 }
 
@@ -9785,6 +9861,14 @@ static void title_max_btn(int x, int y, int s, int maxed) {
   }
 }
 
+/* Botao de minimizar: um traco embaixo, no mesmo fundo do maximizar. */
+static void title_min_btn(int x, int y, int s) {
+  int m = s / 4 > 2 ? s / 4 : 2;
+  int t = s >= 20 ? 2 : 1;
+  fill_round(x, y, s, s, ui_th.modern ? s / 2 : 5, gui_col(ui_th.tbtn));
+  fill_rect(x + m, y + s - m - t * 2, s - 2 * m, t * 2, gui_col(UI_TTEXT));
+}
+
 /* Retangulo de "restaurar": 80% da largura e da altura da tela, centrado
  * acima da barra de tarefas. */
 static void max_restore_rect(int scale, int* x, int* y, int* w, int* h) {
@@ -9885,13 +9969,14 @@ static void gui_draw_frame(struct gui_win* w, int active, uint32_t col_title, ui
             gui_col(active ? UI_TITLE_A : UI_TITLE_I));
   if (wf_on())
     wf_text(w->ox + 12, w->oy + (w->title_h - wfont_height()) / 2, w->title, gui_col(UI_TTEXT),
-            close_x - close_s - 10);
+            close_x - 2 * close_s - 14);
   else
     draw_text_t(w->ox + 12, ty, w->title, gui_col(UI_TTEXT), scale);
   fill_round(close_x, w->oy + 3, close_s, close_s, ui_th.modern ? close_s / 2 : 5,
              gui_col(ui_th.close));
   draw_text_t(close_x + xoff, ty, "x", gui_col(ui_th.modern ? 0xFFFFFFu : UI_TEXT), scale);
   title_max_btn(close_x - close_s - 4, w->oy + 3, close_s, gw_is_max(w));
+  title_min_btn(close_x - 2 * close_s - 8, w->oy + 3, close_s);
   gui_blit_win(w);
   (void)col_black;
   round_top_frame(w->ox, w->oy, w->cw, hh, UI_RADIUS, gui_col(UI_BORDER));
@@ -9927,6 +10012,29 @@ static void paint_shadow(int z, int x, int y, int w, int h) {
   win_shadow(x, y, w, h, px0 + UI_RADIUS, py0, px1 - UI_RADIUS, py0 + UI_RADIUS, (int)gfx_h);
 }
 
+/* O que ja esta no quadro vira preto e branco (luminancia 0,30 R + 0,59 G +
+ * 0,11 B). Na pintura parcial so o retangulo dela; cinza de cinza e o mesmo
+ * cinza, entao refazer um pedaco nao muda nada. 256 cores: nao faz. */
+static void paint_cinza(void) {
+  int x0 = 0, y0 = 0, x1 = (int)gfx_w, y1 = (int)gfx_h, y;
+  if (!gfx_bochs) return;
+  if (paint_only) {
+    x0 = paint_x < 0 ? 0 : paint_x;
+    y0 = paint_y < 0 ? 0 : paint_y;
+    if (paint_x + paint_w < x1) x1 = paint_x + paint_w;
+    if (paint_y + paint_h < y1) y1 = paint_y + paint_h;
+  }
+  for (y = y0; y < y1; y++) {
+    volatile uint32_t* p = (volatile uint32_t*)gfx_at(x0, y);
+    int x;
+    for (x = x0; x < x1; x++, p++) {
+      uint32_t c = *p;
+      uint32_t l = (((c >> 16) & 0xFFu) * 77u + ((c >> 8) & 0xFFu) * 150u + (c & 0xFFu) * 29u) >> 8;
+      *p = (c & 0xFF000000u) | (l << 16) | (l << 8) | l;
+    }
+  }
+}
+
 static void paint_stacked(struct wm_win* wins, int title_h, int scale, uint32_t col_win,
                           uint32_t col_title, uint32_t col_white, uint32_t col_black,
                           uint32_t col_btn, uint32_t col_inactive) {
@@ -9935,7 +10043,7 @@ static void paint_stacked(struct wm_win* wins, int title_h, int scale, uint32_t 
   int n = 0, i, top;
   if (!wins) return;
   for (i = 0; i < WM_MAX; i++) {
-    if (!wins[i].used || run_hidden(&wins[i])) continue;
+    if (!wins[i].used || wins[i].min || run_hidden(&wins[i])) continue;
     if (dc.capture && dc.wm == i) continue;
     if (paint_skip(wins[i].z, wins[i].x, wins[i].y, wins[i].w, wins[i].h)) continue;
     order[n] = i;
@@ -9943,7 +10051,7 @@ static void paint_stacked(struct wm_win* wins, int title_h, int scale, uint32_t 
     n++;
   }
   for (i = 0; gwins && i < GUI_MAX; i++) {
-    if (!gwins[i].open) continue;
+    if (!gwins[i].open || gwins[i].min) continue;
     if (dc.capture && dc.gw == i) continue;
     if (paint_skip(gwins[i].z, gwins[i].ox, gwins[i].oy, gwins[i].cw,
                    gwins[i].title_h + gwins[i].ch)) continue;
@@ -9972,6 +10080,7 @@ static void paint_stacked(struct wm_win* wins, int title_h, int scale, uint32_t 
       paint_shadow(sw->z, sw->x, sw->y, sw->w, sw->h);
     } else {
       struct gui_win* sg = &gwins[order[i]];
+      if (sg->cinza) paint_cinza();   /* tudo atras dela em preto e branco */
       if (!sg->panel) paint_shadow(sg->z, sg->ox, sg->oy, sg->cw, sg->title_h + sg->ch);
     }
     if (kind[i] == 1)
@@ -10025,6 +10134,18 @@ static int at_res_alive(void) {
   t = &gtasks[at_res_task];
   if (!t->used || t->wake == WAKE_DEAD || (int)t->cpu.pid != at_res_pid) {
     at_res_task = -1;
+    return 0;
+  }
+  return 1;
+}
+
+/* O WINMENU residente ainda e a mesma tarefa. */
+static int wk_res_alive(void) {
+  struct gui_task* t;
+  if (wk_res_task < 0 || wk_res_task >= TASK_MAX || !gtasks) return 0;
+  t = &gtasks[wk_res_task];
+  if (!t->used || t->wake == WAKE_DEAD || (int)t->cpu.pid != wk_res_pid) {
+    wk_res_task = -1;
     return 0;
   }
   return 1;
@@ -10309,6 +10430,18 @@ int gui_panel_open(const char* title, int x, int y, int w, int h) {
 #define HIT_WM   1
 #define HIT_GUI  2
 
+/* O ponto (x,y) da tela pega na janela g? Numa transparente (k_gui_transp),
+ * pixel invisivel nao pega: o clique vai para o que esta atras (icones). */
+static int gw_pega(const struct gui_win* g, int x, int y) {
+  int px, py;
+  if (!wm_pt(x, y, g->ox, g->oy, g->cw, g->title_h + g->ch)) return 0;
+  if (!g->transp || !g->pix) return 1;
+  px = x - g->ox;
+  py = y - g->oy - g->title_h;
+  if (py < 0) return 1;
+  return (g->pix[py * g->cw + px] >> 24) < 255u;
+}
+
 static int z_top(struct wm_win* wins, int x, int y, int* kind) {
   int i, best = -1, bk = HIT_NONE, bz = -1;
   /* A barra de tarefas fica na frente: a parte de uma janela arrastada para
@@ -10318,7 +10451,7 @@ static int z_top(struct wm_win* wins, int x, int y, int* kind) {
     return -1;
   }
   for (i = 0; i < WM_MAX; i++) {
-    if (!wins[i].used || run_hidden(&wins[i])) continue;
+    if (!wins[i].used || wins[i].min || run_hidden(&wins[i])) continue;
     if (!wm_pt(x, y, wins[i].x, wins[i].y, wins[i].w, wins[i].h)) continue;
     if (wins[i].z >= bz) {
       bz = wins[i].z;
@@ -10328,8 +10461,8 @@ static int z_top(struct wm_win* wins, int x, int y, int* kind) {
   }
   for (i = 0; gwins && i < GUI_MAX; i++) {
     struct gui_win* w = &gwins[i];
-    if (!w->open) continue;
-    if (!wm_pt(x, y, w->ox, w->oy, w->cw, w->title_h + w->ch)) continue;
+    if (!w->open || w->min) continue;
+    if (!gw_pega(w, x, y)) continue;
     if (w->z >= bz) {
       bz = w->z;
       best = i;
@@ -10411,6 +10544,7 @@ static void cmd_refocus(struct cmd_con* c) {
   for (i = 0; i < WM_MAX; i++) {
     if (!c_wins[i].used || c_wins[i].kind != WM_KIND_CMD) continue;
     if (c_wins[i].st != (struct app_state*)c) continue;
+    if (c_wins[i].min) return;   /* minimizada: continua na barra */
     wm_raise(&c_wins[i]);
     *c_focus = i;
     win_api_dirty = 1;
@@ -10508,12 +10642,13 @@ static void menu_panel(int x, int y, int w, int h) {
 
 /* X do botao "S" na barra: 0 = esquerda, 1 = junto ao painel (lateral direita). */
 static int gui_panel_left(void);
+static int sd_larg(int bar_h);   /* "mostrar desktop", no canto direito da barra */
 
 static int ui_logo_x(int w, int lw) {
   if (ui_menu_pos == 1) {
     int px = gui_panel_left();
     if (px > lw + 40) return px - lw - 10;
-    return w - lw - 8;
+    return w - lw - 8 - sd_larg(c_bar_h);   /* o canto e do "mostrar desktop" */
   }
   return 6;
 }
@@ -10535,11 +10670,18 @@ struct tb_item {
   char key[TB_KEY];
   char nome[16];
   int fixo, n, foco;
+  int nmin;   /* quantas das n estao minimizadas */
 };
 static struct tb_item tb[TB_MAX];
 static int tb_n;
 static char tb_fix[TB_MAX][TB_KEY];
 static int tb_nfix, tb_fix_lido;
+
+/* minimizar / restaurar e "mostrar desktop" (mais abaixo, depois da barra) */
+static void mn_minimiza(int wm, int gw, int como);
+static void mn_restaura(int wm, int gw, int sobe);
+static int sd_larg(int bar_h);
+static int sd_ligado(void);
 
 static int tb_eq(const char* a, const char* b) {
   int i = 0;
@@ -10618,6 +10760,7 @@ static int tb_add(const char* key, int fixo) {
   tb[tb_n].fixo = fixo;
   tb[tb_n].n = 0;
   tb[tb_n].foco = 0;
+  tb[tb_n].nmin = 0;
   return tb_n++;
 }
 
@@ -10656,14 +10799,16 @@ static void tb_monta(void) {
     tb_key_wm(&c_wins[i], key);
     if ((j = tb_add(key, 0)) < 0) continue;
     tb[j].n++;
-    if (gui_focus < 0 && c_focus && *c_focus == i) tb[j].foco = 1;
+    if (c_wins[i].min) tb[j].nmin++;
+    else if (gui_focus < 0 && c_focus && *c_focus == i) tb[j].foco = 1;
   }
   for (i = 0; gwins && i < GUI_MAX; i++) {
     if (!gwins[i].open || gwins[i].panel) continue;
     tb_key_gui(i, key);
     if ((j = tb_add(key, 0)) < 0) continue;
     tb[j].n++;
-    if (gui_focus == i) tb[j].foco = 1;
+    if (gwins[i].min) tb[j].nmin++;
+    else if (gui_focus == i) tb[j].foco = 1;
   }
 }
 
@@ -10718,10 +10863,29 @@ static void tb_desenha(int w, int h, int bar_h, int scale) {
     }
     tb_icone(t, x, y, s, scale);
     if (t->n > 0) {
+      /* todas minimizadas: tracinho apagado */
       int lw = t->foco ? s / 2 : 6;
-      fill_round(x + (s - lw) / 2, h - 4, lw, 3, 1, gui_col(UI_ACCENT));
+      fill_round(x + (s - lw) / 2, h - 4, lw, 3, 1,
+                 gui_col(t->nmin >= t->n ? UI_DIM : UI_ACCENT));
     }
   }
+}
+
+/* Onde fica o botao do programa key na barra (a animacao de minimizar vai
+ * ate ele). 0 = nao esta a vista: o meio da barra. */
+static int tb_botao(const char* key, int* bx, int* by, int* bs) {
+  int w = (int)gfx_w, h = (int)gfx_h, bh = c_bar_h > 0 ? c_bar_h : 24, i;
+  int s = tb_lado(bh), x = tb_x0(w, c_scale > 0 ? c_scale : 1);
+  *bs = s;
+  *by = h - bh + (bh - s) / 2 - 1;
+  tb_monta();
+  for (i = 0; i < tb_n && x + s < w - 320; i++, x += s + 12)
+    if (tb_eq(tb[i].key, key)) {
+      *bx = x;
+      return 1;
+    }
+  *bx = (w - s) / 2;
+  return 0;
 }
 
 /* Clique num botao da barra. 1 = tratado. Esquerdo: abre o fixado fechado
@@ -10767,11 +10931,11 @@ static int tb_clique(int x, int y) {
     if (g) {
       if (!gwins || !gwins[ix].open || gwins[ix].panel) continue;
       tb_key_gui(ix, key);
-      eh_foco = gui_focus == ix;
+      eh_foco = gui_focus == ix && !gwins[ix].min;
     } else {
       if (!c_wins[ix].used || run_hidden(&c_wins[ix])) continue;
       tb_key_wm(&c_wins[ix], key);
-      eh_foco = gui_focus < 0 && c_focus && *c_focus == ix;
+      eh_foco = gui_focus < 0 && c_focus && *c_focus == ix && !c_wins[ix].min;
     }
     if (!tb_eq(key, t->key)) continue;
     if (prim < 0) {
@@ -10789,6 +10953,16 @@ static int tb_clique(int x, int y) {
     prox_gui = prim_gui;
   }
   if (prox < 0) return 1;
+  /* uma janela so, e ela e a da frente: o clique minimiza (como no Windows) */
+  if (t->n == 1 && achou_foco) {
+    mn_minimiza(prim_gui ? -1 : prim, prim_gui ? prim : -1, 1);
+    return 1;
+  }
+  /* minimizada: volta, crescendo do botao ate o lugar dela */
+  if (prox_gui ? gwins[prox].min : c_wins[prox].min) {
+    mn_restaura(prox_gui ? -1 : prox, prox_gui ? prox : -1, 1);
+    return 1;
+  }
   if (prox_gui) {
     gwins[prox].z = ++zseq;
     gui_focus = prox;
@@ -10836,7 +11010,7 @@ static void draw_taskbar(int w, int h, int bar_h, int ch, int scale, int start_w
     clk[3] = (char)('0' + (mm / 10) % 10);
     clk[4] = (char)('0' + mm % 10);
     clk[5] = 0;
-    x = w - 12 - 5 * cw;
+    x = w - sd_larg(bar_h) - 10 - 5 * cw;
     draw_text_t(x, ty, clk, gui_col(UI_TEXT), scale);
     d = rtc_date();
     if (d > 0) {
@@ -10855,6 +11029,490 @@ static void draw_taskbar(int w, int h, int bar_h, int ch, int scale, int start_w
     }
   }
   tb_desenha(w, h, bar_h, scale);
+  {
+    /* "Mostrar desktop" no canto direito: separador e uma telinha; aceso
+     * enquanto as janelas estao escondidas por ele (estado 1). */
+    int sw = sd_larg(bar_h), sx = w - sw, on = sd_ligado();
+    int gw = sw - 12 < 10 ? 10 : sw - 12, gh = gw * 2 / 3, t2 = scale > 1 ? 2 : 1;
+    int gx = sx + (sw - gw) / 2, gy = by + (bar_h - gh) / 2 - 2;
+    uint32_t c = gui_col(on ? UI_ACCENT : UI_DIM);
+    fill_rect(sx, by + 6, 1, bar_h - 12, gui_col(UI_BORDER));
+    if (on) fill_round(sx + 3, by + 4, sw - 6, bar_h - 8, 5, gui_col(UI_BORDER));
+    fill_rect(gx, gy, gw, t2, c);
+    fill_rect(gx, gy + gh - t2, gw, t2, c);
+    fill_rect(gx, gy, t2, gh, c);
+    fill_rect(gx + gw - t2, gy, t2, gh, c);
+    if (on) fill_rect(gx + t2, gy + t2, gw - 2 * t2, gh - 2 * t2, gui_col(UI_ACCENT));
+    fill_rect(gx + gw / 3, gy + gh + 2, gw - 2 * (gw / 3), t2, c);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Minimizar e restaurar (2026-11-26). A janela minimizada (min != 0) sai da
+ * pintura, do clique e do foco, mas fica com o botao na barra (tracinho
+ * apagado). O pedido (mn_minimiza / mn_restaura) muda o estado na hora e o
+ * proximo quadro inteiro faz a animacao: guarda o fundo sem as janelas,
+ * desenha cada uma sozinha, tira a foto e a mostra encolhendo ate o botao
+ * dela na barra (ao restaurar, crescendo do botao ate o lugar), cada vez mais
+ * transparente. Sem tela em memoria ou sem memoria, so muda o estado.
+ * ------------------------------------------------------------------------- */
+#define MN_MAX    12
+#define MN_PASSOS 10
+#define MN_MS     180   /* duracao da animacao inteira */
+
+struct mn_foto {
+  int wm, gw;       /* janela: indice em c_wins ou em gwins (-1 = nao e) */
+  int z;
+  int x, y, w, h;   /* pedaco da janela na tela, acima da barra */
+  int bx, by, bs;   /* botao do programa na barra */
+  uint32_t* pix;    /* w x h, palavras do quadro; DC_CLEAR = fundo (canto redondo) */
+};
+
+static struct {
+  int pede;   /* o proximo quadro inteiro anima */
+  int abre;   /* 1 = restaurar (botao -> janela), 0 = minimizar */
+  int n;
+  struct mn_foto f[MN_MAX];
+  uint32_t* bg;
+} mn;
+
+/* Foco para a janela visivel mais da frente (nenhuma: foco nenhum). Os
+ * paineis (WINTAB, IA) nao entram: nao tomam o teclado sozinhos. */
+static void mn_focus_top(void) {
+  int i, bz = -1, bw = -1, bg = -1;
+  for (i = 0; c_wins && i < WM_MAX; i++) {
+    struct wm_win* w = &c_wins[i];
+    if (!w->used || w->min || run_hidden(w) || w->z <= bz) continue;
+    bz = w->z;
+    bw = i;
+    bg = -1;
+  }
+  for (i = 0; gwins && i < GUI_MAX; i++) {
+    struct gui_win* g = &gwins[i];
+    if (!g->open || g->min || g->panel || g->z <= bz) continue;
+    bz = g->z;
+    bg = i;
+    bw = -1;
+  }
+  gui_focus = bg;
+  gui_stole = 0;
+  if (c_focus) *c_focus = bw;
+  win_api_dirty = 1;
+}
+
+/* Fim do pedido: as restauradas aparecem de verdade e ganham o foco. */
+static void mn_fim(void) {
+  int i, abriu = 0;
+  for (i = 0; i < mn.n; i++) {
+    struct mn_foto* f = &mn.f[i];
+    if (mn.abre) {
+      if (f->wm >= 0 && c_wins && c_wins[f->wm].used) c_wins[f->wm].min = 0;
+      if (f->gw >= 0 && gwins && gwins[f->gw].open) gwins[f->gw].min = 0;
+      abriu = 1;
+    }
+    if (f->pix) ufree(f->pix);
+    f->pix = 0;
+  }
+  if (mn.bg) ufree(mn.bg);
+  mn.bg = 0;
+  mn.n = 0;
+  mn.pede = 0;
+  if (abriu) mn_focus_top();
+  win_api_dirty = 1;
+}
+
+/* Poe a janela no pedido. Pedido no outro sentido ainda sem quadro: termina
+ * antes, sem animar. 0 = nao coube (quem chama muda o estado sem animar). */
+static int mn_add(int wm, int gw, int abre) {
+  struct mn_foto* f;
+  int i;
+  if (mn.pede && mn.abre != abre) mn_fim();
+  for (i = 0; i < mn.n; i++)
+    if (mn.f[i].wm == wm && mn.f[i].gw == gw) return 1;
+  if (mn.n >= MN_MAX) return 0;
+  f = &mn.f[mn.n++];
+  f->wm = wm;
+  f->gw = gw;
+  f->pix = 0;
+  mn.abre = abre;
+  mn.pede = 1;
+  win_api_dirty = 1;
+  return 1;
+}
+
+/* como: 1 = botao "_" ou clique na barra, 2 = "mostrar desktop" */
+static void mn_minimiza(int wm, int gw, int como) {
+  if (wm >= 0 && c_wins && wm < WM_MAX && c_wins[wm].used && !c_wins[wm].min) {
+    c_wins[wm].min = como;
+  } else if (gw >= 0 && gwins && gw < GUI_MAX && gwins[gw].open && !gwins[gw].panel &&
+             !gwins[gw].min) {
+    gwins[gw].min = como;
+  } else {
+    return;
+  }
+  (void)mn_add(wm, gw, 0);
+  mn_focus_top();
+}
+
+/* sobe: 1 = vem para a frente (clique na barra); 0 = fica onde estava na
+ * pilha (o "mostrar desktop" devolvendo todas). A janela continua min ate o
+ * fim da animacao: o fundo da foto e sem ela. */
+static void mn_restaura(int wm, int gw, int sobe) {
+  if (wm >= 0 && c_wins && wm < WM_MAX && c_wins[wm].used && c_wins[wm].min) {
+    if (sobe) c_wins[wm].z = ++zseq;
+    if (!mn_add(wm, -1, 1)) {
+      c_wins[wm].min = 0;
+      mn_focus_top();
+    }
+  } else if (gw >= 0 && gwins && gw < GUI_MAX && gwins[gw].open && gwins[gw].min) {
+    if (sobe) gwins[gw].z = ++zseq;
+    if (!mn_add(-1, gw, 1)) {
+      gwins[gw].min = 0;
+      mn_focus_top();
+    }
+  }
+}
+
+/* No quadro inteiro ja montado (sem as janelas do pedido, que estao min):
+ * guarda o fundo e tira a foto de cada janela desenhada sozinha sobre ele,
+ * apagando-a em seguida. A pagina em montagem termina igual ao fundo.
+ * 0 = nao da para animar. */
+static int mn_fotos(int title_h, int scale, uint32_t col_win, uint32_t col_title,
+                    uint32_t col_white, uint32_t col_black, uint32_t col_btn,
+                    uint32_t col_inactive) {
+  uint32_t y;
+  int i, j, top = -1, ok = 0;
+  int ylim = (int)gfx_h - (c_bar_h > 0 ? c_bar_h : 0);
+  char key[TB_KEY];
+  if (!gfx_bochs || (!gfx_dbuf && !gfx_back) || !um_ready() || dc.on || dc.capture || !c_wins)
+    return 0;
+  mn.bg = (uint32_t*)umalloc_owned(gfx_w * gfx_h * 4u, 0);
+  if (!mn.bg) return 0;
+  for (y = 0; y < gfx_h; y++)
+    dc_copy(mn.bg + y * gfx_w, (const volatile uint32_t*)gfx_at(0, (int)y), gfx_w);
+  /* de tras para a frente: a animacao desenha nesta ordem */
+  for (i = 0; i < mn.n; i++) {
+    struct mn_foto* f = &mn.f[i];
+    f->z = f->wm >= 0 ? c_wins[f->wm].z : gwins[f->gw].z;
+    if (f->z > top) top = f->z;
+  }
+  for (i = 1; i < mn.n; i++) {
+    struct mn_foto t = mn.f[i];
+    for (j = i; j > 0 && mn.f[j - 1].z > t.z; j--) mn.f[j] = mn.f[j - 1];
+    mn.f[j] = t;
+  }
+  for (i = 0; i < mn.n; i++) {
+    struct mn_foto* f = &mn.f[i];
+    int wx, wy, ww, wh, x0, y0, x1, y1, r, c;
+    if (f->wm >= 0) {
+      struct wm_win* w = &c_wins[f->wm];
+      if (!w->used || run_hidden(w)) continue;
+      wx = w->x;
+      wy = w->y;
+      ww = w->w;
+      wh = w->h;
+      wm_draw_window(w, f->z == top, title_h, scale, col_win, col_title, col_white, col_black,
+                     col_btn, col_inactive);
+      tb_key_wm(w, key);
+    } else {
+      struct gui_win* g = &gwins[f->gw];
+      if (!g->open) continue;
+      wx = g->ox;
+      wy = g->oy;
+      ww = g->cw;
+      wh = g->title_h + g->ch;
+      gui_draw_frame(g, f->z == top, col_title, col_white, col_black, col_btn, col_inactive);
+      tb_key_gui(f->gw, key);
+    }
+    x0 = wx < 0 ? 0 : wx;
+    y0 = wy < 0 ? 0 : wy;
+    x1 = wx + ww > (int)gfx_w ? (int)gfx_w : wx + ww;
+    y1 = wy + wh > ylim ? ylim : wy + wh;
+    if (x1 - x0 >= 4 && y1 - y0 >= 4)
+      f->pix = (uint32_t*)umalloc_owned((uint32_t)(x1 - x0) * (uint32_t)(y1 - y0) * 4u, 0);
+    if (f->pix) {
+      f->x = x0;
+      f->y = y0;
+      f->w = x1 - x0;
+      f->h = y1 - y0;
+      for (r = 0; r < f->h; r++) {
+        const volatile uint32_t* src = (const volatile uint32_t*)gfx_at(x0, y0 + r);
+        uint32_t* dst = f->pix + r * f->w;
+        const uint32_t* bg = mn.bg + (uint32_t)(y0 + r) * gfx_w + (uint32_t)x0;
+        dc_copy(dst, src, (uint32_t)f->w);
+        /* cantos redondos da barra de titulo: ali e fundo */
+        if (y0 + r - wy < UI_RADIUS)
+          for (c = 0; c < f->w; c++)
+            if (dst[c] == bg[c]) dst[c] = DC_CLEAR;
+      }
+      (void)tb_botao(key, &f->bx, &f->by, &f->bs);
+      ok = 1;
+    }
+    /* apaga a janela (inclusive o que caiu sobre a barra) */
+    if (y0 < (int)gfx_h && x0 < x1) {
+      int ye = wy + wh > (int)gfx_h ? (int)gfx_h : wy + wh;
+      for (r = y0; r < ye; r++)
+        dc_copy((volatile uint32_t*)gfx_at(x0, r), mn.bg + (uint32_t)r * gfx_w + (uint32_t)x0,
+                (uint32_t)(x1 - x0));
+    }
+  }
+  return ok;
+}
+
+/* a e 0..256 */
+static inline uint32_t mn_mist(uint32_t s, uint32_t d, uint32_t a) {
+  uint32_t rb = (((s & 0xFF00FFu) * a + (d & 0xFF00FFu) * (256u - a)) >> 8) & 0xFF00FFu;
+  uint32_t g = (((s & 0x00FF00u) * a + (d & 0x00FF00u) * (256u - a)) >> 8) & 0x00FF00u;
+  return rb | g | (d & 0xFF000000u);
+}
+
+/* Foto f reduzida (vizinho mais perto) para rw x rh em (rx,ry), com alfa a. */
+static void mn_desenha(const struct mn_foto* f, int rx, int ry, int rw, int rh, uint32_t a) {
+  int r, c, r0, r1, c0, c1;
+  uint64_t sx_step, sy_step;
+  if (rw < 1 || rh < 1 || !f->pix) return;
+  sx_step = ((uint64_t)f->w << 16) / (uint64_t)rw;
+  sy_step = ((uint64_t)f->h << 16) / (uint64_t)rh;
+  r0 = ry < 0 ? 0 : ry;
+  r1 = ry + rh > (int)gfx_h ? (int)gfx_h : ry + rh;
+  c0 = rx < 0 ? 0 : rx;
+  c1 = rx + rw > (int)gfx_w ? (int)gfx_w : rx + rw;
+  for (r = r0; r < r1; r++) {
+    uint64_t sy = ((uint64_t)(r - ry) * sy_step) >> 16;
+    const uint32_t* src = f->pix + (uint32_t)(sy < (uint64_t)f->h ? sy : (uint64_t)(f->h - 1)) * f->w;
+    volatile uint32_t* out = (volatile uint32_t*)gfx_at(0, r);
+    uint64_t sx = (uint64_t)(c0 - rx) * sx_step;
+    for (c = c0; c < c1; c++, sx += sx_step) {
+      uint32_t s = src[(sx >> 16) < (uint64_t)f->w ? (sx >> 16) : (uint64_t)(f->w - 1)];
+      if (s == DC_CLEAR) continue;
+      out[c] = a >= 256u ? s : mn_mist(s, out[c], a);
+    }
+  }
+}
+
+/* Toca a animacao (bloqueia uns MN_MS ms). Cada passo: fundo guardado, as
+ * fotos no tamanho do passo, cursor, apresentar. */
+static void mn_toca(int mx, int my, uint32_t col_cursor) {
+  int k, i, bx0 = (int)gfx_w, by0 = (int)gfx_h, bx1 = 0, by1 = 0;
+  uint32_t t0 = (uint32_t)irq_ticks();
+  for (i = 0; i < mn.n; i++) {
+    struct mn_foto* f = &mn.f[i];
+    if (!f->pix) continue;
+    dc_grow(&bx0, &by0, &bx1, &by1, f->x, f->y, f->w, f->h);
+    dc_grow(&bx0, &by0, &bx1, &by1, f->bx, f->by, f->bs, f->bs);
+  }
+  if (bx0 < 0) bx0 = 0;
+  if (by0 < 0) by0 = 0;
+  if (bx1 > (int)gfx_w) bx1 = (int)gfx_w;
+  if (by1 > (int)gfx_h) by1 = (int)gfx_h;
+  if (bx0 >= bx1 || by0 >= by1) return;
+  for (k = 0; k <= MN_PASSOS; k++) {
+    int p = k * 256 / MN_PASSOS;
+    int e = p * p * (768 - 2 * p) / 65536;   /* suave no comeco e no fim, 0..256 */
+    uint32_t a, y;
+    if (mn.abre) e = 256 - e;                /* 0 = janela, 256 = botao */
+    a = (uint32_t)(256 - e * 3 / 4);
+    gfx_frame_begin();
+    /* Os dois primeiros quadros refazem a tela toda: com pagina dupla a
+     * outra pagina ainda tem o quadro de antes do pedido. */
+    if (k <= 1) {
+      for (y = 0; y < gfx_h; y++)
+        dc_copy((volatile uint32_t*)gfx_at(0, (int)y), mn.bg + y * gfx_w, gfx_w);
+    } else {
+      for (y = (uint32_t)by0; y < (uint32_t)by1; y++)
+        dc_copy((volatile uint32_t*)gfx_at(bx0, (int)y), mn.bg + y * gfx_w + (uint32_t)bx0,
+                (uint32_t)(bx1 - bx0));
+    }
+    for (i = 0; i < mn.n; i++) {
+      const struct mn_foto* f = &mn.f[i];
+      int tw = f->bs, th = f->bs, cx, cy;
+      if (!f->pix) continue;
+      /* no botao, mantendo a proporcao da janela */
+      if (f->w >= f->h) th = f->bs * f->h / f->w;
+      else tw = f->bs * f->w / f->h;
+      if (tw < 2) tw = 2;
+      if (th < 2) th = 2;
+      cx = f->bx + (f->bs - tw) / 2;
+      cy = f->by + (f->bs - th) / 2;
+      mn_desenha(f, f->x + (cx - f->x) * e / 256, f->y + (cy - f->y) * e / 256,
+                 f->w + (tw - f->w) * e / 256, f->h + (th - f->h) * e / 256, a);
+    }
+    if (gpu_drv) {
+      /* os dois primeiros saem inteiros (o quadro do pedido pode ter vindo
+       * com need_draw == 2 e so as areas sujas); depois so o retangulo */
+      gfx_frame_dmg = k > 1;
+      if (k > 1) gfx_dmg_add(bx0, by0, bx1 - bx0, by1 - by0);
+    }
+    cursor_saved = 0;
+    cursor_redraw_at(mx, my, col_cursor);
+    gfx_frame_end();
+    while ((uint32_t)irq_ticks() - t0 < (uint32_t)(MN_MS * (k + 1) / (MN_PASSOS + 1)))
+      __asm__ volatile("pause");
+  }
+}
+
+/* ---- "Mostrar desktop" (canto direito da barra) --------------------------- */
+static int sd_larg(int bar_h) {
+  int s = bar_h * 3 / 4;
+  return s < 14 ? 14 : s;
+}
+
+static int sd_vistas(void) {
+  int i, n = 0;
+  for (i = 0; c_wins && i < WM_MAX; i++)
+    if (c_wins[i].used && !c_wins[i].min && !run_hidden(&c_wins[i])) n++;
+  for (i = 0; gwins && i < GUI_MAX; i++)
+    if (gwins[i].open && !gwins[i].min && !gwins[i].panel) n++;
+  return n;
+}
+
+static int sd_escondidas(void) {
+  int i, n = 0;
+  for (i = 0; c_wins && i < WM_MAX; i++)
+    if (c_wins[i].used && c_wins[i].min == 2) n++;
+  for (i = 0; gwins && i < GUI_MAX; i++)
+    if (gwins[i].open && gwins[i].min == 2) n++;
+  return n;
+}
+
+/* Estado 1: nenhuma janela a vista e ha janelas que o botao escondeu. */
+static int sd_ligado(void) { return sd_vistas() == 0 && sd_escondidas() > 0; }
+
+/* Estado 0 -> 1: esconde todas as janelas a vista (as que ele escondeu antes
+ * e ninguem trouxe de volta viram minimizadas comuns). 1 -> 0: devolve as que
+ * ele escondeu, na mesma ordem da pilha. */
+static void sd_alterna(void) {
+  int i;
+  if (sd_vistas() > 0) {
+    for (i = 0; c_wins && i < WM_MAX; i++)
+      if (c_wins[i].used && c_wins[i].min == 2) c_wins[i].min = 1;
+    for (i = 0; gwins && i < GUI_MAX; i++)
+      if (gwins[i].open && gwins[i].min == 2) gwins[i].min = 1;
+    for (i = 0; c_wins && i < WM_MAX; i++)
+      if (c_wins[i].used && !c_wins[i].min && !run_hidden(&c_wins[i])) mn_minimiza(i, -1, 2);
+    for (i = 0; gwins && i < GUI_MAX; i++)
+      if (gwins[i].open && !gwins[i].min && !gwins[i].panel) mn_minimiza(-1, i, 2);
+    serial_puts("[visual] mostrar desktop: 1\n");
+  } else {
+    for (i = 0; c_wins && i < WM_MAX; i++)
+      if (c_wins[i].used && c_wins[i].min == 2) mn_restaura(i, -1, 0);
+    for (i = 0; gwins && i < GUI_MAX; i++)
+      if (gwins[i].open && gwins[i].min == 2) mn_restaura(-1, i, 0);
+    serial_puts("[visual] mostrar desktop: 0\n");
+  }
+  win_api_dirty = 1;
+}
+
+/* Clique esquerdo no canto da barra. 1 = era o botao. */
+static int sd_clique(int x, int y) {
+  int bh = c_bar_h;
+  if (!c_wins || bh <= 0 || y < (int)gfx_h - bh || x < (int)gfx_w - sd_larg(bh)) return 0;
+  sd_alterna();
+  return 1;
+}
+
+/* ---------------------------------------------------------------------------
+ * Tecla Win: WINMENU.EXE (D:\SODOS), busca num painel transparente da metade
+ * da tela para baixo. O primeiro aperto abre o programa; depois ele fica na
+ * memoria parado em k_winmenu(WK_ESPERA) (sem CPU) e os apertos seguintes so
+ * o acordam (wk_seq), como o WINTAB. Abrir mostra o desktop (sd_alterna);
+ * apertar de novo (ou Esc no menu) fecha e devolve as janelas que ele
+ * escondeu. Uma janela que aparece (programa aberto pelo menu ou pelos
+ * icones, que o painel deixa clicar) fecha o menu.
+ * ------------------------------------------------------------------------- */
+#define WK_ESPERA 0   /* arg = seq: espera a proxima tecla (ate 60 s); -1 so le */
+#define WK_FECHOU 1   /* o painel fechou; arg 1 = devolver as janelas escondidas */
+#define WK_BARRA  2   /* altura da barra de tarefas */
+
+static volatile int wk_seq;   /* +1 a cada tecla Win que abre o menu */
+static int wk_escondeu;       /* este menu escondeu as janelas (fechar devolve) */
+static int wk_fechando;       /* GUI_EV_CLOSE ja mandado ao painel */
+static int wk_held, wk_outra; /* Win apertada; outra tecla no meio (Win+X) */
+static uint32_t wk_t_abriu;   /* tique em que o WINMENU.EXE foi aberto (0 = nunca) */
+
+/* Painel aberto do WINMENU (-1 = nenhum). */
+static int wk_gid(void) {
+  int g;
+  if (!gwins || !wk_res_alive()) return -1;
+  g = gtasks[wk_res_task].gid;
+  return g >= 0 && g < GUI_MAX && gwins[g].open ? g : -1;
+}
+
+static void wk_volta(int devolve) {
+  if (devolve && wk_escondeu && sd_ligado()) sd_alterna();
+  wk_escondeu = 0;
+}
+
+/* A tecla Win sozinha: abre o menu (mostrando o desktop) ou fecha. */
+static void wk_toca(struct wm_win* wins, int* focus, int big) {
+  char exe[DESK_PATH];
+  int g = wk_gid();
+  if (g >= 0) {
+    if (!wk_fechando) gq_push(&gwins[g], GUI_EV_CLOSE, 0, 0, 0);
+    wk_fechando = 1;
+    wk_volta(1);
+    win_api_dirty = 1;
+    return;
+  }
+  /* aberto ha pouco e ainda sem chegar ao k_winmenu: nao abre outro */
+  if (!wk_res_alive() && wk_t_abriu && (uint32_t)irq_ticks() - wk_t_abriu < 5000u) return;
+  wk_escondeu = 0;
+  wk_fechando = 0;
+  if (sd_vistas() > 0) {
+    sd_alterna();
+    wk_escondeu = 1;
+  }
+  wk_seq++;
+  if (wk_res_alive()) {          /* ja na memoria: so acorda */
+    win_api_dirty = 1;
+    return;
+  }
+  if (desk_find("D:\\SODOS\\WINMENU.EXE", exe, (int)sizeof(exe))) {
+    autostart_launch = 1;        /* nao conta como abertura do usuario */
+    wm_exec(wins, focus, big, exe);
+    autostart_launch = 0;
+    wk_t_abriu = (uint32_t)irq_ticks() | 1u;
+  } else {
+    serial_puts("[visual] tecla Win: sem D:\\SODOS\\WINMENU.EXE\n");
+    app_status_set("sem D:\\SODOS\\WINMENU.EXE");
+  }
+  win_api_dirty = 1;
+}
+
+/* A cada volta do laco: com o menu aberto, uma janela que aparece o fecha. */
+static void wk_vigia(void) {
+  int g;
+  if (wk_res_task < 0) return;
+  g = wk_gid();
+  if (g < 0) {
+    wk_fechando = 0;
+    return;
+  }
+  if (!wk_fechando && sd_vistas() > 0) {
+    gq_push(&gwins[g], GUI_EV_CLOSE, 0, 0, 0);
+    wk_fechando = 1;
+    wk_escondeu = 0;             /* as escondidas ficam minimizadas */
+    win_api_dirty = 1;
+  }
+}
+
+/* k_winmenu (WINMENU.EXE). -1 = fora de uma tarefa do WIN. */
+int winmenu_api(int op, int arg) {
+  if (!gtasks || task_cur < 0 || !host_on || kt_in_thread()) return -1;
+  if (op == WK_ESPERA) {
+    wk_res_task = task_cur;
+    wk_res_pid = (int)gtasks[task_cur].cpu.pid;
+    if (arg >= 0 && arg == wk_seq) gui_coop_wait(&wk_seq, arg, 60000u);
+    return wk_seq;
+  }
+  if (op == WK_FECHOU) {
+    wk_volta(arg);
+    wk_fechando = 0;
+    win_api_dirty = 1;
+    return 0;
+  }
+  if (op == WK_BARRA) return c_bar_h;
+  return -1;
 }
 
 static void chrome_paint_over(void) {
@@ -11144,6 +11802,7 @@ static int wm_no_partial; /* menu ou dialogo aberto: ficam sobre a janela */
 static int wm_present_win(struct wm_win* w) {
   int x0 = w->x, y0 = w->y, x1 = w->x + w->w, y1 = w->y + w->h;
   int over, r;
+  if (w->min) return 1;   /* minimizada: nada aparece */
   if (!gfx_bochs || !c_wins || wm_no_partial || dc.on || dc.capture) return 0;
   if (!gfx_dbuf && !gfx_back) return 0;
   if (chrome_menu && *chrome_menu) return 0;
@@ -11430,7 +12089,10 @@ static int win_wm_run_u(void) {
     wins[i].used = 0;
     wins[i].st = 0;
     wins[i].z = 0;
+    wins[i].min = 0;
   }
+  mn.pede = 0;   /* pedido de minimizar de uma sessao anterior do WIN */
+  mn.n = 0;
   note_dlg = 0;
   note_file_menu = 0;
   note_dlg_len = 0;
@@ -11592,6 +12254,7 @@ static int win_wm_run_u(void) {
       at_act = -1;
       if (id >= AT_GUI && id < AT_GUI + GUI_MAX && gwins && gwins[id - AT_GUI].open) {
         gwins[id - AT_GUI].z = ++zseq;
+        gwins[id - AT_GUI].min = 0;   /* Alt+Tab tambem traz a minimizada */
         gui_focus = id - AT_GUI;
         focus = -1;
       } else if (id >= 0 && id < WM_MAX && wins[id].used) {
@@ -11610,6 +12273,7 @@ static int win_wm_run_u(void) {
       }
     }
     wm_no_partial = menu_open || pop_open || note_dlg || note_file_menu;
+    wk_vigia();   /* menu da tecla Win aberto e uma janela apareceu: fecha */
     /* Programa do Command passou a usar a tela 80x25: a janela cresce. */
     if (cons_dirty && cons_dirty->tty && cons_dirty->tty->on && cons_dirty->tty->fit) {
       int fi;
@@ -11858,8 +12522,21 @@ static int win_wm_run_u(void) {
         dc_snap_win(sx, sy, (int)mx, (int)my);
         dc_place(rx, ry);
       }
-      cursor_redraw_at((int)mx, (int)my, col_cursor);
-      gfx_frame_end();
+      if (mn.pede) {
+        /* minimizar/restaurar: fotos sobre este quadro e a animacao (que
+         * apresenta os quadros dela); o proximo quadro inteiro fecha */
+        if (mn_fotos(title_h, scale, col_win, col_title, col_white, col_black, col_btn,
+                     col_inactive)) {
+          mn_toca((int)mx, (int)my, col_cursor);
+        } else {
+          cursor_redraw_at((int)mx, (int)my, col_cursor);
+          gfx_frame_end();
+        }
+        mn_fim();
+      } else {
+        cursor_redraw_at((int)mx, (int)my, col_cursor);
+        gfx_frame_end();
+      }
       prof_draw += (uint32_t)irq_ticks() - prof_t0;
       prof_frames++;
       need_draw = 0;
@@ -12206,6 +12883,9 @@ static int win_wm_run_u(void) {
             note_file_menu = 0;
             handled = 1;
             need_draw = 1;
+          } else if (!menu_open && left && sd_clique((int)mx, (int)my)) {
+            handled = 1;
+            need_draw = 1;
           } else if (!menu_open && left && tb_clique((int)mx, (int)my)) {
             handled = 1;
             need_draw = 1;
@@ -12428,6 +13108,9 @@ static int win_wm_run_u(void) {
               } else if (wm_pt((int)mx, (int)my, gw->ox + gw->cw - 2 * close_s - TB_PAD - 4,
                                gw->oy + 2, close_s, close_s)) {
                 gw_toggle_max(gw);
+              } else if (wm_pt((int)mx, (int)my, gw->ox + gw->cw - 3 * close_s - TB_PAD - 8,
+                               gw->oy + 2, close_s, close_s)) {
+                mn_minimiza(-1, id, 1);   /* o foco vai para a de tras (c_focus = &focus) */
               } else if ((rc = win_corner((int)mx, (int)my, gw->ox, gw->oy, gw->cw,
                                           gw->title_h + gw->ch, big ? 12 : 8)) != 0) {
                 /* canto: o contorno segue o rato; o buffer muda ao soltar */
@@ -12476,7 +13159,13 @@ static int win_wm_run_u(void) {
                 if (focus < 0) focus = wm_find_kind(wins, WM_KIND_NOTE);
                 if (focus < 0) focus = wm_find_kind(wins, WM_KIND_APP);
                 if (focus < 0) focus = 0;
-                if (focus >= 0 && focus < WM_MAX && wins[focus].used) wm_raise(&wins[focus]);
+                if (focus >= 0 && focus < WM_MAX && wins[focus].used && !wins[focus].min)
+                  wm_raise(&wins[focus]);
+                else
+                  mn_focus_top();   /* a escolhida esta minimizada (ou a vaga e vazia) */
+              } else if (wm_pt((int)mx, (int)my, close_x - 2 * close_s - 8, wins[hit].y + 2,
+                               close_s, close_s)) {
+                mn_minimiza(hit, -1, 1);
               } else if (wm_pt((int)mx, (int)my, close_x - close_s - 4, wins[hit].y + 2, close_s,
                                close_s) ||
                          (wm_pt((int)mx, (int)my, wins[hit].x, wins[hit].y, wins[hit].w, title_h) &&
@@ -12675,14 +13364,12 @@ static int win_wm_run_u(void) {
             if (wm_pt((int)mx, (int)my, 12, icon4_y, icon, icon)) on = 1;
             if (desk_hit((int)mx, (int)my, icon, ch, scale, w, h, bar_h) >= 0) on = 1;
             for (t = 0; t < WM_MAX && !on; t++) {
-              if (wins[t].used && !run_hidden(&wins[t]) &&
+              if (wins[t].used && !wins[t].min && !run_hidden(&wins[t]) &&
                   wm_pt((int)mx, (int)my, wins[t].x, wins[t].y, wins[t].w, wins[t].h))
                 on = 1;
             }
             for (t = 0; gwins && t < GUI_MAX && !on; t++) {
-              if (gwins[t].open &&
-                  wm_pt((int)mx, (int)my, gwins[t].ox, gwins[t].oy, gwins[t].cw,
-                        gwins[t].title_h + gwins[t].ch))
+              if (gwins[t].open && !gwins[t].min && gw_pega(&gwins[t], (int)mx, (int)my))
                 on = 1;
             }
             if (!on) {
@@ -12765,6 +13452,23 @@ static int win_wm_run_u(void) {
         at_tabs += shift_on ? -1 : 1;
         continue;
       }
+      /* Tecla Win (E0 5B / E0 5C): apertar e soltar sem outra tecla no meio
+       * abre ou fecha o WINMENU (wk_toca). Nenhuma janela recebe a tecla. */
+      if (kbd_e0 && ((sc & 0x7F) == 0x5B || (sc & 0x7F) == 0x5C)) {
+        kbd_e0 = 0;
+        if (!(sc & 0x80)) {
+          if (!wk_held) wk_outra = 0;
+          wk_held = 1;
+        } else {
+          if (wk_held && !wk_outra) {
+            wk_toca(wins, &focus, big);
+            need_draw = 1;
+          }
+          wk_held = 0;
+        }
+        continue;
+      }
+      if (wk_held && !(sc & 0x80) && sc != 0xE0) wk_outra = 1;
       if (keymap_kp_nav(sc)) kbd_e0 = 1; /* NumLock desligado: vira seta, Home... */
       if (kbd_e0 && !(sc & 0x80)) kp = keymap_ext_char(sc);
       if (desk_ren >= 0) {

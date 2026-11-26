@@ -1229,6 +1229,9 @@ static int k_win_shot(int x, int y, int w, int h, void* rgba) {
 static int k_win_activate(int id) { return kt_in_thread() ? -1 : win_activate_api(id); }
 static int k_alttab(int* tabs) { return alttab_api(tabs); }
 static int k_alttab_wait(int seq, int ms) { return kt_in_thread() ? -1 : alttab_wait_api(seq, ms); }
+/* Tecla Win (WINMENU.EXE) e janela transparente (k_gui_transp). */
+static int k_winmenu(int op, int arg) { return kt_in_thread() ? -1 : winmenu_api(op, arg); }
+static int k_gui_transp(int on) { return gui_transp_set(on); }
 static int k_win_size(int* w, int* h) { return win_screen_size(w, h) ? 0 : -1; }
 static int k_win_primary(int* w, int* h) { return win_primary_size(w, h) ? 0 : -1; }
 static int k_gui_panel(const char* title, int x, int y, int w, int h) {
@@ -1818,6 +1821,9 @@ static const struct kexp table[] = {
   EXP(k_audio_info),
   /* console com cor ANSI? (git status colorido) */
   EXP(k_con_color),
+  /* tecla Win (WINMENU.EXE) e janela transparente */
+  EXP(k_winmenu),
+  EXP(k_gui_transp),
 };
 
 #define NEXP (sizeof(table) / sizeof(table[0]))

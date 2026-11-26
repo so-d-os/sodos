@@ -1049,3 +1049,54 @@ tempo de cada parte do laco.
 - Tambem: com entrada esperando, a tarefa GUI e preemptada sem esperar a
   fatia de 10 ms, e o laco do WIN so chama `net_poll` uma vez por tick (o
   `nic_poll` da NE2000 era mais da metade do tempo do WIN ocioso).
+
+## Som (2026-11-26)
+
+`sodos/cubeb/cubeb_sodos.c` deixou de ser so o relogio: toca pelo `k_audio_*`
+do kernel (`SET AUDIO=1`, `src13/docs/AUDIO.md`). O patch 0013 nao mudou.
+
+- Uma thread por contexto mistura todos os streams (cada um convertido para
+  float estereo, taxa mudada para 48 kHz por interpolacao linear, volume do
+  stream) e manda 16 bits estereo a 48 kHz, mantendo ~80 ms na fila da placa.
+- Posicao = quadros mandados menos `k_audio_pending`, por stream (um segmento
+  por `start`). A pausa nao joga nada fora: o que esta na fila toca e a entrada
+  que sobrou fica para o proximo `start`, porque o Gecko conta com que tudo o
+  que entregou vai tocar (o backend nulo descartava ~100 ms a cada pausa). Um
+  stream destruido (seek, fim, aba fechada) sem outro tocando corta a fila.
+- Sem placa faz o papel de relogio, como o nulo: kernel sem `k_audio_*`
+  (procurados com `k_dl_sym`, entao o `FIREFOX.EXE` abre em kernel antigo),
+  `SET AUDIO=0` (`k_audio_volume(-1) < 0`), outro programa com o som
+  (`k_audio_open` -2, tenta de novo a cada 1 s) ou erro no `k_audio_write`.
+  Ha um teto pelo relogio tambem com placa, para nao pedir o video inteiro se
+  a fila parar de andar.
+- A placa fica livre 2 s depois do ultimo som. Um programa por vez: com o
+  Firefox tocando, o `PLAY` diz "outro programa esta tocando".
+- Teste da logica no Linux (VM do WSL), com uma placa falsa que toca 48 kHz em
+  tempo real: `sodos/tests/t_cubeb_sodos.c` (48 kHz float, 44,1 kHz s16 mono,
+  fim do fluxo, pausa sem buraco no som, dois streams, placa ocupada, driver
+  nulo, kernel sem os simbolos, `SET AUDIO=0` no meio). Passa tambem com
+  `-fsanitize=thread` e `-fsanitize=address,undefined`. Numa CPU so e
+  carregada, uma rodada pode falhar por tempo (a thread fica ~300 ms sem CPU);
+  o conteudo do som confere mesmo assim.
+
+```sh
+cd src13/firefox/sodos/tests
+gcc -O2 -Wall -Wextra -Wno-unused-parameter -I cubeb_stub -pthread \
+    t_cubeb_sodos.c -o /tmp/t_cubeb -lm && /tmp/t_cubeb
+```
+
+Para ter o som no `FIREFOX.EXE`, recompile no Debian (o `build-browser64.sh`
+copia o `cubeb_sodos.c` com `cp -p`, entao so ele recompila):
+
+```sh
+cd src13/firefox
+sh sodos/scripts/build-browser64.sh build compile
+sh sodos/scripts/link-firefox64.sh        # dist/bin/FIREFOX.EXE
+```
+
+e leve o executavel para o `D:\FIREFOX` (`make send` ou
+`sodos/scripts/copy-firefox-disk.sh`). No SODOS: `SET AUDIO=1`, abrir o
+Firefox, `about:support` deve mostrar o backend de audio `sodos` (o antigo
+mostrava `sodos-null`); com um video tocando, o comando `AUDIO` mostra o
+`FIREFOX.EXE` com o som. No notebook, o alto-falante ainda pode ficar mudo
+depois de um boot frio (pendencia do driver, `docs/AUDIO.md`).

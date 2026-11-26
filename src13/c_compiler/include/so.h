@@ -430,6 +430,26 @@ int k_win_size(int* w, int* h);
 /* Tela principal (a primeira da tela estendida). */
 int k_win_primary(int* w, int* h);
 int k_gui_panel(const char* title, int x, int y, int w, int h);
+/* Tecla Win (WINMENU.EXE residente, como o WINTAB). op:
+ *   K_WM_ESPERA (0): arg = seq; espera a proxima tecla Win (o contador sair
+ *     de seq, ate 60 s) e devolve o contador; arg -1 so le. -1 = fora do WIN.
+ *   K_WM_FECHOU (1): o painel fechou; arg 1 = devolver as janelas que a
+ *     tecla escondeu (Esc), 0 = deixar (abriu um programa).
+ *   K_WM_BARRA (2): altura da barra de tarefas em pixels.
+ * Kernels de 2026-11-26 (build 73) em diante. */
+#define K_WM_ESPERA 0
+#define K_WM_FECHOU 1
+#define K_WM_BARRA 2
+int k_winmenu(int op, int arg);
+/* Janela transparente: on = 1 deixa a janela toda invisivel; k_gui_pixels
+ * passa a gravar o alfa (0 invisivel, 255 opaco) e o WIN mistura com o que
+ * esta atras a cada quadro. Clique num pixel invisivel vai para o que esta
+ * atras (icones do desktop). k_gui_fill e k_gui_text continuam opacos.
+ * on = 3 (bit 2): alem disso, tudo o que esta atras da janela (a tela
+ * inteira, menos a barra de tarefas) aparece em preto e branco, a cada
+ * quadro; a janela fica colorida. Kernels antes do build 74 ignoram o bit. */
+#define K_TRANSP_CINZA 2
+int k_gui_transp(int on);
 /* Abre o arquivo com o programa associado a extensao (LINKEXT.DLL, SET
  * LINKEXT=1). 0 = abriu; 1 = sem associacao ou LINKEXT desligado. */
 int k_open_file(const char* path);

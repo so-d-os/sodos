@@ -933,12 +933,64 @@ static void fl_insert(struct arena* a, struct mm_hdr* h) {
   a->bin[b] = (uint32_t)h;
 }
 
-/* Antes de mudar h->size: a lista e escolhida pelo tamanho. */
+static int link_ok(const struct arena* a, uint32_t x);
+static void arena_rebuild(struct arena* a);
+
+/* Elo ruim visto ao tirar um bloco da lista: alguem escreveu num bloco livre
+ * (depois do free). Em 26/11/2026 o prv de um livre da arena alta virou 1 e o
+ * fl_remove escreveu em 0x11: #PF em arena_alloc (CRASH.LOG, WINE.DLL na
+ * pilha, duas vezes no build 68). Agora cada elo e conferido; ruim, nao se
+ * escreve por ele, o log mostra o bloco e a operacao termina refazendo as
+ * listas pela sequencia fisica (fl_conserta). */
+static int fl_ruim;
+
+static void fl_ruim_log(const struct mm_hdr* h, const char* qual, uint32_t elo) {
+  const uint32_t* w = (const uint32_t*)((uint32_t)h + (uint32_t)sizeof(struct mm_hdr));
+  fl_ruim = 1;
+  serial_puts("[mm] elo ");
+  serial_puts(qual);
+  serial_puts(" ruim ao tirar o livre ");
+  serial_hex32((uint32_t)h);
+  serial_puts(" tam ");
+  serial_hex32(h->size);
+  serial_puts(" elo ");
+  serial_hex32(elo);
+  serial_puts(" dados ");
+  serial_hex32(w[0]);
+  serial_puts(" ");
+  serial_hex32(w[1]);
+  serial_puts(" ");
+  serial_hex32(w[2]);
+  serial_puts(" ");
+  serial_hex32(w[3]);
+  serial_puts("\n");
+}
+
+/* Fim de uma operacao que tirou blocos da lista: elo ruim, listas de novo. */
+static void fl_conserta(struct arena* a) {
+  if (!fl_ruim) return;
+  fl_ruim = 0;
+  serial_puts("[mm] listas de livres refeitas\n");
+  arena_rebuild(a);
+}
+
+/* Antes de mudar h->size: a lista e escolhida pelo tamanho. Numa lista sa,
+ * o de tras aponta para h, o da frente volta para h e so a cabeca tem prv 0. */
 static void fl_remove(struct arena* a, struct mm_hdr* h) {
   struct mm_free* f = (struct mm_free*)h;
-  if (f->prv) fb(f->prv)->next = f->next;
-  else a->bin[bin_of(h->size)] = f->next;
-  if (f->next) fb(f->next)->prv = f->prv;
+  int b = bin_of(h->size);
+  if (f->prv) {
+    if (link_ok(a, f->prv) && fb(f->prv)->next == (uint32_t)h) fb(f->prv)->next = f->next;
+    else fl_ruim_log(h, "prv", f->prv);
+  } else if (a->bin[b] == (uint32_t)h) {
+    a->bin[b] = f->next;
+  } else {
+    fl_ruim_log(h, "cabeca", a->bin[b]);
+  }
+  if (f->next) {
+    if (link_ok(a, f->next) && fb(f->next)->prv == (uint32_t)h) fb(f->next)->prv = f->prv;
+    else fl_ruim_log(h, "next", f->next);
+  }
 }
 
 static struct mm_hdr* next_blk(const struct arena* a, struct mm_hdr* h) {
@@ -1130,6 +1182,7 @@ static void* arena_alloc(struct arena* a, uint32_t nbytes, uint32_t owner) {
   h->free = 0;
   h->owner = owner;
   split(a, h, need);
+  fl_conserta(a);
   return (uint8_t*)h + sizeof(struct mm_hdr);
 }
 
@@ -1148,6 +1201,7 @@ static void arena_free(struct arena* a, void* ptr) {
   struct mm_hdr* h = arena_hdr(a, ptr);
   if (!h) return;
   coalesce(a, h);
+  fl_conserta(a);
 }
 
 static void arena_stats(const struct arena* a, uint32_t* total, uint32_t* used,
@@ -1218,10 +1272,12 @@ void* umalloc_top(uint32_t nbytes) {
     top->prev = best->size;
     fix_next_prev(a, top);
     fl_insert(a, best);
+    fl_conserta(a);
     return (uint8_t*)top + sizeof(struct mm_hdr);
   }
   best->free = 0;
   best->owner = 0;
+  fl_conserta(a);
   return (uint8_t*)best + sizeof(struct mm_hdr);
 }
 /* Bloco cujo endereco util e multiplo de align (potencia de 2, >= 16). O
@@ -1262,6 +1318,7 @@ void* umalloc_aligned(uint32_t nbytes, uint32_t align) {
       n->free = 0;
       n->owner = cur_owner;
       split(a, n, need);
+      fl_conserta(a);
       return (uint8_t*)n + hs;
     }
   }
@@ -1300,6 +1357,7 @@ void* umalloc_at(uint32_t addr, uint32_t nbytes, uint32_t owner) {
       n->free = 0;
       n->owner = owner;
       split(a, n, need);
+      fl_conserta(a);
       return (uint8_t*)n + hs;
     }
   }
@@ -1337,6 +1395,7 @@ void* urealloc(void* ptr, uint32_t nbytes) {
     fl_remove(&high, nx);
     h->size += nx->size;
     split(&high, h, need);
+    fl_conserta(&high);
     return ptr;
   }
   n = (uint8_t*)arena_alloc(&high, nbytes, h->owner);

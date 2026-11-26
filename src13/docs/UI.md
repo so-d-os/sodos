@@ -50,13 +50,86 @@ cantos arredondados e texto claro sobre paineis. Primeira etapa concluida.
    claros; icones de atalho no padrao novo.
 2. Apps no tema escuro por padrao: `wg_theme_use(1)` como padrao no GUI.DLL
    (Explorer, VIDEOCFG, WIDGETS) e `FONTADV` ja e escuro.
-3. Botoes minimizar/maximizar de verdade na barra de titulo.
+3. ~~Botoes minimizar/maximizar de verdade na barra de titulo~~: feito (ver
+   "Minimizar e mostrar desktop" abaixo).
 4. Botoes das janelas abertas na barra de tarefas (trocar foco pelo clique).
 5. Painel lateral do assistente (como no mockup): por enquanto e so desenho;
    as acoes ("Buscar arquivos", "Abrir aplicativo") podem chamar o
    `k_win_*`/`wm_open_*` que ja existem.
 6. ~~Papel de parede oficial do mockup~~: `PICO.PNG` ja esta em
    `content/wallpapers` e vem de fabrica como fundo (ver abaixo).
+
+## Minimizar e mostrar desktop (build 72)
+
+- **Botao "_"** na barra de titulo, a esquerda do maximizar (janelas do WIN e
+  de programas). A janela some com uma animacao: a imagem dela encolhe ate o
+  botao do programa na barra de tarefas, cada vez mais transparente (~180 ms,
+  `MN_MS`/`MN_PASSOS`). Restaurar faz o caminho inverso.
+- Minimizada (`min != 0` em `wm_win`/`gui_win`) fica fora da pintura, do
+  clique e do teclado; o botao na barra continua, com o tracinho apagado. O
+  foco passa para a janela visivel mais da frente (`mn_focus_top`).
+- **Barra de tarefas**: clicar no programa da frente (uma janela so) minimiza;
+  clicar num minimizado restaura. Alt+Tab e abrir de novo tambem restauram.
+- **Mostrar desktop**: botao no canto direito da barra (telinha depois do
+  relogio). Estado 0 -> 1 esconde todas as janelas visiveis (`min = 2`); com o
+  botao aceso (1), clicar de novo devolve as que ele escondeu, na mesma ordem.
+  Abrir ou restaurar uma janela no meio volta o estado para 0. Os paineis
+  (IA, WINTAB) nao entram.
+- Animacao: o proximo quadro inteiro guarda o fundo sem as janelas, tira a
+  foto de cada uma desenhada sozinha (`mn_fotos`) e toca os passos
+  (`mn_toca`), com tela em RAM, pagina dupla ou driver de placa. Sem tela em
+  memoria (ou sem memoria) a janela so some.
+- O campo `min` fica no fim de `wm_win` e de `gui_win`, no enchimento que ja
+  existia (o `sizeof` continua 72 e 1200; o `kmalloc` do `gwins` zera tudo).
+  Mesmo assim o botao, o clique e a animacao estao no laco do WIN, que so
+  muda com boot: este kernel vai por boot, nao por `TROCA`.
+
+## Tecla Win: WINMENU (build 73)
+
+- A **tecla Win** (bandeirinha) sozinha, apertar e soltar sem outra tecla no
+  meio, mostra o desktop (o mesmo `sd_alterna` do botao da barra) e abre o
+  `D:\SODOS\WINMENU.EXE` (`utils/winmenu.c`): um painel **transparente** da
+  metade da tela ate a barra, com a caixa de busca de vidro e a lupa embaixo.
+- Onde o painel e invisivel o **clique passa** para o que esta atras: os
+  icones do desktop continuam clicaveis com o menu aberto.
+- Digitar procura programas (`.EXE` do desktop, de `D:\SODOS` e de `D:\`); a
+  lista aparece num cartao de vidro acima da caixa (comeca com o texto
+  primeiro), com o quadrado da inicial, o nome (8.3 em maiusculas vira
+  "Explorer") e a pasta a direita.
+- Texto em **TrueType**: o WINMENU inclui o `video/wfont.c` (o rasterizador do
+  WIN, 4x4 amostras, Latin-1) e desenha com alfa no quadro do painel. Inter
+  (`\SODOS\FONTS\INTER.TTF`, reserva Roboto/DejaVu). Tamanho base 3,7% da
+  altura da tela (40 px em 1080): o texto digitado usa 80% dele (32 px), os
+  nomes Inter Bold a 60% e as pastas e as teclas desenhadas (Enter, Esc) a
+  45%. A caixa tem 2,4x o tamanho base (96 px em 1080, o dobro da primeira
+  versao). Os glifos saem uma vez por tamanho de
+  tela (o programa fica residente); sem os TTF volta a fonte de bitmap.
+- Trocar o `WINMENU.EXE` em `D:\SODOS`: `kill winmenu` tira o residente e a
+  proxima tecla Win carrega o novo (nao precisa de boot).
+- **Fundo em preto e branco** (build 74), liga e desliga em
+  `D:\SODOS\WINMENU.CFG`: `pb=1` (padrao, tambem sem o arquivo) ou `pb=0`,
+  lido a cada abertura. Com 1 o WINMENU chama `k_gui_transp(1 |
+  K_TRANSP_CINZA)`: ao pintar o quadro, logo antes do painel, o kernel passa
+  para cinza tudo o que ja esta desenhado (papel de parede, icones, janelas
+  de tras; `paint_cinza`, luminancia 0,30 R + 0,59 G + 0,11 B). O painel da
+  busca e a barra de tarefas, desenhados depois, ficam coloridos. Como e a
+  cada quadro, os icones continuam vivos e clicaveis. Setas escolhem,
+  Enter ou clique abre (`k_win_launch`), Esc fecha e devolve as janelas. A
+  tecla Win de novo tambem fecha e devolve. Uma janela que aparece (programa
+  aberto pelo menu ou por um icone) fecha o menu e as outras ficam
+  minimizadas.
+- **Residente**: a primeira tecla abre o EXE; ele fica na memoria parado em
+  `k_winmenu(K_WM_ESPERA)` (sem CPU) e as teclas seguintes so o acordam
+  (`wk_seq`), como o WINTAB do Alt+Tab. A janela de texto dele fica escondida
+  (`run_hidden`). Morto ou fechado, a proxima tecla abre de novo.
+- APIs novas (`so.h`): `k_winmenu(op, arg)` (espera, fechou, altura da barra)
+  e `k_gui_transp(on)`: com ela o byte alto de cada pixel da janela e a
+  transparencia; `k_gui_pixels` grava o alfa, o WIN mistura com o que esta
+  atras a cada quadro (`gui_blit_win`) e `gw_pega` deixa o clique passar no
+  pixel invisivel. `k_gui_fill`/`k_gui_text` continuam opacos.
+- No kernel: `wk_toca` (tecla), `wk_vigia` (fecha quando aparece janela),
+  `winmenu_api`; o campo `transp` fica no fim de `gui_win` (o `sizeof` muda:
+  vai por boot).
 
 ## Notas de implementacao
 

@@ -1,7 +1,12 @@
-Fase: midia (YouTube/<audio>). Backend de audio nulo do SODOS no cubeb.
+Fase: midia (YouTube/<audio>). Backend de audio do SODOS no cubeb.
 Arquivos: media/libcubeb/src/cubeb.c, media/libcubeb/src/moz.build
 O fonte cubeb_sodos.c fica em sodos/cubeb e e copiado por build-browser64.sh.
-Teste: about:support mostra backend 'sodos-null'; um <audio> avanca o tempo.
+Desde 26/11/2026 ele toca pelo k_audio_* do kernel (SET AUDIO=1, docs/AUDIO.md)
+e, sem placa, faz o papel de relogio como o antigo backend nulo; o patch nao
+mudou (o comentario "Saida nula" no moz.build ficou como estava).
+Teste: about:support mostra backend 'sodos' (o antigo dizia 'sodos-null'); um
+<audio> avanca o tempo e, com SET AUDIO=1, toca; o comando AUDIO mostra o
+FIREFOX.EXE como dono do som. Logica: sodos/tests/t_cubeb_sodos.c.
 
 --- a/media/libcubeb/src/cubeb.c
 +++ b/media/libcubeb/src/cubeb.c
