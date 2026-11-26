@@ -67,41 +67,27 @@ Notebook com Ryzen: controlador AMD `1022:15E3` em 04:00.6, codec Conexant `14F1
 - `KILL` no meio do `PLAY`: a placa para e o som fica livre na hora.
 - A lógica da fila (ordem, nada de som velho repetido, silêncio no fim, falta de som, recomeço) foi conferida num simulador na VM com uma placa falsa.
 
-### Pendente: o alto-falante do notebook não toca
+### Alto-falante do notebook: só depois de um boot no Linux
 
-Tudo acima mostra a placa tocando, mas **não sai som do alto-falante** do notebook (subsistema PCI `2782:12C2`, codec Conexant SN6180 `14F1:20D1`). Já foi descartado, com `HDAVERB` e `.BAT`s em `D:\TEMP` (`SOMTESTE`, `SOMTEST2`, `SOMTEST3`):
+No notebook Positivo VAIO VJFE69F11X (fabricante Emdoor, subsistema PCI `2782:12C2`, codec Conexant SN6180 `14F1:20D1`) a placa toca no ritmo certo, mas **o alto-falante só soa se o SODOS foi iniciado por um reboot quente vindo do Linux** (visto em 25/11 às 20:32, 21:57 e 22:17, e em 26/11 de manhã). Depois de desligar o notebook, fica mudo. No Linux o alto-falante funciona sempre, e continua funcionando mesmo depois de desligar e religar o driver de som dele (o mesmo reset que o SODOS faz ao carregar).
 
-- caminho do codec: DAC 10 em D0, fluxo 1, formato `0011`, sem mudo; pino 17 (alto-falante, config `91170110`) com saída e EAPD ligados;
-- bipe interno do codec (nó 12, verbo `70A`): também mudo, então não é o fluxo de dados;
-- os 8 GPIOs do codec em nível alto e em nível baixo;
-- os pinos 1D (DAC 22) e 26 (DAC 23), que a BIOS marca como "nada ligado" (o Linux liga o 1D nos "Sirius" `2782:12C3`/`12C5`);
-- energia em todos os nós (10 a 28), todos os DACs no mesmo fluxo e todos os pinos de saída ligados.
+**Contorno:** ligar no Linux, reiniciar sem desligar e escolher o SODOS; daí `SET AUDIO=1`. O estado bom vale até cortar a energia.
 
-**O som saiu (25/11, 20:33):** depois de um boot no Linux (o SODOS ficou fora das 20:04 às 20:32), o `D:\TEMP\SOMTEST4.BAT` fez um reset do grupo de áudio (`HDAVERB 1 7FF 0`) seguido de `HDAVERB 1 705 0` (D0), e o alto-falante tocou; depois disso os testes antigos também tocaram. O despejo do codec ao carregar o driver era idêntico antes e depois do Linux.
+**Causa: não achada (pausado em 26/11).** O estado que o Linux deixa nasce no boot dele, sobrevive a reset do áudio e a reboot quente, e some sem energia. Descartado, com `HDAVERB`, `.BAT`s e coletas em `D:\TEMP` (`SOMTEST*.BAT`, `COLETA*.SH`, `LINUX*`, `FOTOF.TXT`/`FOTOQ.TXT`):
 
-Duas explicações cabem nisso, e um boot frio separa as duas:
+- **codec:** caminho DAC → pino 17 com EAPD; bipe interno (nó 12); os 8 GPIOs do codec; pinos 1D/26 (o Linux liga o 1D nos "Sirius" `2782:12C3`/`12C5`); energia em todos os nós; reset do grupo (`7FF`) e D3 → D0; EAPD de 0 para 1; o estado idêntico ao do Linux tocando (alto-falante pelo DAC 11); os registradores-padrão e os dos nós próprios da Conexant (1C, 1B, 28) são iguais no frio e no quente;
+- **comandos do Linux ao codec** (eventos `hda` do kernel numa religação do driver, `D:\TEMP\LINUX2\verbos_A.txt`): só verbos padrão, na mesma ordem do driver do SODOS;
+- **plataforma:** ACPI da placa (`_PS0` do `AZAL` só age com `APGE`/`ACGE`, que são 0 nesta BIOS); GPIOs de saída da AMD (`0xFED81500`); ACP (`1022:15E2`, o init do `snd_rn_pci_acp3x`); ciclo PCI D0 → D3hot → D0 do HDA; PCI de todas as funções do dispositivo e da ponte; registradores do HDA; nenhum amplificador por I2C declarado no ACPI;
+- **EC:** os bytes que diferem (`0x12` FF/00, `0x2D` 03/00) valem 00 no Linux com som saindo, e o `0x2D` é calculado pelo EC (recusa escrita); ligar o modo ACPI (`SMI_CMD` `B2` ← `A0`) e atender eventos do EC (`QR_EC`) não mudaram nada. Pista fraca: o bit 6 do byte `0x6D`, sem nome, vale 0 no frio e 1 nos casos que tocam (pela vizinhança, deve ser temperatura ou carga).
 
-1. o codec chegava do boot já em D0 e o `SET_POWER D0` do driver não mudava nada; o reset seguido de D0 faz o codec passar de fato pela sequência de ligar (o amplificador interno sobe nessa transição);
-2. o Linux deixou ligado algo fora do codec (ACPI/EC ou GPIO da AMD), que sobrevive a reboot sem cortar a energia.
+Os experimentos saíram do `AUDIO.DLL` (o driver só grava o estado do codec no log). O código deles ficou no commit `5c11a26` (`drivers/audio/hda.c`: `fch_gpio_dump`, `acp_on`, `hda_pm_cycle`, `snapshot_pre`, `acpi_enable_test`, `ec_*`, `codec_vendor_dump`, `codec_power_cycle`), para retomar.
 
-O `AUDIO.DLL` agora faz no init o reset do grupo de áudio e a energia D3 → D0 (`codec_power_cycle` em `drivers/audio/hda.c`), e configura tudo de novo depois. Falta também testar o fone (pino 16).
+**Para retomar**, os dois testes que faltam, cada um com o notebook desligado antes:
 
-**Boot frio x boot vindo do Linux (25/11, noite).** O notebook é um Positivo VAIO VJFE69F11X (fabricante Emdoor, subsistema `2782`). O alto-falante toca no Linux e no SODOS depois de um reboot *quente* vindo do Linux (20:32, 21:57, 22:17); depois de cortar a energia fica mudo. Descartado, um por um:
+1. Linux com `trace_event=hda:* trace_buf_size=16M` na linha do kernel e o `D:\TEMP\COLETA4.SH`: os comandos do **primeiro** contato do Linux com o codec frio (o rastreio que temos é de uma religação);
+2. Linux com `modprobe.blacklist=snd_hda_intel` e reboot quente para o SODOS: se tocar, o estado não vem do driver de som do Linux, e sim de outra parte do boot dele (ACPI, amdgpu...).
 
-- reset do codec (`7FF`) e D3 → D0 no grupo de áudio; EAPD de 0 para 1; os GPIOs do codec; os pinos 1D/26; energia em todos os nós; o codec idêntico ao do Linux tocando (alto-falante pelo DAC 11, como o Linux);
-- os comandos que o Linux manda ao codec (rastreados com os eventos `hda` do kernel, `D:\TEMP\LINUX2\verbos_A.txt`): só verbos padrão;
-- ACPI da placa (`_PS0` do `AZAL` só age com `APGE`/`ACGE`, que são 0 nesta BIOS); GPIOs de saída da AMD; ACP (o init do `snd_rn_pci_acp3x` repetido no SODOS); ciclo PCI D0 → D3hot → D0 do HDA;
-- PCI de todas as funções do dispositivo, registradores do HDA e dos nós próprios da Conexant (1C, 1B, 28): **idênticos** entre frio e quente (`D:\TEMP\FOTOF.TXT` e `FOTOQ.TXT`, a "fotografia" que o driver grava).
-
-O que **difere** é só a memória do **EC** (fora temperatura e ventoinha): bytes `0x12` (00 → FF), `0x2B` (D7 → 6E) e `0x2D` (00 → 03), que o ACPI nem nomeia. O EC tem energia própria e só esquece ao cortar a energia. A hipótese era que o EC soltasse o amplificador quando o sistema liga o **modo ACPI** (FADT: `SMI_CMD` ← `ACPI_ENABLE`), o que o Linux faz no boot ("ACPI: Interpreter enabled") e o SODOS nunca fez. O `AUDIO.DLL` de teste liga o modo ACPI (`acpi_enable_test`) e grava os três bytes antes e depois.
-
-**EC descartado (26/11).** O `D:\TEMP\COLETA3.SH`, rodado no Linux, leu o EC pelo `ec_sys` (mesmas portas 62/66 e mesmo `RD_EC` do driver) enquanto tocava (resultado em `D:\TEMP\LINUX3`). O kernel do Linux do notebook não traz o `ec_sys`, então o script carrega o `D:\TEMP\EC_SYS.KO`.
-
-- Com o Linux tocando no alto-falante, `0x12` = 00 e `0x2D` = 00, iguais ao boot frio mudo. O FF/03 do boot quente deve ser só uma marca que o reboot vindo do Linux deixa.
-- O `0x2B` é um contador: sobe cerca de 1,2 por segundo.
-- O passo que zera o `0x12` não testou nada, porque ele já era 00.
-- No log do `acpi_enable_test` (`D:\LOG\SERIAL.OLD`), o SCI_EN sobe e os três bytes não mudam. Se o alto-falante toca depois disso, num boot frio, ainda não foi anotado.
-- Os outros bytes que diferem entre frio e quente são, pelo mapa do EC no DSDT (região `ECF2`), temperatura, ventoinha, bateria (`B1FC`, `B1RC`) e `WOLE` (0xA7). Sobra o `0x6D`, sem nome, entre `TBAT` e `TMPC`: o bit 6 vale 0 no frio e 1 nos dois casos que tocam. É uma pista fraca, porque pela vizinhança deve ser temperatura ou carga.
+Falta também testar o fone (pino 16).
 
 ## Limites
 
