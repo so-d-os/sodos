@@ -52,9 +52,17 @@ int xhci_cam_describe(char* out, int max);
  * exato com a altura nos 16 bits de cima (largura | altura << 16); skip: quadros
  * descartados antes (a exposicao automatica leva alguns). *kind: 1 = MJPEG
  * (JPEG sem as tabelas de Huffman, as vezes), 2 = YUY2 (w * h * 2 bytes).
- * *data e do driver e vale ate a proxima captura. 0 = ok; senao err diz. */
+ * *data e do driver e vale ate a proxima captura. 0 = ok; senao err diz.
+ * Usa o stream (liga, descarta skip quadros, desliga); com outro programa
+ * transmitindo, tira o quadro do stream dele. */
 int xhci_cam_grab(int want_w, int skip, const uint8_t** data, uint32_t* len, int* kind, int* w,
                   int* h, char* err, int emax);
+
+/* Stream da webcam (k_cam_* em kexports.c; descricao em so.h). */
+int xhci_cam_modes(uint32_t* out, int max);
+int xhci_cam_open(int kind, int w, int h, int* maxlen);
+int xhci_cam_frame(void* buf, int max, int* seq, int timeout_ms);
+int xhci_cam_close(void);
 
 /* Mapeia um BAR de PCI em identidade, sem cache (outros drivers usam). 0 = ok. */
 int pci_mmio_map(uint64_t phys, uint64_t len);

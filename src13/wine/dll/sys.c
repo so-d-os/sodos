@@ -446,6 +446,7 @@ static WINAPI long CoGetApartmentType(int* type, int* qual) {
   *type = -1;
   return (long)0x800401F0; /* CO_E_NOTINITIALIZED */
 }
+int wmf_cocreate(const void* clsid, void** out); /* mf.c */
 static WINAPI long CoCreateInstance(const void* clsid, void* outer, DWORD ctx, const void* iid, void** out) {
   (void)outer;
   (void)ctx;
@@ -453,6 +454,7 @@ static WINAPI long CoCreateInstance(const void* clsid, void* outer, DWORD ctx, c
   if (wine_debug) wlogx("CoCreateInstance: classe ", *(const DWORD*)clsid);
   *out = 0;
   if (wpicker_create(clsid, out)) return 0;
+  if (wmf_cocreate(clsid, out)) return 0; /* webcam (mf.c) */
   return (long)0x80040154; /* REGDB_E_CLASSNOTREG */
 }
 /* RO_INIT_SINGLETHREADED (0) = STA, RO_INIT_MULTITHREADED (1) = MTA */

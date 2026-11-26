@@ -1482,6 +1482,10 @@ int kt_thread_create_rt(int (*fn)(void*), void* arg, uint32_t stack_size, int cp
   if (!t) return E_SRCH;
   t->mask = 1u << cpu;
   t->rt = 1;
+  /* Thread do kernel, nao do programa que estava na CPU: sem isto ela morria
+   * no kt_release_pid de quem a criou (a da webcam, criada no k_cam_open do
+   * Chrome, sumia quando o Chrome fechava). */
+  t->pid = 0;
   if (reserve && n_online >= 3) {
     __atomic_or_fetch(&rt_mask, 1u << cpu, __ATOMIC_SEQ_CST);
     for (i = 0; i < KT_MAX; i++) {

@@ -265,11 +265,13 @@ SLOT(0) SLOT(1) SLOT(2) SLOT(3) SLOT(4) SLOT(5) SLOT(6) SLOT(7) SLOT(8) SLOT(9)
 SLOT(10) SLOT(11) SLOT(12) SLOT(13) SLOT(14) SLOT(15) SLOT(16) SLOT(17) SLOT(18) SLOT(19)
 SLOT(20) SLOT(21) SLOT(22) SLOT(23) SLOT(24) SLOT(25) SLOT(26) SLOT(27) SLOT(28) SLOT(29)
 SLOT(30) SLOT(31) SLOT(32) SLOT(33) SLOT(34) SLOT(35) SLOT(36) SLOT(37) SLOT(38) SLOT(39)
+SLOT(40) SLOT(41) SLOT(42) SLOT(43) SLOT(44) SLOT(45) SLOT(46) SLOT(47)
 #define V(n) (void*)com_slot##n
 static void* com_vtbl[COM_SLOTS] = {V(0),  V(1),  V(2),  V(3),  V(4),  V(5),  V(6),  V(7),  V(8),  V(9),
                                     V(10), V(11), V(12), V(13), V(14), V(15), V(16), V(17), V(18), V(19),
                                     V(20), V(21), V(22), V(23), V(24), V(25), V(26), V(27), V(28), V(29),
-                                    V(30), V(31), V(32), V(33), V(34), V(35), V(36), V(37), V(38), V(39)};
+                                    V(30), V(31), V(32), V(33), V(34), V(35), V(36), V(37), V(38), V(39),
+                                    V(40), V(41), V(42), V(43), V(44), V(45), V(46), V(47)};
 
 struct comobj* com_new(const char* name, com_handler h, void* data) {
   struct comobj* o = (struct comobj*)wzalloc(sizeof(*o));

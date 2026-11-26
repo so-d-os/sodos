@@ -29,6 +29,7 @@
 #include "irq.h"
 #include "troca.h"
 #include "audio.h"
+#include "xhci.h"
 
 void mod_exit(int code);
 void shell_read_line(char* buf, int max);
@@ -1636,6 +1637,14 @@ static int k_troca_dll(const char* nome, char* msg, int max) {
   return kt_in_thread() ? TROCA_EINVAL : troca_dll(nome, msg, max);
 }
 
+/* Webcam USB (kernel/xhci.c, secao "webcam"). Ver so.h. */
+static int k_cam_modes(uint32_t* out, int max) { return xhci_cam_modes(out, max); }
+static int k_cam_open(int kind, int w, int h, int* maxlen) { return xhci_cam_open(kind, w, h, maxlen); }
+static int k_cam_frame(void* buf, int max, int* seq, int timeout_ms) {
+  return xhci_cam_frame(buf, max, seq, timeout_ms);
+}
+static int k_cam_close(void) { return xhci_cam_close(); }
+
 struct kexp {
   const char* name;
   void* fn;
@@ -1833,6 +1842,11 @@ static const struct kexp table[] = {
   EXP(k_gui_transp),
   /* ampliar/restaurar a janela do programa (build 76) */
   EXP(k_gui_max),
+  /* webcam USB (build 79) */
+  EXP(k_cam_modes),
+  EXP(k_cam_open),
+  EXP_NOLOCK(k_cam_frame),
+  EXP(k_cam_close),
 };
 
 #define NEXP (sizeof(table) / sizeof(table[0]))

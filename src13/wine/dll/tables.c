@@ -19,11 +19,13 @@ static const char* const known[] = {
     "vcruntime140", "vcruntime140_1", "msvcp140", "dwrite", "dxgi", "d3d11", "dcomp", "oleacc", "uiautomationcore", "propsys", "mpr", "ncrypt", "wevtapi",
     /* carga atrasada do Claude Code (claude.exe/Bun): sem estas o LoadLibrary
      * falhava e o delay-load lancava 0xC06D007E logo na partida */
-    "wsock32", "dbghelp", "tdh", "fwpuclnt", 0};
+    "wsock32", "dbghelp", "tdh", "fwpuclnt",
+    /* Media Foundation da webcam (mf.c): o Chrome so usa a camera se estas carregam */
+    "mf", "mfplat", "mfreadwrite", "mfcaptureengine", 0};
 
 /* sec_syms primeiro: substitui os stubs antigos de seguranca (sys, shell, compat) */
 static const struct wine_sym* const tables[] = {picker_syms, sec_syms, map_syms, nt_syms, pipe_syms, k32_syms, vm_syms,  obj_syms, exc_syms, file_syms,
-                                                crt_syms, sys_syms, reg_syms, net_syms, gui_syms, misc_syms, crypt_syms, winrt_syms, proc_syms, sig_syms, compat_syms, gdi_syms, dlg_syms, shell_syms, uimisc_syms, procmisc_syms, safearray_syms, dwrite_syms, fill_syms, 0};
+                                                crt_syms, sys_syms, reg_syms, net_syms, gui_syms, misc_syms, crypt_syms, winrt_syms, proc_syms, sig_syms, compat_syms, gdi_syms, dlg_syms, shell_syms, uimisc_syms, procmisc_syms, safearray_syms, dwrite_syms, fill_syms, mf_syms, 0};
 
 static int starts(const char* s, const char* p) {
   while (*p && *s == *p) {

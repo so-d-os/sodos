@@ -2029,12 +2029,14 @@ static int xhci_disk_write_u(uint32_t lba, const void* buf) {
  *      devolve o tamanho maximo do quadro e quantos bytes manda por intervalo;
  *   3. Configure Endpoint (isocrono IN) e SET_INTERFACE na menor alternativa
  *      que tenha essa banda;
- *   4. um TD (Isoch TRB) por intervalo, ISO_Q na fila; cada pacote comeca com
- *      o cabecalho UVC (tamanho, bits FID/EOF/ERR) e o resto e o quadro;
- *   5. descarta os primeiros quadros (exposicao automatica), fica com um;
- *   6. Stop Endpoint, alternativa 0 e o endpoint sai do contexto.
- * Tudo com a trava do driver; a captura leva ~1 s. Hub USB 3 e camera
- * SuperSpeed nao. */
+ *   4. um TD (Isoch TRB) por intervalo, ISO_Q na fila; cada microquadro
+ *      comeca com o cabecalho UVC (tamanho, bits FID/EOF/ERR) e o resto e o
+ *      quadro; os eventos vao para o interruptor 1 e a thread da camera os le
+ *      (ver "webcam: stream");
+ *   5. Stop Endpoint, alternativa 0 e o endpoint sai do contexto.
+ * Programas: k_cam_modes, k_cam_open, k_cam_frame, k_cam_close. O comando
+ * webcam usa o mesmo stream (descarta os primeiros quadros, para a exposicao
+ * automatica). Hub USB 3 e camera SuperSpeed nao. */
 
 static int put_s(char* out, int pos, int max, const char* s);
 static int put_u(char* out, int pos, int max, uint32_t v);
@@ -2045,7 +2047,8 @@ static int put_path(char* out, int pos, int max, const struct udev* d);
 #define CAM_FRM_MAX 32
 #define CAM_ALT_MAX 16
 #define ISO_N 256              /* TRBs no anel isocrono (o ultimo e o Link) */
-#define ISO_Q 40               /* TDs na fila: menos que o anel de eventos (EVT_N) */
+#define ISO_Q 200              /* TDs na fila: 25 ms com um por microquadro */
+#define CEV_N 1024             /* anel de eventos do interruptor 1 (so a camera) */
 #define ISO_SLOT 4096u         /* buffer de cada TD (ate 3 x 1024 bytes) */
 #define TRB_ISOCH 5
 #define TRB_STOP_EP 15
@@ -2065,10 +2068,37 @@ struct cam_alt {
 struct cam_cap {
   uint8_t* fb;
   uint32_t cap, len;
-  int have, fid, bad, started, frames, skip, done, kind;
+  int have, fid, bad, started, kind;
+  uint32_t frames;
   uint32_t want_len;           /* YUY2: w * h * 2 */
   uint32_t pkts, errs, lost;
-  uint32_t noeoi, gap, ncc[4];   /* sem EOI, maior pausa (ms), cc 15/23/4/outros */
+  uint32_t noeoi, ncc[4];      /* sem EOI, cc 15/23/4/outros */
+};
+
+/* Stream (thread da camera e quem le os quadros). */
+struct cam_strm {
+  volatile int run;            /* 1 = transmitindo; so a thread desliga */
+  volatile int stop_req;
+  volatile int seq;            /* quadros publicados (palavra do futex) */
+  volatile int lk;
+  volatile int wake;           /* futex da thread (sempre 0) */
+  int tid;
+  int ready, reading, wr;      /* buffers: pronto, sendo lido, sendo escrito */
+  uint8_t* buf[3];
+  uint32_t blen[3], bcap;
+  uint32_t owner;              /* pid de quem ligou */
+  volatile uint32_t last_read;
+  int kind, w, h, dci;
+  uint32_t tdlen, mult, next;
+  struct ring r;
+  struct xc* x;
+  struct udev* d;
+  struct trb* ev;              /* interruptor 1 */
+  volatile uint32_t* erst;
+  uint32_t ev_idx, ev_ccs;
+  uint8_t* shot;               /* comando webcam: copia do quadro */
+  uint32_t shot_cap;
+  int want_kind;               /* k_cam_open: formato pedido (0 = MJPEG antes) */
 };
 
 static struct {
@@ -2085,11 +2115,10 @@ static struct {
   struct cam_alt alt[CAM_ALT_MAX];
   struct trb* iso;             /* ISO_N TRBs */
   uint8_t* pk;                 /* ISO_N * ISO_SLOT */
-  uint8_t* fb;
-  uint32_t fb_cap;
   struct cam_cap c;
+  struct cam_strm s;
   uint32_t g1;
-} cam = { .g0 = 0x43414D30u, .dev = -1, .g1 = 0x43414D31u };
+} cam = { .g0 = 0x43414D30u, .dev = -1, .s = { .ready = -1, .reading = -1 }, .g1 = 0x43414D31u };
 
 static uint32_t le16(const volatile uint8_t* b) {
   return b[0] | ((uint32_t)b[1] << 8);
@@ -2224,7 +2253,9 @@ static int cam_describe_u(char* out, int max) {
   int pos = 0, i;
   if (!xc_n) (void)xc_up(0);
   if (busy) return put_s(out, 0, max, "USB ocupado.\n");
-  if (cam_open() != 0) return put_s(out, 0, max, "Nenhuma webcam USB (classe de video 0E).\n");
+  /* Transmitindo: os descritores ja estao lidos (e o EP0 fica em paz). */
+  if (!cam.s.run && cam_open() != 0)
+    return put_s(out, 0, max, "Nenhuma webcam USB (classe de video 0E).\n");
   d = &devs[cam.dev];
   pos = put_s(out, pos, max, "Webcam na porta ");
   pos = put_path(out, pos, max, d);
@@ -2260,7 +2291,39 @@ static int cam_describe_u(char* out, int max) {
   return pos;
 }
 
-/* Um pacote isocrono: cabecalho UVC e um pedaco do quadro. */
+/* ---------- webcam: stream ----------
+ *
+ * Os eventos dos TDs isocronos vao para o interruptor 1 (anel de eventos
+ * proprio, CEV_N entradas): a thread da camera (cam_thread, tempo real numa
+ * CPU que nao e a da RIT) le e repoe os TDs sem a trava do driver. A trava so
+ * entra para ligar e desligar (comandos e EP0). Cada quadro inteiro vai para um
+ * de 3 buffers; quem le (k_cam_frame) copia o mais novo. Sem ninguem lendo por
+ * 5 s, a thread desliga a camera sozinha (programa que fechou sem k_cam_close). */
+
+static void cs_lock(void) {
+  while (__atomic_exchange_n(&cam.s.lk, 1, __ATOMIC_ACQUIRE)) __builtin_ia32_pause();
+}
+
+static void cs_unlock(void) {
+  __atomic_store_n(&cam.s.lk, 0, __ATOMIC_RELEASE);
+}
+
+/* Quadro inteiro em c->fb: passa a ser o "pronto" e a escrita vai para um
+ * buffer que ninguem esta lendo. */
+static void cam_publish(struct cam_cap* c) {
+  int i;
+  cs_lock();
+  cam.s.blen[cam.s.wr] = c->len;
+  cam.s.ready = cam.s.wr;
+  for (i = 0; i < 3; i++)
+    if (i != cam.s.ready && i != cam.s.reading) break;
+  cam.s.wr = i;
+  cam.s.seq++;
+  cs_unlock();
+  c->fb = cam.s.buf[i];
+  (void)kt_futex_wake(&cam.s.seq, 64);
+}
+
 static void cam_end(struct cam_cap* c) {
   if (c->started && !c->bad && c->len > 0) {
     int ok;
@@ -2280,22 +2343,26 @@ static void cam_end(struct cam_cap* c) {
     } else {
       ok = c->len == c->want_len;
     }
-    if (ok && ++c->frames > c->skip) c->done = 1;
+    if (ok) {
+      c->frames++;
+      cam_publish(c);
+    }
   }
   c->started = 1;
-  if (!c->done) c->len = 0;
+  c->len = 0;
   c->bad = 0;
 }
 
+/* Um microquadro: cabecalho UVC (um por payload transfer, mesmo com 2 ou 3
+ * transacoes de alta banda, como no uvcvideo do Linux) e um pedaco do quadro. */
 static void cam_packet(struct cam_cap* c, const volatile uint8_t* p, uint32_t n) {
   uint32_t hl, bfh, i;
-  if (c->done || n < 2) return;
+  if (n < 2) return;
   hl = p[0];
   bfh = p[1];
   if (hl < 2 || hl > n) return;
   c->pkts++;
   if (c->have && (int)(bfh & 1u) != c->fid) cam_end(c);  /* quadro novo sem EOF */
-  if (c->done) return;
   c->have = 1;
   c->fid = (int)(bfh & 1u);
   if (bfh & 0x40u) {
@@ -2312,7 +2379,7 @@ static void iso_put(struct ring* r, uint64_t buf, uint32_t len, uint32_t tlbpc) 
   struct trb* t = &r->t[r->idx];
   t->d[0] = (uint32_t)buf;
   t->d[1] = (uint32_t)(buf >> 32);
-  t->d[2] = len;
+  t->d[2] = len | (1u << 22);                     /* interruptor 1 */
   __asm__ volatile ("" : : : "memory");
   t->d[3] = (TRB_ISOCH << 10) | (1u << 5) | (1u << 2) | (tlbpc << 16) | (1u << 31) | r->pcs;
   if (++r->idx == ISO_N - 1) {
@@ -2323,16 +2390,73 @@ static void iso_put(struct ring* r, uint64_t buf, uint32_t len, uint32_t tlbpc) 
   }
 }
 
+static void cam_td(void) {
+  struct ring* r = &cam.s.r;
+  iso_put(r, pa(cam.pk + (uint32_t)r->idx * ISO_SLOT), cam.s.tdlen, cam.s.mult - 1u);
+}
+
+/* Interruptor 1: anel de eventos so da camera, sem interrupcao (polling). */
+static volatile uint8_t* cam_ir(void) {
+  return cam.s.x->rt + 0x20 + 32;
+}
+
+static int ev1_take(uint32_t e[4]) {
+  struct trb* t = &cam.s.ev[cam.s.ev_idx];
+  if ((t->d[3] & 1u) != cam.s.ev_ccs) return 0;
+  __asm__ volatile ("" : : : "memory");
+  e[0] = t->d[0];
+  e[1] = t->d[1];
+  e[2] = t->d[2];
+  e[3] = t->d[3];
+  if (++cam.s.ev_idx == CEV_N) {
+    cam.s.ev_idx = 0;
+    cam.s.ev_ccs ^= 1u;
+  }
+  w64(cam_ir(), 0x18, pa(&cam.s.ev[cam.s.ev_idx]) | 8u);  /* ERDP, limpa EHB */
+  return 1;
+}
+
+static int cam_ir_setup(struct xc* x) {
+  uint32_t maxi = (r32(x->cap, 0x04) >> 8) & 0x7FFu;
+  volatile uint8_t* ir;
+  if (maxi < 2) return -1;
+  if (!cam.s.ev) {
+    uint8_t* raw = (uint8_t*)umalloc_owned(CEV_N * 16u * 2u, 0);
+    if (!raw) return -2;
+    cam.s.ev = (struct trb*)(uintptr_t)((pa(raw) + CEV_N * 16u - 1u) & ~(uint64_t)(CEV_N * 16u - 1u));
+  }
+  if (!cam.s.erst) cam.s.erst = (volatile uint32_t*)xmem(64u, 64u);
+  if (!cam.s.erst) return -2;
+  zero(cam.s.ev, CEV_N * 16u);
+  cam.s.ev_idx = 0;
+  cam.s.ev_ccs = 1;
+  cam.s.erst[0] = (uint32_t)pa(cam.s.ev);
+  cam.s.erst[1] = (uint32_t)(pa(cam.s.ev) >> 32);
+  cam.s.erst[2] = CEV_N;
+  cam.s.erst[3] = 0;
+  cam.s.x = x;
+  ir = cam_ir();
+  w32(ir, 0x00, 1u);                         /* IMAN: limpa IP, IE = 0 */
+  w32(ir, 0x04, 0);
+  w32(ir, 0x08, 1u);                         /* ERSTSZ */
+  w64(ir, 0x18, pa(cam.s.ev));               /* ERDP */
+  w64(ir, 0x10, pa(cam.s.erst));             /* ERSTBA por ultimo */
+  return 0;
+}
+
 /* Escolhe o tamanho: o maior ate want_w de largura (0 = ate 640), ou o
- * menor de todos. MJPEG antes de YUY2. */
+ * menor de todos. MJPEG antes de YUY2. Com a altura nos 16 bits de cima,
+ * so o tamanho exato. */
 static int cam_pick(int want_w) {
   int kind, i, best;
   uint32_t lim = want_w > 0 ? (uint32_t)want_w & 0xFFFFu : 640u;
   uint32_t eh = want_w > 0 ? (uint32_t)want_w >> 16 : 0u;
-  if (eh) {                       /* tamanho exato: largura e altura */
+  if (eh) {
     for (kind = 1; kind <= 2; kind++)
       for (i = 0; i < cam.nfrm; i++)
-        if (cam.frm[i].kind == kind && cam.frm[i].w == lim && cam.frm[i].h == eh) return i;
+        if (cam.frm[i].kind == kind && cam.frm[i].w == lim && cam.frm[i].h == eh &&
+            (!cam.s.want_kind || cam.s.want_kind == kind))
+          return i;
     return -1;
   }
   for (kind = 1; kind <= 2; kind++) {
@@ -2359,17 +2483,140 @@ static int cam_fail(char* err, int max, const char* s) {
   return -1;
 }
 
-static int cam_grab_u(int want_w, int skip, const uint8_t** data, uint32_t* len, int* kind,
-                      int* w, int* h, char* err, int emax) {
+/* Desliga a camera (com a trava): Stop Endpoint, alternativa 0, endpoint fora
+ * do contexto. Quem espera quadro acorda e ve run = 0. */
+static void cam_hw_stop(void) {
+  struct udev* d = cam.s.d;
+  struct xc* x = cam.s.x;
+  struct cam_cap* c = &cam.c;
+  int dci = cam.s.dci;
+  uint32_t e[4];
+  busy = 1;
+  if (!(r32(x->op, 0x04) & 0x1005u)) {
+    (void)cmd_run(x, 0, 0, (TRB_STOP_EP << 10) | ((uint32_t)dci << 16) | ((uint32_t)d->slot << 24), 0);
+    (void)ctrl(d, 0x01, 11, 0, (uint16_t)cam.vs_if, 0);
+    (void)cfg_begin(d, 0, 0);
+    ictx_at(d, 0)[0] = 1u << dci;                                     /* Drop */
+    (void)cfg_run(d);
+    while (evt_take(x, e)) evt_other(x, e);
+  }
+  busy = 0;
+  cam.s.run = 0;
+  cam.s.stop_req = 0;
+  xlog("[xhci] webcam: parou; quadros ");
+  xlog_hex(c->frames);
+  xlog(" pacotes ");
+  xlog_hex(c->pkts);
+  xlog(" erros ");
+  xlog_hex(c->errs);
+  xlog(" perdidos ");
+  xlog_hex(c->lost);
+  log_hex(" sem EOI ", c->noeoi);
+  cam.s.seq++;
+  (void)kt_futex_wake(&cam.s.seq, 64);
+}
+
+/* Uma volta da thread: eventos do interruptor 1, TDs repostos. */
+__attribute__((noinline)) static void cam_step(void) {
+  struct cam_cap* c = &cam.c;
+  struct xc* x = cam.s.x;
+  uint32_t e[4];
+  int ring = 0;
+  if (r32(x->op, 0x04) & 0x1005u) {
+    log_hex("[xhci] webcam: controlador parou, USBSTS ", r32(x->op, 0x04));
+    xl_enter();
+    cam_hw_stop();
+    xl_leave();
+    return;
+  }
+  if (cam.s.stop_req || net_ms() - cam.s.last_read > 5000u) {
+    if (!cam.s.stop_req) xlog("[xhci] webcam: ninguem lendo ha 5 s, desligando\n");
+    xl_enter();
+    cam_hw_stop();
+    xl_leave();
+    return;
+  }
+  while (ev1_take(e)) {
+    uint64_t p;
+    uint32_t code, s, nd;
+    if (((e[3] >> 10) & 0x3Fu) != EV_XFER || (int)(e[3] >> 24) != cam.s.d->slot ||
+        (int)((e[3] >> 16) & 0x1Fu) != cam.s.dci)
+      continue;
+    p = e[0] | ((uint64_t)e[1] << 32);
+    code = e[2] >> 24;
+    if (code != CC_OK && code != CC_SHORT)
+      c->ncc[code == 15 ? 0 : code == 23 ? 1 : code == 4 ? 2 : 3]++;
+    if (p < pa(cam.iso) || p >= pa(cam.iso) + (ISO_N - 1) * 16u) {
+      c->bad = 1;                                 /* Missed Service etc. sem TD */
+      c->lost++;
+      if (code == 14 || code == 15) ring = 1;
+      continue;
+    }
+    s = (uint32_t)((p - pa(cam.iso)) / 16u);
+    nd = (s + (ISO_N - 1) - cam.s.next) % (ISO_N - 1) + 1;  /* TDs que terminaram */
+    if (nd > 1) {
+      c->bad = 1;
+      c->lost += nd - 1;
+    }
+    cam.s.next = (s + 1) % (ISO_N - 1);
+    if (code == CC_OK || code == CC_SHORT) {
+      uint32_t got = cam.s.tdlen - (e[2] & 0xFFFFFFu);
+      if (got > cam.s.tdlen) got = 0;
+      cam_packet(c, cam.pk + s * ISO_SLOT, got);
+    } else {
+      c->bad = 1;
+      c->lost++;
+    }
+    while (nd--) cam_td();
+    ring = 1;
+  }
+  if (ring) x->db[cam.s.d->slot] = (uint32_t)cam.s.dci;
+}
+
+static int cam_thread(void* arg) {
+  (void)arg;
+  for (;;) {
+    if (!cam.s.run) {
+      (void)kt_futex_wait(&cam.s.wake, 0, 200);
+      continue;
+    }
+    cam_step();
+    (void)kt_futex_wait(&cam.s.wake, 0, 2);
+  }
+  return 0;
+}
+
+/* Stream ligado sem a thread (morreu): desliga a camera daqui. Sem trava. */
+static void cam_check_thread(void) {
+  if (!cam.s.run || cam.s.tid <= 0 || kt_thread_alive(cam.s.tid)) return;
+  xlog("[xhci] webcam: a thread da camera morreu; desligando\n");
+  xl_enter();
+  if (cam.s.run) cam_hw_stop();
+  xl_leave();
+  cam.s.tid = 0;
+}
+
+/* Liga a camera e o stream (com a trava). want_w como em cam_pick. */
+static int cam_start_u(int want_w, int* kind, int* w, int* h, uint32_t* maxlen, char* err,
+                       int emax) {
   struct udev* d;
   struct xc* x;
   const struct cam_frm* f;
   const struct cam_alt* a = 0;
   volatile uint32_t* c;
-  struct ring r;
   struct cam_cap* cc = &cam.c;
-  uint32_t plen, maxframe, payload, tdlen, need, t0, spins = 0, e[4], next = 0, last;
-  int fi, i, dci, rc, out = 0, ok = -1;
+  uint32_t plen, maxframe, payload, need, pid = kt_cur_pid();
+  int fi, i, dci, rc, out;
+  cam_check_thread();
+  if (cam.s.run) {
+    if (cam.s.owner != pid) return cam_fail(err, emax, "webcam em uso por outro programa") - 1;
+    *kind = cam.s.kind;
+    *w = cam.s.w;
+    *h = cam.s.h;
+    *maxlen = cam.s.bcap;
+    cam.s.last_read = net_ms();
+    return 0;
+  }
   if (!xc_n) (void)xc_up(0);
   if (busy) return cam_fail(err, emax, "USB ocupado");
   if (cam_open() != 0) return cam_fail(err, emax, "nenhuma webcam USB");
@@ -2381,6 +2628,7 @@ static int cam_grab_u(int want_w, int skip, const uint8_t** data, uint32_t* len,
     return cam_fail(err, emax, ((uint32_t)want_w >> 16) ? "a webcam nao tem esse tamanho (webcam /L)"
                                                          : "a webcam nao tem MJPEG nem YUY2");
   f = &cam.frm[fi];
+  if (cam_ir_setup(x) != 0) return cam_fail(err, emax, "controlador sem interruptor secundario");
   busy = 1;
 
   if (ctrl(d, 0x00, 9, (uint16_t)cam.cfg_val, 0, 0) != 0) {          /* SET_CONFIGURATION */
@@ -2411,11 +2659,6 @@ static int cam_grab_u(int want_w, int skip, const uint8_t** data, uint32_t* len,
     busy = 0;
     return cam_fail(err, emax, "COMMIT recusado");
   }
-  xlog("[xhci] webcam: ");
-  xlog_hex(((uint32_t)f->w << 16) | f->h);
-  xlog(" quadro ");
-  xlog_hex(maxframe);
-  log_hex(" banda ", payload);
 
   /* Menor alternativa com a banda pedida (ou a maior que houver). */
   for (i = 0; i < cam.nalt; i++) {
@@ -2430,46 +2673,48 @@ static int cam_grab_u(int want_w, int skip, const uint8_t** data, uint32_t* len,
     busy = 0;
     return cam_fail(err, emax, "sem endpoint isocrono");
   }
-  tdlen = (uint32_t)a->mps * a->mult;
   dci = (a->ep & 0x0F) * 2 + 1;
 
-  /* Buffers (uma vez; o do quadro cresce se precisar). */
+  /* Buffers: anel, pacotes e 3 quadros (o kmalloc nao da blocos grandes:
+   * vem do umalloc, que e memoria em identidade). */
   need = maxframe;
   if (need < f->maxbuf) need = f->maxbuf;
   if (need < (uint32_t)f->w * f->h * 2u) need = (uint32_t)f->w * f->h * 2u;
   need += 65536u;
-  /* O kmalloc nao da blocos grandes: os buffers vem do umalloc (como as
-   * paginas de rascunho do controlador), nunca liberados. */
   if (!cam.iso) cam.iso = (struct trb*)xmem(ISO_N * 16u, 4096u);
   if (!cam.pk) {
     uint8_t* raw = (uint8_t*)umalloc_owned(ISO_N * ISO_SLOT + 4096u, 0);
     if (raw) cam.pk = (uint8_t*)(uintptr_t)((pa(raw) + 4095u) & ~4095ull);
   }
-  if (cam.fb_cap < need) {
-    cam.fb = (uint8_t*)umalloc_owned(need, 0);
-    cam.fb_cap = cam.fb ? need : 0;
+  if (cam.s.bcap < need) {
+    for (i = 0; i < 3; i++) {
+      if (cam.s.buf[i]) ufree(cam.s.buf[i]);
+      cam.s.buf[i] = (uint8_t*)umalloc_owned(need, 0);
+    }
+    cam.s.bcap = need;
+    for (i = 0; i < 3; i++)
+      if (!cam.s.buf[i]) cam.s.bcap = 0;
   }
-  if (!cam.iso || !cam.pk || !cam.fb) {
+  if (!cam.iso || !cam.pk || !cam.s.bcap) {
     busy = 0;
     return cam_fail(err, emax, "sem memoria");
   }
   zero(cam.iso, ISO_N * 16u);
-  r.t = cam.iso;
-  r.idx = 0;
-  r.pcs = 1;
+  cam.s.r.t = cam.iso;
+  cam.s.r.idx = 0;
+  cam.s.r.pcs = 1;
   cam.iso[ISO_N - 1].d[0] = (uint32_t)pa(cam.iso);
   cam.iso[ISO_N - 1].d[1] = (uint32_t)(pa(cam.iso) >> 32);
   cam.iso[ISO_N - 1].d[3] = (TRB_LINK << 10) | 2u;
 
   /* Configure Endpoint: isocrono IN (CErr 0, Max Burst = transacoes extras). */
-  c = cfg_begin(d, 1u << dci, dci);
-  (void)c;
+  (void)cfg_begin(d, 1u << dci, dci);
   c = ictx_at(d, dci + 1);
   c[0] = (d->speed == 3 ? (uint32_t)(a->ival ? a->ival - 1 : 0) : (uint32_t)(a->ival ? a->ival + 2 : 3)) << 16;
   c[1] = (5u << 3) | ((uint32_t)(a->mult - 1) << 8) | ((uint32_t)a->mps << 16);
   c[2] = (uint32_t)pa(cam.iso) | 1u;
   c[3] = (uint32_t)(pa(cam.iso) >> 32);
-  c[4] = tdlen | (tdlen << 16);
+  c[4] = ((uint32_t)a->mps * a->mult) | (((uint32_t)a->mps * a->mult) << 16);
   rc = cfg_run(d);
   if (rc != 0) {
     log_hex("[xhci] webcam: Configure Endpoint cc=", (uint32_t)-rc);
@@ -2477,126 +2722,119 @@ static int cam_grab_u(int want_w, int skip, const uint8_t** data, uint32_t* len,
     return cam_fail(err, emax, "Configure Endpoint recusado (banda?)");
   }
   if (ctrl(d, 0x01, 11, a->alt, (uint16_t)cam.vs_if, 0) != 0) {      /* SET_INTERFACE */
-    (void)put_s(err, 0, emax, "SET_INTERFACE recusado");
-    goto stop;
+    (void)cfg_begin(d, 0, 0);
+    ictx_at(d, 0)[0] = 1u << dci;
+    (void)cfg_run(d);
+    busy = 0;
+    return cam_fail(err, emax, "SET_INTERFACE recusado");
   }
 
-  cc->fb = cam.fb;
-  cc->cap = cam.fb_cap;
+  cs_lock();
+  cam.s.ready = -1;
+  cam.s.reading = -1;
+  cam.s.wr = 0;
+  cs_unlock();
+  cc->fb = cam.s.buf[0];
+  cc->cap = cam.s.bcap;
   cc->len = 0;
-  cc->have = cc->fid = cc->bad = cc->started = cc->frames = cc->done = 0;
-  cc->skip = skip;
+  cc->have = cc->fid = cc->bad = cc->started = cc->frames = 0;
   cc->kind = f->kind;
   cc->want_len = (uint32_t)f->w * f->h * 2u;
-  cc->pkts = cc->errs = cc->lost = 0;
-  cc->noeoi = cc->gap = 0;
+  cc->pkts = cc->errs = cc->lost = cc->noeoi = 0;
   cc->ncc[0] = cc->ncc[1] = cc->ncc[2] = cc->ncc[3] = 0;
-
-  for (out = 0; out < ISO_Q; out++)
-    iso_put(&r, pa(cam.pk + (uint32_t)r.idx * ISO_SLOT), tdlen, (uint32_t)(a->mult - 1));
+  cam.s.d = d;
+  cam.s.dci = dci;
+  cam.s.tdlen = (uint32_t)a->mps * a->mult;
+  cam.s.mult = a->mult;
+  cam.s.next = 0;
+  cam.s.kind = f->kind;
+  cam.s.w = f->w;
+  cam.s.h = f->h;
+  cam.s.owner = pid;
+  cam.s.last_read = net_ms();
+  cam.s.stop_req = 0;
+  for (out = 0; out < ISO_Q; out++) cam_td();
   x->db[d->slot] = (uint32_t)dci;
-
-  xlog("[xhci] webcam: alt ");
-  xlog_hex(a->alt);
-  xlog(" ep ");
-  xlog_hex(a->ep);
-  xlog(" mps ");
-  xlog_hex(a->mps);
-  xlog(" mult ");
-  xlog_hex(a->mult);
-  xlog(" ival ");
-  xlog_hex(a->ival);
-  xlog("\n");
-  t0 = net_ms();
-  last = net_ms();
-  while (!cc->done) {
-    uint32_t now = net_ms();
-    if (now - last > cc->gap) cc->gap = now - last;
-    last = now;
-    if (late(t0, &spins, 6000)) break;
-    for (i = 0; i < xc_n; i++)                      /* mouse e teclado em outros controladores */
-      if (&xcs[i] != x && xcs[i].up)
-        while (evt_take(&xcs[i], e)) evt_other(&xcs[i], e);
-    if (!evt_take(x, e)) continue;
-    if (((e[3] >> 10) & 0x3Fu) == EV_XFER && (int)(e[3] >> 24) == d->slot &&
-        (int)((e[3] >> 16) & 0x1Fu) == dci) {
-      uint64_t p = e[0] | ((uint64_t)e[1] << 32);
-      uint32_t code = e[2] >> 24, s, nd;
-      if (code != CC_OK && code != CC_SHORT)
-        cc->ncc[code == 15 ? 0 : code == 23 ? 1 : code == 4 ? 2 : 3]++;
-      if (p < pa(cam.iso) || p >= pa(cam.iso) + (ISO_N - 1) * 16u) {
-        cc->bad = 1;                                  /* Missed Service etc. sem TD */
-        cc->lost++;
-        if (code == 14 || code == 15) x->db[d->slot] = (uint32_t)dci;
-        continue;
-      }
-      s = (uint32_t)((p - pa(cam.iso)) / 16u);
-      nd = (s + (ISO_N - 1) - next) % (ISO_N - 1) + 1;  /* TDs que terminaram */
-      if (nd > 1) {
-        cc->bad = 1;
-        cc->lost += nd - 1;
-      }
-      next = (s + 1) % (ISO_N - 1);
-      if (code == CC_OK || code == CC_SHORT) {
-        /* Um cabecalho UVC por microquadro (payload transfer), mesmo com
-         * 2 ou 3 transacoes nele (alta banda), como no uvcvideo do Linux. */
-        uint32_t got = tdlen - (e[2] & 0xFFFFFFu);
-        if (got > tdlen) got = 0;
-        cam_packet(cc, cam.pk + s * ISO_SLOT, got);
-      } else {
-        cc->bad = 1;
-        cc->lost++;
-      }
-      while (nd--) {
-        iso_put(&r, pa(cam.pk + (uint32_t)r.idx * ISO_SLOT), tdlen, (uint32_t)(a->mult - 1));
-      }
-      x->db[d->slot] = (uint32_t)dci;
-      continue;
-    }
-    evt_other(x, e);
-  }
-  xlog("[xhci] webcam: pacotes ");
-  xlog_hex(cc->pkts);
-  xlog(" quadros ");
-  xlog_hex((uint32_t)cc->frames);
-  xlog(" erros ");
-  xlog_hex(cc->errs);
-  log_hex(" perdidos ", cc->lost);
-  xlog("[xhci] webcam: sem EOI ");
-  xlog_hex(cc->noeoi);
-  xlog(" pausa ms ");
-  xlog_hex(cc->gap);
-  xlog(" cc15/23/4/outros ");
-  xlog_hex((cc->ncc[0] << 16) | cc->ncc[1]);
-  xlog(" ");
-  log_hex("", (cc->ncc[2] << 16) | cc->ncc[3]);
-  if (cc->done) {
-    ok = 0;
-    *data = cc->fb;
-    *len = cc->len;
-    *kind = cc->kind;
-    *w = f->w;
-    *h = f->h;
-  } else if (!cc->pkts) {
-    (void)put_s(err, 0, emax, "a webcam nao mandou nada");
-  } else {
-    (void)put_s(err, 0, emax, "nenhum quadro inteiro em 6 s");
-  }
-
-stop:
-  (void)cmd_run(x, 0, 0, (TRB_STOP_EP << 10) | ((uint32_t)dci << 16) | ((uint32_t)d->slot << 24), 0);
-  (void)ctrl(d, 0x01, 11, 0, (uint16_t)cam.vs_if, 0);                 /* alternativa 0 */
-  (void)cfg_begin(d, 0, 0);
-  ictx_at(d, 0)[0] = 1u << dci;                                       /* Drop */
-  (void)cfg_run(d);
-  while (evt_take(x, e)) evt_other(x, e);
+  cam.s.run = 1;
   busy = 0;
-  if (ok != 0) {
-    xlog("[xhci] webcam: ");
-    xlog(err);
-    xlog("\n");
+
+  xlog("[xhci] webcam: stream ");
+  xlog_hex(((uint32_t)f->w << 16) | f->h);
+  xlog(f->kind == 1 ? " MJPEG" : " YUY2");
+  xlog(" alt ");
+  xlog_hex(a->alt);
+  xlog(" banda ");
+  log_hex("", cam.s.tdlen);
+
+  if (cam.s.tid <= 0 || !kt_thread_alive(cam.s.tid)) {
+    int n = kt_online_count();
+    int cpu = n >= 3 ? n - 2 : n - 1;
+    cam.s.tid = kt_thread_create_rt(cam_thread, 0, 16384, cpu < 0 ? 0 : cpu, 0);
+    if (cam.s.tid <= 0) {
+      xlog("[xhci] webcam: thread nao criada\n");
+      cam_hw_stop();
+      return cam_fail(err, emax, "thread da camera nao criada");
+    }
+    log_hex("[xhci] webcam: thread na CPU ", (uint32_t)cpu);
   }
-  return ok;
+  (void)kt_futex_wake(&cam.s.wake, 1);
+  *kind = f->kind;
+  *w = f->w;
+  *h = f->h;
+  *maxlen = cam.s.bcap;
+  return 0;
+}
+
+/* Copia o quadro mais novo depois de *seq. Sem a trava do driver. */
+static int cam_frame_u(void* buf, int max, int* seq, int timeout_ms) {
+  uint32_t t0 = net_ms(), n, i;
+  int r;
+  uint8_t* o = (uint8_t*)buf;
+  const uint8_t* src;
+  if (!buf || !seq) return -1;
+  for (;;) {
+    int cur = cam.s.seq;
+    uint32_t el;
+    cam_check_thread();
+    if (!cam.s.run) return -1;
+    cam.s.last_read = net_ms();
+    if (cur != *seq && cam.s.ready >= 0) break;
+    el = net_ms() - t0;
+    if (timeout_ms <= 0 || el >= (uint32_t)timeout_ms) return 0;
+    (void)kt_futex_wait(&cam.s.seq, cur, (int)((uint32_t)timeout_ms - el));
+  }
+  cs_lock();
+  r = cam.s.ready;
+  if (r < 0) {
+    cs_unlock();
+    return 0;
+  }
+  cam.s.reading = r;
+  n = cam.s.blen[r];
+  *seq = cam.s.seq;
+  cs_unlock();
+  src = cam.s.buf[r];
+  if (n > (uint32_t)max) n = (uint32_t)max;
+  for (i = 0; i + 8 <= n; i += 8) *(uint64_t*)(o + i) = *(const uint64_t*)(src + i);
+  for (; i < n; i++) o[i] = src[i];
+  cs_lock();
+  cam.s.reading = -1;
+  cs_unlock();
+  return (int)n;
+}
+
+/* Pede para a thread desligar e espera (ate 1,5 s). */
+static int cam_close_u(void) {
+  uint32_t t0 = net_ms();
+  cam_check_thread();
+  if (!cam.s.run) return 0;
+  cam.s.stop_req = 1;
+  (void)kt_futex_wake(&cam.s.wake, 1);
+  while (cam.s.run && net_ms() - t0 < 1500u) {
+    int cur = cam.s.seq;
+    (void)kt_futex_wait(&cam.s.seq, cur, 10);
+  }
+  return cam.s.run ? -1 : 0;
 }
 
 /* ---------- comando usb ---------- */
@@ -2784,10 +3022,97 @@ int xhci_cam_grab(int want_w, int skip, const uint8_t** data, uint32_t* len, int
     emax = (int)sizeof(dummy);
   }
   err[0] = 0;
+  {
+    uint32_t maxlen = 0;
+    int seq, n = 0, i, was = cam.s.run;
+    xl_enter();
+    r = cam_start_u(want_w, kind, w, h, &maxlen, err, emax);
+    xl_leave();
+    if (r != 0) {
+      if (r == -2 && cam.s.run) {
+        /* Outro programa transmitindo: tira a foto do stream dele. */
+        err[0] = 0;
+        *kind = cam.s.kind;
+        *w = cam.s.w;
+        *h = cam.s.h;
+        maxlen = cam.s.bcap;
+        was = 1;
+        skip = 0;
+      } else {
+        return r;
+      }
+    }
+    if (cam.s.shot_cap < maxlen) {
+      if (cam.s.shot) ufree(cam.s.shot);
+      cam.s.shot = (uint8_t*)umalloc_owned(maxlen, 0);
+      cam.s.shot_cap = cam.s.shot ? maxlen : 0;
+    }
+    if (!cam.s.shot) {
+      if (!was) (void)cam_close_u();
+      (void)put_s(err, 0, emax, "sem memoria");
+      return -1;
+    }
+    seq = cam.s.seq;
+    for (i = 0; i <= skip; i++) {
+      n = cam_frame_u(cam.s.shot, (int)cam.s.shot_cap, &seq, 3000);
+      if (n <= 0) break;
+    }
+    if (!was) (void)cam_close_u();
+    if (n <= 0) {
+      (void)put_s(err, 0, emax, n == 0 ? "nenhum quadro inteiro em 3 s" : "a webcam parou");
+      return -1;
+    }
+    *data = cam.s.shot;
+    *len = (uint32_t)n;
+    return 0;
+  }
+}
+
+/* Para programas (k_cam_*, kexports.c). */
+int xhci_cam_modes(uint32_t* out, int max) {
+  int i, n = 0;
+  if (!out || max < 0) return -1;
   xl_enter();
-  r = cam_grab_u(want_w, skip, data, len, kind, w, h, err, emax);
+  if (!xc_n) (void)xc_up(0);
+  if (!cam.s.run && (busy || cam_open() != 0)) {
+    xl_leave();
+    return -1;
+  }
+  for (i = 0; i < cam.nfrm && n < max; i++, n++) {
+    out[n * 4 + 0] = cam.frm[i].kind;
+    out[n * 4 + 1] = cam.frm[i].w;
+    out[n * 4 + 2] = cam.frm[i].h;
+    out[n * 4 + 3] = cam.frm[i].ival;
+  }
   xl_leave();
+  return n;
+}
+
+int xhci_cam_open(int kind, int w, int h, int* maxlen) {
+  int k = 0, ww = 0, hh = 0, r;
+  uint32_t ml = 0;
+  char err[64];
+  int want = w | (h << 16);
+  xl_enter();
+  cam.s.want_kind = kind;          /* cam_pick: so esse formato no tamanho exato */
+  r = cam_start_u(want, &k, &ww, &hh, &ml, err, (int)sizeof(err));
+  cam.s.want_kind = 0;
+  xl_leave();
+  if (r == 0 && ((kind && k != kind) || ((w || h) && (ww != w || hh != h)))) {
+    if (!cam.s.run || cam.s.owner == kt_cur_pid()) (void)cam_close_u();
+    return -3;
+  }
+  if (maxlen) *maxlen = (int)ml;
   return r;
+}
+
+int xhci_cam_frame(void* buf, int max, int* seq, int timeout_ms) {
+  return cam_frame_u(buf, max, seq, timeout_ms);
+}
+
+int xhci_cam_close(void) {
+  if (cam.s.run && cam.s.owner != kt_cur_pid()) return -2;
+  return cam_close_u();
 }
 
 /* ---------- RIT (video/visual.c) ---------- */

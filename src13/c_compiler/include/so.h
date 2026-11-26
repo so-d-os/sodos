@@ -483,6 +483,22 @@ int k_audio_pending(void);
 int k_audio_volume(int pct);
 int k_audio_beep(int hz, int ms);
 int k_audio_info(char* out, int max);
+/* Webcam USB (UVC). Um programa por vez; o stream roda numa thread do kernel.
+ * k_cam_modes: 4 inteiros por modo (formato 1 = MJPEG ou 2 = YUY2, largura,
+ *   altura, intervalo em 100 ns: 333333 = 30 q/s); devolve quantos (ate max),
+ *   -1 sem webcam.
+ * k_cam_open: liga no formato e tamanho exatos (formato 0 = qualquer); 0 ok e
+ *   *maxlen = maior quadro; -1 sem webcam ou recusado, -2 outro programa usa,
+ *   -3 sem esse modo. Chamar de novo com ela ligada pelo mesmo programa: 0.
+ * k_cam_frame: espera ate timeout_ms por um quadro mais novo que *seq e copia
+ *   (MJPEG: JPEG sem as tabelas de Huffman, as vezes; YUY2: w*h*2 bytes).
+ *   Devolve os bytes, 0 se nao chegou, -1 se a webcam esta desligada. Comece
+ *   com *seq = 0. Sem ninguem chamando por 5 s, o kernel desliga a webcam.
+ * k_cam_close: desliga (0); -2 se quem ligou foi outro programa. */
+int k_cam_modes(unsigned int* out, int max);
+int k_cam_open(int kind, int w, int h, int* maxlen);
+int k_cam_frame(void* buf, int max, int* seq, int timeout_ms);
+int k_cam_close(void);
 
 /* No cc, __export em uma funcao ou variavel global a coloca na tabela de
  * exports da DLL. No gcc (bootstrap) use link /export:nome ou /exportall. */

@@ -3,6 +3,8 @@
 #include "drives.h"
 #include "mm.h"
 
+int win_launch_arg(const char* exe, const char* arg); /* video/visual.c */
+
 /* Liga os controladores xHCI, procura o pendrive e lista o que achou.
  * "usb webcam ..." e o mesmo que "webcam ..." (vale depois de um TROCA, que
  * nao registra comandos novos). */
@@ -195,21 +197,23 @@ int cmd_webcam(int argc, char** argv) {
   const uint8_t* data = 0;
   uint8_t* img = 0;
   uint32_t len = 0, ilen = 0;
-  int i, want_w = 0, skip = 10, kind = 0, w = 0, h = 0, list = 0, rc;
+  int i, want_w = 0, skip = 10, kind = 0, w = 0, h = 0, list = 0, show = 0, rc;
   for (i = 1; i < argc; i++) {
     const char* a = argv[i];
     if (!a || !a[0]) continue;
     if (arg_eq(a, "/?") || arg_eq(a, "-h")) {
-      puts_k("WEBCAM [arquivo] [/L] [/W:largura | /R:LxA] [/S:quadros]\n"
+      puts_k("WEBCAM [arquivo] [/L] [/SHOW] [/W:largura | /R:LxA] [/S:quadros]\n"
              "  Tira uma foto da webcam USB (UVC) e grava em JPG (ou BMP, se a\n"
              "  camera so tiver YUY2). Sem arquivo: D:\\TEMP\\WEBCAM.JPG.\n"
              "  /L lista formatos e tamanhos.  /W largura maxima (padrao 640).\n"
              "  /R tamanho exato, ex.: /R:640x360.\n"
+             "  /SHOW abre uma janela no WIN com a webcam ao vivo (/R muda o tamanho).\n"
              "  /S quadros descartados antes da foto (padrao 10: a exposicao\n"
              "  automatica acerta neles).\n");
       return 0;
     }
     if (arg_eq(a, "/L")) list = 1;
+    else if (arg_eq(a, "/SHOW") || arg_eq(a, "-show")) show = 1;
     else if ((a[0] == '/' || a[0] == '-') && (a[1] == 'W' || a[1] == 'w') && a[2] == ':') {
       if (!arg_num(a + 3, &want_w)) {
         puts_k("webcam: /W:largura em pixels\n");
@@ -239,6 +243,34 @@ int cmd_webcam(int argc, char** argv) {
     } else {
       file = a;
     }
+  }
+  if (show) {
+    /* Janela no WIN com o stream ao vivo (D:\WEBCAMV.EXE, utils/webcamv.c). */
+    char sz[24];
+    int k = 0;
+    sz[0] = 0;
+    if ((want_w & 0xFFFF) && (want_w >> 16)) {
+      int v, d;
+      for (v = want_w & 0xFFFF, d = 10000; d; d /= 10)
+        if (v >= d || k || d == 1) sz[k++] = (char)('0' + (v / d) % 10);
+      sz[k++] = ' ';
+      {
+        int k0 = k;
+        for (v = want_w >> 16, d = 10000; d; d /= 10)
+          if (v >= d || k > k0 || d == 1) sz[k++] = (char)('0' + (v / d) % 10);
+      }
+      sz[k] = 0;
+    }
+    if (file_size("D:\\WEBCAMV.EXE") < 0) {
+      puts_k("webcam: falta D:\\WEBCAMV.EXE\n");
+      return 1;
+    }
+    if (win_launch_arg("D:\\WEBCAMV.EXE", sz) != 0) {
+      puts_k("webcam: o WIN ja tem outro programa abrindo; tente de novo\n");
+      return 1;
+    }
+    puts_k("webcam: abrindo a janela da webcam no WIN (Esc fecha)\n");
+    return 0;
   }
   if (list) {
     xhci_cam_describe(wc_out, (int)sizeof(wc_out));

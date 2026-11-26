@@ -329,7 +329,7 @@ const uint8_t* pe_find_resource(struct wmod* m, uintptr_t type, uintptr_t name, 
 
 /* ---------- tabelas embutidas ---------- */
 extern const struct wine_sym k32_syms[], crt_syms[], vm_syms[], obj_syms[], exc_syms[], file_syms[],
-    sys_syms[], gui_syms[], reg_syms[], net_syms[], misc_syms[], crypt_syms[], winrt_syms[], proc_syms[], sig_syms[], compat_syms[], gdi_syms[], dlg_syms[], shell_syms[], uimisc_syms[], procmisc_syms[], sec_syms[], map_syms[], safearray_syms[], dwrite_syms[], nt_syms[], pipe_syms[], fill_syms[], picker_syms[];
+    sys_syms[], gui_syms[], reg_syms[], net_syms[], misc_syms[], crypt_syms[], winrt_syms[], proc_syms[], sig_syms[], compat_syms[], gdi_syms[], dlg_syms[], shell_syms[], uimisc_syms[], procmisc_syms[], sec_syms[], map_syms[], safearray_syms[], dwrite_syms[], nt_syms[], pipe_syms[], fill_syms[], picker_syms[], mf_syms[];
 /* pipe.c */
 HANDLE wpipe_open(const wchar16* name, DWORD flags);
 int wpipe_read(struct wobj* o, void* buf, DWORD len, DWORD* done, void* ov);

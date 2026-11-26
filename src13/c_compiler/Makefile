@@ -39,7 +39,7 @@ CC_SRC = cc/main.c cc/util.c cc/lex.c cc/pp.c cc/type.c cc/parse.c cc/gen.c
 
 all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/HELLO.EXE $(O)/CRASHT.EXE $(O)/SOCKT.EXE $(O)/SIGT64.EXE $(O)/FAT32T.EXE \
 	$(O)/CC.EXE $(O)/LINK.EXE $(O)/TLS.DLL $(O)/HTTPS.EXE $(O)/GUI.DLL $(O)/IMG.DLL \
-	$(O)/BROWSER.EXE $(O)/IMAGEVW.EXE $(O)/VIDPLAY.EXE $(O)/FONTADV.EXE $(O)/COMMAND.EXE $(O)/HTTPD.EXE \
+	$(O)/BROWSER.EXE $(O)/IMAGEVW.EXE $(O)/VIDPLAY.EXE $(O)/WEBCAMV.EXE $(O)/FONTADV.EXE $(O)/COMMAND.EXE $(O)/HTTPD.EXE \
 	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE $(O)/VIDEOCFG.EXE $(O)/TELAS.EXE $(O)/IMGBIG.DLL $(O)/AIPANEL.EXE $(O)/MENUCFG.EXE $(O)/TEMAS.EXE $(O)/WINTAB.EXE $(O)/WINMENU.EXE $(O)/LINKEXT.EXE $(O)/DISKSYNC.EXE $(O)/PENDRIVE.EXE $(O)/PLAY.EXE $(O)/HDAVERB.EXE $(O)/SOMDIAG.EXE \
 	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
 	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
@@ -89,6 +89,10 @@ $(O)/IMAGEVW.EXE: ../utils/image_view.c $(O)/GUI.DLL $(O)/IMGBIG.DLL $(HCC) $(HE
 # 1920x1200 saia decodificada em 640x400 e ampliada, ilegivel.
 $(O)/VIDPLAY.EXE: ../utils/videoplay.c $(O)/GUI.DLL $(O)/IMGBIG.DLL $(HCC) $(HEADERS)
 	$(HCC) -o $@ ../utils/videoplay.c $(O)/GUI.DLL $(O)/IMGBIG.DLL
+
+# Webcam ao vivo numa janela (webcam /show). Nome 8.3: WEBCAMV.EXE
+$(O)/WEBCAMV.EXE: ../utils/webcamv.c $(O)/GUI.DLL $(O)/IMGBIG.DLL $(HCC) $(HEADERS)
+	$(HCC) -o $@ ../utils/webcamv.c $(O)/GUI.DLL $(O)/IMGBIG.DLL
 
 # Fontes avancadas: lista D:\SODOS\FONTS e desenha a frase em TTF.
 $(O)/FONTADV.EXE: ../fonts/fontadv.c ../fonts/ttfrast.c ../fonts/ttfrast.h $(O)/GUI.DLL $(HCC) $(HEADERS)

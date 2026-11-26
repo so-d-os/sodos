@@ -9,7 +9,7 @@
 #define E_FAIL ((long)0x80004005)
 #define E_OUTOFMEMORY ((long)0x8007000E)
 
-#define COM_SLOTS 40
+#define COM_SLOTS 48 /* IMFSample vai ate o slot 46 (mf.c) */
 struct comobj;
 /* slot = indice na vtable; a = ate 6 argumentos depois do this. Devolver
  * E_NOTIMPL deixa o tratamento padrao (QI devolve o proprio objeto; metodo
