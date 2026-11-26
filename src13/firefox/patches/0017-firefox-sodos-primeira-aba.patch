@@ -17,10 +17,8 @@ primeira aba, e digitar um endereco nela navega.
 
 --- a/browser/components/tabbrowser/content/tabbrowser.js
 +++ b/browser/components/tabbrowser/content/tabbrowser.js
-@@ -711,9 +711,14 @@
-             );
-           }
-
+@@ -713,7 +713,11 @@
+ 
            // In this case we default to the privileged about process as that's
            // the best guess we can make, and we'll likely need it eventually.
 -          remoteType = E10SUtils.PRIVILEGEDABOUT_REMOTE_TYPE;
@@ -31,4 +29,4 @@ primeira aba, e digitar um endereco nela navega.
 +            : E10SUtils.NOT_REMOTE;
          }
        }
-
+ 
