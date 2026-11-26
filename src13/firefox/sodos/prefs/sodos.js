@@ -98,8 +98,13 @@ pref("media.rdd-process.enabled", false);
 pref("browser.backup.enabled", false);
 pref("browser.backup.scheduled.enabled", false);
 pref("browser.backup.archive.enabled", false);
-// Audio: so ha o backend nulo do SODOS (cubeb_sodos.c), sem som por enquanto.
+// Audio: backend do SODOS (cubeb_sodos.c) pelo k_audio_* do kernel (SET AUDIO=1);
+// sem placa ele so faz o papel de relogio.
 pref("media.cubeb.backend", "sodos");
+// O SODOS compila como XP_LINUX, onde o padrao e true: o cubeb ia pelo AudioIPC
+// (servidor de audio em outro processo, que nao existe aqui) e o contexto vinha
+// nulo ("Can't get cubeb context!"), sem nunca chamar o backend sodos.
+pref("media.cubeb.sandbox", false);
 // Video: o FFmpeg completo esta dentro do FIREFOX.EXE no lugar do ffvpx
 // (sodos/scripts/build-ffmpeg.sh), com H.264/HEVC/AAC alem de VP8/VP9/MP3.
 // So o caminho "FFVPX" e usado; o de biblioteca do sistema (libavcodec.so)

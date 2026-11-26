@@ -1,0 +1,36 @@
+Fase: midia (som). Tempo "incluindo suspensao" do mozglue no SODOS.
+Arquivo: mozglue/misc/Now.cpp
+Sintoma: com o som ligado (cubeb sodos, media.cubeb.sandbox=false), o
+FIREFOX.EXE abortava assim que um <audio>/<video> ficava audivel. Pilha:
+AudioSessionManager::NotifyAudibilityChanged -> abort (D:\LOG\FIREFOX.LOG).
+Causa: o time.h do SODOS nao tem CLOCK_BOOTTIME, entao NowIncludingSuspendMs()
+devolvia sempre Nothing(); ProcessUptimeMs() tambem, e o AudioSessionManager
+faz *uptime (MOZ_RELEASE_ASSERT do Maybe). O MOZ_DIAGNOSTIC_ASSERT logo antes
+nao vale em build release. Antes do som funcionar nenhuma midia ficava audivel
+e o caminho nunca rodava.
+Agora, no SODOS (sem suspensao), o tempo incluindo suspensao e o monotonico.
+Teste: QEMU com intel-hda + hda-output (audiodev wav), SET AUDIO=1, pagina com
+<audio autoplay> de um WAV: o Firefox continua aberto, o tempo do audio anda e
+o WAV do QEMU recebe o tom.
+
+--- a/mozglue/misc/Now.cpp
++++ b/mozglue/misc/Now.cpp
+@@ -89,7 +89,17 @@
+ }
+ 
+ Maybe<uint64_t> NowIncludingSuspendMs() {
+-#  ifndef CLOCK_BOOTTIME
++#  if defined(__SODOS__) && !defined(CLOCK_BOOTTIME)
++  // SODOS: sem suspensao e sem CLOCK_BOOTTIME; o monotonico e o mesmo tempo.
++  // Com Nothing() aqui o ProcessUptimeMs() ficava vazio e o
++  // AudioSessionManager abortava (Maybe vazio) quando uma midia ficava audivel.
++  struct timespec ts = {0};
++
++  if (clock_gettime(CLOCK_MONOTONIC, &ts)) {
++    return Nothing();
++  }
++  return Some(TimespecToMilliseconds(ts));
++#  elif !defined(CLOCK_BOOTTIME)
+   return Nothing();
+ #  else
+   struct timespec ts = {0};
