@@ -65,9 +65,9 @@ static struct view* grave; /* vistas de processos que sairam (ver wmap_proc_exit
 static volatile int map_lock;
 
 static void mlock(void) {
-  while (__sync_lock_test_and_set(&map_lock, 1)) k_thread_yield();
+  wglock(&map_lock);
 }
-static void munlock(void) { __sync_lock_release(&map_lock); }
+static void munlock(void) { wgunlock(&map_lock); }
 
 typedef void*(WINAPI* va_fn)(void*, size_t, DWORD, DWORD);
 typedef BOOL(WINAPI* vf_fn)(void*, size_t, DWORD);

@@ -137,6 +137,22 @@ static volatile int world_idle_word;   /* kt_world_idle / kt_world_kick */
 static inline int boosted(const struct task* t) {
   return boost_pid && t->pid == boost_pid && (int32_t)(boost_until - (uint32_t)irq_ticks()) > 0;
 }
+/* Travas globais do WINE.DLL. Uma copia so do WINE.DLL serve todos os
+ * processos do Claude, e as travas dele (wlock, map_lock, spawn_lock...) sao
+ * palavras na memoria do DLL. O fim de um processo (kt_release_pid) matava
+ * as threads dele em qualquer ponto: uma que estivesse com uma dessas travas
+ * a deixava presa, e os outros processos paravam nela para sempre (26/11/2026:
+ * o Claude na tela de carregamento logo depois de um renderer sair, todas as
+ * threads esperando; acontecia em ~metade das aberturas). O WINE.DLL soma 1
+ * neste int do TEB antes de pegar uma trava global e tira 1 depois de soltar
+ * (wine/dll/wine_int.h, TEB_NOKILL). Com ele > 0 a thread nao morre nos
+ * pontos implicitos (tique, BKL, futex) e morre no primeiro deles depois de
+ * soltar. kt_thread_exit e a falha (kt_thread_fault_exit) matam do mesmo jeito. */
+#define KT_TEB_NOKILL 0x1900
+static inline int may_die(const struct task* t) {
+  return !t->teb || *(volatile const int*)(uintptr_t)(t->teb + KT_TEB_NOKILL) <= 0;
+}
+static inline int must_die(const struct task* t) { return t->killed && may_die(t); }
 static struct cpu* pick_cpu(uint32_t mask);
 static struct task world;
 static struct task idle_t[KT_CPU_MAX];
@@ -458,11 +474,11 @@ static void bkl_take(struct task* t, int depth) {
       waiting = 1;
       __atomic_add_fetch(&bkl_waiters, 1, __ATOMIC_RELAXED);
     }
-    if (waiting && t->killed) __atomic_sub_fetch(&bkl_waiters, 1, __ATOMIC_RELAXED);
+    if (waiting && must_die(t)) __atomic_sub_fetch(&bkl_waiters, 1, __ATOMIC_RELAXED);
     st_bkl_spin++;
     kt_tlb_poll();
     if (t->kind == K_THREAD) {
-      if (t->killed) kt_die(t);
+      if (must_die(t)) kt_die(t);
       /* Girava para sempre (com yield a cada volta se havia outra thread na
        * fila): com o BKL ocupado por uma leitura de disco, todas as CPUs
        * ficavam a 100% no kt_schedule/bkl_take (notebook: 8 nucleos a 100%
@@ -586,10 +602,10 @@ uint64_t kt_bkl_leave(void) {
   }
   bkl_drop(t);
   if (t->kind == K_THREAD) {
-    if (t->killed) kt_die(t);
+    if (must_die(t)) kt_die(t);
     if (this_cpu()->need_resched) {
       kt_schedule();
-      if (t->killed) kt_die(t);
+      if (must_die(t)) kt_die(t);
     }
     if_guard(t, "saida de k_", t->last_exp);
   }
@@ -902,6 +918,7 @@ int kt_hang_text(char* out, int max) {
       }
     }
     if (t->killed) hb_s(&b, " MORTA-PEDIDA");
+    if (!may_die(t)) hb_s(&b, " TRAVA-DO-WINE");
     if (t->rt) hb_s(&b, " RT");
     if (t->teb) hb_s(&b, " win");
     if (t->last_exp) {
@@ -1067,7 +1084,7 @@ static int thread_wait(struct task* t, volatile int* addr, int val, int timeout_
     bkl_take(t, depth);
     return E_AGAIN;
   }
-  if (t->killed) {
+  if (must_die(t)) {
     spin_unlock(&fx_lock);
     kt_die(t);
   }
@@ -1076,7 +1093,7 @@ static int thread_wait(struct task* t, volatile int* addr, int val, int timeout_
   spin_unlock(&fx_lock);
   kt_schedule();
   irq_restore(fl);
-  if (t->killed) kt_die(t);
+  if (must_die(t)) kt_die(t);
   /* sem prazo nao ha "tempo esgotado": uma volta sem wake e espuria e quem
    * chamou confere a palavra de novo (semantica de futex) */
   rc = t->fw_woken ? 0 : (timeout_ms < 0 ? 0 : E_TIMEDOUT);
@@ -1091,7 +1108,7 @@ static void bkl_sleep(struct task* t) {
   uint64_t fl = irq_save();
   __atomic_add_fetch(&bkl_sleepers, 1, __ATOMIC_SEQ_CST);
   spin_lock(&fx_lock);
-  if (!__atomic_load_n(&bkl_lock, __ATOMIC_SEQ_CST) || t->killed) {
+  if (!__atomic_load_n(&bkl_lock, __ATOMIC_SEQ_CST) || must_die(t)) {
     spin_unlock(&fx_lock);
     __atomic_sub_fetch(&bkl_sleepers, 1, __ATOMIC_SEQ_CST);
     irq_restore(fl);
@@ -1497,7 +1514,7 @@ void kt_world_kick(void) {
 
 static void yield_raw(struct task* t) {
   kt_schedule();
-  if (t->killed && t->bkl_depth == 0) kt_die(t);
+  if (t->bkl_depth == 0 && must_die(t)) kt_die(t);
 }
 
 void kt_yield_in_thread(void) {
@@ -1593,7 +1610,7 @@ void kt_release_pid(uint32_t pid) {
     } else {
       serial_puts("[kt] thread nao morreu: tid=");
       put_dec((uint32_t)t->tid);
-      serial_puts("\n");
+      serial_puts(may_die(t) ? "\n" : " (com trava do WINE.DLL)\n");
       t->stack = 0;   /* o ufree_owner leva a pilha; o slot fica perdido */
     }
   }
@@ -1609,7 +1626,7 @@ void kt_release_pid(uint32_t pid) {
 static void preempt_check(struct cpu* c) {
   struct task* t = c->curr;
   if (t->kind != K_THREAD || t->bkl_depth) return;
-  if (t->killed) kt_die(t);
+  if (must_die(t)) kt_die(t);
   if (c->need_resched || (t->slice_ms >= SLICE_MS && c->nr > 0)) {
     yield_raw(t);
   } else if (t->slice_ms >= SLICE_MS) {

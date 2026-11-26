@@ -36,6 +36,7 @@ typedef void* HANDLE;
 #define TEB_WTHREAD 0x1800    /* nosso: struct wobj da thread */
 #define TEB_COINITS 0x1838    /* nosso: CoInitialize sem CoUninitialize nesta thread */
 #define TEB_OLEDATA 0x1840    /* nosso: OleTlsData (64 bytes; flags do apartamento em +0x14) */
+#define TEB_NOKILL 0x1900     /* nosso: travas globais seguras pela thread (o kernel le: KT_TEB_NOKILL) */
 #define TLS_SLOTS 64
 
 #define PEB_IMAGEBASE 0x10
@@ -259,6 +260,54 @@ static inline void wset_lasterr(uint32_t e) { *(uint32_t*)(wteb() + TEB_LASTERR)
 static inline uint32_t wget_lasterr(void) { return *(uint32_t*)(wteb() + TEB_LASTERR); }
 static inline struct wobj* wthread(void) { return *(struct wobj**)(wteb() + TEB_WTHREAD); }
 
+/* Travas globais do WINE.DLL (wlock, map_lock, spawn_lock...). Uma copia so
+ * deste DLL serve todos os processos do Claude, entao essas palavras sao de
+ * todos. O fim de um processo mata as threads dele em qualquer ponto; uma
+ * thread morta com a trava na mao parava os outros processos para sempre (o
+ * Claude na tela de carregamento logo depois de um renderer sair, 26/11/2026).
+ * wnokill_up antes de pegar, wnokill_down depois de soltar: com o contador do
+ * TEB > 0 o kernel (kernel/kthread.c, may_die) adia a morte da thread ate ela
+ * soltar. Fora de thread do Windows (a tarefa principal, que nao e morta
+ * assim) nao faz nada. Nao e atomico: so a propria thread grava, e o kernel
+ * le na mesma CPU (tique) ou na propria thread. */
+static inline volatile int* wnokill_word(void) {
+  uint8_t* t = wteb();
+  if (!t || *(uint8_t**)(t + TEB_SELF) != t) return 0;
+  return (volatile int*)(t + TEB_NOKILL);
+}
+static inline void wnokill_up(void) {
+  volatile int* n = wnokill_word();
+  if (n) ++*n;
+  __asm__ volatile("" ::: "memory"); /* antes de pegar a trava */
+}
+static inline void wnokill_down(void) {
+  volatile int* n;
+  __asm__ volatile("" ::: "memory"); /* depois de soltar a trava */
+  n = wnokill_word();
+  if (n && *n > 0) --*n;
+}
+/* Trava global simples (0 livre, 1 presa) com o contador acima. Ao ceder a
+ * vez a thread fica sem o contador: sem a trava ela pode morrer ali. */
+void k_thread_yield(void);
+static inline void wglock(volatile int* l) {
+  wnokill_up();
+  while (__sync_lock_test_and_set(l, 1)) {
+    wnokill_down();
+    k_thread_yield();
+    wnokill_up();
+  }
+}
+static inline int wgtrylock(volatile int* l) {
+  wnokill_up();
+  if (!__sync_lock_test_and_set(l, 1)) return 1;
+  wnokill_down();
+  return 0;
+}
+static inline void wgunlock(volatile int* l) {
+  __sync_lock_release(l);
+  wnokill_down();
+}
+
 /* ---------- pe.c ---------- */
 struct wmod* pe_load(const char* name, int is_exe);
 void* pe_getproc(struct wmod* m, const char* name);
@@ -321,7 +370,9 @@ void* WINAPI wVirtualAlloc(void* addr, size_t n, DWORD type, DWORD prot);
 /* ---------- obj.c ---------- */
 void wlock(void);
 void wunlock(void);
-void wsignal(void);                                /* gen++ e acorda as esperas */
+int wlock_state(uint32_t* kpid, uint32_t* tid);   /* [wine-dump]: 0 livre, 1/2 presa */
+void wlock_pid_gone(uint32_t kpid);                /* solta a trava de quem acabou */
+void wsignal(void);                               /* gen++ e acorda as esperas */
 HANDLE wh_new(struct wobj* o);
 HANDLE wh_self_process(void); /* obj.c: handle real do proprio processo */
 int wh_is_self(HANDLE h);

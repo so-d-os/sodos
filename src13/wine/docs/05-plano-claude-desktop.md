@@ -555,3 +555,25 @@ F0 e F1 primeiro: sao baratas e decidem o tamanho do resto (com ou sem F3b).
   um pedido na fila (2); a tarefa principal so atende o 2, o pedido (git
   for-each-ref) sumia e os CreateProcess seguintes esperavam 60 s e saiam com
   ERROR_NOT_SUPPORTED. Agora CAS 0 -> 1.
+- **RODACLAU parado na tela de carregamento (2026-11-26, kernel 75)**: em ~metade
+  das aberturas a janela ficava no esqueleto cinza para sempre. O [wine-dump]
+  mostrava todas as threads de todos os processos esperando desde o mesmo
+  instante, e so umas poucas "rodando (ou espera nao marcada)" (a 0x108 do
+  processo principal entre elas), com carga 0%. Sempre logo depois de um filho
+  sair: o primeiro renderer (ultimo `--wine-spawn=4`) ou o renderer e o
+  `claude.exe sandbox status` (ultimo `--wine-spawn=8`; quando abre, o 9 e o
+  NodeService). A hora depois do WIN nao decidia (falhou com 37 s e 2,5 min,
+  abriu com 18 s). Causa: o WINE.DLL e uma copia so para todos os processos, e
+  as travas globais dele (`wlock`, `map_lock`, `spawn_lock`, `poll_busy`...) sao
+  palavras na memoria do DLL; o fim do processo (`kt_release_pid`) matava as
+  threads dele em qualquer ponto (tique, volta de `k_*`, futex), e uma que
+  estivesse com a trava a deixava presa. Os outros processos ficavam no
+  `k_futex_wait(&wine_lock, 2, 10)` (sem marca, prazo de 10 ms: carga 0%) e
+  ninguem mais sinalizava eventos. Correcao: o WINE.DLL soma 1 em TEB+0x1900
+  (`TEB_NOKILL`, `wnokill_up/down`, `wglock/wgunlock` em wine_int.h) enquanto
+  segura uma trava global, e o kernel (`may_die`/`must_die` em kthread.c) nao
+  mata a thread nos pontos implicitos com ele > 0. Rede de seguranca: o `wlock`
+  guarda o dono (pid do SODOS e tid), o `wine_pid_gone` solta a trava de um
+  processo que acabou com ela (linha "[wine] trava global presa por um processo
+  que acabou; solta") e o [wine-dump] termina com "trava global: livre/presa,
+  dono ...". No HANG.LOG a thread com trava aparece com "TRAVA-DO-WINE".

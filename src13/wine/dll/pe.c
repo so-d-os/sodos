@@ -494,9 +494,9 @@ static struct {
 } img_cache[IMG_CACHE_MAX];
 static volatile int img_lock, live_procs;
 static void ic_lock(void) {
-  while (__sync_lock_test_and_set(&img_lock, 1)) k_thread_yield();
+  wglock(&img_lock);
 }
-static void ic_unlock(void) { __sync_lock_release(&img_lock); }
+static void ic_unlock(void) { wgunlock(&img_lock); }
 static void* img_cache_get(const char* path, int size) {
   int i;
   void* d = 0;

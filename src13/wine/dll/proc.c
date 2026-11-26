@@ -368,9 +368,9 @@ static struct spawnrec spawns[SPAWN_MAX];
 static volatile int spawn_lock, spawn_seq, pid_seq;
 
 static void sp_lock(void) {
-  while (__sync_lock_test_and_set(&spawn_lock, 1)) k_thread_yield();
+  wglock(&spawn_lock);
 }
-static void sp_unlock(void) { __sync_lock_release(&spawn_lock); }
+static void sp_unlock(void) { wgunlock(&spawn_lock); }
 
 DWORD wnew_pid(void) { return 0x100u + 4u * (DWORD)__sync_fetch_and_add(&pid_seq, 1); }
 
@@ -1037,11 +1037,11 @@ static int is_url(const char* f) {
   return i >= 2 && f[i] == ':' && f[i + 1] == '/' && f[i + 2] == '/';
 }
 static void url_request(const char* f) {
-  while (__sync_lock_test_and_set(&url_lock, 1)) k_thread_yield();
+  wglock(&url_lock);
   strncpy(url_q, f, sizeof(url_q) - 1);
   url_q[sizeof(url_q) - 1] = 0;
   url_owner = wp();
-  __sync_lock_release(&url_lock);
+  wgunlock(&url_lock);
   wlog("ShellExecute: endereco para o navegador: ", f);
 }
 void wurl_world_service(void) {
@@ -1049,11 +1049,11 @@ void wurl_world_service(void) {
   char b[264];
   int n;
   if (url_owner != wp() || !url_q[0]) return;
-  while (__sync_lock_test_and_set(&url_lock, 1)) k_thread_yield();
+  wglock(&url_lock);
   strcpy(u, url_q);
   url_q[0] = 0;
   url_owner = 0;
-  __sync_lock_release(&url_lock);
+  wgunlock(&url_lock);
   if (k_open_file(u) == 0) return; /* LINKEXT achou o programa */
   /* sem associacao: SET WINEBROWSER=programa (o navegador e configurado no
    * LINKEXT: SET LINKEXT=1 e HTTP,HTTPS=D:\FIREFOX\FIREFOX.EXE no LINKEXT.CFG) */

@@ -37,9 +37,9 @@ static volatile int pk_state;    /* 0 livre, 1 pedido, 2 aberto, 3 falhou */
 static volatile int pk_seq;
 
 static void pk_take(void) {
-  while (__sync_lock_test_and_set(&pk_lock, 1)) k_thread_yield();
+  wglock(&pk_lock);
 }
-static void pk_give(void) { __sync_lock_release(&pk_lock); }
+static void pk_give(void) { wgunlock(&pk_lock); }
 
 /* Na tarefa principal (main.c). */
 void wpick_world_service(void) {

@@ -46,25 +46,70 @@ uint64_t wnow_ms(void) { return k_ms(); }
  * com alguem dormindo. Gira um pouco e depois dorme no futex: com os 4
  * processos do Chromium a versao que so girava (com yield) ocupava 3 CPUs
  * esperando a trava e deixava o dono sem vez. */
+/* wnokill_up/down (wine_int.h): o fim de um processo nao mata a thread que
+ * esta com a trava (senao ela ficava presa e os outros processos paravam).
+ * Dono (pid do SODOS e tid do Windows) para o [wine-dump] e para soltar a
+ * trava de um processo que acabou com ela (wlock_pid_gone). */
 static volatile int wine_lock;
+static volatile uint32_t wine_lock_kpid, wine_lock_tid;
+static inline void wlock_owner(void) {
+  uint8_t* t = wteb();
+  if (t && *(uint8_t**)(t + TEB_SELF) == t) { /* thread ou tarefa do loader (TEB de carga) */
+    struct wproc* p = *(struct wproc**)(t + TEB_PEB);
+    wine_lock_kpid = p ? p->kpid : 0;
+    wine_lock_tid = (uint32_t)*(uint64_t*)(t + TEB_TID);
+  } else {
+    wine_lock_kpid = 0;
+    wine_lock_tid = 0;
+  }
+}
 void wlock(void) {
   int c, spin;
+  wnokill_up();
   for (spin = 0; spin < 100; spin++) {
-    if (__sync_val_compare_and_swap(&wine_lock, 0, 1) == 0) return;
+    if (__sync_val_compare_and_swap(&wine_lock, 0, 1) == 0) {
+      wlock_owner();
+      return;
+    }
     __asm__ volatile("pause");
   }
   c = __sync_lock_test_and_set(&wine_lock, 2);
   while (c != 0) {
+    wnokill_down(); /* dormindo sem a trava a thread pode morrer */
     k_futex_wait(&wine_lock, 2, 10);
+    wnokill_up();
     c = __sync_lock_test_and_set(&wine_lock, 2);
   }
+  wlock_owner();
 }
 void wunlock(void) {
+  wine_lock_kpid = 0;
+  wine_lock_tid = 0;
   if (__sync_fetch_and_sub(&wine_lock, 1) != 1) { /* era 2: alguem dorme */
     wine_lock = 0;
     __sync_synchronize();
     k_futex_wake(&wine_lock, 1);
   }
+  wnokill_down();
+}
+
+/* [wine-dump]: valor da trava e dono (0 = livre). */
+int wlock_state(uint32_t* kpid, uint32_t* tid) {
+  if (kpid) *kpid = wine_lock_kpid;
+  if (tid) *tid = wine_lock_tid;
+  return wine_lock;
+}
+
+/* Fim do processo kpid (wine_pid_gone, depois que o kernel parou as threads
+ * dele): se a trava ficou com ele, ninguem mais vai solta-la. Nao deveria
+ * acontecer com o wnokill; se acontecer, o log diz e a trava volta. Quem
+ * dorme nela acorda sozinho pelo prazo de 10 ms do wlock. */
+void wlock_pid_gone(uint32_t kpid) {
+  if (!kpid || !wine_lock || wine_lock_kpid != kpid) return;
+  wlogx("trava global presa por um processo que acabou; solta. tid ", wine_lock_tid);
+  wine_lock_kpid = 0;
+  wine_lock_tid = 0;
+  __sync_lock_release(&wine_lock);
 }
 
 /* ---------- acordar quem espera ----------

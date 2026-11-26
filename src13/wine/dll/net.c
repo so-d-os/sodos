@@ -246,7 +246,7 @@ void wnet_poll(void) {
   int pending = 0;
   if (!n || !n->socks) return;
   /* uma thread por vez mexe nos soquetes */
-  if (__sync_lock_test_and_set(&poll_busy, 1)) return;
+  if (!wgtrylock(&poll_busy)) return;
   /* sem operacao pendente nao ha o que conferir: nada de chamar o kernel */
   for (s = n->socks; s; s = s->next)
     if (s->c_ov || s->r_ov || s->s_ov || s->ev) pending = 1;
@@ -257,7 +257,7 @@ void wnet_poll(void) {
       sock_events(s);
     }
   }
-  __sync_lock_release(&poll_busy);
+  wgunlock(&poll_busy);
 }
 
 static void poll_wait(int ms) {
@@ -341,12 +341,12 @@ static WINAPI int WSAEnumNetworkEvents(uintptr_t s, HANDLE ev, struct wsanet_eve
     wset_lasterr(WSAEFAULT);
     return SOCKET_ERROR;
   }
-  while (__sync_lock_test_and_set(&poll_busy, 1)) k_thread_yield();
+  wglock(&poll_busy);
   out->events = (int32_t)k->fired;
   if (wine_debug && k->fired) wlogx("rede: WSAEnumNetworkEvents (soquete<<8|FD_*) ", ((uint64_t)k->k << 8) | (uint64_t)k->fired);
   for (i = 0; i < 10; i++) out->err[i] = k->err[i];
   k->fired = 0;
-  __sync_lock_release(&poll_busy);
+  wgunlock(&poll_busy);
   if (ev) WSAResetEvent(ev);
   return 0;
 }
@@ -497,10 +497,10 @@ static uintptr_t new_socket(int af, int type) {
   o->p2 = s;
   s->obj = o;
   h = wh_new(o);
-  while (__sync_lock_test_and_set(&poll_busy, 1)) k_thread_yield();
+  wglock(&poll_busy);
   s->next = n->socks;
   n->socks = s;
-  __sync_lock_release(&poll_busy);
+  wgunlock(&poll_busy);
   return (uintptr_t)h;
 }
 static WINAPI uintptr_t WSASocketW(int af, int type, int proto, void* info, DWORD g, DWORD fl) {
@@ -517,14 +517,14 @@ void wsock_close(struct wobj* o) {
   struct wsock* s = (struct wsock*)o->p2;
   struct wsock** pp;
   if (!s) return;
-  while (__sync_lock_test_and_set(&poll_busy, 1)) k_thread_yield();
+  wglock(&poll_busy);
   if (n)
     for (pp = &n->socks; *pp; pp = &(*pp)->next)
       if (*pp == s) {
         *pp = s->next;
         break;
       }
-  __sync_lock_release(&poll_busy);
+  wgunlock(&poll_busy);
   /* operacoes pendentes terminam canceladas */
   if (s->c_ov) complete(s, s->c_ov, ST_CANCELLED, 0);
   if (s->r_ov) complete(s, s->r_ov, ST_CANCELLED, 0);
@@ -851,7 +851,7 @@ static WINAPI BOOL CancelIoEx(HANDLE h, struct overlapped* ov) {
     wset_lasterr(1168); /* ERROR_NOT_FOUND */
     return 0;
   }
-  while (__sync_lock_test_and_set(&poll_busy, 1)) k_thread_yield();
+  wglock(&poll_busy);
   if (k->c_ov && (!ov || k->c_ov == ov)) {
     struct overlapped* v = k->c_ov;
     k->c_ov = 0;
@@ -870,7 +870,7 @@ static WINAPI BOOL CancelIoEx(HANDLE h, struct overlapped* ov) {
     complete(k, v, ST_CANCELLED, 0);
     n++;
   }
-  __sync_lock_release(&poll_busy);
+  wgunlock(&poll_busy);
   if (!n) {
     wset_lasterr(1168);
     return 0;
@@ -1033,9 +1033,9 @@ static WINAPI int GetAddrInfoW(const wchar16* node, const wchar16* service, cons
     static volatile int dns_lock;
     int tries, rc = -1;
     for (tries = 0; tries < 3 && rc != 0; tries++) {
-      while (__sync_lock_test_and_set(&dns_lock, 1)) k_thread_yield();
+      wglock(&dns_lock);
       rc = k_dns(host, &ip);
-      __sync_lock_release(&dns_lock);
+      wgunlock(&dns_lock);
       if (rc != 0 && wine_debug) wlog("DNS falhou (tenta de novo): ", host);
     }
     if (rc != 0) {

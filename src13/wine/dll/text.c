@@ -53,7 +53,7 @@ int text_ready(void) {
   char dir[160], path[200];
   int i, d;
   if (font_state) return font_state > 0;
-  while (__sync_lock_test_and_set(&font_lock, 1)) k_thread_yield();
+  wglock(&font_lock);
   if (!font_state) {
     int ok = 0;
     if (k_getenv("PATHSODOS", dir, (int)sizeof(dir)) > 0) {
@@ -74,7 +74,7 @@ int text_ready(void) {
     if (!ok) wlog("sem fonte TrueType em \\SODOS\\FONTS: janelas do Windows sem texto", 0);
     font_state = ok ? 1 : -1;
   }
-  __sync_lock_release(&font_lock);
+  wgunlock(&font_lock);
   return font_state > 0;
 }
 

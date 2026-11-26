@@ -75,9 +75,9 @@ static int is_temp_path(const char* path) {
 static struct ramfile* ram_list;
 static volatile int ram_lock_word;
 static void ram_lock(void) {
-  while (__sync_lock_test_and_set(&ram_lock_word, 1)) k_thread_yield();
+  wglock(&ram_lock_word);
 }
-static void ram_unlock(void) { __sync_lock_release(&ram_lock_word); }
+static void ram_unlock(void) { wgunlock(&ram_lock_word); }
 
 static struct ramfile* ram_find(const char* path) {
   struct ramfile* r;
@@ -203,7 +203,7 @@ static int path_ieq(const char* a, const char* b) {
   return *a == *b;
 }
 static void lockt_lock(void) {
-  while (__sync_lock_test_and_set(&lockt_busy, 1)) k_thread_yield();
+  wglock(&lockt_busy);
 }
 static void lockt_set(const char* path, uint64_t ft) {
   int i, at = -1;
@@ -219,7 +219,7 @@ static void lockt_set(const char* path, uint64_t ft) {
     strcpy(lockt[at].path, path);
     lockt[at].ft = ft;
   }
-  __sync_lock_release(&lockt_busy);
+  wgunlock(&lockt_busy);
 }
 static uint64_t fat_to_filetime(unsigned date, unsigned time) {
   int y = 1980 + (int)(date >> 9), m = (int)(date >> 5 & 15), d = (int)(date & 31);
@@ -292,7 +292,7 @@ static uint64_t wpath_time(const char* path) {
   lockt_lock();
   for (i = 0; i < LOCKT_N; i++)
     if (lockt[i].path[0] && path_ieq(lockt[i].path, path)) ft = lockt[i].ft;
-  __sync_lock_release(&lockt_busy);
+  wgunlock(&lockt_busy);
   if (ft) return ft < now ? ft : now;
   strcpy(dir, path);
   slash = strrchr(dir, '\\');
@@ -1261,13 +1261,13 @@ void wensure_dir(const char* path) {
   static volatile int last_lock;
   char tmp[260];
   int i, same;
-  while (__sync_lock_test_and_set(&last_lock, 1)) k_thread_yield();
+  wglock(&last_lock);
   same = wstreq(last, path);
   if (!same) {
     strncpy(last, path, sizeof(last) - 1);
     last[sizeof(last) - 1] = 0;
   }
-  __sync_lock_release(&last_lock);
+  wgunlock(&last_lock);
   if (same) return;
   for (i = 3; path[i]; i++) {
     if (path[i] == '\\') {

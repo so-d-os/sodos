@@ -538,6 +538,7 @@ static volatile int wtrk_lk;
 void wtrack_thread(struct wobj* t) {
   int i;
   if (!t || t->wslot) return;
+  wnokill_up(); /* trava global: ver wine_int.h */
   while (__sync_lock_test_and_set(&wtrk_lk, 1)) __builtin_ia32_pause();
   for (i = 0; i < WTRK_MAX; i++) {
     if (wtrk[i].used) continue;
@@ -552,6 +553,7 @@ void wtrack_thread(struct wobj* t) {
     break;
   }
   __sync_lock_release(&wtrk_lk);
+  wnokill_down();
 }
 
 void wtrack_exit(struct wobj* t) {
@@ -573,6 +575,7 @@ void wine_pid_gone(uint32_t kpid) {
   struct wproc* gone[8];
   int i, j, ng = 0;
   if (!kpid) return;
+  wlock_pid_gone(kpid); /* obj.c: a trava global nao fica com quem acabou */
   for (i = 0; i < WTRK_MAX; i++) {
     if (!wtrk[i].used || wtrk[i].kpid != kpid) continue;
     for (j = 0; j < ng && gone[j] != wtrk[i].p; j++) {
@@ -722,6 +725,25 @@ void wine_dump(void) {
       o = ddec(o, end, w->since > now ? 0 : now - w->since); /* comecou durante o dump */
       o = dcat(o, end, " ms, de ");
       o = dwhere(o, end, w->p, (uint64_t)(uintptr_t)w->caller);
+    }
+    *o++ = '\n';
+    k_dbg(line, (int)(o - line));
+  }
+  {
+    /* trava global do WINE.DLL: presa com todo mundo esperando = alguem morreu
+     * com ela (ver wnokill em wine_int.h) */
+    char line[160], *o = line, *end = line + sizeof(line) - 2;
+    uint32_t lk_kpid, lk_tid;
+    int lk = wlock_state(&lk_kpid, &lk_tid);
+    o = dcat(o, end, "[wine-dump] trava global: ");
+    if (!lk) {
+      o = dcat(o, end, "livre");
+    } else {
+      o = dcat(o, end, lk == 2 ? "presa, com quem espera" : "presa");
+      o = dcat(o, end, ", dono pid do SODOS ");
+      o = ddec(o, end, lk_kpid);
+      o = dcat(o, end, " tid ");
+      o = dhex(o, end, lk_tid);
     }
     *o++ = '\n';
     k_dbg(line, (int)(o - line));

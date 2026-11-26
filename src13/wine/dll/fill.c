@@ -18,9 +18,9 @@ struct slist_entry {
 };
 static volatile int sl_lock;
 static void sl_take(void) {
-  while (__sync_lock_test_and_set(&sl_lock, 1)) k_thread_yield();
+  wglock(&sl_lock);
 }
-static void sl_give(void) { __sync_lock_release(&sl_lock); }
+static void sl_give(void) { wgunlock(&sl_lock); }
 
 static WINAPI struct slist_entry* InterlockedPushEntrySList(uint64_t* head, struct slist_entry* e) {
   struct slist_entry* old;
