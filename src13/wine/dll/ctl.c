@@ -459,6 +459,13 @@ static intptr_t edit_proc(struct wwin* w, DWORD m, uintptr_t wp_, intptr_t lp) {
         }
         return 0;
       }
+      if (c == '\n') { /* Ctrl+Enter: no multilinha quebra a linha sempre */
+        if (multi) {
+          static const wchar16 nl2[2] = {'\r', '\n'};
+          edit_replace(w, nl2, 2);
+        }
+        return 0;
+      }
       if (c < 32 || c == 127) return 0;
       if ((w->style & 0x2000) && (c < '0' || c > '9')) return 0; /* ES_NUMBER */
       edit_replace(w, &c, 1);

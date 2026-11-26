@@ -45,6 +45,17 @@ int xhci_disk_write(uint32_t lba, const void* buf);
 /* Controladores e dispositivos, um por linha (comando usb). */
 int xhci_describe(char* out, int max);
 
+/* Webcam USB (UVC, classe 0E): formatos e tamanhos, um por linha. */
+int xhci_cam_describe(char* out, int max);
+
+/* Um quadro da webcam. want_w: largura maxima (0 = ate 640), ou tamanho
+ * exato com a altura nos 16 bits de cima (largura | altura << 16); skip: quadros
+ * descartados antes (a exposicao automatica leva alguns). *kind: 1 = MJPEG
+ * (JPEG sem as tabelas de Huffman, as vezes), 2 = YUY2 (w * h * 2 bytes).
+ * *data e do driver e vale ate a proxima captura. 0 = ok; senao err diz. */
+int xhci_cam_grab(int want_w, int skip, const uint8_t** data, uint32_t* len, int* kind, int* w,
+                  int* h, char* err, int emax);
+
 /* Mapeia um BAR de PCI em identidade, sem cache (outros drivers usam). 0 = ok. */
 int pci_mmio_map(uint64_t phys, uint64_t len);
 

@@ -40,7 +40,7 @@ CC_SRC = cc/main.c cc/util.c cc/lex.c cc/pp.c cc/type.c cc/parse.c cc/gen.c
 all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/HELLO.EXE $(O)/CRASHT.EXE $(O)/SOCKT.EXE $(O)/SIGT64.EXE $(O)/FAT32T.EXE \
 	$(O)/CC.EXE $(O)/LINK.EXE $(O)/TLS.DLL $(O)/HTTPS.EXE $(O)/GUI.DLL $(O)/IMG.DLL \
 	$(O)/BROWSER.EXE $(O)/IMAGEVW.EXE $(O)/VIDPLAY.EXE $(O)/FONTADV.EXE $(O)/COMMAND.EXE $(O)/HTTPD.EXE \
-	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE $(O)/VIDEOCFG.EXE $(O)/TELAS.EXE $(O)/IMGBIG.DLL $(O)/AIPANEL.EXE $(O)/MENUCFG.EXE $(O)/TEMAS.EXE $(O)/WINTAB.EXE $(O)/WINMENU.EXE $(O)/LINKEXT.EXE $(O)/DISKSYNC.EXE $(O)/PENDRIVE.EXE $(O)/PLAY.EXE $(O)/HDAVERB.EXE \
+	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE $(O)/VIDEOCFG.EXE $(O)/TELAS.EXE $(O)/IMGBIG.DLL $(O)/AIPANEL.EXE $(O)/MENUCFG.EXE $(O)/TEMAS.EXE $(O)/WINTAB.EXE $(O)/WINMENU.EXE $(O)/LINKEXT.EXE $(O)/DISKSYNC.EXE $(O)/PENDRIVE.EXE $(O)/PLAY.EXE $(O)/HDAVERB.EXE $(O)/SOMDIAG.EXE \
 	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
 	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
 	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/TOP.EXE $(O)/COBRA.EXE $(O)/WIFI.EXE $(O)/XCOPY.EXE $(O)/GIT.EXE $(O)/MAKE.EXE \
@@ -85,8 +85,10 @@ $(O)/IMAGEVW.EXE: ../utils/image_view.c $(O)/GUI.DLL $(O)/IMGBIG.DLL $(HCC) $(HE
 	$(HCC) -o $@ ../utils/image_view.c $(O)/GUI.DLL $(O)/IMGBIG.DLL
 
 # Player de video. Nome 8.3: VIDPLAY.EXE
-$(O)/VIDPLAY.EXE: ../utils/videoplay.c $(O)/GUI.DLL $(O)/IMG.DLL $(HCC) $(HEADERS)
-	$(HCC) -o $@ ../utils/videoplay.c $(O)/GUI.DLL $(O)/IMG.DLL
+# IMGBIG.DLL (ate 3840 px): com o IMG.DLL (800 px) uma gravacao de tela
+# 1920x1200 saia decodificada em 640x400 e ampliada, ilegivel.
+$(O)/VIDPLAY.EXE: ../utils/videoplay.c $(O)/GUI.DLL $(O)/IMGBIG.DLL $(HCC) $(HEADERS)
+	$(HCC) -o $@ ../utils/videoplay.c $(O)/GUI.DLL $(O)/IMGBIG.DLL
 
 # Fontes avancadas: lista D:\SODOS\FONTS e desenha a frase em TTF.
 $(O)/FONTADV.EXE: ../fonts/fontadv.c ../fonts/ttfrast.c ../fonts/ttfrast.h $(O)/GUI.DLL $(HCC) $(HEADERS)
@@ -587,6 +589,10 @@ $(O)/PLAY.EXE: ../utils/play.c $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
 # HDAVERB.EXE: verbo cru ao codec HD Audio em uso (diagnostico do AUDIO.DLL).
 $(O)/HDAVERB.EXE: ../utils/hdaverb.c $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
 	$(HCC) -o $@ ../utils/hdaverb.c
+
+# SOMDIAG.EXE: RAM do EC e foto do FCH da AMD (alto-falante mudo no boot frio, docs/AUDIO.md).
+$(O)/SOMDIAG.EXE: ../utils/somdiag.c $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
+	$(HCC) -o $@ ../utils/somdiag.c
 
 # PENDRIVE.EXE: SCAN/MOUNT/EJECT/DIR/COPY do pendrive (SET PENDRIVE=0 desliga).
 $(O)/PENDRIVE.EXE: ../utils/pendrive.c $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL

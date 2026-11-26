@@ -144,6 +144,26 @@ cantos arredondados e texto claro sobre paineis. Primeira etapa concluida.
   `winmenu_api`; o campo `transp` fica no fim de `gui_win` (o `sizeof` muda:
   vai por boot).
 
+## Ctrl+Enter (build 76)
+
+Antes o Ctrl+Enter era um Enter comum em todo lugar: o WIN mandava 13 aos
+programas sem dizer do Ctrl, e no WINE o "Ctrl+Enter to queue" do Claude
+enviava. Agora:
+
+| Onde | O que faz |
+|---|---|
+| Bloco de notas | quebra de linha (como o Enter) |
+| Outras janelas do WIN (Command no prompt, gerenciador, configuracoes) | amplia ou restaura (`wm_toggle_max`), como o botao ao lado do X |
+| Programa rodando no Command | recebe a tecla, como antes |
+| Programa grafico (`k_gui_event`) | recebe 10 (o Enter e 13); quem trata 10 como Enter (`gui.c`, Firefox) segue igual |
+| WINE | o Ctrl+Enter do Windows: `WM_KEYDOWN` Ctrl, `VK_RETURN`, `WM_CHAR` 0x0A. EDIT multilinha quebra a linha; o que nenhum controle usa chega ao `DefWindowProc`, que chama `k_gui_max(2)` (amplia ou restaura) |
+
+`k_gui_max(op)` (kexports, `so.h`): 1 amplia, 0 restaura, 2 troca, < 0
+consulta. O pedido fica em `gui_max_req` e o laco do WIN aplica
+(`gui_max_pump`), porque a troca de tamanho troca o buffer da janela e a
+chamada pode vir de uma thread do programa. O WINE.DLL procura com
+`k_dl_sym(0, "k_gui_max", 0)`: no kernel 75 so nao amplia.
+
 ## Notas de implementacao
 
 - Os paineis hoje sao **opacos** (`fill_round`); a versao translucida depende de
@@ -276,3 +296,22 @@ Com isso o roteiro de teste digita, manda Enter e confere a resposta. Neste
 commit o teste foi feito com um servidor SSE local respondendo "Ola! Recebi: ...":
 a bolha do usuario, a resposta em streaming e o status "ok" apareceram como
 esperado.
+
+## WIN.CFG: programas que sobem com o WIN (build 76)
+
+`D:\SODOS\WIN.CFG` diz o que o WIN executa ao subir. Cada linha
+`run=<linha do prompt>` abre um Command e roda a linha nele, a vista, como o
+comando `COMMAND` (`win_command`). Ate 8 linhas de ate 199 caracteres, na
+ordem; linhas com `;` ou sem `run=` sao ignoradas.
+
+```
+; a API (8797) e a PONTE, que antes dependiam de rodar o START.BAT a mao
+run=D:\START.BAT
+```
+
+- Roda uma vez por boot: fechar o WIN (Ctrl+Backspace) e abrir de novo nao
+  repete, para nao subir a API e a PONTE duas vezes.
+- O arquivo e lido no primeiro quadro do laco do WIN (`winrun_load` e
+  `winrun_service` em `video/visual.c`); cada linha lida vai para o log da
+  serial como `[visual] WIN.CFG run=...`.
+- Sem o arquivo nada muda.

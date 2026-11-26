@@ -1250,6 +1250,65 @@ static char launch_arg[2048];
 static int launch_pending;
 static void launch_drv_note(void);
 
+/* D:\SODOS\WIN.CFG: cada linha run=<linha do prompt> abre um Command quando
+ * o WIN sobe e roda a linha nele, a vista (a API e a PONTE do START.BAT, por
+ * exemplo). Uma vez por boot: fechar e abrir o WIN de novo nao repete. Linhas
+ * com ; ou sem run= sao ignoradas. Os Commands abrem um por quadro, na ordem. */
+#define WINRUN_CFG "D:\\SODOS\\WIN.CFG"
+#define WINRUN_MAX 8
+#define WINRUN_LEN 200
+/* Numa variavel so, com guardas nas pontas (TROCA KERNEL). */
+static struct {
+  uint64_t guarda0[4];
+  char line[WINRUN_MAX][WINRUN_LEN];
+  int n;       /* linhas run= lidas */
+  int i;       /* proxima a abrir */
+  int loaded;  /* o WIN.CFG ja foi lido neste boot */
+  uint64_t guarda1[4];
+} WR;
+#define winrun_line WR.line
+#define winrun_n WR.n
+#define winrun_i WR.i
+#define winrun_loaded WR.loaded
+
+static void winrun_load(void) {
+  static char cfg[2048];
+  int n, i = 0;
+  winrun_loaded = 1;
+  n = file_load(WINRUN_CFG, cfg, (int)sizeof(cfg));
+  if (n <= 0) return;
+  if (n > (int)sizeof(cfg) - 1) n = (int)sizeof(cfg) - 1;
+  cfg[n] = 0;
+  while (i < n && winrun_n < WINRUN_MAX) {
+    int j, k = 0;
+    while (i < n && (cfg[i] == ' ' || cfg[i] == '\t')) i++;
+    j = i;
+    while (j < n && cfg[j] != '\n' && cfg[j] != '\r') j++;
+    if (j - i > 4 && (cfg[i] == 'r' || cfg[i] == 'R') && (cfg[i + 1] == 'u' || cfg[i + 1] == 'U') &&
+        (cfg[i + 2] == 'n' || cfg[i + 2] == 'N') && cfg[i + 3] == '=') {
+      i += 4;
+      while (i < j && cfg[i] == ' ') i++;
+      while (i < j && k < WINRUN_LEN - 1) winrun_line[winrun_n][k++] = cfg[i++];
+      while (k > 0 && winrun_line[winrun_n][k - 1] == ' ') k--;
+      winrun_line[winrun_n][k] = 0;
+      if (k > 0) {
+        serial_puts("[visual] WIN.CFG run=");
+        serial_puts(winrun_line[winrun_n]);
+        serial_puts("\n");
+        winrun_n++;
+      }
+    }
+    i = j;
+    while (i < n && (cfg[i] == '\n' || cfg[i] == '\r')) i++;
+  }
+}
+
+/* Chamado a cada quadro do laco do WIN, antes de atender o pedido de abertura. */
+static void winrun_service(void) {
+  if (!winrun_loaded) winrun_load();
+  if (winrun_i < winrun_n && !launch_pending && win_command(winrun_line[winrun_i]) == 0) winrun_i++;
+}
+
 static uint32_t gui_col(uint32_t rgb);   /* definido mais abaixo */
 
 /* 0xRRGGBB -> palavra no formato que fill_rect/gfx_clear esperam */
@@ -1547,6 +1606,8 @@ static void rc_shown(void);
 static int rc_active(void);
 static uint64_t rc_take(void);
 static void rc_drop(uint64_t f);
+static int rc_copy_ok(void);
+static void rc_copy_rect(int x0, int y0, int x1, int y1);
 static volatile int rit_run;
 
 static void gfx_copy_back_raw(void);
@@ -1556,10 +1617,17 @@ static void gfx_copy_back(void) {
     gfx_copy_back_raw();
     return;
   }
-  /* a seta da RIT: a copia apaga a velha e rc_shown poe na posicao de agora */
+  /* A seta da RIT entra na copia, linha a linha (rc_copy_rect): a tela nao
+   * fica nem um instante sem ela. Antes a copia (a tela inteira, 9 MB)
+   * apagava a seta e so no fim rc_shown a punha de volta; com um programa
+   * animando (o Claude: ~10 quadros/s com o mouse parado) o mouse piscava. */
   f = rc_take();
-  gfx_copy_back_raw();
-  if (rc_active()) rc_shown();
+  if (rc_copy_ok()) {
+    rc_copy_rect(0, 0, (int)gfx_w, (int)gfx_h);
+  } else {
+    gfx_copy_back_raw();
+    if (rc_active()) rc_shown();
+  }
   rc_drop(f);
 }
 
@@ -2210,6 +2278,103 @@ static void rc_draw(int mx, int my) {
 static void rc_shown(void) {
   cursor_saved = 0;
   if (!rc_hidden) rc_draw((int)rit_x, (int)rit_y);
+}
+
+/* Pixel do back buffer (o formato do LFB) <-> o de put_pixel/rc_put: os
+ * bytes 0 e 2 trocados. A troca e a propria inversa. */
+static uint32_t rc_swap02(uint32_t v) {
+  return (v & 0xFF00FF00u) | ((v >> 16) & 0xFFu) | ((v & 0xFFu) << 16);
+}
+
+static void rc_movs(volatile uint32_t* dst, const uint32_t* src, uint32_t n) {
+  __asm__ volatile ("rep movsl" : "+S"(src), "+D"(dst), "+c"(n) : : "memory");
+}
+
+/* A copia do back buffer para a tela pode levar a seta junto (rc_copy_rect)?
+ * So com back buffer em RAM, sem pagina dupla nem driver de placa. Com rc_lk. */
+static int rc_copy_ok(void) {
+  return rc_active() && gfx_back && !gfx_dbuf && !gpu_drv;
+}
+
+/* Copia o retangulo [x0,x1) x [y0,y1) do back buffer para a pagina visivel
+ * com a seta da RIT ja composta nas linhas dela: cada linha vai para a tela
+ * uma vez, pronta, e a seta nunca some (o que sumia era a seta apagada pela
+ * copia ate o rc_shown do fim). O fundo da seta sai do proprio back buffer.
+ * Com rc_lk e rc_copy_ok(). */
+static void rc_copy_rect(int x0, int y0, int x1, int y1) {
+  int scale = cur_scale();
+  int show = !rc_hidden;
+  int nx = 0, ny = 0, bw = 0, bh = 0, keep = 0, r;
+  uint32_t white = rc_swap02(PIXA(255, 255, 255)), black = rc_swap02(PIXA(0, 0, 0));
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > (int)gfx_w) x1 = (int)gfx_w;
+  if (y1 > (int)gfx_h) y1 = (int)gfx_h;
+  if (x0 >= x1 || y0 >= y1) return;
+  if (show) {
+    /* a mesma caixa de rc_draw */
+    nx = (int)rit_x;
+    ny = (int)rit_y;
+    if (nx < 0) nx = 0;
+    if (ny < 0) ny = 0;
+    if ((uint32_t)nx >= gfx_w) nx = (int)gfx_w - 1;
+    if ((uint32_t)ny >= gfx_h) ny = (int)gfx_h - 1;
+    bw = CUR_W * scale;
+    bh = CUR_H * scale;
+    if (nx + bw > (int)gfx_w) bw = (int)gfx_w - nx;
+    if (ny + bh > (int)gfx_h) bh = (int)gfx_h - ny;
+    if (bw < 0) bw = 0;
+    if (bh < 0) bh = 0;
+  }
+  if (cursor_saved) {
+    if (show && nx == old_mx && ny == old_my && bw == cur_bw && bh == cur_bh)
+      keep = 1;          /* mesma caixa: fora do retangulo a seta ja esta la */
+    else if (old_mx >= x0 && old_my >= y0 && old_mx + cur_bw <= x1 && old_my + cur_bh <= y1)
+      cursor_saved = 0;  /* a copia cobre a seta velha inteira */
+    else
+      rc_restore();
+  }
+  for (r = y0; r < y1; r++) {
+    const uint32_t* src = (const uint32_t*)(gfx_back + (uint32_t)r * gfx_w * 4u);
+    volatile uint32_t* dst = (volatile uint32_t*)(gfx_lfb + ((uint32_t)r + gfx_front_y) * gfx_pitch_bytes);
+    int a, b, x, dy;
+    if (!show || r < ny || r >= ny + bh || nx >= x1 || nx + bw <= x0) {
+      rc_movs(dst + x0, src + x0, (uint32_t)(x1 - x0));
+      continue;
+    }
+    a = nx > x0 ? nx : x0;
+    b = nx + bw < x1 ? nx + bw : x1;
+    dy = r - ny;
+    if (a > x0) rc_movs(dst + x0, src + x0, (uint32_t)(a - x0));
+    for (x = a; x < b; x++) {
+      int dx = x - nx;
+      uint32_t bg = src[x];
+      char c = cur_row[dy / scale][dx / scale];
+      cursor_under[dy * bw + dx] = rc_swap02(bg);
+      dst[x] = c == ' ' ? bg : c == 'W' ? white : black;
+    }
+    if (x1 > b) rc_movs(dst + b, src + b, (uint32_t)(x1 - b));
+  }
+  if (!show) return;
+  if (!keep) {
+    /* pedaco da caixa fora do retangulo: o fundo e o que a tela tem */
+    int dy, dx;
+    for (dy = 0; dy < bh; dy++)
+      for (dx = 0; dx < bw; dx++) {
+        int x = nx + dx, y = ny + dy;
+        char c;
+        if (x >= x0 && x < x1 && y >= y0 && y < y1) continue;
+        cursor_under[dy * bw + dx] = rc_get(x, y);
+        c = cur_row[dy / scale][dx / scale];
+        if (c != ' ') rc_put(x, y, c == 'W' ? PIXA(255, 255, 255) : PIXA(0, 0, 0));
+      }
+  }
+  old_mx = nx;
+  old_my = ny;
+  cur_bw = bw;
+  cur_bh = bh;
+  cursor_saved = 1;
+  rc_draws++;
 }
 
 /* 1 se o mundo esta desenhando direto na pagina visivel (fora de quadro). */
@@ -9929,6 +10094,34 @@ static void gw_toggle_max(struct gui_win* g) {
   }
 }
 
+/* k_gui_max (o WINE.DLL chama no Ctrl+Enter que o programa nao usou): o
+ * pedido fica aqui e o laco do WIN troca o tamanho (gui_max_pump), porque
+ * gw_set_rect troca o buffer da janela e a chamada pode vir de uma thread do
+ * programa. op: 0 restaura, 1 amplia, 2 troca; < 0 so consulta. Devolve 1 se
+ * a janela esta ampliada agora, 0 se nao, -1 sem janela. */
+static uint8_t gui_max_req[GUI_MAX];   /* 0 = nada; senao op + 1 */
+int gui_max_set(int op) {
+  if (!gui_ok()) return -1;
+  if (op >= 0 && op <= 2 && !gui.panel) {
+    gui_max_req[gui_ix] = (uint8_t)(op + 1);
+    win_api_dirty = 1;
+  }
+  return gw_is_max(&gui);
+}
+
+static void gui_max_pump(void) {
+  int i;
+  if (!gwins) return;
+  for (i = 0; i < GUI_MAX; i++) {
+    int op = gui_max_req[i];
+    if (!op) continue;
+    gui_max_req[i] = 0;
+    op--;
+    if (!gwins[i].open || gwins[i].panel || gwins[i].min) continue;
+    if (op == 2 || op != gw_is_max(&gwins[i])) gw_toggle_max(&gwins[i]);
+  }
+}
+
 static int wm_is_max(struct wm_win* w) {
   int x0, tw;
   gfx_tela_de(w->x + w->w / 2, &x0, &tw);
@@ -11801,14 +11994,18 @@ static int wm_no_partial; /* menu ou dialogo aberto: ficam sobre a janela */
  * fica com o retangulo novo, sem problema: o proximo quadro inteiro refaz tudo. */
 static int wm_present_win(struct wm_win* w) {
   int x0 = w->x, y0 = w->y, x1 = w->x + w->w, y1 = w->y + w->h;
-  int over, r;
+  int over, r, rcm;
   if (w->min) return 1;   /* minimizada: nada aparece */
   if (!gfx_bochs || !c_wins || wm_no_partial || dc.on || dc.capture) return 0;
   if (!gfx_dbuf && !gfx_back) return 0;
   if (chrome_menu && *chrome_menu) return 0;
   /* Fora da area livre (sobre a barra de tarefas, por exemplo). */
   if (x0 < 0 || y0 < 0 || x1 > (int)gfx_w || y1 > (int)gfx_h - c_bar_h) return 0;
-  over = cursor_saved && old_mx < x1 && old_mx + cur_bw > x0 &&
+  /* Seta da RIT: fica na tela enquanto a janela e pintada no back buffer, e a
+   * copia a compoe (rc_copy_rect). Tirar antes fazia a seta sumir durante a
+   * pintura inteira: piscava a cada tecla no Command. */
+  rcm = rit_run && rc_copy_ok();
+  over = !rcm && cursor_saved && old_mx < x1 && old_mx + cur_bw > x0 &&
          old_my < y1 && old_my + cur_bh > y0;
   if (over) cursor_restore();
   gfx_frame_begin();
@@ -11820,9 +12017,18 @@ static int wm_present_win(struct wm_win* w) {
   paint_h = w->h;
   paint_stacked(c_wins, c_title_h, c_scale, c_win, c_title, c_white, c_black, c_btn, c_inactive);
   paint_only = 0;
-  for (r = y0; r < y1; r++)
-    dc_copy((volatile uint32_t*)(gfx_lfb + ((uint32_t)r + gfx_front_y) * gfx_pitch_bytes + (uint32_t)x0 * 4u),
-            (const volatile uint32_t*)gfx_at(x0, r), (uint32_t)(x1 - x0));
+  if (rcm) {
+    uint64_t f = rc_take();
+    if (rc_copy_ok()) {
+      rc_copy_rect(x0, y0, x1, y1);
+      rcm = 2;
+    }
+    rc_drop(f);
+  }
+  if (rcm != 2)
+    for (r = y0; r < y1; r++)
+      dc_copy((volatile uint32_t*)(gfx_lfb + ((uint32_t)r + gfx_front_y) * gfx_pitch_bytes + (uint32_t)x0 * 4u),
+              (const volatile uint32_t*)gfx_at(x0, r), (uint32_t)(x1 - x0));
   gfx_offscreen = 0;
   gfx_draw_y0 = gfx_front_y;
   if (over) cursor_redraw_at(old_mx, old_my, sys_cursor_col());
@@ -12165,6 +12371,7 @@ static int win_wm_run_u(void) {
       }
     }
     gui_paste_pump();
+    gui_max_pump();
     if (win_api_dirty) {
       /* 2: so janelas de programa mudaram; vira need_draw 2 se nada mais pediu */
       need_draw = win_api_dirty == 2 && need_draw != 1 ? 2 : 1;
@@ -12185,6 +12392,7 @@ static int win_wm_run_u(void) {
     }
     mx = sys_mx;
     my = sys_my;
+    winrun_service();
     if (launch_pending) {
       launch_pending = 0;
       if (launch_arg[0]) wm_open_with(wins, &focus, big, launch_path, launch_arg);
@@ -13497,8 +13705,12 @@ static int win_wm_run_u(void) {
       if (kbd_e0 && !kp) {
         kbd_e0 = 0;
         if (!(sc & 0x80) && gwins && gui_focus >= 0 && gui_focus < GUI_MAX && gwins[gui_focus].open) {
+          /* Setas, Home, End...: o ev[1] leva os modificadores (bit 0 Shift,
+           * 1 Ctrl, 2 Alt). O WINE faz deles WM_KEYDOWN e GetKeyState: no
+           * Chromium Ctrl+seta pula palavra e Shift+seta marca o texto. */
           int k = gui_key_ext(sc);
-          if (k) gq_push(&gwins[gui_focus], GUI_EV_KEY, 0, 0, k);
+          int mods = (keymap_shift() ? 1 : 0) | (kbd_ctrl_down() ? 2 : 0) | (kbd_alt_down() ? 4 : 0);
+          if (k) gq_push(&gwins[gui_focus], GUI_EV_KEY, mods, 0, k);
           continue;
         }
         if (note_dlg && !(sc & 0x80)) {
@@ -13645,7 +13857,11 @@ static int win_wm_run_u(void) {
           continue;
         }
         if (gwins && gui_focus >= 0 && gui_focus < GUI_MAX && gwins[gui_focus].open) {
-          int k = (c == '\n') ? '\r' : (unsigned char)c;
+          /* Enter chega como 13 e Ctrl+Enter como 10 (o LF do DOS): o
+           * programa decide. O WINE.DLL faz dele o Ctrl+Enter do Windows
+           * (quebra de linha no campo; sem campo, amplia por k_gui_max); quem
+           * trata 10 como Enter (gui.c, Firefox) segue igual. */
+          int k = (c == '\n') ? (kbd_ctrl_down() ? '\n' : '\r') : (unsigned char)c;
           /* Ctrl+letra chega como caractere de controle (Ctrl+C = 3), como no
            * terminal. Ctrl+V cola a area de transferencia do kernel como
            * teclas, a nao ser que o programa a trate (k_gui_clip). Ctrl+H, I,
@@ -13662,6 +13878,16 @@ static int win_wm_run_u(void) {
             }
           }
           gq_push(&gwins[gui_focus], GUI_EV_KEY, 0, 0, k);
+          continue;
+        }
+        /* Ctrl+Enter numa janela do WIN: no Bloco de notas e quebra de linha
+         * (segue abaixo, como o Enter); nas outras (Command no prompt,
+         * gerenciador, configuracoes...) amplia ou restaura, como o botao ao
+         * lado do X. Programa rodando no Command recebe a tecla (tty, acima). */
+        if (c == '\n' && kbd_ctrl_down() && focus >= 0 && wins[focus].used &&
+            !wins[focus].min && wins[focus].kind != WM_KIND_NOTE) {
+          wm_toggle_max(&wins[focus], scale);
+          need_draw = 1;
           continue;
         }
         /* Ctrl+C copia, Ctrl+X recorta, Ctrl+V cola e Ctrl+A marca tudo, no

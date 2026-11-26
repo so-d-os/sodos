@@ -645,6 +645,64 @@ static void caixa(int cy, int r, int t, int lx, int xr) {
   }
 }
 
+/* Cursor da busca: barra alta de pontas redondas, azul claro, com um halo
+ * em duas camadas. Pisca com o menu aberto (o teclado e dele: clique nos
+ * icones por tras nao tira o foco) e fica aceso enquanto se digita. Cada
+ * passo da piscada refaz so o retangulo dele: o fundo dali (caixa e texto,
+ * sem o cursor) fica guardado em g_kbg. */
+#define C_KCOR 0x5AB0FFu
+#define C_KHALO 0x2F80D0u
+#define KBG_MAX (48 * 160)
+static unsigned g_kbg[KBG_MAX];
+static int g_kok;                     /* fundo guardado: pode piscar */
+static int g_kx, g_ky, g_kw, g_kh;    /* retangulo do cursor com o halo */
+static int g_kcx, g_ktop, g_kalt, g_kbar;
+
+/* Cursor com o centro em cx, na linha de base base da fonte da busca. */
+static void cursor_lugar(int cx, int base) {
+  g_kbar = F_BUSCA.px / 8 < 3 ? 3 : F_BUSCA.px / 8;
+  g_kalt = F_BUSCA.asc + F_BUSCA.desc / 2 + 6;
+  g_ktop = base - F_BUSCA.asc - 3;
+  g_kcx = cx;
+  g_kx = cx - g_kbar / 2 - 7;
+  g_kw = g_kbar + 14;
+  g_ky = g_ktop - 5;
+  g_kh = g_kalt + 10;
+  if (g_kx < g_fx0) g_kx = g_fx0;
+  if (g_kx + g_kw > g_fx0 + g_fw) g_kw = g_fx0 + g_fw - g_kx;
+  if (g_ky < 0) g_ky = 0;
+  if (g_ky + g_kh > g_ph) g_kh = g_ph - g_ky;
+  g_kok = g_kw > 0 && g_kh > 0 && g_kw * g_kh <= KBG_MAX;
+}
+
+/* O que esta no retangulo agora (tudo menos o cursor) vira o fundo dele. */
+static void cursor_guarda(void) {
+  int y;
+  if (!g_kok) return;
+  for (y = 0; y < g_kh; y++)
+    memcpy(g_kbg + y * g_kw, lin(g_ky + y) + (g_kx - g_fx0), (size_t)g_kw * 4);
+}
+
+/* Fundo de volta e o cursor com alfa a (0 = apagado). */
+static void cursor_pinta(int a) {
+  int y, x0 = g_kcx - g_kbar / 2;
+  if (!g_kok) return;
+  for (y = 0; y < g_kh; y++)
+    memcpy(lin(g_ky + y) + (g_kx - g_fx0), g_kbg + y * g_kw, (size_t)g_kw * 4);
+  if (a <= 0) return;
+  rrect(x0 - 6, g_ktop - 4, g_kbar + 12, g_kalt + 8, g_kbar / 2 + 6, C_KHALO, a * 40 / 255);
+  rrect(x0 - 3, g_ktop - 2, g_kbar + 6, g_kalt + 4, g_kbar / 2 + 3, C_KHALO, a * 85 / 255);
+  rrect(x0, g_ktop, g_kbar, g_kalt, g_kbar / 2, C_KCOR, a);
+}
+
+/* Um passo da piscada: so o retangulo do cursor vai para a janela. */
+static void cursor_passo(int a) {
+  if (!g_kok) return;
+  cursor_pinta(a);
+  k_gui_pixels(g_kx, g_ky, g_kw, g_kh, lin(g_ky) + (g_kx - g_fx0), g_fw * 4);
+  k_gui_present();
+}
+
 /* Com a fonte TrueType: tudo no quadro, com alfa. So as linhas que mudam
  * sao limpas e mandadas: de cima do cartao (o de agora ou o anterior) ate o
  * fim da caixa. */
@@ -696,14 +754,17 @@ static void desenha_ttf(void) {
   /* texto: se nao cabe, mostra o fim (o que se esta digitando) */
   if (g_nq) {
     int ini = 0, w;
-    while (ini < g_nq && tx + txt_larg(&F_BUSCA, g_q + ini, g_nq - ini) + 8 > fim) ini++;
+    while (ini < g_nq && tx + txt_larg(&F_BUSCA, g_q + ini, g_nq - ini) + 18 > fim) ini++;
     w = txt(&F_BUSCA, tx, base, g_q + ini, g_nq - ini, C_TEXT, 255, 0);
-    rrect(tx + w + 3, base - F_BUSCA.asc + 2, 3, F_BUSCA.asc + F_BUSCA.desc / 2, 1, C_ACCENT, 255);
+    cursor_lugar(tx + w + 9, base);
   } else {
     const char* ph = "Buscar programas";
-    rrect(tx - 1, base - F_BUSCA.asc + 2, 3, F_BUSCA.asc + F_BUSCA.desc / 2, 1, C_ACCENT, 255);
-    txt(&F_BUSCA, tx + 10, base, ph, (int)strlen(ph), C_DIM, 170, fim);
+    txt(&F_BUSCA, tx + 14, base, ph, (int)strlen(ph), C_DIM, 170, fim);
+    cursor_lugar(tx + 1, base);
   }
+  /* o cursor por ultimo, aceso; o fundo dele fica guardado para piscar */
+  cursor_guarda();
+  cursor_pinta(255);
   if (ate > de) k_gui_pixels(g_fx0, de, g_fw, ate - de, lin(de), g_fw * 4);
   k_gui_present();
   g_top_ant = top;
@@ -740,6 +801,7 @@ static void desenha(void) {
   }
   g_ry0 = 0;
   g_ry1 = g_ph;
+  g_kok = 0;                                     /* sem TTF: cursor parado */
   memset(g_frame, 0, (size_t)g_fw * g_ph * 4);   /* tudo invisivel */
   desenha_bitmap();
 }
@@ -836,9 +898,14 @@ static int quadro(void) {
   return 1;
 }
 
+/* Piscada do cursor: alfa e quanto tempo fica (ms). Aceso, apaga em dois
+ * passos, apagado, acende em dois passos: ~1 s por volta, 6 desenhos. */
+static const int pisca_a[6] = { 255, 160, 70, 0, 110, 200 };
+static const int pisca_ms[6] = { 530, 50, 50, 330, 50, 50 };
+
 /* Uma abertura do menu: da tecla Win ate fechar. */
 static void sessao(void) {
-  int sw, sh, bar;
+  int sw, sh, bar, fase = 0;
   if (k_win_primary(&sw, &sh) != 0 && k_win_size(&sw, &sh) != 0) return;
   bar = k_winmenu(K_WM_BARRA, 0);
   if (bar <= 0) bar = 40;
@@ -861,7 +928,15 @@ static void sessao(void) {
   desenha();
   for (;;) {
     int ev[4], t;
-    t = k_gui_event(ev, 1000);
+    t = k_gui_event(ev, g_kok ? pisca_ms[fase] : 1000);
+    if (t == 0) {
+      /* passou o tempo da fase: proximo passo da piscada */
+      if (g_kok) {
+        fase = (fase + 1) % 6;
+        cursor_passo(pisca_a[fase]);
+      }
+      continue;
+    }
     if (t < 0 || t == EV_CLOSE) {
       /* o WIN pediu (tecla Win de novo ou uma janela apareceu) */
       fecha(0);
@@ -896,6 +971,7 @@ static void sessao(void) {
       }
       /* a melhor fica em cima (selecao 0); as setas andam como na tela */
       desenha();
+      fase = 0;   /* digitando: o cursor fica aceso e a piscada recomeca */
     } else if (t == EV_DOWN) {
       int c = hit(ev[1], ev[2]);
       if (c >= 0) {

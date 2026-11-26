@@ -36,6 +36,23 @@ endpoint e portas ficam com o mundo (`xhci_mouse_maint`).
 - Com MSI a RIT so acorda quando ha evento (246 voltas em vez de ~1000 por
   segundo).
 
+## Seta sem piscar (build 76)
+
+Com back buffer copiado pela CPU, cada quadro copiava a tela inteira (9 MB
+em 1920x1200) por cima da seta e so no fim `rc_shown` a desenhava de novo.
+Com um programa animando (o Claude, ~10 quadros/s com o mouse parado:
+`RIT` mostrava `seta=` subindo sem `eventos=` mudar), a seta sumia por
+uns milissegundos a cada quadro e o mouse piscava. O mesmo no
+`wm_present_win` (tecla no Command): `cursor_restore` antes de pintar a
+janela inteira.
+
+Agora `rc_copy_rect` copia linha a linha e, nas linhas da seta, compoe a
+seta sobre o fundo do back buffer antes de gravar: a tela nunca fica sem
+ela, e o fundo guardado (`cursor_under`) sai do proprio back buffer. Vale
+para o quadro inteiro (`gfx_copy_back`) e para a janela sozinha
+(`wm_present_win`). Pagina dupla e driver de placa seguem como antes
+(`rc_copy_ok`).
+
 ## Limites
 
 - O programa so reage quando o laco do WIN o roda: se o mundo para, a seta

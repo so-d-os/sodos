@@ -1232,6 +1232,13 @@ static int k_alttab_wait(int seq, int ms) { return kt_in_thread() ? -1 : alttab_
 /* Tecla Win (WINMENU.EXE) e janela transparente (k_gui_transp). */
 static int k_winmenu(int op, int arg) { return kt_in_thread() ? -1 : winmenu_api(op, arg); }
 static int k_gui_transp(int on) { return gui_transp_set(on); }
+/* Ampliar/restaurar a janela do programa (Ctrl+Enter fora de campo no WINE). */
+static int k_gui_max(int op) {
+  int g = gui_thread_enter();
+  int r = gui_max_set(op);
+  gui_thread_leave(g);
+  return r;
+}
 static int k_win_size(int* w, int* h) { return win_screen_size(w, h) ? 0 : -1; }
 static int k_win_primary(int* w, int* h) { return win_primary_size(w, h) ? 0 : -1; }
 static int k_gui_panel(const char* title, int x, int y, int w, int h) {
@@ -1824,6 +1831,8 @@ static const struct kexp table[] = {
   /* tecla Win (WINMENU.EXE) e janela transparente */
   EXP(k_winmenu),
   EXP(k_gui_transp),
+  /* ampliar/restaurar a janela do programa (build 76) */
+  EXP(k_gui_max),
 };
 
 #define NEXP (sizeof(table) / sizeof(table[0]))

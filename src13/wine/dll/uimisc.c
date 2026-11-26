@@ -1021,10 +1021,7 @@ static WINAPI BOOL SetWindowPlacement(HANDLE h, const struct wplacement* p) {
       0x14); /* SWP_NOZORDER|SWP_NOACTIVATE */
   return 1;
 }
-static WINAPI HANDLE WindowFromPoint(struct point pt) {
-  (void)pt;
-  return 0;
-}
+/* WindowFromPoint: em user.c (precisa do hit_top) */
 static WINAPI HANDLE ChildWindowFromPointEx(HANDLE h, struct point pt, DWORD fl) {
   (void)pt;
   (void)fl;
@@ -1681,7 +1678,7 @@ const struct wine_sym uimisc_syms[] = {
     S(RegisterDragDrop), S(RevokeDragDrop), S(DoDragDrop), S(SetScrollInfo), S(GetScrollInfo), S(SetScrollPos),
     S(GetScrollPos), S(SetScrollRange), S(GetScrollRange), S(ShowScrollBar), S(EnableScrollBar),
     S(GetScrollBarInfo), S(ScrollWindowEx), S(ScrollWindow), S(GetWindowPlacement), S(SetWindowPlacement),
-    S(WindowFromPoint), S(ChildWindowFromPointEx), S(GetLastActivePopup), S(FlashWindow), S(FlashWindowEx),
+    S(ChildWindowFromPointEx), S(GetLastActivePopup), S(FlashWindow), S(FlashWindowEx),
     S(keybd_event), S(SendInput), S(GetComboBoxInfo), S(EnumDisplayMonitors), S(MessageBeep), S(Beep),
     S(IsCharAlphaW), S(IsCharAlphaNumericW), S(CreateIconIndirect), S(CreateIcon), S(GetIconInfo),
     S(LoadIconMetric), S(LoadIconWithScaleDown), S(ImageList_Create), S(ImageList_Destroy),

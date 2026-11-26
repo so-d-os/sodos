@@ -450,6 +450,11 @@ int k_winmenu(int op, int arg);
  * quadro; a janela fica colorida. Kernels antes do build 74 ignoram o bit. */
 #define K_TRANSP_CINZA 2
 int k_gui_transp(int on);
+/* Janela do programa: op 1 amplia, 0 restaura, 2 troca (como o botao ao lado
+ * do X); op < 0 so consulta. Devolve 1 ampliada, 0 nao, -1 sem janela. O WIN
+ * aplica no proximo quadro e o programa recebe GUI_EV_RESIZE. Build 76; quem
+ * roda em kernel antigo procura com k_dl_sym(0, "k_gui_max", 0). */
+int k_gui_max(int op);
 /* Abre o arquivo com o programa associado a extensao (LINKEXT.DLL, SET
  * LINKEXT=1). 0 = abriu; 1 = sem associacao ou LINKEXT desligado. */
 int k_open_file(const char* path);

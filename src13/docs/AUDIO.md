@@ -89,7 +89,31 @@ Os experimentos saíram do `AUDIO.DLL` (o driver só grava o estado do codec no 
 1. Linux com `trace_event=hda:* trace_buf_size=16M` na linha do kernel e o `D:\TEMP\COLETA4.SH`: os comandos do **primeiro** contato do Linux com o codec frio (o rastreio que temos é de uma religação);
 2. Linux com `modprobe.blacklist=snd_hda_intel` e reboot quente para o SODOS: se tocar, o estado não vem do driver de som do Linux, e sim de outra parte do boot dele (ACPI, amdgpu...).
 
-Falta também testar o fone (pino 16).
+3. `D:\TEMP\SOMTEST7.BAT` (26/11, ainda não rodado a frio), sem teclas: toca um tom sem mudar nada (A), depois de gravar `00` no byte `0xA7` do EC (B), depois de refazer as escritas `SSD1`/`SSD2` do `_REG` do EC (C) e, por fim, no fone (D). Grava as fotos `FOTO2F.TXT` (antes) e `FOTO2G.TXT` (depois); num boot vindo do Linux, `SOMDIAG FOTO > D:\TEMP\FOTO2Q.TXT` dá a foto para comparar.
+
+O `0xA7` entrou porque vale `09` na foto fria e `00` na quente de 25/11 (bit 0 = `WOLE`, bit 3 sem nome) e não tinha sido testado. Pista fraca: em 26/11, num boot com `0x12` e `0x2D` em `00` (como no frio), ele já valia `00`.
+
+O `SOMDIAG.EXE` (`utils/somdiag.c`) lê e grava a RAM do EC (`SOMDIAG EC [aa [vv]]`) e fotografa o que as fotos antigas não tinham: SMI, PM, PM2, IOMUX, MISC, GPIO remoto e AOAC do FCH (`0xFED80000`), além dos 256 GPIOs (`SOMDIAG FCH`, `SOMDIAG FOTO`). Só o `EC aa vv` e o `REG` gravam. Ele mapeia a página do FCH se o kernel ainda não mapeou.
+
+O fone (pino 16) é o passo D do `SOMTEST7.BAT`.
+
+**Fotos de 26/11 à tarde** (`D:\TEMP\FOTO2A.TXT` e `FOTO2F.TXT` no boot frio, mudo; `FOTO2Q.TXT` no boot vindo do Linux, tocando): EC e FCH **descartados**. A única diferença firme é o byte `0xC2` do PM (`20` no frio, `08` no quente), que é a causa do último reset (`S5/Reset Status`), efeito e não causa. O resto que muda (EC `0x2B`, `0x2D`, `0x4B`, `0x6D`, `0x6F`–`0x77`; MISC `0xBB`; AOAC `0x30`–`0x33`; nível lido dos GPIOs `4A`, `4B` e `82`) muda também entre duas fotos do mesmo boot frio. O `0xA7` do EC valia `00` no frio: descartado.
+
+A foto ganhou a configuração PCI (256 bytes) de todas as funções (`SOMDIAG PCI`). Comparando o frio (`D:\TEMP\FOTO3F.TXT`, `SOMFOTO.BAT`) com o quente (`FOTO3Q.TXT`): **nenhum byte de configuração PCI difere**, em nenhuma das 30 funções. PCI **descartado**. O nível do GPIO `82` (130) saiu 1 nas três fotos frias e 0 nas duas quentes de 26/11, mas vale 1 na foto quente de 25/11 e no Linux tocando: não acompanha o som.
+
+**Teste 2 feito em 26/11 à noite:** Linux com `module_blacklist=snd_hda_intel` (o `modprobe.blacklist=` não segurou o módulo neste kernel), sem som no Linux, reboot quente para o SODOS: **o alto-falante tocou**. O estado não vem do driver HD Audio do Linux nem do primeiro contato dele com o codec; vem de outra parte do boot do Linux. Próximo corte: `module_blacklist=snd_hda_intel,amdgpu,snd_pci_acp3x,snd_rn_pci_acp3x,snd_pci_acp5x,snd_acp_config`. Falta também o controle SODOS frio → reboot quente → SODOS.
+
+**ACP descartado (26/11 à noite):** com `module_blacklist=snd_hda_intel,snd_pci_acp3x,snd_rn_pci_acp3x,snd_pci_acp5x,snd_acp_config` o SODOS tocou depois do reboot quente. Com o `amdgpu` também na lista o Linux parou em "Loading initial ramdisk" (provavelmente só sem tela, por causa do `quiet splash`). Sobram o `amdgpu` e o kernel sem módulo (ACPI, EC, GPIO): o corte seguinte é `nomodeset module_blacklist=snd_hda_intel`, sem o `quiet splash=silent`.
+
+**`amdgpu` descartado, com ressalva (26/11 à noite):** com `module_blacklist=snd_hda_intel,amdgpu` o Linux ficou sem tela em "Loading initial ramdisk", o Caps Lock não respondeu, o Ctrl+Alt+Del reiniciou a máquina e o SODOS **tocou**. Às cegas não deu para conferir o `lsmod` nem saber até onde o Linux chegou. O que sobra é o começo do kernel do Linux (ACPI, EC, GPIO) ou **o reboot quente em si**: o firmware pode ligar o amplificador só no caminho do reset, e o reset do Linux (`0xCF9`, PM `0xC2` = `08`) não é o do SODOS, que tenta antes o `0xFE` do 8042 (`kernel/reboot.c`). O controle SODOS frio → reboot → SODOS decide.
+
+**Controle feito (26/11 à noite): SODOS frio → reboot → SODOS fica mudo.** O PM `0xC2` desse boot vale `08`, o mesmo do reboot vindo do Linux, então o tipo de reset é igual e não é ele. Sobra o começo do kernel do Linux, antes dos módulos; o primeiro suspeito é o ACPI (o SODOS não roda AML: `_INI`, `_PIC`, `_REG` do EC com `ALIB 0x0C`, `_PS0`/`_ON`). Próximo corte: Linux com `acpi=off module_blacklist=snd_hda_intel`.
+
+**`acpi=off` deixa mudo (26/11 à noite):** Linux com `acpi=off module_blacklist=snd_hda_intel`, às cegas (Caps Lock sem resposta, Ctrl+Alt+Del reiniciou), e o SODOS ficou **mudo**. No teste anterior, igual mas com ACPI, tocou: o que liga o alto-falante é o ACPI do Linux (AML da BIOS), antes de qualquer módulo.
+
+No DSDT, fora o `_REG`, quem age no começo: `_PIC` (`DSPI`, `NAPE`), `_INI` do `PCI0` (`OSTP`, `OSFL`, que só leem o `_OSI`) e os eventos do EC. Dois deles disparam SMI por software: `_Q40` (`APMD` = 2, `APMC` = `C0`) e `_Q41` (`APMD` = 1, `APMC` = `C0`), nas portas `B3`/`B2`. O teste de 26/11 de manhã leu os eventos (`QR_EC`) mas não rodou o `_Qxx`, então esse SMI nunca foi mandado pelo SODOS. `D:\TEMP\SOMTEST8.BAT` manda os dois (`SOMDIAG SMI C0 01` e `02`) com um tom depois de cada. `SOMDIAG Q` lista os eventos pendentes do EC (nenhum no boot mudo de 26/11).
+
+Com isso, EC, FCH e PCI estão iguais no frio e no quente. O estado está dentro de algum dispositivo (parte analógica do codec, ACP, SMU, algo por I2C) ou no EC fora da RAM visível, e comparar fotos não acha mais nada: o que resta é dividir o boot do Linux (teste 2 acima e, conforme o resultado, a lista negra de `amdgpu` e dos `snd_*acp*`).
 
 ## Limites
 

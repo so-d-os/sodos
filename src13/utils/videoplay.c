@@ -1,5 +1,7 @@
 /* videoplay.c - player de video do WIN. Nome 8.3: VIDPLAY.EXE
- *   cc -o vidplay.exe videoplay.c gui.dll img.dll
+ *   cc -o vidplay.exe videoplay.c gui.dll imgbig.dll
+ * IMGBIG.DLL e o IMG.DLL com limite de 3840 px: com o IMG.DLL (800 px) um
+ * quadro 1920x1200 sai em 640x400.
  * Abre o arquivo da linha de comando.
  * Reproduz MJPEG e RGB dentro de AVI, MOV e MP4, e uma sequencia de JPEG.
  * Espaco pausa, setas trocam o quadro, Esc fecha. Sem som. */
@@ -761,6 +763,57 @@ static void fit_rect(int sw, int sh, int iw, int ih, int* x, int* y, int* w, int
   if (*y < 0) *y = 0;
 }
 
+/* Reducao por media de area (caixa). O gui_image escala pelo pixel mais
+ * proximo: reduzir 1920 -> 1550 colunas joga fora uma coluna em cada cinco e o
+ * texto fino de uma gravacao de tela vira serrilhado. Aqui cada pixel de
+ * saida e a media do retangulo de origem que ele cobre. */
+static unsigned char* sc_buf;
+static int sc_cap;
+static int* sc_x;
+static int sc_xcap;
+
+static const unsigned char* box_scale(const img_t* im, int w, int h) {
+  int ox, oy, need = w * h * 4;
+  unsigned char* d;
+  if (need > sc_cap) {
+    free(sc_buf);
+    sc_buf = (unsigned char*)malloc(need);
+    sc_cap = sc_buf ? need : 0;
+  }
+  if (w + 1 > sc_xcap) {
+    free(sc_x);
+    sc_x = (int*)malloc((w + 1) * sizeof(int));
+    sc_xcap = sc_x ? w + 1 : 0;
+  }
+  if (!sc_buf || !sc_x) return 0;
+  for (ox = 0; ox <= w; ox++) sc_x[ox] = (int)((long)ox * im->w / w);
+  d = sc_buf;
+  for (oy = 0; oy < h; oy++) {
+    int y0 = (int)((long)oy * im->h / h), y1 = (int)((long)(oy + 1) * im->h / h);
+    if (y1 <= y0) y1 = y0 + 1;
+    for (ox = 0; ox < w; ox++) {
+      int x0 = sc_x[ox], x1 = sc_x[ox + 1], yy, xx, n;
+      unsigned r = 0, g = 0, b = 0;
+      if (x1 <= x0) x1 = x0 + 1;
+      for (yy = y0; yy < y1; yy++) {
+        const unsigned char* s = im->rgba + ((long)yy * im->w + x0) * 4;
+        for (xx = x0; xx < x1; xx++, s += 4) {
+          r += s[0];
+          g += s[1];
+          b += s[2];
+        }
+      }
+      n = (y1 - y0) * (x1 - x0);
+      d[0] = (unsigned char)(r / n);
+      d[1] = (unsigned char)(g / n);
+      d[2] = (unsigned char)(b / n);
+      d[3] = 255;
+      d += 4;
+    }
+  }
+  return sc_buf;
+}
+
 static int key_frame(int key, int* frame, int n, int* paused, int* alive) {
   if (key == 27 || key == 'q') {
     *alive = 0;
@@ -809,6 +862,7 @@ int main(int argc, char** argv) {
     img_t im;
     char msg[180];
     int sw, sh, ch, x, y, w, h;
+    unsigned t_dec = 0;
     im.rgba = 0;
     im.w = im.h = 0;
     sw = gui_width();
@@ -829,6 +883,7 @@ int main(int argc, char** argv) {
     }
     if (frame < 0) frame = 0;
     if (frame >= vid.nframes) frame = 0;
+    t_dec = k_ms();
     vid_frame(&vid, frame, &im);
     if (im.rgba && im.w > 0)
       fit_rect(sw, sh, im.w, im.h, &x, &y, &w, &h);
@@ -837,11 +892,15 @@ int main(int argc, char** argv) {
       w = h = 0;
       gui_text(16, 24, "Quadro sem imagem", -1, 0xFFFFFF, 0x101010, GUI_TEXT_NOBG);
     }
-    if (im.rgba && w > 0)
-      gui_image(x, y, w, h, im.rgba, im.w, im.h, 0, 0, sw, sh - ch - 8);
-    snprintf(msg, sizeof msg, "%s  %d/%d  %s  %d ms  %s  sem som   espaco pausa  setas  Esc",
+    if (im.rgba && w > 0) {
+      const unsigned char* sc = (w < im.w || h < im.h) ? box_scale(&im, w, h) : 0;
+      if (sc) gui_pixels(x, y, w, h, sc, w * 4);
+      else gui_image(x, y, w, h, im.rgba, im.w, im.h, 0, 0, sw, sh - ch - 8);
+    }
+    t_dec = k_ms() - t_dec;
+    snprintf(msg, sizeof msg, "%s  %d/%d  %s  %d ms  %s  %dx%d -> %dx%d  %u ms/quadro  sem som   espaco pausa  setas  Esc",
              vid.codec, frame + 1, vid.nframes, paused ? "pausa" : "play", vid.frame_ms,
-             base_name(path));
+             base_name(path), im.w, im.h, w, h, t_dec);
     gui_fill(0, sh - ch - 8, sw, ch + 8, 0x000000);
     gui_text(8, sh - ch - 4, msg, -1, 0xE0E0E0, 0x000000, GUI_TEXT_NOBG);
     gui_present();
@@ -854,8 +913,13 @@ int main(int argc, char** argv) {
       unsigned t0 = k_ms();
       int spins = 0;
       while (alive && !paused && (int)(k_ms() - t0) < vid.frame_ms && spins < 20000) {
-        int t = gui_wait(&ev, 0);
+        int t;
+        /* ev so vale quando veio evento: sem isto o lixo da pilha podia
+         * parecer GUI_EV_CLOSE e o player fechava sozinho */
+        ev.type = GUI_EV_NONE;
+        t = gui_wait(&ev, 0);
         spins++;
+        if (t == GUI_EV_NONE) continue;
         if (t == GUI_EV_CLOSE || ev.type == GUI_EV_CLOSE) {
           alive = 0;
           break;

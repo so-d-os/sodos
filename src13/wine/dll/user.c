@@ -1546,6 +1546,9 @@ static struct wwin* top_active(struct wgui* g) {
  * teclado sai da fila; o Chromium pergunta o Ctrl ao tratar o WM_KEYDOWN do
  * V (Ctrl+V colar). Um por WINE.DLL: o teclado e um so. */
 static volatile uint8_t key_down[256];
+/* Ultimo ponto do rato, em coordenadas de tela (= do canvas): GetCursorPos e
+ * WindowFromPoint. */
+static volatile int mouse_sx, mouse_sy;
 static void keystate_track(const struct msg* m) {
   if (m->message == WM_KEYDOWN && m->wparam < 256) key_down[m->wparam] = 1;
   else if (m->message == WM_KEYUP && m->wparam < 256) key_down[m->wparam] = 0;
@@ -1678,21 +1681,44 @@ static void pump_events(struct wgui* g) {
     if (t <= 0) break;
     switch (t) {
       case 1: /* DOWN */
+        mouse_sx = ev[1];
+        mouse_sy = ev[2];
         g->mouse_down = 1;
         mouse_msg(g, ev[3] == 2 ? WM_RBUTTONDOWN : WM_LBUTTONDOWN, ev[3] == 2 ? 2 : 1, ev[1], ev[2]);
         break;
       case 4: /* UP */
+        mouse_sx = ev[1];
+        mouse_sy = ev[2];
         g->mouse_down = 0;
         mouse_msg(g, ev[3] == 2 ? WM_RBUTTONUP : WM_LBUTTONUP, 0, ev[1], ev[2]);
         break;
       case 5: /* DRAG */
       case 8: /* MOVE */
+        mouse_sx = ev[1];
+        mouse_sy = ev[2];
         mouse_msg(g, WM_MOUSEMOVE, g->mouse_down ? 1 : 0, ev[1], ev[2]);
         break;
       case 6: { /* WHEEL */
+        /* Vai para a janela debaixo do rato, com o ponto em coordenadas de
+         * tela no lParam (o WIN manda x, y do canvas). Antes ia para o foco
+         * com lParam 0: o Chromium (RerouteMouseWheel) pergunta o
+         * WindowFromPoint do ponto, recebia 0 e descartava a roda; e o
+         * evento caia no canto (0, 0) da pagina, nao na conversa. */
         struct wwin* a = top_active(g);
         struct wwin* f = a && a->focus ? a->focus : a;
-        if (f) q_push(g, f, WM_MOUSEWHEEL, (uintptr_t)((-ev[3] * 120) << 16), 0, 0);
+        struct wwin* t;
+        int title, x, y;
+        uintptr_t mk = (key_down[0x10] ? 4 : 0) | (key_down[0x11] ? 8 : 0); /* MK_SHIFT, MK_CONTROL */
+        mouse_sx = ev[1];
+        mouse_sy = ev[2];
+        t = hit_top(g, ev[1], ev[2], &title);
+        if (t && !title && t->enabled) {
+          struct wwin* c = hit_child(t, ev[1] - t->cx, ev[2] - t->cy, &x, &y);
+          if (c && c->enabled) f = c;
+        }
+        if (f)
+          q_push(g, f, WM_MOUSEWHEEL, ((uintptr_t)(uint16_t)(-ev[3] * 120) << 16) | mk,
+                 ((intptr_t)(ev[2] & 0xFFFF) << 16) | (ev[1] & 0xFFFF), 0);
         break;
       }
       case 2: { /* KEY */
@@ -1701,6 +1727,19 @@ static void pump_events(struct wgui* g) {
         int ch, vk = vk_of(cp850_uni(ev[3]), &ch);
         if (!a || !a->enabled) break;
         f = a->focus && !a->focus->destroyed ? a->focus : a;
+        /* Ctrl+Enter (o WIN manda 10; o Enter e 13): como no Windows, Ctrl
+         * apertado, VK_RETURN e WM_CHAR 0x0A. Antes ia como Enter puro, sem o
+         * Ctrl: o "Ctrl+Enter to queue" do Claude enviava. O campo
+         * multilinha quebra a linha (ctl.c); quem nao usa a tecla cai no
+         * DefWindowProc, que amplia ou restaura a janela do WIN. */
+        if (ev[3] == 10) {
+          q_push(g, f, WM_KEYDOWN, 0x11, 1, 0);
+          q_push(g, f, WM_KEYDOWN, 0x0D, 1, 0);
+          q_push(g, f, WM_CHAR, '\n', 1, 0);
+          q_push(g, f, WM_KEYUP, 0x0D, (intptr_t)0xC0000001, 0);
+          q_push(g, f, WM_KEYUP, 0x11, (intptr_t)0xC0000001, 0);
+          break;
+        }
         /* Ctrl+letra (o WIN manda 1..26; com k_gui_clip(1) o Ctrl+V tambem):
          * Ctrl, letra, solta letra, solta Ctrl. 8/9/10/13 sao Backspace/Tab/
          * Enter (vk_of). */
@@ -1716,6 +1755,22 @@ static void pump_events(struct wgui* g) {
           q_push(g, f, WM_KEYDOWN, (uintptr_t)L, 1, 0);
           q_push(g, f, WM_KEYUP, (uintptr_t)L, (intptr_t)0xC0000001, 0);
           q_push(g, f, WM_KEYUP, 0x11, (intptr_t)0xC0000001, 0);
+          break;
+        }
+        /* Setas, Home, End, PgUp/PgDn, Del: o WIN (build 77) manda no ev[1]
+         * o Shift (bit 0) e o Ctrl (bit 1) que estavam apertados. Como no
+         * Windows: o modificador desce antes e sobe depois, e o GetKeyState
+         * o ve quando a tecla sai da fila (o Chromium faz Ctrl+seta pular
+         * palavra e Shift+seta marcar). Tecla estendida: bit 24 do lParam. */
+        if (ev[3] >= 0x101 && ev[3] <= 0x109 && vk) {
+          int sh = ev[1] & 1, ct = ev[1] & 2;
+          intptr_t lp = 1 | (1 << 24);
+          if (sh) q_push(g, f, WM_KEYDOWN, 0x10, 1, 0);
+          if (ct) q_push(g, f, WM_KEYDOWN, 0x11, 1, 0);
+          q_push(g, f, WM_KEYDOWN, (uintptr_t)vk, lp, 0);
+          q_push(g, f, WM_KEYUP, (uintptr_t)vk, lp | (intptr_t)0xC0000000, 0);
+          if (ct) q_push(g, f, WM_KEYUP, 0x11, (intptr_t)0xC0000001, 0);
+          if (sh) q_push(g, f, WM_KEYUP, 0x10, (intptr_t)0xC0000001, 0);
           break;
         }
         if (vk) q_push(g, f, WM_KEYDOWN, (uintptr_t)vk, 1, 0);
@@ -1993,6 +2048,25 @@ intptr_t WINAPI wDefWindowProcW(HANDLE h, DWORD m, uintptr_t wp_, intptr_t lp) {
     case WM_SYSCOMMAND:
       if ((wp_ & 0xFFF0) == 0xF060) wsend(w, WM_CLOSE, 0, 0);
       return 0;
+    case WM_MOUSEWHEEL:
+      /* como no Windows: a filha que nao trata a roda passa para a mae */
+      if (w->parent && !w->parent->destroyed) return wsend(w->parent, m, wp_, lp);
+      return 0;
+    case WM_KEYDOWN:
+      /* Ctrl+Enter que o programa nao usou (fora de campo de texto): amplia
+       * ou restaura a janela do WIN, como nas janelas do proprio WIN. O
+       * k_gui_max e do build 76: em kernel antigo nao faz nada. */
+      if (wp_ == 0x0D && key_down[0x11]) {
+        typedef int (*gui_max_fn)(int);
+        static gui_max_fn gmax;
+        static int gmax_tried;
+        if (!gmax_tried) {
+          gmax_tried = 1;
+          gmax = (gui_max_fn)k_dl_sym(0, "k_gui_max", 0);
+        }
+        if (gmax) gmax(2);
+      }
+      return 0;
     case WM_PAINT: {
       struct paintstruct ps;
       BeginPaint(w, &ps);
@@ -2199,6 +2273,13 @@ static WINAPI BOOL SystemParametersInfoW(DWORD a, DWORD b, void* p, DWORD f) {
    * pedia DWRITE_RENDERING_MODE_ALIASED e dwrite.c entregava glifos em
    * preto e branco (texto serrilhado no Claude). Tipo STANDARD = tons de
    * cinza: dwrite.c nao faz ClearType de verdade. */
+  /* Linhas (e colunas) por giro da roda: o padrao do Windows, 3. Antes caia
+   * no "zerado" abaixo, e o Chromium multiplica o giro por isso: o
+   * WM_MOUSEWHEEL chegava e a pagina rolava 0 pixels. */
+  if ((a == 0x68 || a == 0x6C) && p) { /* SPI_GETWHEELSCROLLLINES / CHARS */
+    *(uint32_t*)p = 3;
+    return 1;
+  }
   if (a == 0x4A && p) { /* SPI_GETFONTSMOOTHING */
     *(BOOL*)p = 1;
     return 1;
@@ -2256,8 +2337,21 @@ static WINAPI BOOL DrawIconEx(HANDLE dc, int x, int y, HANDLE icon, int cx, int 
 static WINAPI BOOL DrawIcon(HANDLE dc, int x, int y, HANDLE icon) { return DrawIconEx(dc, x, y, icon, 0, 0, 0, 0, 3); }
 static WINAPI HANDLE SetCursor(HANDLE c) { return c; }
 static WINAPI BOOL GetCursorPos(struct point* p) {
-  p->x = p->y = 0;
+  p->x = mouse_sx;
+  p->y = mouse_sy;
   return 1;
+}
+/* Janela mais funda no ponto (tela = canvas). O Chromium a pergunta para cada
+ * WM_MOUSEWHEEL; com 0 ele descartava a roda. */
+static WINAPI HANDLE WindowFromPoint(struct point pt) {
+  struct wgui* g = gui_get();
+  struct wwin* t;
+  int title, x, y;
+  if (!g) return 0;
+  t = hit_top(g, pt.x, pt.y, &title);
+  if (!t) return 0;
+  if (title) return t;
+  return hit_child(t, pt.x - t->cx, pt.y - t->cy, &x, &y);
 }
 static WINAPI int ShowCursor(BOOL s) { return s ? 1 : 0; }
 static WINAPI short GetKeyState(int vk) {
@@ -2497,7 +2591,7 @@ const struct wine_sym gui_syms[] = {
     S(GetSystemMetricsForDpi), S(GetDpiForSystem), S(GetDpiForWindow), S(SetProcessDPIAware), S(ChangeWindowMessageFilterEx), S(ChangeWindowMessageFilter), S(GetCaretBlinkTime),
     S(SetProcessDpiAwarenessContext), S(SetProcessDpiAwareness), S(AdjustWindowRectEx), S(AdjustWindowRect),
     S(SystemParametersInfoW), S(LoadCursorW), S(LoadIconW), S(LoadImageW), S(DestroyIcon), S(CopyImage),
-    S(DrawIconEx), S(DrawIcon), S(SetCursor), S(GetCursorPos), S(ShowCursor), S(GetKeyState), S(GetAsyncKeyState),
+    S(DrawIconEx), S(DrawIcon), S(SetCursor), S(GetCursorPos), S(WindowFromPoint), S(ShowCursor), S(GetKeyState), S(GetAsyncKeyState),
     S(MonitorFromWindow), S(MonitorFromPoint), S(GetMonitorInfoW), S(MessageBeep), S(SetUserObjectInformationW),
     S(WaitForInputIdle), S(SetProcessDefaultLayout), S(GetSystemMenu), S(EnableMenuItem), S(FlashWindowEx),
     S(IsWindowUnicode), S(SetRect), S(SetRectEmpty), S(CopyRect), S(OffsetRect), S(InflateRect), S(PtInRect),

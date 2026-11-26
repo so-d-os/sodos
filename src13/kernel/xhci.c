@@ -17,6 +17,7 @@
  *   6. mouse: deixa um Normal TRB no interrupt IN e le cada relatorio;
  *   7. disco: CBW, dados e CSW nos dois endpoints bulk (READ(10), WRITE(10)).
  * Um mouse e um disco por vez. Hub USB 3 (SuperSpeed) nao.
+ * Webcam (UVC): so sob pedido (comando webcam), ver a secao "webcam".
  * A memoria e toda de identidade (fisico = virtual) abaixo de 4 GB. */
 #include "kthread.h"
 #include <stdint.h>
@@ -513,8 +514,8 @@ static void ep_reset(struct udev* d, int dci, struct ring* r) {
 
 /* Requisicao de controle no EP0. Os dados ficam em d->buf (ate 1024 bytes).
  * Um STALL (requisicao recusada) para o EP0; o reset deixa ele pronto de novo. */
-static int ctrl(struct udev* d, uint8_t rtype, uint8_t req, uint16_t val, uint16_t idx,
-                uint16_t len) {
+static int ctrl_to(struct udev* d, uint8_t rtype, uint8_t req, uint16_t val, uint16_t idx,
+                   uint16_t len, volatile uint8_t* b) {
   int in = (rtype & 0x80) != 0;
   uint32_t trt = len ? (in ? 3u : 2u) : 0u;
   uint64_t st;
@@ -523,7 +524,7 @@ static int ctrl(struct udev* d, uint8_t rtype, uint8_t req, uint16_t val, uint16
            (uint32_t)idx | ((uint32_t)len << 16), 8u,
            (TRB_SETUP << 10) | (1u << 6) | (trt << 16));
   if (len)
-    ring_put(&d->ep0, (uint32_t)pa(d->buf), (uint32_t)(pa(d->buf) >> 32), len,
+    ring_put(&d->ep0, (uint32_t)pa(b), (uint32_t)(pa(b) >> 32), len,
              (TRB_DATA << 10) | (in ? (1u << 16) : 0u));
   st = ring_put(&d->ep0, 0, 0, 0,
                 (TRB_STATUS << 10) | (1u << 5) | ((len && in) ? 0u : (1u << 16)));
@@ -531,6 +532,11 @@ static int ctrl(struct udev* d, uint8_t rtype, uint8_t req, uint16_t val, uint16
   rc = xfer_wait(d->x, d->slot, 1, st, 500, 0);
   if (rc == CC_STALL) ep_reset(d, 1, &d->ep0);
   return rc;
+}
+
+static int ctrl(struct udev* d, uint8_t rtype, uint8_t req, uint16_t val, uint16_t idx,
+                uint16_t len) {
+  return ctrl_to(d, rtype, req, val, idx, len, d->buf);
 }
 
 /* ---------- controlador ---------- */
@@ -2012,6 +2018,587 @@ static int xhci_disk_write_u(uint32_t lba, const void* buf) {
   return 0;
 }
 
+/* ---------- webcam (UVC) ----------
+ *
+ * Classe de video (0E): uma interface VideoControl (0E/01) e uma
+ * VideoStreaming (0E/02). A VS tem os formatos (MJPEG ou YUY2) e os tamanhos
+ * na alternativa 0, e um endpoint isocrono IN em cada alternativa > 0, cada
+ * uma com uma banda. Para um quadro:
+ *   1. SET_CONFIGURATION e VS na alternativa 0;
+ *   2. PROBE/COMMIT (SET_CUR) com formato, tamanho e intervalo; a camera
+ *      devolve o tamanho maximo do quadro e quantos bytes manda por intervalo;
+ *   3. Configure Endpoint (isocrono IN) e SET_INTERFACE na menor alternativa
+ *      que tenha essa banda;
+ *   4. um TD (Isoch TRB) por intervalo, ISO_Q na fila; cada pacote comeca com
+ *      o cabecalho UVC (tamanho, bits FID/EOF/ERR) e o resto e o quadro;
+ *   5. descarta os primeiros quadros (exposicao automatica), fica com um;
+ *   6. Stop Endpoint, alternativa 0 e o endpoint sai do contexto.
+ * Tudo com a trava do driver; a captura leva ~1 s. Hub USB 3 e camera
+ * SuperSpeed nao. */
+
+static int put_s(char* out, int pos, int max, const char* s);
+static int put_u(char* out, int pos, int max, uint32_t v);
+static int put_hex2(char* out, int pos, int max, uint32_t v);
+static int put_path(char* out, int pos, int max, const struct udev* d);
+
+#define CAM_FMT_MAX 8
+#define CAM_FRM_MAX 32
+#define CAM_ALT_MAX 16
+#define ISO_N 256              /* TRBs no anel isocrono (o ultimo e o Link) */
+#define ISO_Q 40               /* TDs na fila: menos que o anel de eventos (EVT_N) */
+#define ISO_SLOT 4096u         /* buffer de cada TD (ate 3 x 1024 bytes) */
+#define TRB_ISOCH 5
+#define TRB_STOP_EP 15
+
+struct cam_frm {
+  uint8_t kind, fmt, idx;
+  uint16_t w, h;
+  uint32_t ival, maxbuf;
+};
+
+struct cam_alt {
+  uint8_t alt, ep, mult, ival;
+  uint16_t mps;
+};
+
+/* Estado da captura em andamento. */
+struct cam_cap {
+  uint8_t* fb;
+  uint32_t cap, len;
+  int have, fid, bad, started, frames, skip, done, kind;
+  uint32_t want_len;           /* YUY2: w * h * 2 */
+  uint32_t pkts, errs, lost;
+  uint32_t noeoi, gap, ncc[4];   /* sem EOI, maior pausa (ms), cc 15/23/4/outros */
+};
+
+static struct {
+  uint32_t g0;
+  int dev;                     /* devs[] da webcam, -1 = nenhuma */
+  volatile uint8_t* cfg;       /* descritor de configuracao inteiro */
+  int cfg_len, cfg_val;
+  int vc_if, vs_if, uvc;
+  int nfmt;
+  uint8_t fmt_kind[CAM_FMT_MAX], fmt_idx[CAM_FMT_MAX];
+  int nfrm;
+  struct cam_frm frm[CAM_FRM_MAX];
+  int nalt;
+  struct cam_alt alt[CAM_ALT_MAX];
+  struct trb* iso;             /* ISO_N TRBs */
+  uint8_t* pk;                 /* ISO_N * ISO_SLOT */
+  uint8_t* fb;
+  uint32_t fb_cap;
+  struct cam_cap c;
+  uint32_t g1;
+} cam = { .g0 = 0x43414D30u, .dev = -1, .g1 = 0x43414D31u };
+
+static uint32_t le16(const volatile uint8_t* b) {
+  return b[0] | ((uint32_t)b[1] << 8);
+}
+
+static int cam_find(void) {
+  int i, q;
+  for (i = 0; i < UDEV_MAX; i++) {
+    if (devs[i].kind != UD_OTHER || !devs[i].slot) continue;
+    for (q = 0; q < devs[i].nifc; q++)
+      if (devs[i].ifc[q][0] == 0x0E) return i;
+  }
+  return -1;
+}
+
+/* Le o descritor de configuracao inteiro e acha interfaces, formatos,
+ * tamanhos e alternativas. 0 = ok. */
+static int cam_load(struct udev* d) {
+  const volatile uint8_t* b;
+  int n, k, l, t, total;
+  int cif = -1, calt = 0, ccls = -1, csub = -1, fkind = 0, fidx = 0;
+  if (!cam.cfg) cam.cfg = (volatile uint8_t*)xmem(4096u, 64u);
+  if (!cam.cfg) return -1;
+  n = ctrl_to(d, 0x80, 6, 0x0200, 0, 9, cam.cfg);
+  if (n != 0) {
+    log_hex("[xhci] webcam: GET_DESCRIPTOR cc=", (uint32_t)n);
+    return -1;
+  }
+  total = (int)le16(cam.cfg + 2);
+  if (total < 9) total = 9;
+  if (total > 4096) total = 4096;
+  if (ctrl_to(d, 0x80, 6, 0x0200, 0, (uint16_t)total, cam.cfg) != 0) return -1;
+  b = cam.cfg;
+  n = total;
+  cam.cfg_len = total;
+  cam.cfg_val = b[5];
+  cam.vc_if = cam.vs_if = -1;
+  cam.uvc = 0x100;
+  cam.nfmt = cam.nfrm = cam.nalt = 0;
+  for (k = 0; k + 1 < n; k += l) {
+    l = b[k];
+    t = b[k + 1];
+    if (l < 2 || k + l > n) break;
+    if (t == 4 && l >= 9) {
+      cif = b[k + 2];
+      calt = b[k + 3];
+      ccls = b[k + 5];
+      csub = b[k + 6];
+      if (ccls == 0x0E && csub == 1 && cam.vc_if < 0) cam.vc_if = cif;
+      if (ccls == 0x0E && csub == 2 && cam.vs_if < 0) cam.vs_if = cif;
+      continue;
+    }
+    if (ccls != 0x0E) continue;
+    if (t == 0x24 && csub == 1 && cif == cam.vc_if && l >= 5 && b[k + 2] == 1)
+      cam.uvc = (int)le16(b + k + 3);                                  /* VC_HEADER */
+    if (t == 0x24 && csub == 2 && cif == cam.vs_if && calt == 0) {
+      int st = b[k + 2];
+      if ((st == 6 && l >= 11) || (st == 4 && l >= 27)) {               /* VS_FORMAT_* */
+        fidx = b[k + 3];
+        fkind = 0;
+        if (st == 6) fkind = 1;
+        else if (b[k + 5] == 'Y' && b[k + 6] == 'U' && b[k + 7] == 'Y' && b[k + 8] == '2') fkind = 2;
+        if (fkind && cam.nfmt < CAM_FMT_MAX) {
+          cam.fmt_kind[cam.nfmt] = (uint8_t)fkind;
+          cam.fmt_idx[cam.nfmt] = (uint8_t)fidx;
+          cam.nfmt++;
+        }
+      } else if ((st == 7 || st == 5) && l >= 26 && fkind &&
+                 (st == 7) == (fkind == 1) && cam.nfrm < CAM_FRM_MAX) {  /* VS_FRAME_* */
+        struct cam_frm* f = &cam.frm[cam.nfrm++];
+        f->kind = (uint8_t)fkind;
+        f->fmt = (uint8_t)fidx;
+        f->idx = b[k + 3];
+        f->w = (uint16_t)le16(b + k + 5);
+        f->h = (uint16_t)le16(b + k + 7);
+        f->maxbuf = le32(b + k + 17);
+        f->ival = le32(b + k + 21);
+      } else if (st == 4 || st == 6 || st == 0x10 || st == 0x0C) {
+        fkind = 0;                                                     /* formato sem suporte */
+      }
+    }
+    if (t == 5 && l >= 7 && cif == cam.vs_if && calt > 0 && (b[k + 2] & 0x80) &&
+        (b[k + 3] & 3) == 1 && cam.nalt < CAM_ALT_MAX) {
+      uint32_t raw = le16(b + k + 4);
+      struct cam_alt* a = &cam.alt[cam.nalt++];
+      a->alt = (uint8_t)calt;
+      a->ep = b[k + 2];
+      a->mps = (uint16_t)(raw & 0x7FFu);
+      a->mult = (uint8_t)(((raw >> 11) & 3u) + 1u);
+      a->ival = b[k + 6];
+    }
+  }
+  if (cam.vs_if < 0) return -1;
+  return 0;
+}
+
+/* Controlador parado (HCH, HSE ou HCE): esquece os dispositivos dele, reinicia
+ * e enumera de novo. */
+static void xc_recover(struct xc* x) {
+  int j;
+  log_hex("[xhci] controlador parado, reiniciando; USBSTS ", r32(x->op, 0x04));
+  for (j = 0; j < UDEV_MAX; j++)
+    if (devs[j].kind != UD_FREE && devs[j].x == x) {
+      devs[j].slot = 0;          /* sem Disable Slot: o controlador nao responde */
+      dev_drop(j);
+    }
+  x->up = 0;
+  busy = 0;
+  (void)xc_up(0);
+  scan_all();
+}
+
+static int cam_open(void) {
+  int i = cam_find();
+  cam.dev = -1;
+  if (i >= 0 && (r32(devs[i].x->op, 0x04) & 0x1005u)) {
+    xc_recover(devs[i].x);
+    i = cam_find();
+  }
+  if (i < 0) return -1;
+  if (cam_load(&devs[i]) != 0) {
+    xlog("[xhci] webcam: descritores ilegiveis\n");
+    return -2;
+  }
+  cam.dev = i;
+  return 0;
+}
+
+static int cam_describe_u(char* out, int max) {
+  static const char* const kn[] = { "?", "MJPEG", "YUY2" };
+  struct udev* d;
+  int pos = 0, i;
+  if (!xc_n) (void)xc_up(0);
+  if (busy) return put_s(out, 0, max, "USB ocupado.\n");
+  if (cam_open() != 0) return put_s(out, 0, max, "Nenhuma webcam USB (classe de video 0E).\n");
+  d = &devs[cam.dev];
+  pos = put_s(out, pos, max, "Webcam na porta ");
+  pos = put_path(out, pos, max, d);
+  pos = put_s(out, pos, max, ", UVC ");
+  pos = put_u(out, pos, max, (uint32_t)(cam.uvc >> 8));
+  pos = put_s(out, pos, max, ".");
+  pos = put_hex2(out, pos, max, (uint32_t)cam.uvc & 0xFFu);
+  pos = put_s(out, pos, max, ", interface de video ");
+  pos = put_u(out, pos, max, (uint32_t)cam.vs_if);
+  pos = put_s(out, pos, max, "\n");
+  for (i = 0; i < cam.nfrm; i++) {
+    const struct cam_frm* f = &cam.frm[i];
+    pos = put_s(out, pos, max, "  ");
+    pos = put_s(out, pos, max, kn[f->kind < 3 ? f->kind : 0]);
+    pos = put_s(out, pos, max, " ");
+    pos = put_u(out, pos, max, f->w);
+    pos = put_s(out, pos, max, "x");
+    pos = put_u(out, pos, max, f->h);
+    if (f->ival) {
+      pos = put_s(out, pos, max, "  ");
+      pos = put_u(out, pos, max, (10000000u + f->ival / 2u) / f->ival);
+      pos = put_s(out, pos, max, " q/s");
+    }
+    pos = put_s(out, pos, max, "\n");
+  }
+  if (!cam.nfrm) pos = put_s(out, pos, max, "  nenhum formato MJPEG ou YUY2\n");
+  pos = put_s(out, pos, max, "  banda (bytes por intervalo):");
+  for (i = 0; i < cam.nalt; i++) {
+    pos = put_s(out, pos, max, " ");
+    pos = put_u(out, pos, max, (uint32_t)cam.alt[i].mps * cam.alt[i].mult);
+  }
+  pos = put_s(out, pos, max, "\n");
+  return pos;
+}
+
+/* Um pacote isocrono: cabecalho UVC e um pedaco do quadro. */
+static void cam_end(struct cam_cap* c) {
+  if (c->started && !c->bad && c->len > 0) {
+    int ok;
+    if (c->kind == 1) {
+      /* SOI no comeco e EOI no fim (algumas cameras completam com zeros):
+       * sem o EOI o quadro veio cortado. */
+      uint32_t k, lo = c->len > 64u ? c->len - 64u : 2u;
+      ok = 0;
+      if (c->len > 4 && c->fb[0] == 0xFF && c->fb[1] == 0xD8)
+        for (k = c->len - 1; k > lo; k--)
+          if (c->fb[k] == 0xD9 && c->fb[k - 1] == 0xFF) {
+            c->len = k + 1;
+            ok = 1;
+            break;
+          }
+      if (!ok) c->noeoi++;
+    } else {
+      ok = c->len == c->want_len;
+    }
+    if (ok && ++c->frames > c->skip) c->done = 1;
+  }
+  c->started = 1;
+  if (!c->done) c->len = 0;
+  c->bad = 0;
+}
+
+static void cam_packet(struct cam_cap* c, const volatile uint8_t* p, uint32_t n) {
+  uint32_t hl, bfh, i;
+  if (c->done || n < 2) return;
+  hl = p[0];
+  bfh = p[1];
+  if (hl < 2 || hl > n) return;
+  c->pkts++;
+  if (c->have && (int)(bfh & 1u) != c->fid) cam_end(c);  /* quadro novo sem EOF */
+  if (c->done) return;
+  c->have = 1;
+  c->fid = (int)(bfh & 1u);
+  if (bfh & 0x40u) {
+    c->bad = 1;
+    c->errs++;
+  }
+  if (c->len + (n - hl) > c->cap) c->bad = 1;
+  else
+    for (i = hl; i < n; i++) c->fb[c->len++] = p[i];
+  if (bfh & 2u) cam_end(c);
+}
+
+static void iso_put(struct ring* r, uint64_t buf, uint32_t len, uint32_t tlbpc) {
+  struct trb* t = &r->t[r->idx];
+  t->d[0] = (uint32_t)buf;
+  t->d[1] = (uint32_t)(buf >> 32);
+  t->d[2] = len;
+  __asm__ volatile ("" : : : "memory");
+  t->d[3] = (TRB_ISOCH << 10) | (1u << 5) | (1u << 2) | (tlbpc << 16) | (1u << 31) | r->pcs;
+  if (++r->idx == ISO_N - 1) {
+    struct trb* l = &r->t[ISO_N - 1];
+    l->d[3] = (TRB_LINK << 10) | 2u | r->pcs;
+    r->idx = 0;
+    r->pcs ^= 1u;
+  }
+}
+
+/* Escolhe o tamanho: o maior ate want_w de largura (0 = ate 640), ou o
+ * menor de todos. MJPEG antes de YUY2. */
+static int cam_pick(int want_w) {
+  int kind, i, best;
+  uint32_t lim = want_w > 0 ? (uint32_t)want_w & 0xFFFFu : 640u;
+  uint32_t eh = want_w > 0 ? (uint32_t)want_w >> 16 : 0u;
+  if (eh) {                       /* tamanho exato: largura e altura */
+    for (kind = 1; kind <= 2; kind++)
+      for (i = 0; i < cam.nfrm; i++)
+        if (cam.frm[i].kind == kind && cam.frm[i].w == lim && cam.frm[i].h == eh) return i;
+    return -1;
+  }
+  for (kind = 1; kind <= 2; kind++) {
+    best = -1;
+    for (i = 0; i < cam.nfrm; i++)
+      if (cam.frm[i].kind == kind && cam.frm[i].w <= lim &&
+          (best < 0 || cam.frm[i].w > cam.frm[best].w))
+        best = i;
+    if (best >= 0) return best;
+  }
+  best = -1;
+  for (i = 0; i < cam.nfrm; i++)
+    if (best < 0 || cam.frm[i].w < cam.frm[best].w ||
+        (cam.frm[i].w == cam.frm[best].w && cam.frm[i].kind < cam.frm[best].kind))
+      best = i;
+  return best;
+}
+
+static int cam_fail(char* err, int max, const char* s) {
+  if (err && max > 0) (void)put_s(err, 0, max, s);
+  xlog("[xhci] webcam: ");
+  xlog(s);
+  xlog("\n");
+  return -1;
+}
+
+static int cam_grab_u(int want_w, int skip, const uint8_t** data, uint32_t* len, int* kind,
+                      int* w, int* h, char* err, int emax) {
+  struct udev* d;
+  struct xc* x;
+  const struct cam_frm* f;
+  const struct cam_alt* a = 0;
+  volatile uint32_t* c;
+  struct ring r;
+  struct cam_cap* cc = &cam.c;
+  uint32_t plen, maxframe, payload, tdlen, need, t0, spins = 0, e[4], next = 0, last;
+  int fi, i, dci, rc, out = 0, ok = -1;
+  if (!xc_n) (void)xc_up(0);
+  if (busy) return cam_fail(err, emax, "USB ocupado");
+  if (cam_open() != 0) return cam_fail(err, emax, "nenhuma webcam USB");
+  d = &devs[cam.dev];
+  x = d->x;
+  if (d->speed != 3 && d->speed != 1) return cam_fail(err, emax, "so webcam USB 2 (HS ou FS)");
+  fi = cam_pick(want_w);
+  if (fi < 0)
+    return cam_fail(err, emax, ((uint32_t)want_w >> 16) ? "a webcam nao tem esse tamanho (webcam /L)"
+                                                         : "a webcam nao tem MJPEG nem YUY2");
+  f = &cam.frm[fi];
+  busy = 1;
+
+  if (ctrl(d, 0x00, 9, (uint16_t)cam.cfg_val, 0, 0) != 0) {          /* SET_CONFIGURATION */
+    busy = 0;
+    return cam_fail(err, emax, "SET_CONFIGURATION recusado");
+  }
+  (void)ctrl(d, 0x01, 11, 0, (uint16_t)cam.vs_if, 0);                 /* SET_INTERFACE alt 0 */
+
+  /* PROBE: formato, tamanho e intervalo; a camera completa o resto. */
+  plen = cam.uvc >= 0x150 ? 48u : cam.uvc >= 0x110 ? 34u : 26u;
+  for (;;) {
+    zero(d->buf, 64u);
+    d->buf[0] = 1;                                                    /* bmHint: intervalo */
+    d->buf[2] = f->fmt;
+    d->buf[3] = f->idx;
+    put_le32(d->buf + 4, f->ival);
+    rc = ctrl(d, 0x21, 0x01, 0x0100, (uint16_t)cam.vs_if, (uint16_t)plen);
+    if (rc == 0 || plen == 26u) break;
+    plen = plen == 48u ? 34u : 26u;
+  }
+  if (rc != 0 || ctrl(d, 0xA1, 0x81, 0x0100, (uint16_t)cam.vs_if, (uint16_t)plen) != 0) {
+    busy = 0;
+    return cam_fail(err, emax, "PROBE recusado");
+  }
+  maxframe = le32(d->buf + 18);
+  payload = le32(d->buf + 22);
+  if (ctrl(d, 0x21, 0x01, 0x0200, (uint16_t)cam.vs_if, (uint16_t)plen) != 0) {  /* COMMIT */
+    busy = 0;
+    return cam_fail(err, emax, "COMMIT recusado");
+  }
+  xlog("[xhci] webcam: ");
+  xlog_hex(((uint32_t)f->w << 16) | f->h);
+  xlog(" quadro ");
+  xlog_hex(maxframe);
+  log_hex(" banda ", payload);
+
+  /* Menor alternativa com a banda pedida (ou a maior que houver). */
+  for (i = 0; i < cam.nalt; i++) {
+    uint32_t bw = (uint32_t)cam.alt[i].mps * cam.alt[i].mult;
+    if (bw >= payload && (!a || bw < (uint32_t)a->mps * a->mult)) a = &cam.alt[i];
+  }
+  if (!a)
+    for (i = 0; i < cam.nalt; i++)
+      if (!a || (uint32_t)cam.alt[i].mps * cam.alt[i].mult > (uint32_t)a->mps * a->mult)
+        a = &cam.alt[i];
+  if (!a) {
+    busy = 0;
+    return cam_fail(err, emax, "sem endpoint isocrono");
+  }
+  tdlen = (uint32_t)a->mps * a->mult;
+  dci = (a->ep & 0x0F) * 2 + 1;
+
+  /* Buffers (uma vez; o do quadro cresce se precisar). */
+  need = maxframe;
+  if (need < f->maxbuf) need = f->maxbuf;
+  if (need < (uint32_t)f->w * f->h * 2u) need = (uint32_t)f->w * f->h * 2u;
+  need += 65536u;
+  /* O kmalloc nao da blocos grandes: os buffers vem do umalloc (como as
+   * paginas de rascunho do controlador), nunca liberados. */
+  if (!cam.iso) cam.iso = (struct trb*)xmem(ISO_N * 16u, 4096u);
+  if (!cam.pk) {
+    uint8_t* raw = (uint8_t*)umalloc_owned(ISO_N * ISO_SLOT + 4096u, 0);
+    if (raw) cam.pk = (uint8_t*)(uintptr_t)((pa(raw) + 4095u) & ~4095ull);
+  }
+  if (cam.fb_cap < need) {
+    cam.fb = (uint8_t*)umalloc_owned(need, 0);
+    cam.fb_cap = cam.fb ? need : 0;
+  }
+  if (!cam.iso || !cam.pk || !cam.fb) {
+    busy = 0;
+    return cam_fail(err, emax, "sem memoria");
+  }
+  zero(cam.iso, ISO_N * 16u);
+  r.t = cam.iso;
+  r.idx = 0;
+  r.pcs = 1;
+  cam.iso[ISO_N - 1].d[0] = (uint32_t)pa(cam.iso);
+  cam.iso[ISO_N - 1].d[1] = (uint32_t)(pa(cam.iso) >> 32);
+  cam.iso[ISO_N - 1].d[3] = (TRB_LINK << 10) | 2u;
+
+  /* Configure Endpoint: isocrono IN (CErr 0, Max Burst = transacoes extras). */
+  c = cfg_begin(d, 1u << dci, dci);
+  (void)c;
+  c = ictx_at(d, dci + 1);
+  c[0] = (d->speed == 3 ? (uint32_t)(a->ival ? a->ival - 1 : 0) : (uint32_t)(a->ival ? a->ival + 2 : 3)) << 16;
+  c[1] = (5u << 3) | ((uint32_t)(a->mult - 1) << 8) | ((uint32_t)a->mps << 16);
+  c[2] = (uint32_t)pa(cam.iso) | 1u;
+  c[3] = (uint32_t)(pa(cam.iso) >> 32);
+  c[4] = tdlen | (tdlen << 16);
+  rc = cfg_run(d);
+  if (rc != 0) {
+    log_hex("[xhci] webcam: Configure Endpoint cc=", (uint32_t)-rc);
+    busy = 0;
+    return cam_fail(err, emax, "Configure Endpoint recusado (banda?)");
+  }
+  if (ctrl(d, 0x01, 11, a->alt, (uint16_t)cam.vs_if, 0) != 0) {      /* SET_INTERFACE */
+    (void)put_s(err, 0, emax, "SET_INTERFACE recusado");
+    goto stop;
+  }
+
+  cc->fb = cam.fb;
+  cc->cap = cam.fb_cap;
+  cc->len = 0;
+  cc->have = cc->fid = cc->bad = cc->started = cc->frames = cc->done = 0;
+  cc->skip = skip;
+  cc->kind = f->kind;
+  cc->want_len = (uint32_t)f->w * f->h * 2u;
+  cc->pkts = cc->errs = cc->lost = 0;
+  cc->noeoi = cc->gap = 0;
+  cc->ncc[0] = cc->ncc[1] = cc->ncc[2] = cc->ncc[3] = 0;
+
+  for (out = 0; out < ISO_Q; out++)
+    iso_put(&r, pa(cam.pk + (uint32_t)r.idx * ISO_SLOT), tdlen, (uint32_t)(a->mult - 1));
+  x->db[d->slot] = (uint32_t)dci;
+
+  xlog("[xhci] webcam: alt ");
+  xlog_hex(a->alt);
+  xlog(" ep ");
+  xlog_hex(a->ep);
+  xlog(" mps ");
+  xlog_hex(a->mps);
+  xlog(" mult ");
+  xlog_hex(a->mult);
+  xlog(" ival ");
+  xlog_hex(a->ival);
+  xlog("\n");
+  t0 = net_ms();
+  last = net_ms();
+  while (!cc->done) {
+    uint32_t now = net_ms();
+    if (now - last > cc->gap) cc->gap = now - last;
+    last = now;
+    if (late(t0, &spins, 6000)) break;
+    for (i = 0; i < xc_n; i++)                      /* mouse e teclado em outros controladores */
+      if (&xcs[i] != x && xcs[i].up)
+        while (evt_take(&xcs[i], e)) evt_other(&xcs[i], e);
+    if (!evt_take(x, e)) continue;
+    if (((e[3] >> 10) & 0x3Fu) == EV_XFER && (int)(e[3] >> 24) == d->slot &&
+        (int)((e[3] >> 16) & 0x1Fu) == dci) {
+      uint64_t p = e[0] | ((uint64_t)e[1] << 32);
+      uint32_t code = e[2] >> 24, s, nd;
+      if (code != CC_OK && code != CC_SHORT)
+        cc->ncc[code == 15 ? 0 : code == 23 ? 1 : code == 4 ? 2 : 3]++;
+      if (p < pa(cam.iso) || p >= pa(cam.iso) + (ISO_N - 1) * 16u) {
+        cc->bad = 1;                                  /* Missed Service etc. sem TD */
+        cc->lost++;
+        if (code == 14 || code == 15) x->db[d->slot] = (uint32_t)dci;
+        continue;
+      }
+      s = (uint32_t)((p - pa(cam.iso)) / 16u);
+      nd = (s + (ISO_N - 1) - next) % (ISO_N - 1) + 1;  /* TDs que terminaram */
+      if (nd > 1) {
+        cc->bad = 1;
+        cc->lost += nd - 1;
+      }
+      next = (s + 1) % (ISO_N - 1);
+      if (code == CC_OK || code == CC_SHORT) {
+        /* Um cabecalho UVC por microquadro (payload transfer), mesmo com
+         * 2 ou 3 transacoes nele (alta banda), como no uvcvideo do Linux. */
+        uint32_t got = tdlen - (e[2] & 0xFFFFFFu);
+        if (got > tdlen) got = 0;
+        cam_packet(cc, cam.pk + s * ISO_SLOT, got);
+      } else {
+        cc->bad = 1;
+        cc->lost++;
+      }
+      while (nd--) {
+        iso_put(&r, pa(cam.pk + (uint32_t)r.idx * ISO_SLOT), tdlen, (uint32_t)(a->mult - 1));
+      }
+      x->db[d->slot] = (uint32_t)dci;
+      continue;
+    }
+    evt_other(x, e);
+  }
+  xlog("[xhci] webcam: pacotes ");
+  xlog_hex(cc->pkts);
+  xlog(" quadros ");
+  xlog_hex((uint32_t)cc->frames);
+  xlog(" erros ");
+  xlog_hex(cc->errs);
+  log_hex(" perdidos ", cc->lost);
+  xlog("[xhci] webcam: sem EOI ");
+  xlog_hex(cc->noeoi);
+  xlog(" pausa ms ");
+  xlog_hex(cc->gap);
+  xlog(" cc15/23/4/outros ");
+  xlog_hex((cc->ncc[0] << 16) | cc->ncc[1]);
+  xlog(" ");
+  log_hex("", (cc->ncc[2] << 16) | cc->ncc[3]);
+  if (cc->done) {
+    ok = 0;
+    *data = cc->fb;
+    *len = cc->len;
+    *kind = cc->kind;
+    *w = f->w;
+    *h = f->h;
+  } else if (!cc->pkts) {
+    (void)put_s(err, 0, emax, "a webcam nao mandou nada");
+  } else {
+    (void)put_s(err, 0, emax, "nenhum quadro inteiro em 6 s");
+  }
+
+stop:
+  (void)cmd_run(x, 0, 0, (TRB_STOP_EP << 10) | ((uint32_t)dci << 16) | ((uint32_t)d->slot << 24), 0);
+  (void)ctrl(d, 0x01, 11, 0, (uint16_t)cam.vs_if, 0);                 /* alternativa 0 */
+  (void)cfg_begin(d, 0, 0);
+  ictx_at(d, 0)[0] = 1u << dci;                                       /* Drop */
+  (void)cfg_run(d);
+  while (evt_take(x, e)) evt_other(x, e);
+  busy = 0;
+  if (ok != 0) {
+    xlog("[xhci] webcam: ");
+    xlog(err);
+    xlog("\n");
+  }
+  return ok;
+}
+
 /* ---------- comando usb ---------- */
 
 static int put_s(char* out, int pos, int max, const char* s) {
@@ -2098,6 +2685,8 @@ static int xhci_describe_u(char* out, int max) {
         pos = put_s(out, pos, max, ", ");
         pos = put_u(out, pos, max, dk_blocks / 2048u);
         pos = put_s(out, pos, max, " MB");
+      } else if (d->nifc && d->ifc[0][0] == 0x0E) {
+        pos = put_s(out, pos, max, "webcam (comando webcam)");
       } else {
         int q;
         pos = put_s(out, pos, max, "outro (sem driver:");
@@ -2174,6 +2763,29 @@ int xhci_describe(char* out, int max) {
   int r;
   xl_enter();
   r = xhci_describe_u(out, max);
+  xl_leave();
+  return r;
+}
+int xhci_cam_describe(char* out, int max) {
+  int r;
+  if (!out || max < 2) return 0;
+  out[0] = 0;
+  xl_enter();
+  r = cam_describe_u(out, max);
+  xl_leave();
+  return r;
+}
+int xhci_cam_grab(int want_w, int skip, const uint8_t** data, uint32_t* len, int* kind, int* w,
+                  int* h, char* err, int emax) {
+  int r;
+  static char dummy[64];
+  if (!err || emax < 2) {
+    err = dummy;
+    emax = (int)sizeof(dummy);
+  }
+  err[0] = 0;
+  xl_enter();
+  r = cam_grab_u(want_w, skip, data, len, kind, w, h, err, emax);
   xl_leave();
   return r;
 }

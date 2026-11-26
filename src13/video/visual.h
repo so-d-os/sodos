@@ -109,6 +109,9 @@ int winmenu_api(int op, int arg);
 /* Janela do programa transparente (alfa por pixel, clique passa no invisivel);
  * bit 2: o que esta atras dela em preto e branco. */
 int gui_transp_set(int on);
+/* Amplia (1), restaura (0) ou troca (2) a janela do programa; < 0 consulta.
+ * O laco do WIN aplica. Devolve 1 ampliada, 0 nao, -1 sem janela. */
+int gui_max_set(int op);
 /* Injeta uma tecla ASCII na janela GUI com foco (automacao/testes). */
 int win_api_key(int ch);
 /* Linha y em BGR. Devolve a largura, ou -1. */
