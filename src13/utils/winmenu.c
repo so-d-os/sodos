@@ -57,9 +57,19 @@ static int g_nq;
 
 static int g_pw, g_ph;          /* painel */
 static int g_cw, g_chh;         /* fonte de bitmap (reserva) */
-static unsigned char* g_frame;  /* RGBA do painel */
 static int g_bx, g_by, g_bw, g_bh;   /* caixa de busca */
 static int g_rowh;
+
+/* Quadro so da coluna do menu (x de g_fx0 a g_fx0 + g_fw, em coordenadas do
+ * painel), um unsigned por pixel: R no byte baixo, depois G, B e o alfa
+ * (0 = invisivel), como o k_gui_pixels le. O resto do painel nunca muda: o
+ * k_gui_transp ja o deixou invisivel. Fica de uma abertura para a outra. */
+static unsigned* g_frame;
+static int g_fx0, g_fw;
+static int g_ry0, g_ry1;        /* so as linhas de g_ry0 a g_ry1 sao desenhadas */
+static int g_top_ant;           /* linha mais alta do desenho anterior */
+static int g_cheio;             /* 1 = o proximo desenho limpa e manda a coluna toda */
+static int g_geo[9];            /* geometria do quadro e dos guardados */
 
 /* ------------------------------------------------------------- fontes */
 
@@ -181,44 +191,98 @@ static int txt_larg(const struct fonte* f, const char* s, int n) {
 
 /* ------------------------------------------------------------- desenho */
 
-/* "over": cor rgb com alfa a (0..255) por cima do que ja esta no quadro */
-static void px_over(int x, int y, unsigned rgb, int a) {
-  unsigned char* p;
-  int da, oa, k;
-  if (x < 0 || y < 0 || x >= g_pw || y >= g_ph || a <= 0) return;
-  p = g_frame + ((size_t)y * g_pw + x) * 4;
-  if (a >= 255 || !p[3]) {   /* opaco, ou nada embaixo: so grava */
-    p[0] = (unsigned char)(rgb >> 16);
-    p[1] = (unsigned char)(rgb >> 8);
-    p[2] = (unsigned char)rgb;
-    p[3] = (unsigned char)(a >= 255 ? 255 : a);
-    return;
-  }
-  da = p[3];
+/* O cc nao otimiza: cada pixel com chamada e divisao custava caro (ate
+ * 200 ms por tecla redesenhando tudo). Por isso as linhas retas dos
+ * retangulos vao em trechos (span_over, a conta so e refeita quando muda o
+ * que esta embaixo), as amostras dos cantos so nas colunas dos cantos, as
+ * linhas iguais do meio do cartao sao copiadas e o fundo da caixa de busca
+ * fica guardado. A imagem e a mesma de antes, pixel a pixel. */
+
+static unsigned* lin(int y) { return g_frame + (size_t)y * g_fw; }
+
+/* Pixel do quadro com a cor rgb e o alfa a. */
+static unsigned pk(unsigned rgb, int a) {
+  return ((rgb >> 16) & 0xFFu) | (rgb & 0xFF00u) | ((rgb & 0xFFu) << 16) | ((unsigned)a << 24);
+}
+
+/* "over": cor rgb com alfa a (0..255) por cima do pixel v */
+static unsigned over1(unsigned v, unsigned rgb, int a) {
+  int da = (int)(v >> 24), oa, k;
+  unsigned out;
+  if (a <= 0) return v;
+  if (a >= 255 || !da) return pk(rgb, a >= 255 ? 255 : a);   /* opaco, ou nada embaixo */
   oa = a + da * (255 - a) / 255;
-  if (oa <= 0) return;
+  if (oa <= 0) return v;
+  out = (unsigned)oa << 24;
   for (k = 0; k < 3; k++) {
-    int s = (int)((rgb >> (16 - 8 * k)) & 0xFF);
-    p[k] = (unsigned char)((s * a + p[k] * da * (255 - a) / 255) / oa);
+    int s = (int)((rgb >> (16 - 8 * k)) & 0xFF), d = (int)((v >> (8 * k)) & 0xFF);
+    out |= (unsigned)((s * a + d * da * (255 - a) / 255) / oa) << (8 * k);
   }
-  p[3] = (unsigned char)oa;
+  return out;
+}
+
+static void px_over(int x, int y, unsigned rgb, int a) {
+  unsigned* p;
+  if (x < g_fx0 || x >= g_fx0 + g_fw || y < g_ry0 || y >= g_ry1 || a <= 0) return;
+  p = lin(y) + (x - g_fx0);
+  *p = over1(*p, rgb, a);
+}
+
+/* n pixels da linha y a partir de x, todos com a mesma cor e alfa. */
+static void span_over(int x, int y, int n, unsigned rgb, int a) {
+  unsigned *p, in, out;
+  int i;
+  if (y < g_ry0 || y >= g_ry1 || a <= 0) return;
+  if (x < g_fx0) {
+    n -= g_fx0 - x;
+    x = g_fx0;
+  }
+  if (x + n > g_fx0 + g_fw) n = g_fx0 + g_fw - x;
+  if (n <= 0) return;
+  p = lin(y) + (x - g_fx0);
+  in = p[0];
+  out = over1(in, rgb, a);
+  for (i = 0; i < n; i++) {
+    if (p[i] != in) {
+      in = p[i];
+      out = over1(in, rgb, a);
+    }
+    p[i] = out;
+  }
 }
 
 /* Texto TrueType com a linha de base em yb; nenhuma letra passa de x_lim
  * (0 = sem limite). Devolve a largura. */
 static int txt(const struct fonte* f, int x, int yb, const char* s, int n, unsigned rgb, int a,
                int x_lim) {
-  int i, pen = x * 256;
+  int i, pen = x * 256, m_a = -1;
+  unsigned m_in = 0, m_out = 0;   /* ultima conta: o miolo da letra repete */
   for (i = 0; i < n; i++) {
     const struct wfont_glyph* g = glifo(f, (unsigned char)s[i]);
     int gx = ((pen + 128) >> 8) + g->left, gy = yb - g->top, r, c;
     if (x_lim && gx + g->w > x_lim) break;
     if (g->a)
-      for (r = 0; r < g->h; r++)
+      for (r = 0; r < g->h; r++) {
+        int py = gy + r;
+        const unsigned char* mr = g->a + r * g->w;
+        unsigned* row;
+        if (py < g_ry0 || py >= g_ry1) continue;
+        row = lin(py) - g_fx0;
         for (c = 0; c < g->w; c++) {
-          int m = g->a[r * g->w + c];
-          if (m) px_over(gx + c, gy + r, rgb, a * m / 255);
+          int m = mr[c], px = gx + c, aa;
+          unsigned* p;
+          if (!m || px < g_fx0 || px >= g_fx0 + g_fw) continue;
+          aa = a * m / 255;
+          if (aa <= 0) continue;
+          p = row + px;
+          if (aa != m_a || *p != m_in) {
+            m_a = aa;
+            m_in = *p;
+            m_out = over1(m_in, rgb, aa);
+          }
+          *p = m_out;
         }
+      }
     pen += g->adv;
   }
   return ((pen + 128) >> 8) - x;
@@ -235,6 +299,13 @@ static int rr_cov(int x, int y, int rx, int ry, int w, int h, int r) {
   if (y >= ry + r && y < ry + h - r) return 16;
   cx = (x < rx + r ? rx + r : rx + w - r) * 8;   /* centro do canto */
   cy = (y < ry + r ? ry + r : ry + h - r) * 8;
+  /* As amostras ficam a menos de 4,25 (oitavos) do meio do pixel: com o meio
+   * a mais de 5 da borda do circulo, todas caem do mesmo lado. */
+  {
+    int mx = x * 8 + 4 - cx, my = y * 8 + 4 - cy, d2 = mx * mx + my * my;
+    if (r8 > 5 && d2 <= (r8 - 5) * (r8 - 5)) return 16;
+    if (d2 > (r8 + 5) * (r8 + 5)) return 0;
+  }
   for (sy = 0; sy < 4; sy++)
     for (sx = 0; sx < 4; sx++) {
       int dx = x * 8 + sx * 2 + 1 - cx, dy = y * 8 + sy * 2 + 1 - cy;
@@ -243,41 +314,73 @@ static int rr_cov(int x, int y, int rx, int ry, int w, int h, int r) {
   return n;
 }
 
+/* Amostras (rr_cov) so nas colunas dos cantos; o resto da linha e reto. */
 static void rrect(int x, int y, int w, int h, int r, unsigned rgb, int a) {
-  int i, j;
+  int i, j, j0 = y, j1 = y + h;
   if (r * 2 > h) r = h / 2;
   if (r * 2 > w) r = w / 2;
-  for (j = y; j < y + h; j++)
-    for (i = x; i < x + w; i++) {
+  if (j0 < g_ry0) j0 = g_ry0;
+  if (j1 > g_ry1) j1 = g_ry1;
+  for (j = j0; j < j1; j++) {
+    if (r < 1 || (j >= y + r && j < y + h - r)) {
+      span_over(x, j, w, rgb, a);
+      continue;
+    }
+    for (i = x; i < x + r; i++) {
       int c = rr_cov(i, j, x, y, w, h, r);
       if (c) px_over(i, j, rgb, a * c / 16);
     }
-}
-
-/* Contorno de 1 px do retangulo redondo: o anel entre ele e o de dentro. */
-static void rframe(int x, int y, int w, int h, int r, unsigned rgb, int a) {
-  int i, j;
-  if (r * 2 > h) r = h / 2;
-  if (r * 2 > w) r = w / 2;
-  for (j = y; j < y + h; j++)
-    for (i = x; i < x + w; i++) {
-      int c = rr_cov(i, j, x, y, w, h, r) - rr_cov(i, j, x + 1, y + 1, w - 2, h - 2, r - 1);
-      if (c > 0) px_over(i, j, rgb, a * c / 16);
+    span_over(x + r, j, w - 2 * r, rgb, a);
+    for (i = x + w - r; i < x + w; i++) {
+      int c = rr_cov(i, j, x, y, w, h, r);
+      if (c) px_over(i, j, rgb, a * c / 16);
     }
+  }
 }
 
-/* Brilho do vidro: o contorno so na parte de cima, sumindo ate a linha rows. */
-static void brilho(int x, int y, int w, int h, int r, unsigned rgb, int a, int rows) {
-  int i, j;
+/* Anel de 1 px do retangulo redondo (ele menos o de dentro, 1 px menor),
+ * nas linhas y .. y + rows - 1. fade: o alfa cai ate a linha rows. Nas linhas
+ * do meio o anel sao so as duas bordas; nas dos cantos, as colunas dos cantos
+ * e, na primeira e na ultima linha, o trecho reto entre elas. */
+static void anel(int x, int y, int w, int h, int r, unsigned rgb, int a, int rows, int fade) {
+  int i, j, j1 = y + (rows < h ? rows : h);
   if (r * 2 > h) r = h / 2;
   if (r * 2 > w) r = w / 2;
-  for (j = y; j < y + rows && j < y + h; j++) {
-    int aj = a * (rows - (j - y)) / rows;
-    for (i = x; i < x + w; i++) {
+  for (j = y; j < j1; j++) {
+    int aj = fade ? a * (rows - (j - y)) / rows : a;
+    if (j < g_ry0 || j >= g_ry1) continue;
+    if (r < 2 || w < 2 * r + 2) {   /* pequeno: todas as colunas */
+      for (i = x; i < x + w; i++) {
+        int c = rr_cov(i, j, x, y, w, h, r) - rr_cov(i, j, x + 1, y + 1, w - 2, h - 2, r - 1);
+        if (c > 0) px_over(i, j, rgb, aj * c / 16);
+      }
+      continue;
+    }
+    if (j >= y + r && j < y + h - r) {
+      px_over(x, j, rgb, aj);
+      px_over(x + w - 1, j, rgb, aj);
+      continue;
+    }
+    for (i = x; i < x + r + 1; i++) {
+      int c = rr_cov(i, j, x, y, w, h, r) - rr_cov(i, j, x + 1, y + 1, w - 2, h - 2, r - 1);
+      if (c > 0) px_over(i, j, rgb, aj * c / 16);
+    }
+    if (j == y || j == y + h - 1) span_over(x + r + 1, j, w - 2 * r - 2, rgb, aj);
+    for (i = x + w - r - 1; i < x + w; i++) {
       int c = rr_cov(i, j, x, y, w, h, r) - rr_cov(i, j, x + 1, y + 1, w - 2, h - 2, r - 1);
       if (c > 0) px_over(i, j, rgb, aj * c / 16);
     }
   }
+}
+
+/* Contorno de 1 px do retangulo redondo: o anel entre ele e o de dentro. */
+static void rframe(int x, int y, int w, int h, int r, unsigned rgb, int a) {
+  anel(x, y, w, h, r, rgb, a, h, 0);
+}
+
+/* Brilho do vidro: o contorno so na parte de cima, sumindo ate a linha rows. */
+static void brilho(int x, int y, int w, int h, int r, unsigned rgb, int a, int rows) {
+  if (rows > 0) anel(x, y, w, h, r, rgb, a, rows, 1);
 }
 
 /* Lupa: anel de raio r (espessura t) com centro no meio do pixel (cx,cy) e o
@@ -302,6 +405,8 @@ static void lupa(int cx, int cy, int r, int t, unsigned rgb) {
       if (n) px_over(x, y, rgb, 255 * n / 16);
     }
 }
+
+static int tecla_larg(const char* s) { return txt_larg(&F_DICA, s, (int)strlen(s)) + F_DICA.px; }
 
 /* Tecla desenhada ("Esc", "Enter") com a direita em xr, centrada em cy.
  * Devolve a largura. */
@@ -468,7 +573,81 @@ static int pasta(const struct prog* p, char* dir) {
   return dl;
 }
 
-/* Com a fonte TrueType: tudo no quadro, com alfa. */
+/* Fundo do cartao: sombra, vidro e contorno. */
+#define CARD_R 20   /* raio dos cantos */
+#define CARD_SY 6   /* a sombra desce isto */
+static void cartao_camadas(int y0, int ch) {
+  rrect(g_bx + 2, y0 + CARD_SY, g_bw - 4, ch, CARD_R, 0x000000u, 50);   /* sombra */
+  rrect(g_bx, y0, g_bw, ch, CARD_R, C_GLASS, A_GLASS);
+  rframe(g_bx, y0, g_bw, ch, CARD_R, C_EDGE, 200);
+}
+
+/* As linhas de m0 a m1 estao no trecho reto das tres camadas (longe dos
+ * cantos do vidro e da sombra, que desce CARD_SY): sao todas iguais a de
+ * cima delas. So as de cima e as de baixo sao desenhadas. */
+static void cartao(int y0, int ch) {
+  int m0 = y0 + CARD_SY + CARD_R + 1, m1 = y0 + ch - CARD_R, j;
+  if (ch < 2 * CARD_R || m1 - m0 < 2) {
+    cartao_camadas(y0, ch);
+    return;
+  }
+  g_ry1 = m0;
+  cartao_camadas(y0, ch);
+  g_ry0 = m1;
+  g_ry1 = g_ph;
+  cartao_camadas(y0, ch);
+  g_ry0 = 0;
+  for (j = m0; j < m1; j++) memcpy(lin(j), lin(m0 - 1), (size_t)g_fw * 4);
+}
+
+/* Fundo da caixa de busca (linhas g_by ate caixa_fim): sombra macia, vidro,
+ * brilho em cima, contorno, lupa e as teclas. So muda com o jeito: vazia,
+ * com texto, com texto e resultados (a tecla Enter). Cada um e desenhado
+ * uma vez e guardado (g_cx). */
+#define CX_N 3
+static unsigned* g_cx[CX_N];
+static int g_cx_ok[CX_N];
+
+static int caixa_fim(void) {
+  int b = g_by + g_bh + 12;   /* a sombra de baixo */
+  return b > g_ph ? g_ph : b;
+}
+
+static int caixa_jeito(void) { return !g_nq ? 0 : g_nres ? 2 : 1; }
+
+static void caixa_fundo(int cy, int r, int t, int lx, int xr) {
+  rrect(g_bx - 4, g_by + 2, g_bw + 8, g_bh + 10, g_bh / 2 + 4, 0x000000u, 30);
+  rrect(g_bx - 1, g_by + 4, g_bw + 2, g_bh + 2, g_bh / 2 + 1, 0x000000u, 50);
+  rrect(g_bx, g_by, g_bw, g_bh, g_bh / 2, C_GLASS, A_GLASS);
+  brilho(g_bx + 1, g_by + 1, g_bw - 2, g_bh - 2, g_bh / 2 - 1, 0xFFFFFFu, 60, g_bh / 2);
+  rframe(g_bx, g_by, g_bw, g_bh, g_bh / 2, g_nq ? C_ACCENT : C_EDGE, 255);
+  if (g_nq) rframe(g_bx + 1, g_by + 1, g_bw - 2, g_bh - 2, g_bh / 2 - 1, C_ACCENT, 140);
+  lupa(lx, cy - r / 4, r, t, g_nq ? C_TEXT : 0xB8C7DAu);
+  /* teclas a direita: Esc (e Enter quando ha o que abrir) */
+  {
+    int we = tecla(xr, cy, "Esc");
+    if (g_nres) tecla(xr - we - 12, cy, "Enter");
+  }
+}
+
+static void caixa(int cy, int r, int t, int lx, int xr) {
+  int v = caixa_jeito();
+  size_t n = (size_t)(caixa_fim() - g_by) * (size_t)g_fw;
+  if (g_cx[v] && g_cx_ok[v]) {
+    memcpy(lin(g_by), g_cx[v], n * 4);
+    return;
+  }
+  memset(lin(g_by), 0, n * 4);
+  caixa_fundo(cy, r, t, lx, xr);
+  if (g_cx[v]) {
+    memcpy(g_cx[v], lin(g_by), n * 4);
+    g_cx_ok[v] = 1;
+  }
+}
+
+/* Com a fonte TrueType: tudo no quadro, com alfa. So as linhas que mudam
+ * sao limpas e mandadas: de cima do cartao (o de agora ou o anterior) ate o
+ * fim da caixa. */
 static void desenha_ttf(void) {
   int i, cy = g_by + g_bh / 2;
   int r = g_bh * 16 / 100, t = g_bh >= 80 ? 4 : 3;
@@ -476,13 +655,23 @@ static void desenha_ttf(void) {
   int tx = lx + r * 2 + g_bh * 22 / 100;           /* comeco do texto */
   int base = cy + (F_BUSCA.asc - F_BUSCA.desc) / 2;
   int xr = g_bx + g_bw - g_bh * 36 / 100;          /* direita das teclas */
-  int fim;
+  int fim, top = g_nres ? card_y() : g_by, de, ate;
+  if (top < 0) top = 0;
+  g_ry0 = 0;
+  g_ry1 = g_ph;
+  if (g_cheio) {
+    de = 0;
+    ate = g_ph;
+    memset(g_frame, 0, (size_t)g_fw * g_ph * 4);
+  } else {
+    de = top < g_top_ant ? top : g_top_ant;
+    ate = caixa_fim();
+    if (de < g_by) memset(lin(de), 0, (size_t)(g_by - de) * g_fw * 4);
+  }
   /* cartao dos resultados */
   if (g_nres) {
     int y0 = card_y(), ch = card_h(), s = g_rowh - g_rowh * 36 / 100;
-    rrect(g_bx + 2, y0 + 6, g_bw - 4, ch, 20, 0x000000u, 50);   /* sombra */
-    rrect(g_bx, y0, g_bw, ch, 20, C_GLASS, A_GLASS);
-    rframe(g_bx, y0, g_bw, ch, 20, C_EDGE, 200);
+    cartao(y0, ch);
     for (i = 0; i < g_nres; i++) {
       const struct prog* p = &g_p[g_res[i]];
       int y = row_y(i), nb = y + g_rowh / 2 + (F_NOME.asc - F_NOME.desc) / 2, nx, dl, dw;
@@ -499,17 +688,10 @@ static void desenha_ttf(void) {
       txt(&F_NOME, nx, nb, p->nome, (int)strlen(p->nome), C_TEXT, 255, g_bx + g_bw - 20);
     }
   }
-  /* caixa de busca: sombra macia, vidro, brilho em cima e contorno */
-  rrect(g_bx - 4, g_by + 2, g_bw + 8, g_bh + 10, g_bh / 2 + 4, 0x000000u, 30);
-  rrect(g_bx - 1, g_by + 4, g_bw + 2, g_bh + 2, g_bh / 2 + 1, 0x000000u, 50);
-  rrect(g_bx, g_by, g_bw, g_bh, g_bh / 2, C_GLASS, A_GLASS);
-  brilho(g_bx + 1, g_by + 1, g_bw - 2, g_bh - 2, g_bh / 2 - 1, 0xFFFFFFu, 60, g_bh / 2);
-  rframe(g_bx, g_by, g_bw, g_bh, g_bh / 2, g_nq ? C_ACCENT : C_EDGE, 255);
-  if (g_nq) rframe(g_bx + 1, g_by + 1, g_bw - 2, g_bh - 2, g_bh / 2 - 1, C_ACCENT, 140);
-  lupa(lx, cy - r / 4, r, t, g_nq ? C_TEXT : 0xB8C7DAu);
-  /* teclas a direita: Esc (e Enter quando ha o que abrir) */
-  fim = xr - tecla(xr, cy, "Esc");
-  if (g_nres) fim -= 12 + tecla(fim - 12, cy, "Enter");
+  caixa(cy, r, t, lx, xr);
+  /* o texto vai ate antes das teclas */
+  fim = xr - tecla_larg("Esc");
+  if (g_nres) fim -= 12 + tecla_larg("Enter");
   fim -= 20;
   /* texto: se nao cabe, mostra o fim (o que se esta digitando) */
   if (g_nq) {
@@ -522,12 +704,10 @@ static void desenha_ttf(void) {
     rrect(tx - 1, base - F_BUSCA.asc + 2, 3, F_BUSCA.asc + F_BUSCA.desc / 2, 1, C_ACCENT, 255);
     txt(&F_BUSCA, tx + 10, base, ph, (int)strlen(ph), C_DIM, 170, fim);
   }
-  /* so a coluna do menu muda; o resto do painel fica invisivel */
-  {
-    int x0 = g_bx - 8, w = g_bw + 16;
-    k_gui_pixels(x0, 0, w, g_ph, g_frame + (size_t)x0 * 4, g_pw * 4);
-  }
+  if (ate > de) k_gui_pixels(g_fx0, de, g_fw, ate - de, lin(de), g_fw * 4);
   k_gui_present();
+  g_top_ant = top;
+  g_cheio = 0;
 }
 
 /* Sem os TTF: o desenho de antes, com a fonte de bitmap. */
@@ -542,10 +722,7 @@ static void desenha_bitmap(void) {
   rrect(g_bx, g_by, g_bw, g_bh, g_bh / 2, C_GLASS, A_GLASS);
   rframe(g_bx, g_by, g_bw, g_bh, g_bh / 2, g_nq ? C_ACCENT : C_EDGE, 255);
   lupa(g_bx + g_bh / 2 + 2, cy - r / 3, r, 3, C_TEXT);
-  {
-    int x0 = g_bx - 8, w = g_bw + 16;
-    k_gui_pixels(x0, 0, w, g_ph, g_frame + (size_t)x0 * 4, g_pw * 4);
-  }
+  k_gui_pixels(g_fx0, 0, g_fw, g_ph, g_frame, g_fw * 4);
   if (g_nq) k_gui_text(tx, ty, g_q, g_nq, C_TEXT, 0, TEXT_NOBG | TEXT_BOLD);
   else k_gui_text(tx, ty, "Buscar programas", 16, C_DIM, 0, TEXT_NOBG);
   for (i = 0; i < g_nres; i++) {
@@ -557,9 +734,14 @@ static void desenha_bitmap(void) {
 }
 
 static void desenha(void) {
-  memset(g_frame, 0, (size_t)g_pw * g_ph * 4);   /* tudo invisivel */
-  if (g_ttf) desenha_ttf();
-  else desenha_bitmap();
+  if (g_ttf) {
+    desenha_ttf();
+    return;
+  }
+  g_ry0 = 0;
+  g_ry1 = g_ph;
+  memset(g_frame, 0, (size_t)g_fw * g_ph * 4);   /* tudo invisivel */
+  desenha_bitmap();
 }
 
 /* Linha de resultado sob o clique, ou -1. */
@@ -599,20 +781,13 @@ static void abre(int i) {
   fecha(0);
 }
 
-/* Uma abertura do menu: da tecla Win ate fechar. */
-static void sessao(void) {
-  int sw, sh, bar, y0;
-  if (k_win_primary(&sw, &sh) != 0 && k_win_size(&sw, &sh) != 0) return;
-  bar = k_winmenu(K_WM_BARRA, 0);
-  if (bar <= 0) bar = 40;
-  k_gui_font(&g_cw, &g_chh);
-  if (g_cw < 1) g_cw = 8;
-  if (g_chh < 1) g_chh = 16;
-  fontes(sh);
-  y0 = sh / 2;
+/* Painel, caixa e coluna para a tela sw x sh (bar = barra de tarefas). As
+ * fontes ja estao montadas (fontes). 0 = tela pequena demais. */
+static int geometria(int sw, int sh, int bar) {
+  int y0 = sh / 2;
   g_pw = sw;
   g_ph = sh - y0 - bar;
-  if (g_ph < 160) return;
+  if (g_ph < 160) return 0;
   /* caixa com ~2,4x a altura da letra (o dobro da primeira versao) */
   g_bh = g_ttf ? g_px * 24 / 10 : 96;
   if (g_bh > g_ph / 3) g_bh = g_ph / 3;
@@ -622,16 +797,62 @@ static void sessao(void) {
   g_bx = (sw - g_bw) / 2;
   g_by = g_ph - g_bh - 34;
   g_rowh = g_ttf ? F_NOME.px * 24 / 10 : g_chh + 22;
-  g_frame = (unsigned char*)malloc((size_t)g_pw * g_ph * 4);
-  if (!g_frame) return;
+  /* so a coluna do menu muda; o resto do painel fica invisivel */
+  g_fx0 = g_bx - 8;
+  g_fw = g_bw + 16;
+  if (g_fx0 < 0) g_fx0 = 0;
+  if (g_fx0 + g_fw > g_pw) g_fw = g_pw - g_fx0;
+  return 1;
+}
+
+/* O quadro e os fundos guardados da caixa ficam de uma abertura para a
+ * outra; so mudam com a geometria (tela ou fonte). 0 = sem memoria. */
+static int quadro(void) {
+  int geo[9], i, mesmo = g_frame != 0;
+  geo[0] = g_pw;
+  geo[1] = g_ph;
+  geo[2] = g_bx;
+  geo[3] = g_by;
+  geo[4] = g_bw;
+  geo[5] = g_bh;
+  geo[6] = g_rowh;
+  geo[7] = g_px;
+  geo[8] = g_ttf;
+  for (i = 0; i < 9; i++)
+    if (geo[i] != g_geo[i]) mesmo = 0;
+  g_cheio = 1;
+  if (mesmo) return 1;
+  if (g_frame) free(g_frame);
+  for (i = 0; i < CX_N; i++) {
+    if (g_cx[i]) free(g_cx[i]);
+    g_cx[i] = 0;
+    g_cx_ok[i] = 0;
+  }
+  g_frame = (unsigned*)malloc((size_t)g_fw * g_ph * 4);
+  if (!g_frame) return 0;
+  /* sem memoria para os guardados: so desenha a caixa toda vez */
+  for (i = 0; i < CX_N; i++) g_cx[i] = (unsigned*)malloc((size_t)(caixa_fim() - g_by) * g_fw * 4);
+  for (i = 0; i < 9; i++) g_geo[i] = geo[i];
+  return 1;
+}
+
+/* Uma abertura do menu: da tecla Win ate fechar. */
+static void sessao(void) {
+  int sw, sh, bar;
+  if (k_win_primary(&sw, &sh) != 0 && k_win_size(&sw, &sh) != 0) return;
+  bar = k_winmenu(K_WM_BARRA, 0);
+  if (bar <= 0) bar = 40;
+  k_gui_font(&g_cw, &g_chh);
+  if (g_cw < 1) g_cw = 8;
+  if (g_chh < 1) g_chh = 16;
+  fontes(sh);
+  if (!geometria(sw, sh, bar) || !quadro()) return;
   coleta();
   g_nq = 0;
   g_q[0] = 0;
   g_nres = 0;
   g_sel = 0;
-  if (k_gui_panel("Busca", 0, y0, g_pw, g_ph) != 0) {
-    free(g_frame);
-    g_frame = 0;
+  if (k_gui_panel("Busca", 0, sh / 2, g_pw, g_ph) != 0) {
     k_winmenu(K_WM_FECHOU, 1);
     return;
   }
@@ -684,8 +905,6 @@ static void sessao(void) {
       }
     }
   }
-  free(g_frame);
-  g_frame = 0;
 }
 
 int main(void) {

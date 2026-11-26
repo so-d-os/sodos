@@ -118,6 +118,19 @@ cantos arredondados e texto claro sobre paineis. Primeira etapa concluida.
   tecla Win de novo tambem fecha e devolve. Uma janela que aparece (programa
   aberto pelo menu ou por um icone) fecha o menu e as outras ficam
   minimizadas.
+- **Desenho rapido** (26/11): o `cc` nao otimiza, e redesenhar o painel
+  pixel a pixel custava 83 ms ao abrir e 144 a 204 ms por tecla (medido no
+  build 74, 1920x1200), tudo CPU do proprio WINMENU, nao espera pela vez.
+  Agora: o quadro e so a coluna do menu; linhas retas dos retangulos vao em
+  trechos (`span_over`, a conta so muda quando muda o que esta embaixo); as
+  16 amostras do canto so onde a borda do circulo passa (`rr_cov`); as
+  linhas do meio do cartao sao copiadas; o fundo da caixa (vidro, brilho,
+  lupa, teclas) e guardado nos 3 jeitos (vazia, com texto, com Enter); so
+  as linhas que mudam sao limpas e mandadas ao `k_gui_pixels`. Ficou em
+  ~6 ms por tecla e ~4 ms ao abrir (primeira vez de cada jeito da caixa:
+  ~20 ms), com a imagem identica pixel a pixel (hash de 11 estados igual ao
+  do desenho antigo). A primeira tecla Win depois do boot ainda monta as
+  fontes (~170 ms).
 - **Residente**: a primeira tecla abre o EXE; ele fica na memoria parado em
   `k_winmenu(K_WM_ESPERA)` (sem CPU) e as teclas seguintes so o acordam
   (`wk_seq`), como o WINTAB do Alt+Tab. A janela de texto dele fica escondida
