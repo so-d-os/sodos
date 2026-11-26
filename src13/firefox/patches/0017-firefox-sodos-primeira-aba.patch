@@ -1,0 +1,34 @@
+Fase: navegacao. A primeira aba da janela nao navegava.
+Arquivo: browser/components/tabbrowser/content/tabbrowser.js
+Sintoma: o FIREFOX.EXE abria com a aba "New Tab" sem carregar a pagina
+inicial, e o Enter na barra de endereco dessa aba so limpava a barra; numa
+aba nova (botao +) tudo funcionava.
+Causa: com a pagina inicial padrao, gBrowserInit.uriToLoadPromise ainda e uma
+promessa quando o tabbrowser cria a primeira aba (espera o SessionStartup
+decidir se restaura a sessao). Nesse caso o upstream cria o browser com
+remoteType = PRIVILEGEDABOUT_REMOTE_TYPE sem olhar o e10s. No SODOS (processo
+unico, sem filhos) o browser fica remote="true" sem processo de conteudo:
+remoteType null, docShell null, e toda carga some sem erro. Medido com uma
+sonda no browser-init.js: "remote=true remoteType=null docShell=false".
+Agora, sem gMultiProcessBrowser, a primeira aba e criada no processo
+principal (NOT_REMOTE), como as abas do botao +.
+Teste: abrir o FIREFOX.EXE pelo WIN; a pagina inicial (sodos.js) carrega na
+primeira aba, e digitar um endereco nela navega.
+
+--- a/browser/components/tabbrowser/content/tabbrowser.js
++++ b/browser/components/tabbrowser/content/tabbrowser.js
+@@ -711,9 +711,14 @@
+             );
+           }
+
+           // In this case we default to the privileged about process as that's
+           // the best guess we can make, and we'll likely need it eventually.
+-          remoteType = E10SUtils.PRIVILEGEDABOUT_REMOTE_TYPE;
++          // SODOS: sem e10s (processo unico) nao ha processo privilegedabout;
++          // uma aba remota aqui ficava sem docShell e nenhuma carga acontecia.
++          remoteType = gMultiProcessBrowser
++            ? E10SUtils.PRIVILEGEDABOUT_REMOTE_TYPE
++            : E10SUtils.NOT_REMOTE;
+         }
+       }
+
