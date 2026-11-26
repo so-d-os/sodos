@@ -3069,7 +3069,29 @@ int xhci_cam_grab(int want_w, int skip, const uint8_t** data, uint32_t* len, int
 }
 
 /* Para programas (k_cam_*, kexports.c). */
+/* Ponteiro de programa: no heap alto (programas, DLLs, pilhas) ou acima de
+ * 4 GB. Abaixo de um_start() fica o kernel (kts[], world, cpus...): tres
+ * quedas de 26/11 tinham listas de modos da camera escritas ali. Recusa e
+ * registra quem chamou, em vez de corromper o kernel. */
+static int cam_user_ptr(const void* p, uint32_t len, const char* what) {
+  uint64_t a = (uint64_t)(uintptr_t)p;
+  if (a >= um_start() && a + len >= a) return 1;
+  xlog("[xhci] webcam: ponteiro no kernel em ");
+  xlog(what);
+  xlog(" ");
+  xlog_hex((uint32_t)(a >> 32));
+  xlog_hex((uint32_t)a);
+  log_hex(" pid ", kt_cur_pid());
+  return 0;
+}
+
 int xhci_cam_modes(uint32_t* out, int max) {
+  if (max > 0 && !cam_user_ptr(out, (uint32_t)max * 16u, "k_cam_modes")) return -1;
+  xlog("[xhci] webcam: k_cam_modes pid ");
+  xlog_hex(kt_cur_pid());
+  xlog(" buffer ");
+  xlog_hex((uint32_t)((uint64_t)(uintptr_t)out >> 32));
+  log_hex("", (uint32_t)(uintptr_t)out);
   int i, n = 0;
   if (!out || max < 0) return -1;
   xl_enter();
@@ -3093,6 +3115,7 @@ int xhci_cam_open(int kind, int w, int h, int* maxlen) {
   uint32_t ml = 0;
   char err[64];
   int want = w | (h << 16);
+  if (maxlen && !cam_user_ptr(maxlen, 4, "k_cam_open")) return -1;
   xl_enter();
   cam.s.want_kind = kind;          /* cam_pick: so esse formato no tamanho exato */
   r = cam_start_u(want, &k, &ww, &hh, &ml, err, (int)sizeof(err));
@@ -3107,6 +3130,8 @@ int xhci_cam_open(int kind, int w, int h, int* maxlen) {
 }
 
 int xhci_cam_frame(void* buf, int max, int* seq, int timeout_ms) {
+  if (!cam_user_ptr(buf, max > 0 ? (uint32_t)max : 0, "k_cam_frame") || !cam_user_ptr(seq, 4, "k_cam_frame seq"))
+    return -1;
   return cam_frame_u(buf, max, seq, timeout_ms);
 }
 

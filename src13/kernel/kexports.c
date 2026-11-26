@@ -741,7 +741,15 @@ static void k_win_teb(void* teb) { kt_win_teb_set((uint64_t)(uintptr_t)teb); }
  * Claude cria de outras threads ficavam no registro de esperas com o pid
  * errado; o Ctrl+Backspace (fim do WIN) nao as limpava e o wine_dump do
  * REBOOT lia o wproc ja solto (#GP). A k_thread guarda o pid dela. */
-static uint32_t k_getpid(void) { return kt_in_thread() ? kt_cur_pid() : um_owner(); }
+static uint32_t k_getpid(void) {
+  uint32_t r;
+  if (kt_in_thread()) return kt_cur_pid();
+  /* mundo: sem o BKL o um_owner() e o de quem esta com ele (ver k_cam_frame) */
+  kt_bkl_enter();
+  r = um_owner();
+  kt_bkl_leave();
+  return r;
+}
 /* Memoria num endereco baixo fixo para a imagem de um EXE sem relocacoes. */
 static void* k_win_lowmem(uint32_t addr, uint32_t size) { return wine_low_alloc(addr, size); }
 /* Memoria virtual dos programas do Windows (kernel/vmem.c). */
@@ -1640,8 +1648,21 @@ static int k_troca_dll(const char* nome, char* msg, int max) {
 /* Webcam USB (kernel/xhci.c, secao "webcam"). Ver so.h. */
 static int k_cam_modes(uint32_t* out, int max) { return xhci_cam_modes(out, max); }
 static int k_cam_open(int kind, int w, int h, int* maxlen) { return xhci_cam_open(kind, w, h, maxlen); }
+/* EXP_NOLOCK so para threads (o driver copia sem a trava dele). No mundo (um
+ * programa do WIN, como o GESTURE) pega o BKL, como o k_ms: a espera do
+ * quadro vai para world_wait -> gui_coop_wait, que troca de tarefa do WIN
+ * (mod_cpu_save/mod_cpu_load) e roda o laco do WIN. Sem o BKL, o cur_pid e o
+ * um_owner eram os de uma thread do Claude que estava com ele: a tarefa do
+ * GESTURE guardou o pid do bash do Claude, o "kill gesture" encerrou o
+ * Claude e soltou a pilha do GESTURE vivo (26/11, lista de livres corrompida
+ * e trava). */
 static int k_cam_frame(void* buf, int max, int* seq, int timeout_ms) {
-  return xhci_cam_frame(buf, max, seq, timeout_ms);
+  int r;
+  if (kt_in_thread()) return xhci_cam_frame(buf, max, seq, timeout_ms);
+  kt_bkl_enter();
+  r = xhci_cam_frame(buf, max, seq, timeout_ms);
+  kt_bkl_leave();
+  return r;
 }
 static int k_cam_close(void) { return xhci_cam_close(); }
 

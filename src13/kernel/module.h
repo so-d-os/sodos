@@ -109,6 +109,9 @@ void mod_mark_boot_reset(void);   /* LIMPA: proxima marca e a do WIN novo */
 uint32_t mod_root_pid(uint32_t pid);
 int mod_chain_has(uint32_t pid, uint32_t want);
 int mod_kill(uint32_t pid);
+/* KILL <nome>: pids vivos de EXE do SODOS com esse nome; e se o pid e PE. */
+int mod_pids_named(const char* name, uint32_t* out, int max);
+int mod_pid_is_pe(uint32_t pid);
 /* Unidade de onde o .EXE atual foi carregado ('C', 'D', ...; 0 = nenhuma).
  * Programas usam para achar arquivos/log ao lado do proprio exe. */
 char mod_exe_drive(void);

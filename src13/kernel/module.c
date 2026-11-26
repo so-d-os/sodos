@@ -656,6 +656,37 @@ uint32_t mod_boot_mark(void) { return boot_mark; }
 /* LIMPA: o boot roda de novo; o WIN novo marca outra vez. */
 void mod_mark_boot_reset(void) { boot_mark = 0; }
 
+/* "gesture" ou "GESTURE.EXE" contra o nome do modulo (sem caixa, ate o '.'). */
+static int name_is(const char* mod, const char* name) {
+  int i;
+  for (i = 0; name[i] && mod[i]; i++) {
+    char x = name[i], y = mod[i];
+    if (x >= 'a' && x <= 'z') x = (char)(x - 32);
+    if (y >= 'a' && y <= 'z') y = (char)(y - 32);
+    if (x != y) return 0;
+  }
+  return !name[i] && (!mod[i] || mod[i] == '.');
+}
+
+/* KILL <nome>: pids vivos cujo EXE do SODOS (SOX) tem esse nome, pela tabela
+ * de modulos (o pid que a tarefa do WIN guardou pode nao ser o dela). */
+int mod_pids_named(const char* name, uint32_t* out, int max) {
+  int i, n = 0;
+  if (!name || !name[0]) return 0;
+  for (i = 0; i < LIVE_MAX && n < max; i++) {
+    int id = live[i].id;
+    if (!live[i].pid || id < 0 || id >= MOD_MAX || !mods[id].used || mods[id].is_dll) continue;
+    if (name_is(mods[id].name, name)) out[n++] = live[i].pid;
+  }
+  return n;
+}
+
+/* 1 se o pid esta vivo e e um EXE do Windows (roda pelo WINE.DLL). */
+int mod_pid_is_pe(uint32_t pid) {
+  int i = live_find(pid);
+  return i >= 0 && live[i].id < 0;
+}
+
 /* Primeiro programa da cadeia (quem chamou quem, ate o de fora). */
 uint32_t mod_root_pid(uint32_t pid) {
   int i, guard = 0;

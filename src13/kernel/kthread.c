@@ -168,6 +168,7 @@ static int kt_up;
 static volatile int stopping;
 static volatile int stop_cpu = -1;
 static int next_tid = 1;
+static int kt_create_kernel;  /* kt_thread_create_rt: a thread e do kernel, nao do programa */
 static volatile uint32_t tlb_gen;
 static int xs_mode;               /* 0 = fxsave, 1 = xsave */
 static uint32_t xs_lo, xs_hi, xs_size = 512;
@@ -1388,7 +1389,11 @@ int kt_thread_create(int (*fn)(void*), void* arg, uint32_t stack_size, uint32_t 
     t->xs_raw = raw;
     t->xs = (uint8_t*)(((uintptr_t)raw + 63u) & ~(uintptr_t)63u);
   }
-  t->pid = mod_current_pid();
+  /* Thread do kernel (kt_thread_create_rt): pid 0 e pilha com dono 0. Com o
+   * dono do programa que chamou, o fim dele (ufree_owner) liberava a pilha
+   * com a thread ainda rodando nela; a memoria voltava para outro e o
+   * agendador caia com a tarefa corrompida (webcam, 26/11/2026). */
+  t->pid = kt_create_kernel ? 0 : mod_current_pid();
   t->stack = (uint8_t*)umalloc_owned(stack_size, t->pid);
   if (!t->stack) return E_NOMEM;
   fpu_init_area(t->xs);
@@ -1476,7 +1481,9 @@ int kt_thread_create_rt(int (*fn)(void*), void* arg, uint32_t stack_size, int cp
   int tid, i;
   struct task* t;
   if (cpu <= 0 || cpu >= KT_CPU_MAX || !cpus[cpu].online) return E_INVAL;
+  kt_create_kernel = 1;
   tid = kt_thread_create(fn, arg, stack_size, 1u << cpu);
+  kt_create_kernel = 0;
   if (tid <= 0) return tid;
   t = find_tid(tid);
   if (!t) return E_SRCH;

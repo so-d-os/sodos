@@ -7131,6 +7131,18 @@ static void gui_yield(int wake) {
   }
   if (task_cur < 0 || !host_on) return;
   t = &gtasks[task_cur];
+  /* Trocar de tarefa sem o BKL guarda o pid de quem esta com ele (uma thread
+   * de outro programa). Um k_* EXP_NOLOCK que espera no mundo sem pegar o
+   * BKL (k_cam_frame ate 26/11) cai aqui: avisa uma vez por programa. */
+  if (kt_bkl_depth() == 0) {
+    static uint32_t warned;
+    if (warned != t->cpu.pid + 1u) {
+      warned = t->cpu.pid + 1u;
+      serial_puts("[visual] gui_yield sem o BKL: ");
+      serial_puts(t->path);
+      serial_puts("\n");
+    }
+  }
   t->wake = wake;
   console_detach(t);
   mod_cpu_save(&t->cpu);
@@ -7888,11 +7900,28 @@ static int name_match(const char* path, const char* name) {
   }
   return !name[i] && (!b[i] || b[i] == '.');
 }
+/* EXE do SODOS: o pid vem da tabela de modulos. A tarefa do WIN guarda o pid
+ * na troca de tarefa, e um pid errado ali (26/11: o do bash do Claude na
+ * tarefa do GESTURE) fazia o "kill gesture" encerrar o Claude. Pela tarefa
+ * so os EXE do Windows (claude.exe), cujo pid e conferido como PE. */
 int win_task_pids(const char* name, uint32_t* out, int max) {
   int i, n = 0;
   if (!host_on || !gtasks || !name) return -1;
-  for (i = 0; i < task_n && n < max; i++)
-    if (gtasks[i].used && gtasks[i].cpu.pid && name_match(gtasks[i].path, name)) out[n++] = gtasks[i].cpu.pid;
+  n = mod_pids_named(name, out, max);
+  if (n > 0) return n;
+  for (i = 0; i < task_n && n < max; i++) {
+    uint32_t p = gtasks[i].cpu.pid;
+    if (!gtasks[i].used || !p || !name_match(gtasks[i].path, name)) continue;
+    if (!mod_pid_is_pe(p)) {
+      serial_puts("[visual] kill: pid da tarefa nao confere com ");
+      serial_puts(gtasks[i].path);
+      serial_puts(" pid=");
+      serial_hex32(p);
+      serial_puts("\n");
+      continue;
+    }
+    out[n++] = p;
+  }
   return n;
 }
 
