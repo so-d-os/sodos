@@ -158,8 +158,17 @@ DISKS_CMD_O = $(DISKS_CMD_C:.c=.o)
 
 CMD_O = $(SHELL_CMD_O) $(DISKS_CMD_O)
 
-kernel.elf: kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c video/gpu.c video/wfont.c video/prtscr.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/ps2in.c kernel/smp.c kernel/reboot.c kernel/xhci.c kernel/nvme.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c fs/fsdrv.c kernel/env.c kernel/linkext.c kernel/wine.c kernel/vmem.c kernel/bootpak.c kernel/mm.c net/net.c net/httpd.c net/png.c net/wpa.c net/rtw89.c net/wifi.c net/r8125.c net/virtio_net.c kernel/module.c kernel/elf.c kernel/sched.c kernel/kthread.c kernel/kexports.c kernel/keymap.c kernel/clip.c kernel/vt.c kernel/version.c kernel/thermal.c kernel/hang.c kernel/troca.c kernel/audio.c $(SHELL_CMD_C) $(DISKS_CMD_C) kernel/ap_blob.o shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
-	@[ -f kernel/version.h ] || sh tools/mkversion.sh
+# Numero de build = commits ate o HEAD, igual em toda maquina (tools/mkversion.sh).
+# O version.h e conferido a cada make e so e regravado quando o commit muda (o
+# kernel recompila entao). Com mudancas nao commitadas, cada kernel.elf novo
+# ganha +K: "build 239+2".
+.PHONY: FORCE
+FORCE:
+kernel/version.h: FORCE
+	@sh tools/mkversion.sh --commit
+
+kernel.elf: kernel/version.h kernel/kernel.c kernel/bootinfo.c fs/files.c executables.c fs/fat.c fs/partition.c fs/fat_format.c video/visual.c video/font8x8_data.c video/font8x16_data.c video/fbcon.c video/gpu.c video/wfont.c video/prtscr.c kernel/serial.c kernel/idt.c kernel/isr.c kernel/pic.c kernel/irq.c kernel/ps2in.c kernel/smp.c kernel/reboot.c kernel/xhci.c kernel/nvme.c kernel/interrupt_stack.c kernel/trace.c fs/drives.c fs/fsdrv.c kernel/env.c kernel/linkext.c kernel/wine.c kernel/vmem.c kernel/bootpak.c kernel/mm.c net/net.c net/httpd.c net/png.c net/wpa.c net/rtw89.c net/wifi.c net/r8125.c net/virtio_net.c kernel/module.c kernel/elf.c kernel/sched.c kernel/kthread.c kernel/kexports.c kernel/keymap.c kernel/clip.c kernel/vt.c kernel/version.c kernel/thermal.c kernel/hang.c kernel/troca.c kernel/audio.c $(SHELL_CMD_C) $(DISKS_CMD_C) kernel/ap_blob.o shell/cmd_shutdown.asm kernel/isr_stubs.asm kernel/irq_stubs.asm kernel/modrun.asm kernel/kernel_entry.asm kernel/linker.ld $(wildcard *.h kernel/*.h fs/*.h net/*.h video/*.h) c_compiler/sox.h
+	@sh tools/mkversion.sh --kernel
 	$(CC) $(CFLAGS) -c kernel/version.c -o kernel/version.o
 	$(CC) $(CFLAGS) -c kernel/thermal.c -o kernel/thermal.o
 	$(CC) $(CFLAGS) -c kernel/hang.c -o kernel/hang.o
@@ -811,7 +820,8 @@ grub: kernel_multiboot.elf sodos.pak
 # que o kernel monta como D: (kernel/nvme.c). Preparar uma vez com
 #   make real-setup        (sudo: linha user,noauto no fstab + GRUB F8)
 # Depois, sem sudo, nesta ordem:
-#   make version           sobe o numero de build (tools/mkversion.sh)
+#   make version           (opcional) gera a versao de novo; o numero segue o
+#                          commit sozinho, com mudancas locais sobe o +K
 #   make real              compila o kernel, SODOS.PAK e os programas do D:
 #   make send              monta a FAT32 em $(REAL_MNT) e copia direto nela:
 #                          BOOT/KERNEL.ELF, BOOT/SODOS.PAK e os arquivos do D:

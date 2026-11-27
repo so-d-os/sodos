@@ -1,12 +1,17 @@
 /* version.c - versao do kernel (comando VER, banner, Gerenciador) e o
  * \LOG\BOOT.LOG, que diz a cada boot se o kernel mudou desde o anterior.
  *
- * A string vem de kernel/version.h, gerado por tools/mkversion.sh em todo
- * build do kernel (o numero de build sempre sobe). Assim da para ver no PC
+ * A string vem de kernel/version.h, gerado por tools/mkversion.sh. O numero
+ * de build e a contagem de commits do codigo (o mesmo em toda maquina); um
+ * kernel compilado com mudancas nao commitadas ganha +K ("build 239+2"), que
+ * sobe a cada kernel novo em cima do mesmo commit. Assim da para ver no PC
  * real se o KERNEL.ELF que o GRUB carregou e mesmo o ultimo enviado.
  */
 #include <stdint.h>
 #include "version.h"
+#ifndef SODOS_VER_LOCAL
+#define SODOS_VER_LOCAL 0 /* version.h de antes do +K */
+#endif
 #include "shell.h"
 #include "serial.h"
 #include "smp.h"
@@ -74,34 +79,54 @@ static void cat_mhz(char* d, int max, uint64_t hz) {
 
 /* "build N" da ultima linha de boot do log (pula as linhas de reboot);
  * -1 se nao achar. */
-static int last_build_line(const char* buf, int st, int end);
-static int last_build(const char* buf, int len) {
+static int last_build_line(const char* buf, int st, int end, int* local);
+static int last_build(const char* buf, int len, int* local) {
   int end = len, st, v;
   for (;;) {
     while (end > 0 && (buf[end - 1] == '\n' || buf[end - 1] == '\r')) end--;
     if (end <= 0) return -1;
     st = end;
     while (st > 0 && buf[st - 1] != '\n') st--;
-    v = last_build_line(buf, st, end);
+    v = last_build_line(buf, st, end, local);
     if (v >= 0) return v;
     end = st;
   }
 }
-static int last_build_line(const char* buf, int st, int end) {
+/* "build N" ou "build N+K": devolve N e poe K em *local (0 sem o +K). */
+static int last_build_line(const char* buf, int st, int end, int* local) {
   int i;
   for (i = st; i + 6 < end; i++) {
     if (buf[i] == 'b' && buf[i + 1] == 'u' && buf[i + 2] == 'i' && buf[i + 3] == 'l' &&
         buf[i + 4] == 'd' && buf[i + 5] == ' ') {
-      int v = 0, k = i + 6, n = 0;
+      int v = 0, k = i + 6, n = 0, l = 0;
       while (k < end && buf[k] >= '0' && buf[k] <= '9') {
         v = v * 10 + (buf[k] - '0');
         k++;
         n++;
       }
-      if (n) return v;
+      if (n) {
+        if (k < end && buf[k] == '+') {
+          k++;
+          while (k < end && buf[k] >= '0' && buf[k] <= '9') {
+            l = l * 10 + (buf[k] - '0');
+            k++;
+          }
+        }
+        *local = l;
+        return v;
+      }
     }
   }
   return -1;
+}
+
+/* "239" ou "239+2" */
+static void cat_build(char* d, int max, unsigned b, unsigned local) {
+  cat_u(d, max, b, 1);
+  if (local) {
+    cat(d, max, "+");
+    cat_u(d, max, local, 1);
+  }
 }
 
 #define LOG_MAX 12288
@@ -110,7 +135,7 @@ static char logbuf[LOG_MAX + 256];
 static int try_log(char letter, const char* line) {
   char dir[8] = "X:\\LOG";
   char path[32];
-  int n, ll = slen(line), prev;
+  int n, ll = slen(line), prev, prev_local = 0;
   if (!drives_is_mounted(letter)) return -1;
   dir[0] = letter;
   drives_mkdir(dir); /* 0 criou, 1 ja existia; outro erro aparece no save */
@@ -119,7 +144,7 @@ static int try_log(char letter, const char* line) {
   cat(path, (int)sizeof path, "\\BOOT.LOG");
   n = file_load(path, logbuf, LOG_MAX);
   if (n < 0) n = 0;
-  prev = last_build(logbuf, n);
+  prev = last_build(logbuf, n, &prev_local);
   /* Mantem so o fim: corta linhas velhas ate caber a nova. */
   if (n + ll > LOG_MAX) {
     int cut = n + ll - LOG_MAX, i;
@@ -138,15 +163,15 @@ static int try_log(char letter, const char* line) {
   boot_note[0] = 0;
   if (prev < 0) {
     cat(boot_note, (int)sizeof boot_note, "primeiro boot registrado neste disco");
-  } else if (prev == SODOS_VER_BUILD) {
+  } else if (prev == SODOS_VER_BUILD && prev_local == SODOS_VER_LOCAL) {
     cat(boot_note, (int)sizeof boot_note, "MESMO kernel do boot anterior (build ");
-    cat_u(boot_note, (int)sizeof boot_note, (unsigned)prev, 1);
+    cat_build(boot_note, (int)sizeof boot_note, (unsigned)prev, (unsigned)prev_local);
     cat(boot_note, (int)sizeof boot_note, ")");
   } else {
     cat(boot_note, (int)sizeof boot_note, "kernel ATUALIZADO: build ");
-    cat_u(boot_note, (int)sizeof boot_note, (unsigned)prev, 1);
+    cat_build(boot_note, (int)sizeof boot_note, (unsigned)prev, (unsigned)prev_local);
     cat(boot_note, (int)sizeof boot_note, " -> ");
-    cat_u(boot_note, (int)sizeof boot_note, (unsigned)SODOS_VER_BUILD, 1);
+    cat_build(boot_note, (int)sizeof boot_note, (unsigned)SODOS_VER_BUILD, (unsigned)SODOS_VER_LOCAL);
   }
   return 0;
 }

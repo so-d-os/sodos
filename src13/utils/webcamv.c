@@ -16,10 +16,10 @@
 #include <so.h>
 
 /* Exports do build 79: o linker nao os conhece; busca na hora. */
-static int (*k_cam_modes)(unsigned int* out, int max);
-static int (*k_cam_open)(int kind, int w, int h, int* maxlen);
-static int (*k_cam_frame)(void* buf, int max, int* seq, int timeout_ms);
-static int (*k_cam_close)(void);
+static int (*p_cam_modes)(unsigned int* out, int max);
+static int (*p_cam_open)(int kind, int w, int h, int* maxlen);
+static int (*p_cam_frame)(void* buf, int max, int* seq, int timeout_ms);
+static int (*p_cam_close)(void);
 
 /* Tabelas de Huffman padrao (JPEG, anexo K): o MJPEG da webcam vem sem DHT. */
 static const unsigned char dc_l[16] = {0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0};
@@ -167,17 +167,17 @@ int main(int argc, char** argv) {
     want_w = atoi(argv[1]);
     want_h = atoi(argv[2]);
   }
-  k_cam_modes = (int (*)(unsigned int*, int))k_dl_sym(0, "k_cam_modes", 0);
-  k_cam_open = (int (*)(int, int, int, int*))k_dl_sym(0, "k_cam_open", 0);
-  k_cam_frame = (int (*)(void*, int, int*, int))k_dl_sym(0, "k_cam_frame", 0);
-  k_cam_close = (int (*)(void))k_dl_sym(0, "k_cam_close", 0);
+  p_cam_modes = (int (*)(unsigned int*, int))k_dl_sym(0, "k_cam_modes", 0);
+  p_cam_open = (int (*)(int, int, int, int*))k_dl_sym(0, "k_cam_open", 0);
+  p_cam_frame = (int (*)(void*, int, int*, int))k_dl_sym(0, "k_cam_frame", 0);
+  p_cam_close = (int (*)(void))k_dl_sym(0, "k_cam_close", 0);
   if (gui_open_pct("Webcam", 45, 55) != 0) {
     printf("WEBCAMV: abra pelo WIN (webcam /show)\n");
     return 1;
   }
-  if (!k_cam_modes || !k_cam_open || !k_cam_frame || !k_cam_close)
+  if (!p_cam_modes || !p_cam_open || !p_cam_frame || !p_cam_close)
     return fail_wait("Este kernel nao tem o stream da webcam.", "Precisa do SODOS build 79 ou mais novo.");
-  n = k_cam_modes(m, 32);
+  n = p_cam_modes(m, 32);
   if (n <= 0) return fail_wait("Nenhuma webcam USB.", "Ligue a camera e abra de novo (comando usb mostra).");
   /* YUY2 com 25 q/s ou mais no tamanho pedido; senao MJPEG. */
   for (i = 0; i < n; i++)
@@ -196,7 +196,7 @@ int main(int argc, char** argv) {
     snprintf(msg, sizeof msg, "A webcam nao tem %dx%d (webcam /L lista os tamanhos).", want_w, want_h);
     return fail_wait(msg, 0);
   }
-  r = k_cam_open(kind, want_w, want_h, &maxlen);
+  r = p_cam_open(kind, want_w, want_h, &maxlen);
   if (r != 0)
     return fail_wait(r == -2 ? "A webcam esta em uso por outro programa (Chrome?)." : "A webcam nao ligou.",
                      r == -2 ? "Feche o outro programa e abra de novo." : 0);
@@ -204,7 +204,7 @@ int main(int argc, char** argv) {
   jpg = (unsigned char*)malloc((size_t)maxlen + 1024);
   rgba = (unsigned char*)malloc((size_t)want_w * want_h * 4);
   if (!raw || !jpg || !rgba) {
-    k_cam_close();
+    p_cam_close();
     return fail_wait("Sem memoria para os quadros.", 0);
   }
   snprintf(title, sizeof title, "Webcam %dx%d", want_w, want_h);
@@ -227,9 +227,9 @@ int main(int argc, char** argv) {
       if (!alive) break;
     }
     if (!alive) break;
-    got = k_cam_frame(raw, maxlen, &seq, 100);
+    got = p_cam_frame(raw, maxlen, &seq, 100);
     if (got < 0) {
-      k_cam_close();
+      p_cam_close();
       return fail_wait("A webcam parou.", "Foi desligada ou outro programa a desligou.");
     }
     if (got == 0) continue;
@@ -306,7 +306,7 @@ int main(int argc, char** argv) {
     gui_present();
     shown++;
   }
-  k_cam_close();
+  p_cam_close();
   gui_close();
   return 0;
 }

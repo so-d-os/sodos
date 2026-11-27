@@ -49,6 +49,8 @@ Num kernel com a troca a quente (`TROCA` sem argumentos responde), um kernel ou 
 
 Não use para mudanças de `struct` ou de tamanho de variável do kernel: aí, reinicie. Detalhes em `src13/docs/TROCA.md`.
 
+O número do build (`ver`, `TROCA`, `\LOG\BOOT.LOG`) é a contagem de commits do código, o mesmo em toda máquina para o mesmo commit. Um kernel compilado com mudanças não commitadas sai como `build N+K`, e o K sobe a cada kernel novo em cima do mesmo commit. O `make kernel_multiboot.elf` atualiza o número sozinho (não precisa de `make version`). Ao citar um kernel num commit ou numa mensagem, use esse número (ex.: `build 240+3`). No clone raso do GIT.EXE a contagem vem uma vez da API do GitHub, então o primeiro build depois de um clone ou pull precisa de rede; sem ela o kernel sai como `build ?`.
+
 ## Cuidados
 
 - `tecla` e `mouse` vão para a janela que tem o foco. Antes de digitar, confira com `janelas` ou clique na janela certa.

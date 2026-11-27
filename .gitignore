@@ -18,9 +18,11 @@ src13/content/*.mp4
 # Arquivo de lixo de uma sessao antiga (nome U+F03A, 815 bytes)
 
 
-# Versao do kernel gerada no build (tools/mkversion.sh). O contador
-# src13/kernel/BUILDNO fica no git: o numero da build e o mesmo em todo checkout.
+# Versao do kernel gerada no build (tools/mkversion.sh). O numero da build e a
+# contagem de commits (o mesmo em todo checkout); o BUILDLOC so guarda o +K dos
+# kernels de teste com mudancas nao commitadas, desta maquina.
 src13/kernel/version.h
+src13/kernel/BUILDLOC
 
 # develop/: so fonte vai para o git. AGENT.CFG tem a chave da API; os .json
 # sao estado local dos programas (janela, dumps); .obj e .EXE saem do build.
