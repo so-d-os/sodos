@@ -20,6 +20,9 @@ int mod_exec(const char* path, int argc, char** argv);
 int mod_kill(uint32_t pid);
 /* Codigo de saida de um programa DOS encerrado com Ctrl+C (ASCII ETX). */
 #define MOD_EXIT_BREAK 3
+/* Programa encerrado por uma excecao no codigo dele (isr.c): o sistema segue.
+ * O mesmo numero do STATUS_ACCESS_VIOLATION do Windows. */
+#define MOD_EXIT_FAULT ((int)0xC0000005u)
 
 /* Procura o programa como o shell faz: nome, nome.EXE, na unidade corrente e em D:. */
 int mod_find_exe(const char* name, char* out, int max);

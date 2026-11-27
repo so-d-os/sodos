@@ -14,6 +14,7 @@
 #include "smp.h"
 #include "kthread.h"
 #include "troca.h"
+#include "vt.h"
 void gpu_crash_text(void);   /* video/gpu.c */
 #define VGA vga_text  /* 0xB8000, ou a copia do fbcon no UEFI */
 #define ATTR 0x1F00  /* fundo azul, texto branco */
@@ -111,6 +112,10 @@ static uint64_t crash_cr2;
 static uint8_t crash_stack[65536] __attribute__((aligned(16)));
 static volatile int crash_depth;
 static char crash_rip[48];  /* "QEMU.EXE+0x..." para a tela */
+static int crash_prog;      /* 1: so o programa foi encerrado (isr_prog_abort) */
+static const char* prog_why;     /* por que o prog_abort_ok recusou, ou 0 */
+static volatile int prog_in_abort; /* 1: dentro do isr_prog_abort */
+static isr_frame_t prog_f;       /* a falta que o isr_prog_abort trata */
 
 static void lc(char c) {
   if (crash_n < (int)sizeof(crash_txt) - 1) crash_txt[crash_n++] = c;
@@ -190,7 +195,22 @@ static void crash_build(void) {
   ldec(mod_current_pid());
   ls("  exe da unidade ");
   lc(mod_exe_drive() ? mod_exe_drive() : '-');
-  ls(":\r\n\r\nvetor ");
+  ls(":\r\n");
+  if (crash_prog) ls("falta no codigo do programa: so ele foi encerrado, o sistema seguiu\r\n");
+  if (!crash_prog && prog_in_abort) {
+    ls("FALTA DENTRO DO isr_prog_abort (encerrando so o programa). A falta original:\r\n  vetor ");
+    ldec(prog_f.int_no);
+    ls(" RIP=");
+    lh64(prog_f.eip);
+    ls(" ");
+    where(prog_f.eip);
+    ls("\r\n");
+  } else if (!crash_prog && prog_why) {
+    ls("encerrar so o programa: recusado (");
+    ls(prog_why);
+    ls(")\r\n");
+  }
+  ls("\r\nvetor ");
   ldec(f->int_no);
   ls(" ");
   ls(vec_name(f->int_no));
@@ -322,11 +342,12 @@ static void crash_build(void) {
   crash_txt[crash_n] = 0;
 }
 
-static void crash_save(void) {
+static void crash_save(int panic) {
   static char path[] = "?:\\CRASH.LOG";
   char order[3] = { mod_exe_drive(), 'U', 'D' };
   int i, k;
-  fs_panic = 1; /* o dono da trava pode ser quem caiu */
+  crash_path = 0;
+  fs_panic = panic; /* tela azul: o dono da trava pode ser quem caiu */
   for (i = 0; i < 3; i++) {
     char L = order[i];
     if (!L) continue;
@@ -349,7 +370,85 @@ static void crash_on_stack(void) {
   crash_build();
   serial_puts("[exc] CRASH.LOG:\n");
   serial_puts(crash_txt);
-  crash_save();
+  crash_save(1);
+}
+
+/* ---- Falta no codigo do proprio programa (thread principal) ----
+ * Antes virava tela azul: o Firefox sem memoria chama o MOZ_CRASH (escreve
+ * no endereco 0 de proposito, CRASH.LOG de 2026-11-27) e o SODOS inteiro
+ * parava. Quando a falta e no codigo de um modulo do programa corrente (o EXE
+ * ou as DLLs dele, nao o kernel nem DLLs do sistema), com IF ligado e pilha
+ * em ordem, o isr_common pula para isr_prog_abort como faz com a entrada de
+ * falhas do programa: ela grava o CRASH.LOG com o disco normal (as outras
+ * CPUs seguem) e sai pelo mod_exit, o mesmo caminho do exit(). */
+extern int mod_depth;          /* modrun.asm */
+void mod_exit(int code);
+static uint64_t prog_cr2;
+static volatile int prog_abort_busy;
+
+static int prog_owns(uint64_t a, uint32_t pid) {
+  struct mod_info m;
+  int i;
+  if (a >= 0x100000000ull) return 0;
+  for (i = 0; i < MOD_MAX; i++) {
+    if (!mod_get(i, &m) || !m.base || m.pid != pid) continue;
+    if (a >= m.base && a < (uint64_t)m.base + m.size) return 1;
+  }
+  return 0;
+}
+
+static int prog_abort_ok(const isr_frame_t* f) {
+  uint32_t pid = mod_current_pid();
+  uint64_t v = f->int_no;
+#define RECUSA(s) do { prog_why = (s); return 0; } while (0)
+  prog_why = 0;
+  if (!pid) RECUSA("sem programa corrente");
+  if (crash_depth) RECUSA("ja na tela azul");
+  if (mod_depth <= 0) RECUSA("mod_depth 0");
+  if (kt_in_thread()) RECUSA("thread do programa");
+  if (v != 0 && v != 6 && v != 13 && v != 14 && v != 16 && v != 17 && v != 19) RECUSA("vetor fora da lista");
+  if (!(f->eflags & 0x200u)) RECUSA("IF desligado");  /* cli: pode estar segurando algo */
+  if (troca_texto(f->eip)) RECUSA("RIP no kernel trocado");
+  if (f->eip >= KERNEL_LOAD && f->eip < (uint64_t)(uintptr_t)__bss_start) RECUSA("RIP no kernel");
+  if (!prog_owns(f->eip, pid)) RECUSA("RIP fora dos modulos do programa");
+  /* isr_prog_abort roda logo abaixo do frame */
+  if (!mapped((uint64_t)(uintptr_t)f - 0x4000) || !mapped((uint64_t)(uintptr_t)f - 1)) RECUSA("pilha abaixo do frame sem mapa");
+  if (__atomic_exchange_n(&prog_abort_busy, 1, __ATOMIC_ACQUIRE)) RECUSA("outro encerramento em curso");
+#undef RECUSA
+  return 1;
+}
+
+static void isr_prog_abort(void) __attribute__((noreturn, used));
+static void isr_prog_abort(void) {
+  uint32_t pid = mod_current_pid();
+  prog_in_abort = 1;
+  kt_bkl_enter_kernel();   /* como uma chamada k_*; o mod_exec acerta a profundidade */
+  crash_f = &prog_f;
+  crash_cr2 = prog_cr2;
+  crash_prog = 1;
+  crash_build();
+  crash_prog = 0;
+  serial_puts("[exc] falta no programa pid=");
+  serial_hex32(pid);
+  serial_puts(" ");
+  serial_puts(crash_rip);
+  serial_puts(": programa encerrado, sistema segue. CRASH.LOG:\n");
+  serial_puts(crash_txt);
+  crash_save(0);
+  syslog_stamp();
+  syslog_puts("! falta em ");
+  syslog_puts(crash_rip[0] ? crash_rip : "?");
+  syslog_puts(": programa encerrado");
+  if (crash_path) {
+    syslog_puts(", log em ");
+    syslog_puts(crash_path);
+  }
+  syslog_puts("\n");
+  crash_f = 0;
+  prog_in_abort = 0;
+  __atomic_store_n(&prog_abort_busy, 0, __ATOMIC_RELEASE);
+  mod_exit(MOD_EXIT_FAULT);
+  for (;;) __asm__ volatile ("hlt");
 }
 
 /* Chama fn com RSP no topo da pilha top; volta para a pilha antiga. */
@@ -536,6 +635,16 @@ isr_ret_t isr_dispatch(isr_frame_t* f) {
       kt_thread_fault_exit();
     }
   }
+  /* Thread principal que falhou no codigo dele: so o programa termina. */
+  if (prog_abort_ok(f)) {
+    isr_ret_t r;
+    prog_f = *f;
+    __asm__ volatile ("mov %%cr2, %0" : "=r"(prog_cr2));
+    r.entry = (uint64_t)(uintptr_t)isr_prog_abort;
+    r.cr2 = prog_cr2;
+    return r;
+  }
+
   /* Daqui em diante e fatal: as outras CPUs param. */
   kt_stop_others();
 
@@ -626,6 +735,21 @@ isr_ret_t isr_dispatch(isr_frame_t* f) {
   vga_puts_at(row, &c, "  pid ");
   print_dec(mod_current_pid(), row, &c);
   row++;
+
+  if (prog_in_abort || prog_why) {
+    c = 0;
+    if (prog_in_abort) {
+      vga_puts_at(row, &c, "Falta DENTRO do isr_prog_abort. Original: vetor ");
+      print_dec((uint32_t)prog_f.int_no, row, &c);
+      vga_puts_at(row, &c, " RIP 0x");
+      print_hex((uint32_t)prog_f.eip, row, &c);
+    } else {
+      vga_puts_at(row, &c, "So o programa: recusado (");
+      vga_puts_at(row, &c, prog_why);
+      vga_puts_at(row, &c, ")");
+    }
+    row++;
+  }
 
   c = 0;
   if (crash_path) {
