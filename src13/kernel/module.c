@@ -61,19 +61,42 @@ char mod_exe_drive(void) { return exe_drive; }
 static uint64_t mod_fs_read(void);
 static void mod_fs_write(uint64_t v);
 
+/* cur_pid e do dono do BKL: uma thread de programa que pega o BKL (em outra
+ * CPU) poe o pid dela ali ate soltar. Uma excecao no codigo do programa da
+ * thread principal (sem o BKL) lia o pid da thread: o #DE do CRASHT ia para a
+ * entrada de falhas do WINE.DLL, e o WINE caia (tela azul, 2026-11-27).
+ * world_pid guarda o pid da thread principal enquanto uma thread o cobre;
+ * pid_seq (impar = coberto) deixa mod_world_pid ler sem o BKL. */
+static uint32_t world_pid;
+static uint32_t pid_seq;
+
 void mod_thread_enter(struct mod_tsave* s, uint32_t pid, char drive) {
   s->pid = cur_pid;
   s->owner = um_owner();
   s->drive = exe_drive;
-  cur_pid = pid;
+  __atomic_store_n(&world_pid, cur_pid, __ATOMIC_SEQ_CST);
+  __atomic_add_fetch(&pid_seq, 1, __ATOMIC_SEQ_CST);
+  __atomic_store_n(&cur_pid, pid, __ATOMIC_SEQ_CST);
   um_set_owner(pid);
   exe_drive = drive;
 }
 
 void mod_thread_leave(const struct mod_tsave* s) {
-  cur_pid = s->pid;
+  __atomic_store_n(&cur_pid, s->pid, __ATOMIC_SEQ_CST);
+  __atomic_add_fetch(&pid_seq, 1, __ATOMIC_SEQ_CST);
   um_set_owner(s->owner);
   exe_drive = s->drive;
+}
+
+/* Pid da thread principal (o programa do WIN/DOS), mesmo sem o BKL. */
+uint32_t mod_world_pid(void) {
+  for (;;) {
+    uint32_t s1 = __atomic_load_n(&pid_seq, __ATOMIC_SEQ_CST);
+    uint32_t p = (s1 & 1u) ? __atomic_load_n(&world_pid, __ATOMIC_SEQ_CST)
+                           : __atomic_load_n(&cur_pid, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&pid_seq, __ATOMIC_SEQ_CST) == s1) return p;
+    __asm__ volatile ("pause");
+  }
 }
 
 void mod_cpu_save(struct mod_cpu* s) {

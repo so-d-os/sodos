@@ -146,6 +146,12 @@ static const char* vec_name(uint64_t v) {
   return v < sizeof(n) / sizeof(n[0]) ? n[v] : "reservado";
 }
 
+/* Pid do codigo que esta nesta CPU: a thread, ou a thread principal (o
+ * mod_current_pid sozinho e o do dono do BKL, talvez outra CPU). */
+static uint32_t fault_pid(void) {
+  return kt_in_thread() ? kt_cur_pid() : mod_world_pid();
+}
+
 extern char __bss_start[];
 #define KERNEL_LOAD 0x01000000ull
 
@@ -192,7 +198,7 @@ static void crash_build(void) {
   ls("SODOS CRASH.LOG\r\nuptime ");
   ldec(net_ms());
   ls(" ms  pid ");
-  ldec(mod_current_pid());
+  ldec(fault_pid());
   ls("  exe da unidade ");
   lc(mod_exe_drive() ? mod_exe_drive() : '-');
   ls(":\r\n");
@@ -398,7 +404,7 @@ static int prog_owns(uint64_t a, uint32_t pid) {
 }
 
 static int prog_abort_ok(const isr_frame_t* f) {
-  uint32_t pid = mod_current_pid();
+  uint32_t pid = mod_world_pid();
   uint64_t v = f->int_no;
 #define RECUSA(s) do { prog_why = (s); return 0; } while (0)
   prog_why = 0;
@@ -420,9 +426,10 @@ static int prog_abort_ok(const isr_frame_t* f) {
 
 static void isr_prog_abort(void) __attribute__((noreturn, used));
 static void isr_prog_abort(void) {
-  uint32_t pid = mod_current_pid();
+  uint32_t pid;
   prog_in_abort = 1;
   kt_bkl_enter_kernel();   /* como uma chamada k_*; o mod_exec acerta a profundidade */
+  pid = mod_current_pid(); /* com o BKL: o do programa */
   crash_f = &prog_f;
   crash_cr2 = prog_cr2;
   crash_prog = 1;
@@ -505,7 +512,7 @@ void isr_fault_release(uint32_t pid) {
 }
 
 static uint64_t fault_target(const isr_frame_t* f) {
-  uint32_t pid = kt_in_thread() ? kt_cur_pid() : mod_current_pid();
+  uint32_t pid = fault_pid();
   uint64_t v = f->int_no;
   int i;
   if (!pid || crash_depth) return 0;
@@ -733,7 +740,7 @@ isr_ret_t isr_dispatch(isr_frame_t* f) {
   vga_puts_at(row, &c, "  RFLAGS: 0x");
   print_hex((uint32_t)f->eflags, row, &c);
   vga_puts_at(row, &c, "  pid ");
-  print_dec(mod_current_pid(), row, &c);
+  print_dec(fault_pid(), row, &c);
   row++;
 
   if (prog_in_abort || prog_why) {

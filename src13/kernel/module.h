@@ -105,6 +105,9 @@ void mod_list(void);
 
 /* Programa em execucao (0 = nenhum). */
 uint32_t mod_current_pid(void);
+/* Pid da thread principal, certo mesmo sem o BKL (excecoes): o
+ * mod_current_pid e o do dono do BKL, que pode ser uma thread em outra CPU. */
+uint32_t mod_world_pid(void);
 /* Encerrar programas (KILL/KILLALL): marca dos de inicio e cadeia de pids. */
 void mod_mark_boot(void);
 uint32_t mod_boot_mark(void);
