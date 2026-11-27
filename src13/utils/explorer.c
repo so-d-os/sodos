@@ -6,8 +6,10 @@
  *   - lista de arquivos com colunas Nome / Tamanho / Data
  *   - duplo clique (ou Enter) abre pasta, executavel ou mostra informacao
  *   - Nova pasta, Excluir (com confirmacao), F5, roda do rato, teclado
- *   - botao direito num item: Abrir / Criar atalho (.EXE) / Excluir; num
- *     espaco vazio: Nova pasta / Atualizar
+ *   - botao direito num item: Abrir / Criar atalho (.EXE) / Renomear /
+ *     Excluir; num espaco vazio: Nova pasta / Novo arquivo / Atualizar
+ *   - F2 renomeia o marcado (so o nome fica marcado: a extensao continua),
+ *     F5 atualiza
  *   - campo de endereco: clique marca a linha toda, digitar substitui
  *   - barra Nome embaixo (tem o foco): digitar filtra a lista (pedaco do
  *     nome, ou curinga * e ?) e marca o melhor nome; Enter abre o marcado,
@@ -94,11 +96,15 @@ static char g_pick_title[80];
 #define CTX_NEWDIR 4
 #define CTX_REF    5
 #define CTX_REN    6
+#define CTX_NEWFILE 7
 static int g_ctx_n;          /* 0 = fechado */
 static int g_ctx_item[6];
-/* Renomear: linha em edicao (-1 = nenhuma) e o campo sobre o nome */
+/* Renomear: linha em edicao (-1 = nenhuma) e o campo sobre o nome.
+ * g_ren_ext: onde comeca a extensao de um arquivo (-1 = pasta ou sem
+ * ponto): com o nome todo marcado, digitar troca so o que vem antes. */
 static int g_ren = -1;
 static gui_edit_t g_ren_edit;
+static int g_ren_ext = -1;
 static int g_ren_x, g_ren_y, g_ren_w, g_ren_h;
 static int g_ctx_x, g_ctx_y, g_ctx_w, g_ctx_ih;
 /* pergunta "Excluir X?" */
@@ -146,7 +152,7 @@ static int is_exe(const char* n) {
   int l = (int)strlen(n);
   if (l < 5) return 0;
   return n[l - 4] == '.' && (n[l - 3] == 'E' || n[l - 3] == 'e') &&
-         (n[l - 2] == 'X' || n[l - 2] == 'e') &&
+         (n[l - 2] == 'X' || n[l - 2] == 'x') &&
          (n[l - 1] == 'E' || n[l - 1] == 'e');
 }
 
@@ -157,6 +163,22 @@ static int is_bat(const char* n) {
          (n[l - 2] == 'A' || n[l - 2] == 'a') &&
          (n[l - 1] == 'T' || n[l - 1] == 't');
 }
+
+/* Texto que o bloco de notas abre sem LINKEXT (a lista do @NOTEPAD do
+ * LINKEXT.CFG de exemplo). */
+static int is_text(const char* n) {
+  static const char* const ext[] = {"TXT", "MD", "LOG", "INI", "CFG", "C", "H", "CSV"};
+  const char* dot = strrchr(n, '.');
+  int k;
+  if (!dot || dot == n) return 0;
+  for (k = 0; k < (int)(sizeof(ext) / sizeof(ext[0])); k++)
+    if (ci_cmp(dot + 1, ext[k]) == 0) return 1;
+  return 0;
+}
+
+/* Programa com um argumento, aberto pelo WIN (kexports.c); "@NOTEPAD" = o
+ * bloco de notas, como no LINKEXT.CFG. */
+int k_win_launch_arg(const char* exe, const char* arg);
 
 /* "1,2 MB" / "12 KB" / "345 B" */
 static void fmt_size(unsigned sz, char* out, int max) {
@@ -625,7 +647,10 @@ static void open_sel(void) {
     char full3[PATHMAX];
     copy_str(full3, g_path, PATHMAX);
     cat_str(full3, e->name, PATHMAX);
-    if (k_open_file(full3) == 0) {
+    if (k_open_file(full3) == 0 ||
+        (is_text(e->name) && k_win_launch_arg("@NOTEPAD", full3) == 0)) {
+      /* sem LINKEXT (ou sem associacao): texto vai para o bloco de notas
+       * do WIN (o NOTEPAD.EXE, como o @NOTEPAD do LINKEXT.CFG) */
       char b[200];
       snprintf(b, sizeof(b), "abrindo %s", e->name);
       set_status(b);
@@ -670,6 +695,29 @@ static void start_rename(void) {
   gui_edit_set(&g_ren_edit, e->name);
   gui_edit_select_all(&g_ren_edit);
   g_ren_w = 0;
+  g_ren_ext = -1;
+  if (!e->dir) {
+    int i;
+    for (i = 1; e->name[i]; i++)
+      if (e->name[i] == '.') g_ren_ext = i;
+  }
+}
+
+/* Tecla no nome em edicao. Como no Windows, com tudo marcado a primeira
+ * letra (ou Backspace/Del) troca so o nome e deixa a extensao. */
+static void ren_key(int k) {
+  if (g_ren_edit.all && g_ren_ext > 0 && g_ren_ext < g_ren_edit.len &&
+      (k == '\b' || k == GUI_KEY_DEL || (k >= 32 && k < 127) || (k >= 0x80 && k <= 0xFF))) {
+    char ext[64];
+    copy_str(ext, g_ren_edit.text + g_ren_ext, (int)sizeof(ext));
+    gui_edit_set(&g_ren_edit, ext);
+    g_ren_edit.caret = 0;
+    g_ren_ext = -1;
+    if (k == '\b' || k == GUI_KEY_DEL) return;
+  }
+  if (k == GUI_KEY_LEFT || k == GUI_KEY_RIGHT || k == GUI_KEY_HOME || k == GUI_KEY_END)
+    g_ren_ext = -1;
+  gui_edit_key(&g_ren_edit, k);
 }
 
 static void cancel_rename(void) { g_ren = -1; }
@@ -731,6 +779,34 @@ static void commit_rename(void) {
     snprintf(b, sizeof(b), "renomeado para %s", nm);
     set_status(b);
   }
+}
+
+/* Novo arquivo: arquivo.txt vazio, depois arquivo2.txt, arquivo3.txt...
+ * (como o "Novo Documento de Texto" do Windows), ja com o nome em edicao. */
+static void make_file(void) {
+  char full[PATHMAX];
+  int i;
+  for (i = 1; i < 1000; i++) {
+    char name[24];
+    if (i == 1) copy_str(name, "arquivo.txt", sizeof(name));
+    else snprintf(name, sizeof(name), "arquivo%d.txt", i);
+    copy_str(full, g_path, PATHMAX);
+    cat_str(full, name, PATHMAX);
+    if (k_fsize(full) >= 0 || dir_exists(full)) continue;
+    if (k_fsave(full, "", 0) < 0 || k_fsize(full) < 0) break;
+    {
+      char b[120];
+      snprintf(b, sizeof(b), "%s criado: digite o nome e Enter", name);
+      gui_edit_set(&g_name, "");   /* o filtro esconderia o arquivo novo */
+      filter_update();
+      load_dir(g_path);
+      set_status(b);
+      select_name(name);
+      start_rename();
+    }
+    return;
+  }
+  set_status("nao foi possivel criar o arquivo");
 }
 
 /* Nova pasta NOVAPASTA, NOVAPA~1, ... */
@@ -915,6 +991,7 @@ static void ctx_open_at(int x, int y, int on_item) {
     g_ctx_item[g_ctx_n++] = CTX_DEL;
   } else {
     g_ctx_item[g_ctx_n++] = CTX_NEWDIR;
+    g_ctx_item[g_ctx_n++] = CTX_NEWFILE;
     g_ctx_item[g_ctx_n++] = CTX_REF;
   }
   g_ctx_x = x;
@@ -929,6 +1006,7 @@ static const char* ctx_label(int it) {
     case CTX_NEWDIR: return "Nova pasta";
     case CTX_REF: return "Atualizar";
     case CTX_REN: return "Renomear";
+    case CTX_NEWFILE: return "Novo arquivo";
   }
   return "";
 }
@@ -941,6 +1019,7 @@ static void ctx_run(int it) {
   else if (it == CTX_DEL) {
     if (sel_ent()) g_ask_del = 1;
   } else if (it == CTX_NEWDIR) make_dir();
+  else if (it == CTX_NEWFILE) make_file();
   else if (it == CTX_REF) {
     load_dir(g_path);
     set_status("lista atualizada");
@@ -1157,6 +1236,15 @@ static int name_key(int k, int rows) {
     if (sel_ent()) g_ask_del = 1;
     return 0;
   }
+  if (k == GUI_KEY_F1 + 1) { /* F2: renomear */
+    if (sel_ent() && !is_up_row(g_sel)) start_rename();
+    return 0;
+  }
+  if (k == GUI_KEY_F1 + 4) { /* F5: atualizar */
+    load_dir(g_path);
+    set_status("lista atualizada");
+    return 0;
+  }
   if (gui_edit_key(&g_name, k)) name_changed();
   return 0;
 }
@@ -1315,6 +1403,15 @@ static int draw_file_list(int x, int y, int w, int h, int* out_rows) {
       g_ren_h = rh;
       if (g_ren_w < 120) g_ren_w = 120;
       gui_edit_draw(&g_ren_edit, g_ren_x, g_ren_y, g_ren_w, g_ren_h, 1);
+      if (g_ren_edit.all && g_ren_ext > 0 && g_ren_edit.scroll == 0) {
+        /* so o nome marcado: a extensao volta ao normal */
+        int cw = gui_char_w(), ty = g_ren_y + (g_ren_h - gui_char_h()) / 2;
+        int ex = g_ren_x + 4 + g_ren_ext * cw;
+        int n = g_ren_edit.len - g_ren_ext;
+        int room = (g_ren_x + g_ren_w - 2 - ex) / cw;
+        if (n > room) n = room;
+        if (n > 0) gui_text(ex, ty, g_ren_edit.text + g_ren_ext, n, 0x000000, 0xFFFFFF, 0);
+      }
     } else
       gui_text_fit(x + 28, iy + 1, e->name, col_name - 32,
                    sel ? th->sel_text : (e->dir ? th->text : th->field_text), bg,
@@ -1736,7 +1833,7 @@ int main(int argc, char** argv) {
             cancel_rename();
             set_status("renomear cancelado");
           } else
-            gui_edit_key(&g_ren_edit, k);
+            ren_key(k);
         } else if (g_ask_del) {
           if (k == 27 || k == 'n' || k == 'N') ask_answer(0);
           else if (k == '\r' || k == '\n' || k == 's' || k == 'S') ask_answer(1);

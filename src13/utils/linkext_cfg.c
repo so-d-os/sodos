@@ -122,7 +122,7 @@ static int save_cfg(void) {
   k += snprintf(out + k, sizeof(out) - k,
                 "; LINKEXT.CFG - qual programa abre cada extensao (LINKEXT.EXE)\r\n"
                 "; EXT[,EXT...]=programa  (sem letra: relativo ao PATHSODOS)\r\n"
-                "; Visores do WIN: @NOTEPAD, @IMAGEM, @VIDEO\r\n");
+                "; Visores do WIN: @NOTEPAD (o NOTEPAD.EXE), @IMAGEM, @VIDEO\r\n");
   for (i = 0; i < g_n; i++)
     k += snprintf(out + k, sizeof(out) - k, "%s=%s\r\n", g_a[i].ext, g_a[i].prog);
   if (k_fsave(g_cfg, out, k) < 0) {
@@ -337,7 +337,7 @@ int main(void) {
     wg_edit_box(&id_ext, &g_ext, pad + 100, y + 22, 140, 26);
     wg_label(pad + 256, y + 28, "Programa");
     wg_edit_box(&id_prog, &g_prog, pad + 340, y + 22, sw - pad * 2 - 340 - 4, 26);
-    wg_label_dim(pad + 16, y + 58, "Ex.: TXT=@NOTEPAD  JPG,PNG=@IMAGEM  HTM=D:\\SODOS\\NETSURF.EXE");
+    wg_label_dim(pad + 16, y + 58, "Ex.: TXT=D:\\SODOS\\NOTEPAD.EXE  JPG,PNG=@IMAGEM  MP4=@VIDEO");
     y += 86 + 10;
 
     if (wg_button(&id_save, pad, y, 150, bh, "Salvar", 1)) do_save();

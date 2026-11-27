@@ -256,11 +256,39 @@ static int load_glyph(int g, int dx, int dy, int depth) {
         a2 = (int8_t)p[1];
         p += 2;
       }
-      if (flags & 8) p += 2;           /* escala: ignorada (rara no ASCII) */
-      else if (flags & 64) p += 4;
-      else if (flags & 128) p += 8;
-      if (!(flags & 2)) a1 = a2 = 0;    /* pontos casados: nao usado */
-      if (!load_glyph(comp, dx + a1, dy + a2, depth + 1)) return 0;
+      {
+        /* escala ou matriz 2x2 (F2Dot14): x' = a*x + c*y, y' = b*x + d*y.
+         * Antes era ignorada: a aspa ” do Noto Mono (a “ girada) sumia. */
+        int sa = 16384, sb = 0, sc = 0, sd = 16384, base = W->np, k;
+        if (flags & 8) {
+          if (p + 2 > lim) return 0;
+          sa = sd = ri16(p);
+          p += 2;
+        } else if (flags & 64) {
+          if (p + 4 > lim) return 0;
+          sa = ri16(p);
+          sd = ri16(p + 2);
+          p += 4;
+        } else if (flags & 128) {
+          if (p + 8 > lim) return 0;
+          sa = ri16(p);
+          sb = ri16(p + 2);
+          sc = ri16(p + 4);
+          sd = ri16(p + 6);
+          p += 8;
+        }
+        if (!(flags & 2)) a1 = a2 = 0;    /* pontos casados: nao usado */
+        if (sa == 16384 && sb == 0 && sc == 0 && sd == 16384) {
+          if (!load_glyph(comp, dx + a1, dy + a2, depth + 1)) return 0;
+        } else {
+          if (!load_glyph(comp, 0, 0, depth + 1)) return 0;
+          for (k = base; k < W->np; k++) {
+            int x = W->px[k], y = W->py[k];
+            W->px[k] = (int)(((long long)x * sa + (long long)y * sc) / 16384) + dx + a1;
+            W->py[k] = (int)(((long long)x * sb + (long long)y * sd) / 16384) + dy + a2;
+          }
+        }
+      }
       more = flags & 32;
     }
   }
@@ -373,10 +401,25 @@ static uint8_t* pool;
 static wfont_free_fn pool_free;
 static int f_px, f_asc, f_desc, f_ready;
 
+#ifdef WFONT_CP1252
+/* NOTEPAD.EXE: 0x80..0x9F sao as letras extras do Windows-1252 (aspas
+ * curvas, travessao, reticencias, euro...), nao os controles C1 do Unicode. */
+static const uint16_t cp1252_hi[32] = {
+  0x20AC, 0x003F, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+  0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x003F, 0x017D, 0x003F,
+  0x003F, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+  0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x003F, 0x017E, 0x0178,
+};
+#endif
+
 /* Desenha o glifo do codigo c em G[c - FIRST]; mascara em *dst (avanca). */
 static int rasterize(int c, int px, uint8_t** dst, uint8_t* dst_end) {
   struct wfont_glyph* gl = &G[c - FIRST];
+#ifdef WFONT_CP1252
+  int g = glyph_id(c >= 0x80 && c < 0xA0 ? cp1252_hi[c - 0x80] : c);
+#else
   int g = glyph_id(c);
+#endif
   long long k = (long long)px * FIX;   /* pixels*FIX por unidade = k / upem */
   int i, minx, maxx, miny, maxy, left, right, top, bot, w, h, r;
   uint8_t* a;

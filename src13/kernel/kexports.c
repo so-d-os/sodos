@@ -1140,6 +1140,15 @@ static int k_gui_raw(int on) {
   gui_thread_leave(g);
   return r;
 }
+/* Realce sob o rato: a janela em foco recebe GUI_EV_MOVE (teclado e cliques
+ * normais). Kernels de 2026-11-27 em diante; os programas procuram com
+ * k_dl_sym(0, "k_gui_hover", 0) (num kernel antigo o k_gui_raw(2) seria o cru). */
+static int k_gui_hover(int on) {
+  int g = gui_thread_enter();
+  int r = gui_raw_set(on ? 2 : 0);
+  gui_thread_leave(g);
+  return r;
+}
 static int k_gui_clip(int on) {
   int g = gui_thread_enter();
   int r = gui_clip_set(on);
@@ -1800,6 +1809,7 @@ static const struct kexp table[] = {
   EXP(k_gui_present),
   EXP(k_gui_event),
   EXP(k_gui_raw),
+  EXP(k_gui_hover),
   EXP(k_gui_clip),
   EXP(k_gui_pixels),
   EXP(k_gui_quality),

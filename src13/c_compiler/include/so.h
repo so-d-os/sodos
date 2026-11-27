@@ -366,7 +366,9 @@ int k_gui_event(int* ev, int timeout_ms);
 /* 1: a janela recebe o teclado em scancodes (GUI_EV_SCAN, apertar e soltar,
  * Ctrl/Alt/Shift inclusive) e todo movimento do rato (GUI_EV_MOVE) quando
  * tem o foco. Para emuladores (QEMU). Ctrl+F1..F12 trocam de tela e
- * Ctrl+Backspace fecha o WIN: continuam do kernel. */
+ * Ctrl+Backspace fecha o WIN: continuam do kernel.
+ * 2 (kernels de 2026-11-27 em diante): so o movimento do rato (GUI_EV_MOVE,
+ * para realce sob o rato); teclado e cliques seguem como sem o modo cru. */
 int k_gui_raw(int on);
 /* Teclado da janela: Ctrl+letra chega como 1..26 (Ctrl+C = 3). Ctrl+V o WIN
  * digita sozinho o texto da area de transferencia (k_clip_get); com

@@ -452,7 +452,7 @@ A barra tem só o botão **Iniciar** e o aviso `ESC=DOS`. O menu tem 7 itens:
 
 | Item | O que abre |
 |---|---|
-| Bloco de notas | Editor de texto nativo (abre `C:\readme.txt`) |
+| Bloco de notas | `NOTEPAD.EXE` (veja **Bloco de notas** abaixo); sem ele no disco, o editor embutido do WIN |
 | Gerenciador | Janela informativa do gerenciador |
 | Explorer | `explorer.asm`, montado em `0x58000` e rodado como app de janela |
 | Configurações | Submenu **Tela**, **Fontes** (prévia das fontes VGA e 8×8) e **Fontes avançadas** |
@@ -460,7 +460,7 @@ A barra tem só o botão **Iniciar** e o aviso `ESC=DOS`. O menu tem 7 itens:
 | Command | Prompt gráfico (várias janelas) |
 | Sair | Volta ao DOS |
 
-Clique com o botão direito no fundo abre um menu de contexto com **Console** e **Configurações de tela**.
+Clique com o botão direito no fundo abre um menu de contexto com **Nova pasta**, **Novo arquivo** (cria `arquivo.txt`, depois `arquivo2.txt`, `arquivo3.txt`... já com o nome em edição), **Console**, **Configurações de tela** e **Design**. Num ícone da pasta do desktop, o botão direito dá **Abrir** e **Renomear**; `F2` renomeia o ícone marcado. Como no Windows, ao renomear um arquivo só o nome fica marcado (a extensão continua) e as setas, `Home`, `End` e `Del` andam no nome.
 
 ### Ícones
 
@@ -475,6 +475,7 @@ Os demais ícones vêm de `D:\USER\DEFAULT\DESKTOP` (até 24 itens, sem rolagem)
 | `.EXE` / `.BIN` | Executa como programa SOX |
 | `.PNG` `.JPG` `.JPE` `.GIF` `.ICO` `.BMP` | Abre no `IMAGEVW.EXE` (BMP não é decodificado; veja abaixo) |
 | `.MP4` `.MOV` `.M4V` `.AVI` `.MPG` `.MPE` `.MJG` `.MJP` `.3GP` `.MKV` `.WMV` `.FLV` `.OGV` | Abre no `VIDPLAY.EXE` |
+| `.TXT` `.MD` `.LOG` `.INI` `.CFG` `.C` `.H` `.CSV` | Abre no `NOTEPAD.EXE` (com `SET LINKEXT=1`, o que o `LINKEXT.CFG` mandar) |
 | Outros | Com `SET LINKEXT=1`, o programa associado no `LINKEXT.CFG`; senão, janela de texto com o nome |
 
 Miniaturas: `make disk-files` gera `NOME.THM` (formato `THM1`, até 64×64 RGBA) para cada imagem em `content/`; o desktop desenha a miniatura com transparência. Arquivos de vídeo ganham um triângulo vermelho desenhado; pastas, um ícone amarelo.
@@ -492,7 +493,17 @@ Miniaturas: `make disk-files` gera `NOME.THM` (formato `THM1`, até 64×64 RGBA)
 
 ### Bloco de notas
 
-Carrega `C:\readme.txt` ao abrir. Tem menu **Arquivo** com **Salvar**, **Salvar como...** e **Abrir**, com caixa de nome e lista de arquivos. `F2` grava; `Esc` fecha o menu/diálogo, ou sai do desktop gravando. Arquivos de até 1 KB.
+`NOTEPAD.EXE` (`src13/utils/notepad.c`, em `D:\SODOS` e na raiz do `D:`) é um programa próprio, no estilo do Notepad do Windows 10. O WIN o abre pelo menu Iniciar, pelo ícone **ARQ**, pelo clique num `.TXT` no desktop ou no Explorer e pelo **Abrir com** (`LINKEXT.CFG`: o de exemplo já traz `TXT,MD,LOG,INI,CFG,C,H,CSV=D:\SODOS\NOTEPAD.EXE`, e o `@NOTEPAD` antigo também cai nele; `NOTEPAD [arquivo]` também funciona). Cada pedido abre uma janela, como no Windows.
+
+- Menus **Arquivo** (Novo, Nova janela, Abrir, Salvar, Salvar como, Sair), **Editar** (Desfazer/Refazer em vários níveis, Recortar, Copiar, Colar, Excluir, Localizar, Localizar próxima/anterior, Substituir, Ir para, Selecionar tudo, Hora/Data) e **Ferramentas** (Quebra automática de linha, Fonte, Zoom de 10% a 500%, Barra de status, Codificação, Fim de linha, MAIÚSCULAS/minúsculas, Estatísticas, Sobre). Botão direito no texto: menu de contexto.
+- Abre e grava UTF-8, UTF-8 com BOM, UTF-16 LE/BE e ANSI (Windows-1252); fim de linha Windows (CRLF), Unix (LF) ou Macintosh (CR), detectados ao abrir e mostrados na barra de status junto com `Ln`, `Col` e o zoom.
+- Texto em TrueType suavizado (Noto Mono, JetBrains Mono ou Fira Mono; menus em Noto Sans), o mesmo rasterizador dos títulos do WIN.
+- Segue as cores do sistema (Configurações → **Temas**): no **Clássico**, o visual claro do Notepad do Windows 10; no **Moderno** (claro) e no **Escuro**, as cores do tema (texto, menus, diálogos, barras de rolagem e de status). Trocar o tema com o bloco de notas aberto vale na hora.
+- Diálogos **Abrir**/**Salvar como** com Área de Trabalho e discos, lista de pastas e arquivos (`*.txt` ou `*.*`) e a codificação; pergunta antes de substituir um arquivo e antes de fechar com alterações.
+- Teclas do Notepad: `Ctrl+N/O/S`, `Ctrl+Shift+S`, `Ctrl+Z/Y/X/C/V/A`, `Ctrl+F`, `Ctrl+H`, `Ctrl+G`, `F3`/`Shift+F3`, `F5`, `F10` (menus pelo teclado), `Ctrl`+setas, `Shift`+setas, duplo clique seleciona palavra e triplo a linha.
+- Fonte, zoom, quebra de linha e barra de status ficam em `NOTEPAD.CFG` ao lado do `.EXE`.
+
+Sem o `NOTEPAD.EXE` no disco, o WIN volta ao editor embutido antigo (abre `C:\readme.txt`, `F2` grava, até 1 KB).
 
 ### Command
 

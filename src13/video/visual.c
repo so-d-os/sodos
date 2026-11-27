@@ -1218,7 +1218,7 @@ static const char* th_menu_icon(const char* label) {
     {"Sair", "SAIR"}, {"Tela", "TELA"}, {"Fontes", "FONTES"},
     {"Fontes avancadas", "FONTADV"}, {"Design", "DESIGN"}, {"Menu", "MENU"},
     {"Abrir com", "ABRIRCOM"}, {"Temas", "TEMAS"}, {"Nova pasta", "PASTA"},
-    {"Console", "CMD"}, {"Configuracoes de tela", "TELA"},
+    {"Console", "CMD"}, {"Configuracoes de tela", "TELA"}, {"Novo arquivo", "ARQUIVO"},
   };
   int i;
   for (i = 0; i < (int)(sizeof(map) / sizeof(map[0])); i++)
@@ -5805,7 +5805,8 @@ static void wm_clamp_rect(int* x, int* y, int* w, int* h, int big) {
   if (*y < 0) *y = 0;
 }
 
-static void wm_open_notepad(struct wm_win* wins, int* focus, int big) {
+/* Bloco de notas do proprio WIN (sem o NOTEPAD.EXE no disco). */
+static void wm_open_note_win(struct wm_win* wins, int* focus, int big) {
   int i = wm_find_kind(wins, WM_KIND_NOTE);
   if (i < 0) i = wm_alloc(wins);
   if (i < 0) return;
@@ -5824,6 +5825,12 @@ static void wm_open_notepad(struct wm_win* wins, int* focus, int big) {
   }
   wm_raise(&wins[i]);
   *focus = i;
+}
+
+static void wm_open_notepad_file(struct wm_win* wins, int* focus, int big, const char* file);
+/* Iniciar > Bloco de notas, icone fixo, barra de tarefas: o NOTEPAD.EXE vazio. */
+static void wm_open_notepad(struct wm_win* wins, int* focus, int big) {
+  wm_open_notepad_file(wins, focus, big, 0);
 }
 
 static int wm_count_kind(struct wm_win* wins, int kind) {
@@ -6953,9 +6960,12 @@ static void gq_push(struct gui_win* w, int type, int x, int y, int key) {
   w->qn++;
 }
 
+/* on 1: teclado em scancodes e movimento cru (emuladores). on 2: so o
+ * movimento do rato (GUI_EV_MOVE) com a janela em foco, o teclado e os
+ * cliques seguem normais: realce de menu sob o rato (NOTEPAD). */
 int gui_raw_set(int on) {
   if (!gui_ok()) return -1;
-  gui.raw = on ? 1 : 0;
+  gui.raw = on == 2 ? 2 : on ? 1 : 0;
   gui.raw_btn = 0;
   return 0;
 }
@@ -6966,10 +6976,12 @@ int gui_clip_set(int on) {
   return 0;
 }
 
-/* Janela com foco em modo cru, ou -1. */
-static int gui_raw_focus(void) {
+/* Janela com foco em modo cru, ou -1. teclado 1: so o cru de verdade
+ * (k_gui_raw(1)); 0: tambem a de so movimento (k_gui_raw(2)). */
+static int gui_raw_focus(int teclado) {
   if (!gwins || gui_focus < 0 || gui_focus >= GUI_MAX) return -1;
   if (!gwins[gui_focus].open || !gwins[gui_focus].raw) return -1;
+  if (teclado && gwins[gui_focus].raw != 1) return -1;
   return gui_focus;
 }
 
@@ -7506,7 +7518,7 @@ int gui_event(int* ev, int timeout_ms) {
       __asm__ volatile ("pause");
       continue;
     }
-    if (kind == 0 && gui.raw) {
+    if (kind == 0 && gui.raw == 1) {
       ev[0] = GUI_EV_SCAN;
       ev[3] = scb;
       return GUI_EV_SCAN;
@@ -7524,7 +7536,7 @@ int gui_event(int* ev, int timeout_ms) {
       y = (int)sys_my - (gui.oy + gui.title_h);
       ev[1] = x;
       ev[2] = y;
-      if (gui.raw && !gui.drag) {
+      if (gui.raw == 1 && !gui.drag) {
         int btn = gui.pkt[0] & 7;
         int inside = x >= 0 && y >= 0 && x < gui.cw && y < gui.ch;
         if (inside || gui.raw_btn) {
@@ -7614,7 +7626,7 @@ static void gui_idle(void) {
     if (kind < 0) break;
     if (kind == 0) {
       int key = 0;
-      if (gui.raw) gui_q_push(GUI_EV_SCAN, 0, 0, scb);
+      if (gui.raw == 1) gui_q_push(GUI_EV_SCAN, 0, 0, scb);
       else if (gui_key_event(scb, &key)) gui_q_push(GUI_EV_KEY, 0, 0, key);
       continue;
     }
@@ -7623,7 +7635,7 @@ static void gui_idle(void) {
       int dz = mouse_wheel();
       if (!from_abs)
         sys_mouse_place(sys_mx + (int8_t)gui.pkt[1], sys_my - (int8_t)gui.pkt[2]);
-      if (gui.raw && !gui.drag) {
+      if (gui.raw == 1 && !gui.drag) {
         int rx = (int)sys_mx - gui.ox, ry = (int)sys_my - (gui.oy + gui.title_h);
         int btn = gui.pkt[0] & 7;
         int inside = rx >= 0 && ry >= 0 && rx < gui.cw && ry < gui.ch;
@@ -8697,7 +8709,11 @@ static int desk_ren = -1;
 static char desk_ren_buf[DESK_NAME];
 static int desk_ren_len;
 static int desk_ren_all;   /* nome todo marcado: digitar substitui */
+static int desk_ren_seln;  /* letras marcadas (o nome sem a extensao) */
+static int desk_ren_caret; /* posicao do cursor no nome */
 static char desk_ren_old[DESK_NAME];
+/* 1 = o ultimo clique foi num icone do desktop: F2 renomeia o marcado */
+static int desk_kbd;
 /* Icone marcado pelo ultimo clique: so o rotulo dele tem fundo (os outros sao
  * transparentes). -1 nenhum, 0..desk_n-1 itens da pasta (desk_mark_name
  * guarda o nome para achar de novo quando a pasta e relida), DESK_MARK_FIXED
@@ -8865,6 +8881,7 @@ static void desk_load(void) {
 static void desk_mark_item(int i) {
   int k = 0;
   desk_mark = i;
+  desk_kbd = i >= 0 && i < desk_n;
   if (i >= 0 && i < desk_n)
     for (; desk_items[i].name[k] && k < (int)sizeof(desk_mark_name) - 1; k++)
       desk_mark_name[k] = desk_items[i].name[k];
@@ -8944,14 +8961,22 @@ static int desk_ensure_root(char* out, int max) {
   return 0;
 }
 
-/* Nome do icone em edicao: Enter grava (rename no disco), Esc cancela. */
+/* Nome do icone em edicao: Enter grava (rename no disco), Esc cancela.
+ * Como no Windows, num arquivo so o nome fica marcado (a extensao nao):
+ * digitar troca "arquivo" e o ".txt" continua. desk_ren_seln = letras
+ * marcadas a partir do inicio; desk_ren_caret = onde a proxima letra entra. */
 static void desk_ren_start(int i) {
-  int k;
+  int k, dot = -1;
   if (i < 0 || i >= desk_n) return;
-  for (k = 0; desk_items[i].name[k] && k < DESK_NAME - 1; k++) desk_ren_buf[k] = desk_items[i].name[k];
+  for (k = 0; desk_items[i].name[k] && k < DESK_NAME - 1; k++) {
+    desk_ren_buf[k] = desk_items[i].name[k];
+    if (desk_ren_buf[k] == '.') dot = k;
+  }
   desk_ren_buf[k] = 0;
   desk_ren_len = k;
   desk_ren_all = 1;
+  desk_ren_seln = (!desk_items[i].dir && dot > 0) ? dot : k;
+  desk_ren_caret = desk_ren_seln;
   wm_copy_str(desk_ren_old, (int)sizeof(desk_ren_old), desk_items[i].name);
   desk_ren = i;
 }
@@ -8974,6 +8999,8 @@ static void desk_ren_commit(void) {
   for (i = 0; it->name[i] || desk_ren_buf[i]; i++)
     if (it->name[i] != desk_ren_buf[i]) same = 0;
   if (same) return;
+  /* so maiusculas/minusculas mudaram: o FAT acharia o proprio arquivo */
+  if (desk_nome_eq(it->name, desk_ren_buf)) same = 2;
   nlen = 0;
   while (it->name[nlen]) nlen++;
   plen = 0;
@@ -8983,7 +9010,7 @@ static void desk_ren_commit(void) {
   for (i = 0; i < plen; i++) to[i] = it->path[i];
   for (i = 0; i < desk_ren_len; i++) to[plen + i] = desk_ren_buf[i];
   to[plen + desk_ren_len] = 0;
-  if (desk_dir_ok(to) || file_size(to) >= 0) {
+  if (same != 2 && (desk_dir_ok(to) || file_size(to) >= 0)) {
     app_status_set("ja existe com esse nome");
     return;
   }
@@ -8994,26 +9021,105 @@ static void desk_ren_commit(void) {
   desk_load();
 }
 
-/* Tecla durante a edicao (ASCII; 0 ignora). */
+/* Tira as letras [a, b) do nome em edicao. */
+static void desk_ren_cut(int a, int b) {
+  int i;
+  if (a < 0) a = 0;
+  if (b > desk_ren_len) b = desk_ren_len;
+  if (a >= b) return;
+  for (i = b; i <= desk_ren_len; i++) desk_ren_buf[a + i - b] = desk_ren_buf[i];
+  desk_ren_len -= b - a;
+  if (desk_ren_caret > b) desk_ren_caret -= b - a;
+  else if (desk_ren_caret > a) desk_ren_caret = a;
+}
+
+/* Tecla durante a edicao (ASCII; 0 ignora). Setas/Home/End: desk_ren_nav. */
 static void desk_ren_key(int c) {
   if (desk_ren_all && c != '\r' && c != '\n' && c != 27) {
     desk_ren_all = 0;
     if (c == 8 || (c >= 32 && c < 127)) {
-      desk_ren_len = 0;
-      desk_ren_buf[0] = 0;
+      /* digitar substitui o trecho marcado (o nome, sem a extensao) */
+      desk_ren_cut(0, desk_ren_seln);
+      desk_ren_caret = 0;
       if (c == 8) return;
     }
   }
+  if (desk_ren_caret < 0 || desk_ren_caret > desk_ren_len) desk_ren_caret = desk_ren_len;
   if (c == '\r' || c == '\n') desk_ren_commit();
   else if (c == 27) desk_ren = -1;
   else if (c == 8) {
-    if (desk_ren_len > 0) desk_ren_buf[--desk_ren_len] = 0;
+    if (desk_ren_caret > 0) desk_ren_cut(desk_ren_caret - 1, desk_ren_caret);
   } else if (c >= 32 && c < 127 && desk_ren_len < DESK_NAME - 1 && c != '\\' && c != '/' &&
              c != ':' && c != '*' && c != '?' && c != '"' && c != '<' && c != '>' && c != '|') {
     /* nome longo: aceita espaco e minusculas (antes so 8.3 em maiusculas) */
-    desk_ren_buf[desk_ren_len++] = (char)c;
-    desk_ren_buf[desk_ren_len] = 0;
+    int i;
+    for (i = desk_ren_len; i >= desk_ren_caret; i--) desk_ren_buf[i + 1] = desk_ren_buf[i];
+    desk_ren_buf[desk_ren_caret++] = (char)c;
+    desk_ren_len++;
   }
+}
+
+/* Setas no nome em edicao: 0x4B esquerda, 0x4D direita, 0x47 Home, 0x4F
+ * End, 0x53 Del (scancodes da tecla estendida). */
+static void desk_ren_nav(int sc) {
+  if (desk_ren_all) {
+    desk_ren_all = 0;
+    if (sc == 0x53) {
+      desk_ren_cut(0, desk_ren_seln);
+      desk_ren_caret = 0;
+      return;
+    }
+    if (sc == 0x4B) desk_ren_caret = 0;
+    else if (sc == 0x4D) desk_ren_caret = desk_ren_seln;
+  }
+  if (sc == 0x4B && desk_ren_caret > 0) desk_ren_caret--;
+  else if (sc == 0x4D && desk_ren_caret < desk_ren_len) desk_ren_caret++;
+  else if (sc == 0x47) desk_ren_caret = 0;
+  else if (sc == 0x4F) desk_ren_caret = desk_ren_len;
+  else if (sc == 0x53) desk_ren_cut(desk_ren_caret, desk_ren_caret + 1);
+}
+
+/* Botao direito no desktop > Novo arquivo: arquivo.txt vazio, depois
+ * arquivo2.txt, arquivo3.txt... (como o "Novo Documento de Texto" do
+ * Windows), ja com o nome em edicao. */
+static void desk_new_file(void) {
+  char root[48];
+  char full[80];
+  char name[24];
+  int i, n, k;
+  if (desk_ensure_root(root, (int)sizeof(root)) != 0) {
+    app_status_set("sem pasta do desktop");
+    return;
+  }
+  for (i = 1; i < 1000; i++) {
+    n = 0;
+    for (k = 0; "arquivo"[k]; k++) name[n++] = "arquivo"[k];
+    if (i > 1) {
+      if (i >= 100) name[n++] = (char)('0' + i / 100);
+      if (i >= 10) name[n++] = (char)('0' + (i / 10) % 10);
+      name[n++] = (char)('0' + i % 10);
+    }
+    name[n++] = '.';
+    name[n++] = 't';
+    name[n++] = 'x';
+    name[n++] = 't';
+    name[n] = 0;
+    wm_copy_str(full, (int)sizeof(full), root);
+    n = 0;
+    while (full[n]) n++;
+    wm_copy_str(full + n, (int)sizeof(full) - n, name);
+    if (desk_dir_ok(full) || file_size(full) >= 0) continue;
+    if (file_save(full, "", 0) < 0 || file_size(full) < 0) break;
+    desk_load();
+    for (k = 0; k < desk_n; k++)
+      if (desk_nome_eq(desk_items[k].name, name)) {
+        desk_mark_item(k);
+        desk_ren_start(k);
+        break;
+      }
+    return;
+  }
+  app_status_set("nao criou o arquivo");
 }
 
 /* Botao direito no desktop > Nova pasta: NOVAPASTA, NOVAP001, ... */
@@ -9290,18 +9396,29 @@ static void desk_draw(int icon, int ch, int scale, int sw, int sh, int bar_h,
     if (i == desk_ren) {
       int bw = 12 * FONT_W * scale + 8;
       int bh = (vga_bios_font_ok ? FONT_H : 8) * scale + 4;
-      /* caixa de 12 letras: nome maior rola, mostrando o fim (onde se digita) */
-      const char* vis = desk_ren_len > 12 ? desk_ren_buf + desk_ren_len - 12 : desk_ren_buf;
-      int tw = (desk_ren_len > 12 ? 12 : desk_ren_len) * FONT_W * scale;
+      /* caixa de 12 letras: nome maior rola, mostrando o cursor; marcado
+       * (o nome sem a extensao) em azul */
+      int cw1 = FONT_W * scale;
+      int car = desk_ren_caret < 0 || desk_ren_caret > desk_ren_len ? desk_ren_len : desk_ren_caret;
+      int v0 = 0, k2, nvis;
+      char seg[16];
+      if (car > 12) v0 = car - 12;
+      if (desk_ren_all && desk_ren_seln <= 12) v0 = 0;
+      nvis = desk_ren_len - v0;
+      if (nvis > 12) nvis = 12;
       fill_rect(x - 2, y + icon, bw, bh, col_black);
       fill_rect(x - 1, y + icon + 1, bw - 2, bh - 2, col_white);
-      if (desk_ren_all) {
+      for (k2 = 0; k2 < nvis; k2++) {
+        int p = v0 + k2, on = desk_ren_all && p < desk_ren_seln;
         uint32_t sel = desk_color(32, 96, 200);
-        fill_rect(x + 2, y + icon + 2, tw, bh - 4, sel);
-        draw_string_scaled(x + 2, y + icon + 2, vis, col_white, sel, scale);
-      } else
-        draw_string_scaled(x + 2, y + icon + 2, vis, col_black, col_white, scale);
-      fill_rect(x + 2 + tw, y + icon + 2, scale > 1 ? 2 : 1, bh - 4, col_black);
+        seg[0] = desk_ren_buf[p];
+        seg[1] = 0;
+        if (on) fill_rect(x + 2 + k2 * cw1, y + icon + 2, cw1, bh - 4, sel);
+        draw_string_scaled(x + 2 + k2 * cw1, y + icon + 2, seg, on ? col_white : col_black,
+                           on ? sel : col_white, scale);
+      }
+      if (!desk_ren_all || desk_ren_seln >= desk_ren_len)
+        fill_rect(x + 2 + (car - v0) * cw1, y + icon + 2, scale > 1 ? 2 : 1, bh - 4, col_black);
     } else {
       /* rotulo: o .LNK sem a extensao; nome longo encurtado com ".." para
        * nao invadir os vizinhos (o nome inteiro continua no item) */
@@ -9629,14 +9746,124 @@ static void wm_open_fonts(struct wm_win* wins, int* focus, int big) {
   *focus = i;
 }
 
-/* Menu de contexto do desktop: Nova pasta, Console, Configuracoes de tela, Design. */
-#define POP_N 4
+/* Texto que o bloco de notas abre sozinho (sem LINKEXT; a mesma lista do
+ * @NOTEPAD do LINKEXT.CFG de exemplo). */
+static int desk_is_text(const char* name) {
+  static const char* const ext[] = {"TXT", "MD", "LOG", "INI", "CFG", "C", "H", "CSV"};
+  int n = 0, dot = -1, i, k;
+  while (name[n]) n++;
+  for (i = 0; i < n; i++)
+    if (name[i] == '.') dot = i;
+  if (dot <= 0) return 0;
+  for (k = 0; k < (int)(sizeof(ext) / sizeof(ext[0])); k++) {
+    const char* e = ext[k];
+    for (i = 0; e[i] && dot + 1 + i < n; i++) {
+      char c = name[dot + 1 + i];
+      if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+      if (c != e[i]) break;
+    }
+    if (!e[i] && dot + 1 + i == n) return 1;
+  }
+  return 0;
+}
+
+/* NOTEPAD.EXE (programa proprio: \SODOS ou a PATH). 0 = nao esta no disco. */
+static int notepad_exe(char* out, int max) {
+  if (desk_find("D:\\SODOS\\NOTEPAD.EXE", out, max)) return 1;
+  return mod_find_exe("NOTEPAD", out, max) == 0;
+}
+
+/* Bloco de notas com o arquivo (file 0 = documento novo): o NOTEPAD.EXE,
+ * uma janela por chamada como no Windows; sem ele, o do proprio WIN. */
+static void wm_open_notepad_file(struct wm_win* wins, int* focus, int big, const char* file) {
+  char exe[DRV_PATH];
+  int ni;
+  if (notepad_exe(exe, (int)sizeof(exe))) {
+    wm_exec_arg(wins, focus, big, exe, file && file[0] ? file : 0);
+    return;
+  }
+  wm_open_note_win(wins, focus, big);
+  if (!file || !file[0]) return;
+  note_load(file);
+  ni = wm_find_kind(wins, WM_KIND_NOTE);
+  if (ni >= 0) note_set_title(&wins[ni]);
+}
+
+/* Abre o icone i da pasta do desktop (clique, ou Abrir no botao direito). */
+static void desk_activate(struct wm_win* wins, int* focus, int big, int i) {
+  if (desk_items[i].dir &&
+      wm_open_folder(wins, focus, big, desk_items[i].path)) {
+    /* aberta no Explorer (visao de pasta) */
+  } else if (desk_items[i].dir) {
+    char listing[512];
+    int nw = wm_new_run_window(wins, big, desk_items[i].name, 0);
+    if (nw >= 0) {
+      run_puts("Pasta ");
+      run_puts(desk_items[i].path);
+      run_puts("\n");
+      if (file_list(desk_items[i].path, listing, (int)sizeof(listing)) > 0)
+        run_puts(listing);
+      else run_puts("(vazio)\n");
+      run_out = 0;
+      *focus = nw;
+    }
+  } else if (desk_items[i].lnk) {
+    char tgt[DESK_PATH];
+    char exe[DESK_PATH];
+    if (desk_lnk_target(desk_items[i].path, tgt, (int)sizeof(tgt))) {
+      if (!desk_find(tgt, exe, (int)sizeof(exe)))
+        wm_copy_str(exe, (int)sizeof(exe), tgt);
+      wm_exec(wins, focus, big, exe);
+    } else
+      app_status_set("atalho vazio");
+  } else if (linkext_fn && !app_is_prog(desk_items[i].name) &&
+             linkext_fn(desk_items[i].path) == 0) {
+    /* LINKEXT.DLL achou o programa da extensao (abre no proximo quadro) */
+  } else if (desk_items[i].image == 1)
+    wm_open_image(wins, focus, big, desk_items[i].path);
+  else if (desk_items[i].image == 2)
+    wm_open_video(wins, focus, big, desk_items[i].path);
+  else if (app_is_prog(desk_items[i].name)) {
+    char exe[DESK_PATH];
+    if (!desk_find(desk_items[i].path, exe, (int)sizeof(exe)))
+      wm_copy_str(exe, (int)sizeof(exe), desk_items[i].path);
+    wm_exec(wins, focus, big, exe);
+  }
+  else if (desk_is_text(desk_items[i].name))
+    wm_open_notepad_file(wins, focus, big, desk_items[i].path);
+  else {
+    int nw = wm_new_run_window(wins, big, desk_items[i].name, 0);
+    if (nw >= 0) {
+      run_puts(desk_items[i].name);
+      run_puts("\n");
+      run_out = 0;
+      *focus = nw;
+    }
+  }
+  desk_kbd = 0;
+}
+
+/* Menu de contexto do desktop. pop_kind 0 (fundo): Nova pasta, Novo arquivo,
+ * Console, Configuracoes de tela, Design. pop_kind 1 (botao direito num
+ * icone da pasta do desktop, pop_item): Abrir, Renomear. */
+#define POP_N 5
+#define POP_ICON_N 2
+static int pop_kind;
+static int pop_item = -1;
+static int pop_count(void) { return pop_kind ? POP_ICON_N : POP_N; }
+static const char* pop_label(int i) {
+  static const char* const fundo[POP_N] = {"Nova pasta", "Novo arquivo", "Console",
+                                           "Configuracoes de tela", "Design"};
+  static const char* const icone[POP_ICON_N] = {"Abrir", "Renomear"};
+  if (i < 0 || i >= pop_count()) return "";
+  return pop_kind ? icone[i] : fundo[i];
+}
 static void pop_geom(int ax, int ay, int scale, int scr_w, int scr_h, int bar_h,
                      int* x, int* y, int* rw, int* rh) {
   int ch = (vga_bios_font_ok ? FONT_H : 8) * scale;
   int item_h = ch + (scale > 1 ? 8 : 4);
-  *rw = 22 * FONT_W * scale + 16;
-  *rh = item_h * POP_N + 4;
+  *rw = (pop_kind ? 14 : 22) * FONT_W * scale + 16;
+  *rh = item_h * pop_count() + 4;
   *x = ax;
   *y = ay;
   if (*x + *rw > scr_w - 2) *x = scr_w - 2 - *rw;
@@ -11882,11 +12109,7 @@ static void wm_open_with(struct wm_win* wins, int* focus, int big, const char* e
     } else if ((k[0] == 'V' || k[0] == 'v') && (k[1] == 'I' || k[1] == 'i')) {
       wm_open_video(wins, focus, big, file);
     } else {
-      int ni;
-      wm_open_notepad(wins, focus, big);
-      note_load(file);
-      ni = wm_find_kind(wins, WM_KIND_NOTE);
-      if (ni >= 0) note_set_title(&wins[ni]);
+      wm_open_notepad_file(wins, focus, big, file);
     }
     return;
   }
@@ -12719,15 +12942,10 @@ static int win_wm_run_u(void) {
         pop_geom(pop_x, pop_y, scale, w, h, bar_h, &px, &py, &pw, &ph);
         menu_panel(px, py, pw, ph);
         {
-          int ih = (ph - 4) / POP_N;
-          menu_row(px + 1, py + 2, pw - 2, ih, "Nova pasta", pop_hot == 0, 0,
-                   col_win, col_title, col_white, col_black, scale);
-          menu_row(px + 1, py + 2 + ih, pw - 2, ih, "Console", pop_hot == 1, 0,
-                   col_win, col_title, col_white, col_black, scale);
-          menu_row(px + 1, py + 2 + 2 * ih, pw - 2, ih, "Configuracoes de tela", pop_hot == 2, 0,
-                   col_win, col_title, col_white, col_black, scale);
-          menu_row(px + 1, py + 2 + 3 * ih, pw - 2, ih, "Design", pop_hot == 3, 0,
-                   col_win, col_title, col_white, col_black, scale);
+          int ih = (ph - 4) / pop_count(), k;
+          for (k = 0; k < pop_count(); k++)
+            menu_row(px + 1, py + 2 + k * ih, pw - 2, ih, pop_label(k), pop_hot == k, 0,
+                     col_win, col_title, col_white, col_black, scale);
         }
         menu_frame(px, py, pw, ph, col_black);
       }
@@ -12805,7 +13023,7 @@ static int win_wm_run_u(void) {
       }
       in_ms = (uint32_t)irq_ticks();
       if (kind == 0) {
-        int rf = gui_raw_focus();
+        int rf = gui_raw_focus(1);
         /* Janela crua (emulador): o byte vai inteiro, exceto as teclas do SO. */
         if (rf >= 0 && !win_os_key(scb)) {
           gq_push(&gwins[rf], GUI_EV_SCAN, 0, 0, scb);
@@ -12822,7 +13040,7 @@ static int win_wm_run_u(void) {
         mx = sys_mx;
         my = sys_my;
         {
-          int rf = gui_raw_focus();
+          int rf = gui_raw_focus(0);
           if (rf >= 0) {
             struct gui_win* g = &gwins[rf];
             int rx = (int)mx - g->ox, ry = (int)my - (g->oy + g->title_h);
@@ -12905,9 +13123,9 @@ static int win_wm_run_u(void) {
           pop_geom(pop_x, pop_y, scale, w, h, bar_h, &px, &py, &pw, &ph);
           hot = -1;
           if (wm_pt((int)mx, (int)my, px, py, pw, ph)) {
-            int ih = (ph - 4) / POP_N;
+            int ih = (ph - 4) / pop_count();
             if (ih > 0) hot = ((int)my - (py + 2)) / ih;
-            if (hot < 0 || hot >= POP_N) hot = -1;
+            if (hot < 0 || hot >= pop_count()) hot = -1;
           }
           if (hot != pop_hot) {
             pop_hot = hot;
@@ -13026,6 +13244,7 @@ static int win_wm_run_u(void) {
         } else if ((left && !prev_left) || desk_soltou >= 0) {
           int handled = 0;
           int icons_on;
+          if (left && !prev_left) desk_kbd = 0;
           if (desk_ren >= 0) {
             desk_ren_commit();
             handled = 1;
@@ -13035,11 +13254,19 @@ static int win_wm_run_u(void) {
             pop_geom(pop_x, pop_y, scale, w, h, bar_h, &px, &py, &pw, &ph);
             pop_open = 0;
             if (wm_pt((int)mx, (int)my, px, py, pw, ph)) {
-              int ih = (ph - 4) / POP_N;
+              int ih = (ph - 4) / pop_count();
               int item = ih > 0 ? ((int)my - (py + 2)) / ih : 0;
-              if (item <= 0) desk_new_folder();
-              else if (item == 1) wm_open_command(wins, &focus, big);
-              else if (item == 2) wm_open_display(wins, &focus, big);
+              if (pop_kind == 1) {
+                /* icone: Abrir / Renomear */
+                if (pop_item >= 0 && pop_item < desk_n) {
+                  desk_mark_item(pop_item);
+                  if (item <= 0) desk_activate(wins, &focus, big, pop_item);
+                  else desk_ren_start(pop_item);
+                }
+              } else if (item <= 0) desk_new_folder();
+              else if (item == 1) desk_new_file();
+              else if (item == 2) wm_open_command(wins, &focus, big);
+              else if (item == 3) wm_open_display(wins, &focus, big);
               else host_open_design(wins, &focus, big);
             }
             handled = 1;
@@ -13263,53 +13490,7 @@ static int win_wm_run_u(void) {
             menu_cfg = 0;
             menu_tela = 0;
             desk_mark_item(desk_i);
-            if (desk_items[desk_i].dir &&
-                wm_open_folder(wins, &focus, big, desk_items[desk_i].path)) {
-              /* aberta no Explorer (visao de pasta) */
-            } else if (desk_items[desk_i].dir) {
-              char listing[512];
-              int nw = wm_new_run_window(wins, big, desk_items[desk_i].name, 0);
-              if (nw >= 0) {
-                run_puts("Pasta ");
-                run_puts(desk_items[desk_i].path);
-                run_puts("\n");
-                if (file_list(desk_items[desk_i].path, listing, (int)sizeof(listing)) > 0)
-                  run_puts(listing);
-                else run_puts("(vazio)\n");
-                run_out = 0;
-                focus = nw;
-              }
-            } else if (desk_items[desk_i].lnk) {
-              char tgt[DESK_PATH];
-              char exe[DESK_PATH];
-              if (desk_lnk_target(desk_items[desk_i].path, tgt, (int)sizeof(tgt))) {
-                if (!desk_find(tgt, exe, (int)sizeof(exe)))
-                  wm_copy_str(exe, (int)sizeof(exe), tgt);
-                wm_exec(wins, &focus, big, exe);
-              } else
-                app_status_set("atalho vazio");
-            } else if (linkext_fn && !app_is_prog(desk_items[desk_i].name) &&
-                       linkext_fn(desk_items[desk_i].path) == 0) {
-              /* LINKEXT.DLL achou o programa da extensao (abre no proximo quadro) */
-            } else if (desk_items[desk_i].image == 1)
-              wm_open_image(wins, &focus, big, desk_items[desk_i].path);
-            else if (desk_items[desk_i].image == 2)
-              wm_open_video(wins, &focus, big, desk_items[desk_i].path);
-            else if (app_is_prog(desk_items[desk_i].name)) {
-              char exe[DESK_PATH];
-              if (!desk_find(desk_items[desk_i].path, exe, (int)sizeof(exe)))
-                wm_copy_str(exe, (int)sizeof(exe), desk_items[desk_i].path);
-              wm_exec(wins, &focus, big, exe);
-            }
-            else {
-              int nw = wm_new_run_window(wins, big, desk_items[desk_i].name, 0);
-              if (nw >= 0) {
-                run_puts(desk_items[desk_i].name);
-                run_puts("\n");
-                run_out = 0;
-                focus = nw;
-              }
-            }
+            desk_activate(wins, &focus, big, desk_i);
             handled = 1;
             need_draw = 1;
           } else {
@@ -13428,17 +13609,13 @@ static int win_wm_run_u(void) {
                   wins[hit].st->click = row;
                   app_entry(WIN_MSG_CLICK, app_api_table, wins[hit].st);
                   if (app_open_req) {
-                    int ni;
                     app_open_req = 0;
                     if (linkext_fn && linkext_fn(app_open_path) == 0) {
                       /* LINKEXT.DLL abriu */
                     } else if (desk_is_video(app_open_path))
                       wm_open_video(wins, &focus, big, app_open_path);
                     else {
-                      wm_open_notepad(wins, &focus, big);
-                      note_load(app_open_path);
-                      ni = wm_find_kind(wins, WM_KIND_NOTE);
-                      if (ni >= 0) note_set_title(&wins[ni]);
+                      wm_open_notepad_file(wins, &focus, big, app_open_path);
                     }
                   }
                   if (app_run_req) {
@@ -13599,7 +13776,8 @@ static int win_wm_run_u(void) {
             if (wm_pt((int)mx, (int)my, 12, icon2_y, icon, icon)) on = 1;
             if (wm_pt((int)mx, (int)my, 12, icon3_y, icon, icon)) on = 1;
             if (wm_pt((int)mx, (int)my, 12, icon4_y, icon, icon)) on = 1;
-            if (desk_hit((int)mx, (int)my, icon, ch, scale, w, h, bar_h) >= 0) on = 1;
+            int di = -1;
+            if ((di = desk_hit((int)mx, (int)my, icon, ch, scale, w, h, bar_h)) >= 0) on = 1;
             for (t = 0; t < WM_MAX && !on; t++) {
               if (wins[t].used && !wins[t].min && !run_hidden(&wins[t]) &&
                   wm_pt((int)mx, (int)my, wins[t].x, wins[t].y, wins[t].w, wins[t].h))
@@ -13609,7 +13787,34 @@ static int win_wm_run_u(void) {
               if (gwins[t].open && !gwins[t].min && gw_pega(&gwins[t], (int)mx, (int)my))
                 on = 1;
             }
+            /* icone da pasta do desktop sem janela na frente: Abrir / Renomear */
+            if (di >= 0 && !menu_open && z_empty(wins, (int)mx, (int)my)) {
+              int t2, sobre = 0;
+              for (t2 = 0; gwins && t2 < GUI_MAX && !sobre; t2++)
+                if (gwins[t2].open && !gwins[t2].min && gw_pega(&gwins[t2], (int)mx, (int)my))
+                  sobre = 1;
+              if (!sobre) {
+                if (desk_ren >= 0) desk_ren_commit();
+                desk_mark_item(di);
+                pop_kind = 1;
+                pop_item = di;
+                pop_open = 1;
+                pop_x = (int)mx;
+                pop_y = (int)my;
+                pop_hot = 0;
+                menu_open = 0;
+                menu_cfg = 0;
+                menu_tela = 0;
+                note_file_menu = 0;
+                need_draw = 1;
+                prev_right = right;
+                continue;
+              }
+            }
             if (!on) {
+              if (desk_ren >= 0) desk_ren_commit();
+              pop_kind = 0;
+              pop_item = -1;
               pop_open = 1;
               pop_x = (int)mx;
               pop_y = (int)my;
@@ -13709,9 +13914,15 @@ static int win_wm_run_u(void) {
       if (keymap_kp_nav(sc)) kbd_e0 = 1; /* NumLock desligado: vira seta, Home... */
       if (kbd_e0 && !(sc & 0x80)) kp = keymap_ext_char(sc);
       if (desk_ren >= 0) {
-        /* nome de icone do desktop em edicao: o teclado e dele */
-        if (!(sc & 0x80) && (!kbd_e0 || kp)) {
-          desk_ren_key(syn ? syn : kp ? kp : win_keychar(sc));
+        /* nome de icone do desktop em edicao: o teclado e dele. Setas, Home,
+         * End e Del (E0 + codigo) andam no nome; antes o E0 se perdia aqui. */
+        if (sc == 0xE0) {
+          kbd_e0 = 1;
+          continue;
+        }
+        if (!(sc & 0x80) && sc != SCANCODE_LSHIFT && sc != SCANCODE_RSHIFT) {
+          if (kbd_e0 && !kp) desk_ren_nav(sc);
+          else desk_ren_key(syn ? syn : kp ? kp : win_keychar(sc));
           need_draw = 1;
         }
         kbd_e0 = 0;
@@ -13843,6 +14054,23 @@ static int win_wm_run_u(void) {
         win_session_free(wins);
         return 0;
       }
+      if (sc == SCANCODE_F2 && desk_kbd && desk_mark >= 0 && desk_mark < desk_n) {
+        /* icone do desktop marcado pelo ultimo clique: F2 renomeia */
+        desk_ren_start(desk_mark);
+        need_draw = 1;
+        continue;
+      }
+      if (((sc >= 0x3B && sc <= 0x44) || sc == 0x57 || sc == 0x58) && !kbd_alt_down() &&
+          gwins && gui_focus >= 0 && gui_focus < GUI_MAX && gwins[gui_focus].open &&
+          !note_dlg && !menu_open) {
+        /* F1..F12 para o programa (GUI_KEY_F1 + n; ev[1] = Shift/Ctrl como
+         * nas setas): F3 Localizar proxima e F5 Hora/Data no NOTEPAD, F2
+         * renomear e F5 atualizar no Explorer. */
+        int fn = sc <= 0x44 ? sc - 0x3B : 10 + (sc - 0x57);
+        int mods = (keymap_shift() ? 1 : 0) | (kbd_ctrl_down() ? 2 : 0);
+        gq_push(&gwins[gui_focus], GUI_EV_KEY, mods, 0, 0x111 + fn);
+        continue;
+      }
       if (sc == SCANCODE_F2) {
         if (focus >= 0 && wins[focus].used && wins[focus].kind == WM_KIND_NOTE) {
           note_save();
@@ -13894,19 +14122,25 @@ static int win_wm_run_u(void) {
           /* Ctrl+letra chega como caractere de controle (Ctrl+C = 3), como no
            * terminal. Ctrl+V cola a area de transferencia do kernel como
            * teclas, a nao ser que o programa a trate (k_gui_clip). Ctrl+H, I,
-           * J e M seriam Backspace, Tab e Enter: nao vao. */
-          if (kbd_ctrl_down()) {
-            int l = (unsigned char)c | 0x20;
-            if (l >= 'a' && l <= 'z') {
-              if (l == 'v' && !gwins[gui_focus].clip) {
-                gui_paste_start(gui_focus);
-                continue;
+           * J e M seriam Backspace, Tab e Enter: chegam como GUI_KEY_CTRL +
+           * letra (0x148 = Ctrl+H, Substituir no NOTEPAD). Com o Ctrl, ev[1]
+           * leva os modificadores (bit 0 Shift, 1 Ctrl): Ctrl+Shift+S. */
+          {
+            int mods = 0;
+            if (kbd_ctrl_down()) {
+              int l = (unsigned char)c | 0x20;
+              if (l >= 'a' && l <= 'z') {
+                if (l == 'v' && !gwins[gui_focus].clip) {
+                  gui_paste_start(gui_focus);
+                  continue;
+                }
+                mods = (keymap_shift() ? 1 : 0) | 2;
+                k = l - 'a' + 1;
+                if (l == 'h' || l == 'i' || l == 'j' || l == 'm') k = 0x140 + k;
               }
-              if (l == 'h' || l == 'i' || l == 'j' || l == 'm') continue;
-              k = l - 'a' + 1;
             }
+            gq_push(&gwins[gui_focus], GUI_EV_KEY, mods, 0, k);
           }
-          gq_push(&gwins[gui_focus], GUI_EV_KEY, 0, 0, k);
           continue;
         }
         /* Ctrl+Enter numa janela do WIN: no Bloco de notas e quebra de linha

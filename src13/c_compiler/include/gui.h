@@ -26,6 +26,17 @@
 #define GUI_KEY_HOME  0x107
 #define GUI_KEY_END   0x108
 #define GUI_KEY_DEL   0x109
+/* F1..F12 (kernels de 2026-11-27 em diante): GUI_KEY_F1 + 0..11. Nas setas,
+ * Home/End/PgUp/PgDn/Del, nas F e no Ctrl+letra, ev.x leva os modificadores:
+ * GUI_MOD_SHIFT, GUI_MOD_CTRL (e GUI_MOD_ALT nas setas). */
+#define GUI_KEY_F1    0x111
+#define GUI_KEY_F12   0x11C
+#define GUI_MOD_SHIFT 1
+#define GUI_MOD_CTRL  2
+#define GUI_MOD_ALT   4
+/* Ctrl+H, Ctrl+I, Ctrl+J e Ctrl+M (os outros Ctrl+letra chegam como 1..26):
+ * GUI_KEY_CTRL + letra, Ctrl+H = 0x148. */
+#define GUI_KEY_CTRL  0x140
 
 #define GUI_TEXT_NOBG      1
 #define GUI_TEXT_BOLD      2

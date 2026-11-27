@@ -5,6 +5,8 @@ copia  src13/c_compiler/out/VIDEOCFG.EXE  D:\SODOS\
 copia  src13/c_compiler/out/IMGBIG.DLL    D:\SODOS\
 copia  src13/c_compiler/out/AIPANEL.EXE   D:\SODOS\
 copia  src13/c_compiler/out/MENUCFG.EXE   D:\SODOS\
+# Bloco de notas (o WIN abre por Iniciar, .TXT e o @NOTEPAD do LINKEXT.CFG)
+copia  src13/c_compiler/out/NOTEPAD.EXE   D:\SODOS\
 # Configuracoes > Temas
 copia  src13/c_compiler/out/TEMAS.EXE     D:\SODOS\
 # Alt+Tab do WIN: o WIN abre o WINTAB.EXE so enquanto o Alt esta apertado

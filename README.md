@@ -452,7 +452,7 @@ The bar has only the **Start** button and the `ESC=DOS` hint. The menu has 7 ite
 
 | Item | What it opens |
 |---|---|
-| Notepad | Native text editor (opens `C:\readme.txt`) |
+| Notepad | `NOTEPAD.EXE` (see **Notepad** below); without it on disk, the WIN built-in editor |
 | Manager | Informative manager window |
 | Explorer | `explorer.asm`, assembled at `0x58000` and run as a window app |
 | Settings | Submenu **Display**, **Fonts** (VGA vs 8×8 preview) and **Advanced fonts** |
@@ -460,7 +460,7 @@ The bar has only the **Start** button and the `ESC=DOS` hint. The menu has 7 ite
 | Command | Graphical prompt (several windows) |
 | Exit | Back to DOS |
 
-Right-clicking the background opens a context menu with **Console** and **Display settings**.
+Right-clicking the background opens a context menu with **Nova pasta** (new folder), **Novo arquivo** (new file: `arquivo.txt`, then `arquivo2.txt`, `arquivo3.txt`... with the name already in edit), **Console**, **Display settings** and **Design**. On an icon of the desktop folder, right click gives **Abrir** (open) and **Renomear** (rename); `F2` renames the selected icon. Like Windows, renaming a file selects only the name (the extension stays) and the arrows, `Home`, `End` and `Del` move in it.
 
 ### Icons
 
@@ -475,6 +475,7 @@ The other icons come from `D:\USER\DEFAULT\DESKTOP` (up to 24 items, no scrollin
 | `.EXE` / `.BIN` | Runs as a SOX program |
 | `.PNG` `.JPG` `.JPE` `.GIF` `.ICO` `.BMP` | Opens in `IMAGEVW.EXE` (BMP is not decoded; see below) |
 | `.MP4` `.MOV` `.M4V` `.AVI` `.MPG` `.MPE` `.MJG` `.MJP` `.3GP` `.MKV` `.WMV` `.FLV` `.OGV` | Opens in `VIDPLAY.EXE` |
+| `.TXT` `.MD` `.LOG` `.INI` `.CFG` `.C` `.H` `.CSV` | Opens in `NOTEPAD.EXE` (with `SET LINKEXT=1`, whatever `LINKEXT.CFG` says) |
 | Others | With `SET LINKEXT=1`, the program associated in `LINKEXT.CFG`; otherwise a text window with the name |
 
 Thumbnails: `make disk-files` generates `NAME.THM` (format `THM1`, up to 64×64 RGBA) for every image in `content/`; the desktop draws the thumbnail with transparency. Video files get a drawn red triangle; folders get a yellow icon.
@@ -492,7 +493,17 @@ Thumbnails: `make disk-files` generates `NAME.THM` (format `THM1`, up to 64×64 
 
 ### Notepad
 
-Loads `C:\readme.txt` on open. It has a **File** menu with **Save**, **Save as...** and **Open**, with a name box and a file list. `F2` saves; `Esc` closes the menu/dialog, or exits the desktop saving. Files up to 1 KB.
+`NOTEPAD.EXE` (`src13/utils/notepad.c`, in `D:\SODOS` and the root of `D:`) is a standalone program in the style of the Windows 10 Notepad. WIN opens it from the Start menu, the **ARQ** icon, a click on a `.TXT` on the desktop or in Explorer, and **Abrir com** (`LINKEXT.CFG`: the sample already has `TXT,MD,LOG,INI,CFG,C,H,CSV=D:\SODOS\NOTEPAD.EXE`, and the old `@NOTEPAD` also lands there; `NOTEPAD [file]` also works). Each request opens a window, like Windows.
+
+- Menus **Arquivo** (New, New window, Open, Save, Save as, Exit), **Editar** (multi-level Undo/Redo, Cut, Copy, Paste, Delete, Find, Find next/previous, Replace, Go to, Select all, Time/Date) and **Ferramentas** (Word wrap, Font, Zoom from 10% to 500%, Status bar, Encoding, Line ending, UPPER/lower case, Statistics, About). Right click on the text: context menu.
+- Opens and saves UTF-8, UTF-8 with BOM, UTF-16 LE/BE and ANSI (Windows-1252); Windows (CRLF), Unix (LF) or Macintosh (CR) line endings, detected on open and shown in the status bar with `Ln`, `Col` and the zoom.
+- Antialiased TrueType text (Noto Mono, JetBrains Mono or Fira Mono; menus in Noto Sans), the same rasterizer as the WIN titles.
+- Follows the system colors (Settings → **Temas**): with **Clássico**, the light look of the Windows 10 Notepad; with **Moderno** (light) and **Escuro** (dark), the theme colors (text, menus, dialogs, scroll and status bars). Changing the theme with Notepad open applies at once.
+- **Open**/**Save as** dialogs with Desktop and drives, a folder and file list (`*.txt` or `*.*`) and the encoding; asks before replacing a file and before closing with changes.
+- Notepad keys: `Ctrl+N/O/S`, `Ctrl+Shift+S`, `Ctrl+Z/Y/X/C/V/A`, `Ctrl+F`, `Ctrl+H`, `Ctrl+G`, `F3`/`Shift+F3`, `F5`, `F10` (keyboard menus), `Ctrl`+arrows, `Shift`+arrows, double click selects a word and triple click the line.
+- Font, zoom, word wrap and status bar are kept in `NOTEPAD.CFG` next to the `.EXE`.
+
+Without `NOTEPAD.EXE` on disk, WIN falls back to the old built-in editor (opens `C:\readme.txt`, `F2` saves, up to 1 KB).
 
 ### Command
 
