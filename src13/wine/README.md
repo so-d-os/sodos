@@ -6,6 +6,7 @@ O que foi preciso para o instalador do Claude Desktop:
 [docs/02-claude-setup.md](docs/02-claude-setup.md).
 7-Zip instalado e rodando: [docs/03-7zip.md](docs/03-7zip.md).
 WinRAR instalado pelo instalador gráfico, `Rar.exe` e a janela do `WinRAR.exe`: [docs/04-winrar.md](docs/04-winrar.md).
+Google Chrome baixado do Google pelo `INSTCHRM.EXE` e aberto pelo `D:\RODACHROME.BAT`: [docs/06-chrome.md](docs/06-chrome.md).
 
 ```
 SET WINE=1          liga (nada e carregado ainda)

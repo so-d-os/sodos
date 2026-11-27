@@ -44,7 +44,7 @@ all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/H
 	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
 	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
 	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/TOP.EXE $(O)/COBRA.EXE $(O)/WIFI.EXE $(O)/XCOPY.EXE $(O)/GIT.EXE $(O)/MAKE.EXE \
-	$(O)/AGENT.EXE $(O)/LLAMA.EXE $(O)/FFLAUNCH.EXE $(O)/SMPT.EXE $(O)/TROCA.EXE \
+	$(O)/AGENT.EXE $(O)/LLAMA.EXE $(O)/FFLAUNCH.EXE $(O)/SMPT.EXE $(O)/TROCA.EXE $(O)/INSTCHRM.EXE \
 	drivers
 
 # GUI.DLL (janela canvas do WIN) e o navegador, em varios arquivos
@@ -607,6 +607,11 @@ $(O)/SOMDIAG.EXE: ../utils/somdiag.c $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC
 # PENDRIVE.EXE: SCAN/MOUNT/EJECT/DIR/COPY do pendrive (SET PENDRIVE=0 desliga).
 $(O)/PENDRIVE.EXE: ../utils/pendrive.c $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
 	$(HCC) -o $@ ../utils/pendrive.c
+
+# INSTCHRM.EXE: baixa o Google Chrome do Google e instala em D:\APPS\CHROME
+# para o WINE, com o D:\RODACHROME.BAT (wine/docs/06-chrome.md).
+$(O)/INSTCHRM.EXE: ../utils/instchrm.c $(O)/TLS.DLL $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
+	$(HCC) -o $@ ../utils/instchrm.c $(O)/TLS.DLL
 
 # Painel de IA: janela docada na lateral direita (chat).
 # O painel inclui o ai_client.c (fonte unica): um objeto, como no AGENT.
