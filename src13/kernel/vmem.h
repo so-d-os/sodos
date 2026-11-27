@@ -18,5 +18,7 @@ int vmem_release(uint64_t va);
 int vmem_protect(uint64_t va, uint64_t size, int prot, int* old);
 int vmem_query(uint64_t va, struct vmem_info* out);
 void vmem_release_pid(uint32_t pid);
+/* 0 se va e do vmem e a pagina nao esta presente; fora do vmem, 1. */
+int vmem_present(uint64_t va);
 void vmem_stats(uint64_t* reserved, uint64_t* committed);
 #endif

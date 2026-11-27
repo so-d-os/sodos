@@ -115,6 +115,8 @@ void gpu_close(void);
 /* WIN para o fundo / volta. Sem driver, nada. gpu_resume: 0 = ativo de novo;
  * outro valor: o driver foi descarregado e o quadro volta a CPU. */
 void gpu_suspend(void);
+/* Tela de crash: placa no layout do GOP, sem log nem disco. */
+void gpu_crash_text(void);
 int gpu_resume(const struct gpu_mode* m);
 /* 1 se ha driver carregado, parado com o WIN ao fundo. */
 int gpu_suspended(void);

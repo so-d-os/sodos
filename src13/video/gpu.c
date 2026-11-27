@@ -503,6 +503,18 @@ void gpu_suspend(void) {
   log_save();   /* o usuario pode estar indo ler o log numa tela do DOS */
 }
 
+/* Tela de crash (isr.c): a placa volta ao layout do GOP para o fbcon
+ * aparecer. Sem log nem disco: as outras CPUs ja pararam e quem caiu pode
+ * ser o proprio disco. Com a tela estendida (3840 de pitch) o fbcon
+ * desenhava com o pitch de uma tela e o texto sumia picado no meio da imagem. */
+void gpu_crash_text(void) {
+  const struct gpu_drv* d = gpu_drv ? gpu_drv : parked;
+  gpu_drv = 0;
+  gpu_hwcur = 0;
+  parked = 0;
+  if (d && d->suspend) (void)d->suspend();
+}
+
 int gpu_resume(const struct gpu_mode* m) {
   const struct gpu_drv* d = parked;
   struct gpu_mode mm;

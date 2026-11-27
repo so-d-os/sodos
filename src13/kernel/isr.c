@@ -14,6 +14,7 @@
 #include "smp.h"
 #include "kthread.h"
 #include "troca.h"
+void gpu_crash_text(void);   /* video/gpu.c */
 #define VGA vga_text  /* 0xB8000, ou a copia do fbcon no UEFI */
 #define ATTR 0x1F00  /* fundo azul, texto branco */
 
@@ -569,7 +570,10 @@ isr_ret_t isr_dispatch(isr_frame_t* f) {
     f = crash_f;
   }
 
-  /* Se estiver em modo grafico, volta a modo texto para panic ser visivel */
+  /* Se estiver em modo grafico, volta a modo texto para panic ser visivel.
+   * Antes, a placa volta ao layout do GOP: com a tela estendida o fbcon
+   * escrevia com o pitch de uma tela e o texto nao aparecia. */
+  gpu_crash_text();
   vga_force_text_mode();
 
   /* Limpa tela VGA */
@@ -652,6 +656,7 @@ void isr_df_panic(isr_frame_t* f) {
   (void)f;
   __asm__ volatile ("cli");
   serial_puts("[exc] DOUBLE FAULT (#DF)\n");
+  gpu_crash_text();
   vga_force_text_mode();
   {
     int i;

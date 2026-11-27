@@ -16,6 +16,7 @@
  */
 #include <stdint.h>
 #include "kthread.h"
+#include "vmem.h"
 #include "smp.h"
 #include "serial.h"
 #include "mm.h"
@@ -369,6 +370,46 @@ static int first_cpu(uint32_t mask) {
   return 0;
 }
 
+/* Pilha salva desmapeada (pilha do Windows solta no vmem com a thread viva
+ * na fila): o ctx_switch dava #PF sem pilha e #DF da maquina inteira
+ * (CRASH.LOG de 2026-11-27, thread do Chrome). So ela morre, sem rodar.
+ * Chamado com c->lock. */
+static int stack_ok(struct task* t) {
+  if (t->kind != K_THREAD) return 1;
+  if (vmem_present(t->rsp) && vmem_present(t->rsp + 63u)) return 1;
+  serial_puts("[kt] pilha desmapeada: tid=");
+  put_dec((uint32_t)t->tid);
+  serial_puts(" pid=");
+  put_dec(t->pid);
+  serial_puts(" rsp=");
+  serial_hex32((uint32_t)(t->rsp >> 32));
+  serial_hex32((uint32_t)t->rsp);
+  serial_puts(": thread encerrada sem rodar\n");
+  t->killed = 1;
+  t->state = T_DEAD;
+  t->exited = 1;
+  return 0;
+}
+
+int kt_rsp_in(uint64_t lo, uint64_t hi, uint32_t* pid) {
+  uint64_t me;
+  int i;
+  __asm__ volatile ("mov %%rsp, %0" : "=r"(me));
+  if (kt_up && me >= lo && me < hi) {
+    *pid = cur()->pid;
+    return cur()->tid ? cur()->tid : -1;
+  }
+  for (i = 0; i < KT_MAX; i++) {
+    const struct task* t = &kts[i];
+    if (t->state == T_FREE || t->state == T_DEAD || t->kind != K_THREAD || t->on_cpu) continue;
+    if (t->rsp >= lo && t->rsp < hi) {
+      *pid = t->pid;
+      return t->tid ? t->tid : -1;
+    }
+  }
+  return 0;
+}
+
 static void kt_schedule(void) {
   uint64_t fl = irq_save();
   struct cpu* c = this_cpu();
@@ -393,7 +434,8 @@ static void kt_schedule(void) {
   } else if (prev->migrate_to >= 0 && prev->state == T_RUNNING) {
     prev->state = T_READY;
   }
-  next = rq_pick(c);
+  do next = rq_pick(c);
+  while (next && next != prev && !stack_ok(next));
   if (!next) next = c->idle;
   if (next == prev) {
     prev->state = T_RUNNING;

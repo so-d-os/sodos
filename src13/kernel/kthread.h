@@ -86,6 +86,9 @@ void kt_thread_exit(int code) __attribute__((noreturn));
 int kt_thread_self(void);
 /* 1 se a thread existe e nao terminou. */
 int kt_thread_alive(int tid);
+/* tid de uma thread viva com a pilha em [lo,hi) (a atual pelo rsp de agora,
+ * as paradas pelo rsp salvo); -1 = a atual sem tid; 0 = nenhuma. */
+int kt_rsp_in(uint64_t lo, uint64_t hi, uint32_t* pid);
 int kt_thread_affinity(int tid, uint32_t mask);
 void kt_thread_yield(void);
 int kt_thread_tls(uint64_t fs);

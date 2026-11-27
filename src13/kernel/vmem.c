@@ -154,6 +154,41 @@ static uint64_t* pte_of(uint64_t va, int create) {
   return &t[(va >> 12) & 511];
 }
 
+/* 0 se va esta na regiao do vmem e a pagina nao esta presente (kthread.c:
+ * nao trocar para uma thread com a pilha salva desmapeada). */
+int vmem_present(uint64_t va) {
+  uint64_t* e;
+  if (va < VM_BASE || va >= VM_END) return 1;
+  e = pte_of(va, 0);
+  return e && (*e & PTE_P);
+}
+
+/* Diagnostico: [va,end) vai perder o mapeamento e tem a pilha de uma thread
+ * viva (a do #DF no ctx_switch, 2026-11-27: pilha do Windows de uma thread
+ * do Chrome desmapeada com ela na fila). Diz quem e quem pediu. */
+static void stack_check(const char* op, uint64_t va, uint64_t end) {
+  uint32_t pid = 0;
+  int tid = kt_rsp_in(va, end, &pid);
+  if (!tid) return;
+  serial_puts("[vmem] ");
+  serial_puts(op);
+  serial_puts(" na pilha de thread viva: va=");
+  serial_hex32((uint32_t)(va >> 32));
+  serial_hex32((uint32_t)va);
+  serial_puts(" fim=");
+  serial_hex32((uint32_t)(end >> 32));
+  serial_hex32((uint32_t)end);
+  serial_puts(" tid=");
+  serial_hex32((uint32_t)tid);
+  serial_puts(" pid=");
+  serial_hex32(pid);
+  serial_puts(" quem pid=");
+  serial_hex32(um_owner());
+  serial_puts(" tid=");
+  serial_hex32((uint32_t)kt_thread_self());
+  serial_puts("\n");
+}
+
 /* tudo solto: devolve quadros, tabelas e as entradas do PML4 */
 static void drop_all(void) {
   uint64_t* t = pml4();
@@ -282,6 +317,7 @@ int vmem_commit(uint64_t va, uint64_t size, int prot) {
   end = (va + size + PG - 1) & ~(PG - 1);
   va &= ~(PG - 1);
   if (!r || end > r->base + r->size) return 0;
+  if (prot == VMEM_NOACCESS) stack_check("commit sem acesso", va, end);
   for (a = va; a < end; a += PG) {
     uint64_t* e = pte_of(a, 1);
     if (!e) return 0;
@@ -350,6 +386,7 @@ int vmem_decommit(uint64_t va, uint64_t size) {
     va &= ~(PG - 1);
     if (end > r->base + r->size) return 0;
   }
+  stack_check("decommit", va, end);
   for (a = va; a < end; a += PG) {
     uint64_t* e = pte_of(a, 0);
     if (!e) {
@@ -395,6 +432,7 @@ int vmem_protect(uint64_t va, uint64_t size, int prot, int* old) {
   end = (va + size + PG - 1) & ~(PG - 1);
   va &= ~(PG - 1);
   if (!r || end > r->base + r->size) return 0;
+  if (prot == VMEM_NOACCESS) stack_check("protect sem acesso", va, end);
   for (a = va; a < end; a += PG) {
     uint64_t* e = pte_of(a, 0);
     if (!e || !(*e & PTE_C)) return 0; /* Windows: so paginas commitadas */
