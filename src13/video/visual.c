@@ -1235,6 +1235,7 @@ static const char* th_menu_icon(const char* label) {
  *                (palavra 0x00RRGGBB, que vira B,G,R no byte a byte)
  * ------------------------------------------------------------------------- */
 static uint32_t* desk_wall;
+static uint32_t desk_wall_w, desk_wall_h; /* tamanho em que desk_wall foi escalado */
 static uint32_t desk_rgb;
 static int gfx_quality;
 /* Interface escolhida em Design (VIDEO.CFG). menu_pos: 0 esquerda, 1 centro, 2 direita. */
@@ -1317,8 +1318,36 @@ static uint32_t rgb_to_pixa(uint32_t rgb) {
          (0xFFu << 24);
 }
 
+/* A tela mudou de tamanho depois do papel de parede (tela estendida: gfx_w
+ * 1920 -> 3840 no gfx_tela_estende, ou de volta no gfx_tela_uma). Sem isto o
+ * gfx_desk_clear lia desk_wall com a largura nova e passava do fim do buffer
+ * (ruido da metade da tela para baixo). Mesma altura e largura multipla: a
+ * mesma imagem em cada tela. Senao reescala. Sem memoria fica a cor. */
+static void desk_wall_fit(void) {
+  uint32_t* nb;
+  uint32_t x, y, ow = desk_wall_w, oh = desk_wall_h;
+  if (!desk_wall || (ow == gfx_w && oh == gfx_h)) return;
+  nb = (ow && oh && gfx_w && gfx_h) ? (uint32_t*)umalloc_owned(gfx_w * gfx_h * 4u, 0) : 0;
+  if (nb) {
+    int lado = (oh == gfx_h && gfx_w > ow && gfx_w % ow == 0);
+    for (y = 0; y < gfx_h; y++) {
+      const uint32_t* src = desk_wall + (size_t)(lado ? y : (uint32_t)((uint64_t)y * oh / gfx_h)) * ow;
+      uint32_t* dst = nb + (size_t)y * gfx_w;
+      if (lado)
+        for (x = 0; x < gfx_w; x++) dst[x] = src[x % ow];
+      else
+        for (x = 0; x < gfx_w; x++) dst[x] = src[(uint64_t)x * ow / gfx_w];
+    }
+  }
+  ufree(desk_wall);
+  desk_wall = nb;
+  desk_wall_w = nb ? gfx_w : 0;
+  desk_wall_h = nb ? gfx_h : 0;
+}
+
 /* Fundo do desktop: papel de parede, cor escolhida ou o teal padrao. */
 static void gfx_desk_clear(void) {
+  desk_wall_fit();
   if (gfx_bochs && desk_wall) {
     uint32_t y;
     for (y = 0; y < gfx_h; y++) {
@@ -14384,6 +14413,8 @@ int win_wall_set(const uint8_t* rgba, int sw, int sh) {
     }
   }
   desk_wall = buf;
+  desk_wall_w = gfx_w;
+  desk_wall_h = gfx_h;
   win_api_dirty = 1;
   return 0;
 }
