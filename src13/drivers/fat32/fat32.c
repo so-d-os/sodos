@@ -1597,8 +1597,50 @@ static int find_in_parent(struct vol* v, const char* path, char* par, const char
   return r < 0 ? -4 : r;
 }
 
+/* Cluster do ".." da pasta que comeca em c (0 = a raiz). 0xFFFFFFFF: nao deu
+ * para ler ou a pasta nao tem "..". */
+static uint32_t dotdot_of(struct vol* v, uint32_t c) {
+  const uint8_t* d;
+  if (load_dir(v, c) != 0) return 0xFFFFFFFFu;
+  d = v->cbuf + 32;
+  if (d[0] != '.' || d[1] != '.' || !(d[11] & 0x10)) return 0xFFFFFFFFu;
+  return (uint32_t)rd16(d + 20) << 16 | rd16(d + 26);
+}
+
+/* 1 se a pasta dir e a pasta c ou fica dentro dela (subindo pelos ".."). */
+static int dir_inside(struct vol* v, uint32_t dir, uint32_t c) {
+  uint32_t guard = 0;
+  while (valid_clus(v, dir) && dir != v->root) {
+    if (dir == c) return 1;
+    if (++guard > 4096u) return 1;   /* laco nos "..": melhor recusar */
+    dir = dotdot_of(v, dir);
+    if (dir == 0xFFFFFFFFu) return 1;
+  }
+  return 0;
+}
+
+/* A pasta c mudou de pasta-mae: o ".." dela passa a apontar para parent
+ * (0 na raiz, como o FAT pede). 0 ok; -1 erro de disco. */
+static int dotdot_set(struct vol* v, uint32_t c, uint32_t parent) {
+  uint8_t* d;
+  if (parent == v->root) parent = 0;
+  if (load_dir(v, c) != 0) return -1;
+  d = v->cbuf + 32;
+  if (d[0] != '.' || d[1] != '.') return 0;   /* sem "..": nada a acertar */
+  wr16(d + 20, (uint16_t)(parent >> 16));
+  wr16(d + 26, (uint16_t)parent);
+  if (vwrite(v, clus_lba(v, c), 1, v->cbuf) != 0) {
+    v->cbuf_clus = 0;
+    return -1;
+  }
+  return 0;
+}
+
 /* Troca o nome e/ou a pasta sem copiar: uma entrada nova aponta para a mesma
- * cadeia e a antiga some. Codigos em fsdrv.h (os de drives_rename). */
+ * cadeia e a antiga some. Pasta para outra pasta: o ".." dela passa a apontar
+ * para a nova mae (o Claude Desktop move a pasta da sessao ao trocar de
+ * projeto; com -7 ela ficava para tras). Pasta para dentro dela mesma: -2.
+ * Codigos em fsdrv.h (os de drives_rename). */
 static int f_rename(void* p, const char* from, const char* to) {
   struct vol* v = (struct vol*)p;
   struct ent src, dst;
@@ -1613,7 +1655,7 @@ static int f_rename(void* p, const char* from, const char* to) {
   if (r <= 0) return r == 0 ? -1 : r;
   r = find_in_parent(v, to, par, &leaf, &dir, &dst);
   if (r < 0) return r;
-  if ((src.attr & 0x10) && dir != sdir) return -7;
+  if ((src.attr & 0x10) && dir != sdir && dir_inside(v, dir, src.clus)) return -2;
   exists = r == 1;
   same = exists && dst.pos_clus == src.pos_clus && dst.pos_off == src.pos_off;  /* so muda a caixa */
   if (exists && !same) {
@@ -1634,6 +1676,8 @@ static int f_rename(void* p, const char* from, const char* to) {
   }
   r = dir_add(v, dir, leaf, tpl, sbuf);
   if (r == 0 && !same && ent_unlink(v, &src) != 0) r = -3;
+  if (r == 0 && (src.attr & 0x10) && dir != sdir && valid_clus(v, src.clus) && dotdot_set(v, src.clus, dir) != 0)
+    r = -3;
   if (r != 0) err = r == -3 ? -4 : -2;
   /* o substituido ja saiu da pasta: a cadeia dele volta para o disco */
   if (exists && !same && valid_clus(v, dst.clus) && dst.clus != src.clus)

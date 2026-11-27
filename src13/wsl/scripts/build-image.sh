@@ -21,7 +21,10 @@
 #
 #   sh wsl/scripts/build-image.sh            (MB=2000 tamanho da imagem)
 #   KVER=6.10.7-policorp-amd64 sh ...        (outro kernel de /boot)
-#   FRESH=1 sh ...                           (baixa os pacotes de novo)
+#   KIMG="/mnt/c/Program Files/WSL/tools/kernel" sh ...
+#                                            (bzImage fora do /boot; o WSL2
+#                                            nao tem /boot, so /lib/modules)
+#   FRESH=1 sh ...                         (baixa os pacotes de novo)
 #   PARTS=0 sh ...                           (um DEBIAN.IMG so, MB < 2048)
 # Saida em partes DEBIAN.000, .001... de 128 MB (o WSL.EXE novo le assim; o
 # k_fsize do SODOS e int, entao um arquivo so fica abaixo de 2 GB). Com partes
@@ -47,7 +50,7 @@ PKGS=$PKGS,ncurses-bin,perl-base,mawk,dash,usrmerge,libc-bin,sysvinit-utils,moun
 PKGS=$PKGS,gcc,cpp,binutils,libc6-dev,make,nasm,e2fsprogs
 
 mkdir -p "$OUT" "$W" "$T/debs"
-if [ ! -x "$T/mm/usr/bin/mmdebstrap" ] || [ ! -x "$T/bb/bin/busybox" ] || [ ! -x "$T/fk/usr/bin/faked-sysv" ]; then
+if [ ! -x "$T/mm/usr/bin/mmdebstrap" ] || { [ ! -x "$T/bb/bin/busybox" ] && [ ! -x "$T/bb/usr/bin/busybox" ]; } || [ ! -x "$T/fk/usr/bin/faked-sysv" ]; then
   (cd "$T/debs" && apt-get download mmdebstrap busybox-static fakeroot libfakeroot)
   mkdir -p "$T/mm" "$T/bb" "$T/fk"
   dpkg -x "$T"/debs/mmdebstrap_*.deb "$T/mm"
@@ -55,16 +58,34 @@ if [ ! -x "$T/mm/usr/bin/mmdebstrap" ] || [ ! -x "$T/bb/bin/busybox" ] || [ ! -x
   dpkg -x "$T"/debs/fakeroot_*.deb "$T/fk"
   dpkg -x "$T"/debs/libfakeroot_*.deb "$T/fk"
 fi
+BB=$T/bb/bin/busybox
+[ -x "$BB" ] || BB=$T/bb/usr/bin/busybox
+# cpio (initrd): o WSL2 nao tem; vem de "apt-get download cpio" em ~/wsltools/cp
+if ! command -v cpio > /dev/null; then
+  if [ ! -x "$T/cp/usr/bin/cpio" ]; then
+    (cd "$T/debs" && apt-get download cpio) && dpkg -x "$T"/debs/cpio_*.deb "$T/cp"
+  fi
+  PATH=$T/cp/usr/bin:$PATH
+fi
 M=/lib/modules/$KVER
-[ -f "/boot/vmlinuz-$KVER" ] && [ -d "$M" ] || { echo "kernel $KVER nao achado em /boot e $M"; exit 1; }
+KIMG=${KIMG:-/boot/vmlinuz-$KVER}
+[ -f "$KIMG" ] && [ -d "$M" ] || { echo "kernel $KVER nao achado ($KIMG e $M); KIMG= aponta o bzImage"; exit 1; }
 
 # 1. Debian minimo (tar so desempacotado + os .deb em /sodos-debs)
 [ -n "$FRESH" ] && rm -f "$W/rootfs.tar"
+# chave do Debian: num Ubuntu (WSL2) o apt so tem as do Ubuntu e o mmdebstrap
+# para em "NO_PUBKEY"; o pacote debian-archive-keyring fica em ~/wsltools/kr
+KR=$T/kr/usr/share/keyrings/debian-archive-keyring.gpg
+if [ ! -f /usr/share/keyrings/debian-archive-keyring.gpg ] && [ ! -f "$KR" ]; then
+  (cd "$T/debs" && apt-get download debian-archive-keyring) && dpkg -x "$T"/debs/debian-archive-keyring_*.deb "$T/kr"
+fi
+KEYOPT=
+[ -f /usr/share/keyrings/debian-archive-keyring.gpg ] || KEYOPT=--keyring=$KR
 if [ ! -s "$W/rootfs.tar" ]; then
   PATH="$T/fk/usr/bin:$T/mm/usr/bin:/usr/sbin:/sbin:$PATH" \
     "$T/fk/usr/bin/fakeroot-sysv" -l "$T/fk/usr/lib/x86_64-linux-gnu/libfakeroot/libfakeroot-sysv.so" \
     -f "$T/fk/usr/bin/faked-sysv" -- \
-    mmdebstrap --mode=chrootless --variant=extract --include="$PKGS" \
+    mmdebstrap --mode=chrootless --variant=extract $KEYOPT --include="$PKGS" \
     --extract-hook='mkdir -p "$1/sodos-debs"; cp "$1"/var/cache/apt/archives/*.deb "$1/sodos-debs/"' \
     "$SUITE" "$W/rootfs.tar" "$MIRROR" > "$W/mmdebstrap.log" 2>&1 || { tail "$W/mmdebstrap.log"; exit 1; }
 fi
@@ -143,7 +164,7 @@ cat > "$W/sodos-agent" <<'AGENT'
 # Protocolo (wsl/wslbox.h no SODOS):
 #   SODOS -> Linux:  R <id> <flags> <cwdlen> <cmdlen>\n<cwd><cmd>  |  K <id>\n
 #   Linux -> SODOS:  READY\n | O <id> <len>\n<bytes> | E ... | X <id> <codigo>\n
-import os, signal, subprocess, threading, tty
+import os, signal, subprocess, threading, time, tty
 
 fd = os.open("/dev/ttyS1", os.O_RDWR | os.O_NOCTTY)
 tty.setraw(fd)
@@ -191,6 +212,29 @@ def pump(stream, kind, rid):
             break
         send(("%s %s %d\n" % (kind, rid, len(d))).encode() + d)
 
+# O agente nasce com "&" do sodos-init: um shell sem job control deixa o
+# SIGINT e o SIGQUIT ignorados nos processos de fundo, e os filhos herdam.
+# Sem isto o K (Ctrl+C, TerminateProcess do bash do Claude Code) nao matava
+# nada: "sleep 60" ia ate o fim.
+def child_setup():
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGQUIT, signal.SIG_DFL)
+
+# K: SIGINT no grupo; quem ainda estiver vivo leva SIGTERM em 2 s e SIGKILL
+# em mais 3 s (returncode: o wait() do run() segura a trava do poll())
+def reap(p):
+    for sig, wait in ((signal.SIGTERM, 2.0), (signal.SIGKILL, 3.0)):
+        t = 0.0
+        while t < wait and p.returncode is None:
+            time.sleep(0.1)
+            t += 0.1
+        if p.returncode is not None:
+            return
+        try:
+            os.killpg(p.pid, sig)
+        except OSError:
+            return
+
 def run(rid, flags, cwd, cmd):
     env = dict(os.environ)
     env.update(HOME="/root", LANG="C.UTF-8", TERM="dumb",
@@ -200,7 +244,8 @@ def run(rid, flags, cwd, cmd):
     args = ["/bin/bash", "-l", "-c", cmd] if flags & 1 else ["/bin/bash", "-c", cmd]
     try:
         p = subprocess.Popen(args, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+                             preexec_fn=child_setup)
     except Exception as e:
         send(("E %s %d\n" % (rid, len(str(e)) + 1)).encode() + (str(e) + "\n").encode())
         send(("X %s 127\n" % rid).encode())
@@ -233,6 +278,7 @@ while True:
                 os.killpg(p.pid, signal.SIGINT)
             except OSError:
                 pass
+            threading.Thread(target=reap, args=(p,), daemon=True).start()
 AGENT
 
 cat > "$W/sodos-setup" <<'SETUP'
@@ -263,8 +309,9 @@ SETUP
 
 # initrd: busybox + virtio_blk
 rm -rf "$W/initrd" && mkdir -p "$W/initrd/bin" "$W/initrd/dev" "$W/initrd/proc" "$W/initrd/sys" "$W/initrd/root" "$W/initrd/lib/modules"
-cp "$T/bb/bin/busybox" "$W/initrd/bin/busybox"
-cp "$M/kernel/drivers/block/virtio_blk.ko" "$W/initrd/lib/modules/"
+cp "$BB" "$W/initrd/bin/busybox"
+# (o kernel do WSL2 tem o virtio_blk embutido: sem o .ko, o insmod so falha)
+cp "$M/kernel/drivers/block/virtio_blk.ko" "$W/initrd/lib/modules/" 2>/dev/null || true
 cat > "$W/initrd/init" <<'RD'
 #!/bin/busybox sh
 # initrd do WSL do SODOS: carrega o virtio_blk, monta /dev/vda e passa para o
@@ -290,11 +337,12 @@ exec $B switch_root /root "$init" "$@"
 RD
 chmod 755 "$W/initrd/init"
 (cd "$W/initrd" && find . | cpio -o -H newc 2>/dev/null | gzip -9) > "$OUT/INITRD.IMG"
-cp "/boot/vmlinuz-$KVER" "$OUT/VMLINUZ"
+rm -f "$OUT/VMLINUZ" # o do /mnt/c vem sem permissao de escrita
+cp "$KIMG" "$OUT/VMLINUZ"
 
 # 3. ext4: extrai, acrescenta e grava como "root" num namespace
 rm -f "$OUT/DEBIAN.IMG"
-cp "$T/bb/bin/busybox" "$OUT/../busybox.tmp"
+cp "$BB" "$OUT/../busybox.tmp"
 unshare -r sh -e -c '
 W=$1; M=$2; KVER=$3; OUT=$4; MB=$5
 rm -rf "$W/root"; mkdir -p "$W/root"
@@ -309,6 +357,7 @@ mkdir -p "$W/root/lib/modules/$KVER"
 for f in kernel/drivers/block/virtio_blk.ko kernel/drivers/net/virtio_net.ko kernel/drivers/net/net_failover.ko \
          kernel/net/core/failover.ko kernel/lib/dim/dimlib.ko kernel/fs/9p/9p.ko kernel/net/9p/9pnet.ko \
          kernel/net/9p/9pnet_virtio.ko kernel/fs/netfs/netfs.ko kernel/drivers/char/virtio_console.ko; do
+  [ -f "$M/$f" ] || continue # kernel do WSL2: virtio e 9p embutidos
   mkdir -p "$W/root/lib/modules/$KVER/$(dirname $f)"
   cp "$M/$f" "$W/root/lib/modules/$KVER/$f"
 done

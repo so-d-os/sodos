@@ -651,9 +651,60 @@ void fat_dcache_reset(void) {
   mem_zero(dc_tab, DC_SLOTS * (uint32_t)sizeof(struct dc_ent));
 }
 
+/* Pasta aberta para alterar: o sub_dir (64 KB fixos) ou, se ela for maior, um
+ * buffer da arena alta (big_dir) que so cresce. O FAT aceita 65536 entradas
+ * por pasta (2 MB). Com o teto de 64 KB, uma pasta de clusters de 16 KB (o Z:
+ * de 1 GB) parava em ~680 arquivos de nome longo; o Code Cache do Chromium
+ * (um arquivo por script do Claude) passa disso, e cada arquivo que nao cabia
+ * dava "erro gravando" a cada boot. */
+#define DIR_BYTES_MAX (65536u * 32u)
+static uint8_t* big_dir;
+static uint32_t big_cap;
+
+static uint32_t dir_max_clusters(void) {
+  uint32_t cb = sectors_per_cluster * 512u;
+  return cb ? DIR_BYTES_MAX / cb : 0;
+}
+
+/* Quanto cabe no buffer de ents (0: raiz ou vista do cache, nao cresce). */
+static uint32_t room_of(const struct fat_dir_entry* ents) {
+  if (ents == sub_dir) return SUBDIR_MAX;
+  if (big_dir && (const uint8_t*)ents == big_dir) return big_cap;
+  return 0;
+}
+
+/* Garante need bytes no buffer de v, com os v->bytes de agora preservados
+ * (v->ents pode mudar de lugar). 0 ok; -1 sem memoria ou acima do limite. */
+static int view_room(struct dir_view* v, uint32_t need) {
+  uint8_t* cur = (uint8_t*)v->ents;
+  uint8_t* p;
+  uint32_t cap;
+  if (need <= room_of(v->ents)) return 0;
+  if (cur != (uint8_t*)sub_dir && cur != big_dir) return -1;
+  if (need > DIR_BYTES_MAX) return -1;
+  if (cur == (uint8_t*)sub_dir && big_dir && big_cap >= need) {
+    dc_copy(big_dir, cur, (uint32_t)v->bytes);
+    v->ents = (struct fat_dir_entry*)big_dir;
+    return 0;
+  }
+  if (!um_ready()) return -1;
+  cap = big_cap > 4u * SUBDIR_MAX ? big_cap : 4u * SUBDIR_MAX;
+  while (cap < need) cap *= 2u;
+  if (cap > DIR_BYTES_MAX) cap = DIR_BYTES_MAX;
+  p = (uint8_t*)umalloc_top(cap);
+  if (!p) return -1;
+  dc_copy(p, cur, (uint32_t)v->bytes);
+  if (big_dir) ufree(big_dir);   /* cur pode ser o big_dir: ja foi copiado */
+  big_dir = p;
+  big_cap = cap;
+  v->ents = (struct fat_dir_entry*)p;
+  return 0;
+}
+
 static int dir_load(uint16_t cluster, struct dir_view* v) {
   uint8_t* dst;
-  int guard = 0;
+  uint32_t guard = 0, total = 0, maxc;
+  uint16_t c;
   struct dc_ent* ce;
   v->cluster = cluster;
   v->bytes = 0;
@@ -667,22 +718,30 @@ static int dir_load(uint16_t cluster, struct dir_view* v) {
   }
   if (bytes_per_sector != 512 || sectors_per_cluster == 0) return -1;
   v->ents = sub_dir;
-  dst = (uint8_t*)sub_dir;
   /* Copia gravavel a partir do cache: o que vem depois do fim e livre (zero). */
   ce = dc_slot(cluster, 0);
-  if (ce && ce->data && ce->full <= SUBDIR_MAX) {
+  if (ce && ce->data && ce->full <= DIR_BYTES_MAX && view_room(v, ce->full) == 0) {
+    dst = (uint8_t*)v->ents;
     dc_copy(dst, ce->data, ce->used);
     mem_zero(dst + ce->used, ce->full - ce->used);
     v->bytes = (int)ce->full;
     v->count = v->bytes / 32;
     return 0;
   }
-  while (!cluster_end(cluster) && guard++ < 64) {
+  /* Tamanho da cadeia (a FAT esta na memoria) para escolher o buffer. */
+  maxc = dir_max_clusters();
+  for (c = cluster; !cluster_end(c); c = get_next_cluster(c)) {
+    if (++guard > maxc) return -1;   /* laco ou pasta acima do limite do FAT */
+    total += sectors_per_cluster * 512u;
+  }
+  if (view_room(v, total) != 0) return -1;
+  dst = (uint8_t*)v->ents;
+  while (!cluster_end(cluster)) {
     uint32_t lba = first_data_sector + ((uint32_t)(cluster - 2) * sectors_per_cluster);
     /* O cluster inteiro de uma vez: abrir um arquivo percorre uma pasta por
      * nivel do caminho, e setor a setor isso domina a partida de um programa
      * que consulta muitos arquivos. */
-    if ((uint32_t)v->bytes + sectors_per_cluster * 512u > SUBDIR_MAX) return -1;
+    if ((uint32_t)v->bytes + sectors_per_cluster * 512u > total) return -1;
     if (read_run(lba, sectors_per_cluster, dst + v->bytes) != 0) return -1;
     v->bytes += (int)(sectors_per_cluster * 512u);
     cluster = get_next_cluster(cluster);
@@ -752,7 +811,7 @@ static int dir_flush(struct dir_view* v) {
   }
   cluster = v->cluster;
   off = 0;
-  while (!cluster_end(cluster) && off < (uint32_t)v->bytes && guard++ < 64) {
+  while (!cluster_end(cluster) && off < (uint32_t)v->bytes && (uint32_t)guard++ < dir_max_clusters()) {
     uint32_t lba = first_data_sector + ((uint32_t)(cluster - 2) * sectors_per_cluster);
     uint32_t n = ((uint32_t)v->bytes - off) / 512u;
     if (n > sectors_per_cluster) n = sectors_per_cluster;
@@ -931,10 +990,11 @@ static int dir_grow(struct dir_view* v) {
   uint32_t lba;
   int guard = 0;
   if (v->cluster < 2 || fat_type != 16) return -1;
-  if ((uint32_t)v->bytes + sectors_per_cluster * 512u > SUBDIR_MAX) return -1;
+  /* o buffer da vista cresce junto (ate as 65536 entradas do FAT) */
+  if (view_room(v, (uint32_t)v->bytes + sectors_per_cluster * 512u) != 0) return -1;
   dc_drop(v->cluster); /* a cadeia muda; o dir_flush de quem cresceu guarda de novo */
   cluster = v->cluster;
-  while (!cluster_end(cluster) && guard++ < 64) {
+  while (!cluster_end(cluster) && (uint32_t)guard++ < dir_max_clusters()) {
     uint16_t n = get_next_cluster(cluster);
     if (cluster_end(n)) {
       prev = cluster;
@@ -1572,14 +1632,56 @@ int fat_delete(const char* path) {
   return 0;
 }
 
+/* Cluster do ".." da pasta c (0 = a raiz); 0xFFFF se nao deu para ler. */
+static uint16_t dotdot_of(uint16_t c) {
+  struct dir_view v;
+  int i;
+  if (dir_load_ro(c, &v) != 0) return 0xFFFFu;
+  for (i = 0; i < v.count && i < 2; i++) {
+    const struct fat_dir_entry* e = &v.ents[i];
+    if (e->name[0] == '.' && e->name[1] == '.' && (e->attributes & 0x10)) return e->cluster;
+  }
+  return 0xFFFFu;
+}
+
+/* 1 se a pasta dir e a pasta c ou fica dentro dela (subindo pelos "..").
+ * Usa o buffer das subpastas: quem chama rele a sua vista depois. */
+static int dir_inside(uint16_t dir, uint16_t c) {
+  int guard = 0;
+  while (dir >= 2) {
+    if (dir == c) return 1;
+    if (++guard > 4096) return 1;   /* laco nos "..": melhor recusar */
+    dir = dotdot_of(dir);
+    if (dir == 0xFFFFu) return 1;
+  }
+  return 0;
+}
+
+/* A pasta c mudou de pasta-mae: o ".." dela aponta para parent (0 = raiz). */
+static int dotdot_set(uint16_t c, uint16_t parent) {
+  struct dir_view v;
+  int i;
+  if (dir_load(c, &v) != 0) return -1;
+  for (i = 0; i < v.count && i < 2; i++) {
+    struct fat_dir_entry* e = &v.ents[i];
+    if (e->name[0] == '.' && e->name[1] == '.' && (e->attributes & 0x10)) {
+      e->cluster = parent < 2 ? 0 : parent;
+      return dir_flush(&v);
+    }
+  }
+  return 0;
+}
+
 /* Renomeia/move from para to no mesmo volume trocando so a entrada de
  * diretorio: os dados (a cadeia de clusters) ficam onde estao. Antes o
  * rename() da libc copiava o arquivo inteiro e apagava o antigo, e cada
  * gravacao atomica do Firefox (temporario + rename) custava o dobro em PIO.
  * Um to que ja existe (arquivo) e substituido, como no POSIX.
- * Pasta: so dentro da mesma pasta-mae (o ".." do filho nao muda).
+ * Pasta para outra pasta: o ".." dela passa a apontar para a nova mae (o
+ * Claude Desktop move a pasta da sessao ao trocar de projeto); para dentro
+ * dela mesma, -2.
  * 0 ok. -1 nao existe (from ou a pasta de to). -2 nome invalido/sem lugar.
- * -3 to e pasta (ou from e pasta e to existe). -7 pasta para outra pasta. */
+ * -3 to e pasta (ou from e pasta e to existe). -4 erro de disco. */
 int fat_rename(const char* from, const char* to) {
   static char leaf2[FAT_NAME_MAX];
   struct dir_view pv;
@@ -1589,6 +1691,7 @@ int fat_rename(const char* from, const char* to) {
   struct fat_dir_entry* d;
   struct fat_dir_entry* ne;
   uint16_t src_parent;
+  uint16_t dst_parent;
   uint16_t old_dest = 0;
   int src_first, src_idx, dfirst, is_dir = 0, same_dir, i;
   if (fat_type != 16 || !from || !from[0] || !to || !to[0]) return -2;
@@ -1607,7 +1710,11 @@ int fat_rename(const char* from, const char* to) {
    * vale a copia src e os indices (a mesma pasta relida tem o mesmo conteudo). */
   if (open_parent(to, &pv, leaf2, 0) != 0) return -1;
   same_dir = pv.cluster == src_parent;
-  if (is_dir && !same_dir) return -7;
+  if (is_dir && !same_dir) {
+    if (dir_inside(pv.cluster, src.cluster)) return -2;
+    if (open_parent(to, &pv, leaf2, 0) != 0) return -1;   /* o dir_inside usou o buffer */
+  }
+  dst_parent = pv.cluster;
   d = dir_find(&pv, leaf2, 1, 0);
   if (d && !(same_dir && (int)(d - pv.ents) == src_idx)) return -3;
   d = dir_find(&pv, leaf2, 0, &dfirst);
@@ -1639,6 +1746,7 @@ int fat_rename(const char* from, const char* to) {
   }
   if (old_dest >= 2 && old_dest != src.cluster) free_chain(old_dest);
   flush_fat();
+  if (is_dir && !same_dir && src.cluster >= 2 && dotdot_set(src.cluster, dst_parent) != 0) return -4;
   return 0;
 }
 

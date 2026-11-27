@@ -43,7 +43,7 @@ all: $(LINK) $(SOXRUN) $(HCC) $(O)/KERNEL.IMP $(O)/LIBC.DLL $(O)/CRT0.OBJ $(O)/H
 	$(O)/WIDGETS.EXE $(O)/EXPLORER.EXE $(O)/NOTEPAD.EXE $(O)/VIDEOCFG.EXE $(O)/TELAS.EXE $(O)/IMGBIG.DLL $(O)/AIPANEL.EXE $(O)/MENUCFG.EXE $(O)/TEMAS.EXE $(O)/WINTAB.EXE $(O)/WINMENU.EXE $(O)/LINKEXT.EXE $(O)/DISKSYNC.EXE $(O)/PENDRIVE.EXE $(O)/PLAY.EXE $(O)/HDAVERB.EXE $(O)/SOMDIAG.EXE \
 	$(O)/WGET.EXE $(O)/BAT.EXE $(O)/POSIX.DLL $(O)/LIBCX.DLL $(O)/XHELLO.EXE \
 	$(O)/TERM.DLL $(O)/TTERM.EXE $(O)/GLIB.DLL $(O)/TGLIB.EXE \
-	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/TOP.EXE $(O)/COBRA.EXE $(O)/WIFI.EXE $(O)/XCOPY.EXE $(O)/GIT.EXE $(O)/MAKE.EXE \
+	$(O)/POSIXX.DLL $(O)/MC.EXE $(O)/TOP.EXE $(O)/COBRA.EXE $(O)/WIFI.EXE $(O)/XCOPY.EXE $(O)/GIT.EXE $(O)/MAKE.EXE $(O)/CURL.EXE \
 	$(O)/AGENT.EXE $(O)/LLAMA.EXE $(O)/FFLAUNCH.EXE $(O)/SMPT.EXE $(O)/TROCA.EXE $(O)/INSTCHRM.EXE \
 	drivers
 
@@ -244,6 +244,12 @@ MAKE_SRC = $(addprefix $(MAKE_DIR)/,main.c input.c macro.c make.c modtime.c \
 	rules.c target.c utils.c check.c sodos.c)
 $(O)/MAKE.EXE: $(MAKE_SRC) $(MAKE_DIR)/make.h $(MAKE_DIR)/sodos.h $(O)/POSIX.DLL $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
 	$(HCC) -o $@ $(MAKE_SRC) $(O)/POSIX.DLL
+
+# CURL.EXE (../../develop/CURL): cliente HTTP/HTTPS no estilo do curl, pela
+# TLS.DLL. O BUILD.BAT e o MAKEFILE da pasta fazem o mesmo dentro do SODOS.
+CURL_DIR = ../../develop/CURL
+$(O)/CURL.EXE: $(CURL_DIR)/CURL.C $(O)/TLS.DLL $(HCC) $(HEADERS) $(O)/KERNEL.IMP $(O)/LIBC.DLL
+	$(HCC) -o $@ $(CURL_DIR)/CURL.C $(O)/TLS.DLL
 
 $(HCC): $(CC_SRC) cc/cc.h sox.h | $(B)
 	$(HOSTCC) $(HCFLAGS) -o $@ $(CC_SRC)

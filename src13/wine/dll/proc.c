@@ -17,6 +17,26 @@
 #include <stdio.h>
 #include "wine_int.h"
 struct inh_spec;
+/* Linha do pedido: "\1nome\1 linha" quando o argv[0] que o pai pediu nao e o
+ * programa (CreateProcess com lpApplicationName; o Bun roda o claude.exe com
+ * argv0 "rg"). O programa sai do resto da linha; o filho recebe o nome como
+ * argv[0]. Devolve o comeco do resto; *a0 = o nome (cortado no lugar) ou 0. */
+static char* line_body(char* s, char** a0) {
+  char* e;
+  if (a0) *a0 = 0;
+  if (!s || s[0] != '\1' || !(e = strchr(s + 1, '\1'))) return s;
+  if (a0) {
+    *e = 0;
+    *a0 = s + 1;
+  }
+  return e + 1;
+}
+/* o mesmo, so para mostrar no log (sem cortar nada) */
+static const char* line_shown(const char* s) {
+  const char* e;
+  if (!s || s[0] != '\1' || !(e = strchr(s + 1, '\1'))) return s;
+  return e + 1;
+}
 static struct wobj** inh_snapshot(struct wproc* pp, const struct inh_spec* spec);
 static void inh_drop(struct wobj** t);
 const HANDLE* wattr_handles(const void* list, DWORD* count); /* procmisc.c */
@@ -73,7 +93,7 @@ static HANDLE spawn(const char* cmdline, DWORD* err, const struct inh_spec* spec
   p->spawn_dir = dir;
   __sync_lock_test_and_set(&p->spawn_req, 2);
   k_futex_wake(&p->exit_req, -1);
-  wlog("processo filho: ", cmdline);
+  wlog("processo filho: ", line_shown(cmdline));
   return h;
 }
 
@@ -468,13 +488,21 @@ int wspawn_claim(int* argc, char*** argv) {
     wlog("processo filho: sem memoria para a linha de comando", 0);
     return -1;
   }
-  n = split_args(line, av, 255);
-  av[n] = 0;
-  /* argv[0] do pai pode ser so o nome; o caminho real fica o que o WIN abriu */
-  if (n > 0) av[0] = (*argv)[0];
+  {
+    char* a0;
+    char* body = line_body(line, &a0); /* a0 aponta para dentro de line, que fica */
+    n = split_args(body, av, 255);
+    av[n] = 0;
+    /* argv[0] do pai pode ser so o nome; o caminho real fica o que o WIN abriu
+     * (o main.c carrega por ele). O nome pedido pelo pai, se outro, vai para
+     * o argv[0] e a linha de comando que o programa ve. */
+    if (n > 0) av[0] = (*argv)[0];
+    p->cmd_argv0 = a0 && a0[0] ? a0 : 0;
+  }
   *argc = n;
   *argv = av;
-  wlog("processo filho em paralelo: ", r->cmdline);
+  wlog("processo filho em paralelo: ", line_shown(r->cmdline));
+  if (p->cmd_argv0) wlog("processo filho: argv[0] pedido pelo pai: ", p->cmd_argv0);
   return 1;
 }
 
@@ -703,6 +731,43 @@ static int is_git_exe(const char* path) {
   return (b[0] | 0x20) == 'g' && (b[1] | 0x20) == 'i' && (b[2] | 0x20) == 't' &&
          (b[3] == '.' || b[3] == 0);
 }
+/* bash.exe do Claude Code (o WSL.EXE do SODOS com esse nome): em vez da
+ * tarefa principal, uma thread fala direto com a caixa do WSL (bashbox.c).
+ * 1 = era o bash (*h ou *err prontos); 0 = segue pelo spawn de sempre. */
+int wbash_wanted(void);
+HANDLE wbash_start(int argc, char** argv, const char* dir, const HANDLE* std, DWORD* err);
+static int is_bash_name(const char* path) {
+  const char* b = path;
+  const char* q;
+  for (q = path; *q; q++)
+    if (*q == '\\' || *q == '/' || *q == ':') b = q + 1;
+  return wstreq(b, "bash.exe") || wstreq(b, "bash");
+}
+static int bash_route(const char* line, DWORD* err, const char* dir, const HANDLE* std, HANDLE* h) {
+  char* c;
+  char* argv[256];
+  char path[300];
+  int argc;
+  if (!wbash_wanted()) return 0;
+  c = (char*)k_malloc((unsigned)strlen(line) + 1);
+  if (!c) return 0;
+  strcpy(c, line);
+  argc = split_args(line_body(c, 0), argv, 255);
+  if (argc < 1) {
+    k_free(c);
+    return 0;
+  }
+  argv[argc] = 0;
+  wpath(argv[0], path, (int)sizeof(path));
+  if (!is_bash_name(path) || !is_sodos_exe(path)) {
+    k_free(c);
+    return 0;
+  }
+  *h = wbash_start(argc, argv, dir, std, err);
+  k_free(c);
+  return 1;
+}
+
 static int run_sodos_child(struct wproc* p, const char* path, int argc, char** argv) {
   char old[300];
   char* out;
@@ -783,7 +848,8 @@ void wspawn_world_service(void) {
   cmd = p->spawn_cmd;
   char* whole = (char*)k_malloc((unsigned)strlen(cmd) + 1); /* split_args corta cmd */
   if (whole) strcpy(whole, cmd);
-  argc = split_args(cmd, argv, 127);
+  /* o argv0 pedido ("\1rg\1") so vai ao filho do Windows em paralelo (whole) */
+  argc = split_args(line_body(cmd, 0), argv, 127);
   if (argc < 1) {
     rc = -1;
   } else {
@@ -804,7 +870,7 @@ void wspawn_world_service(void) {
     if (!path[0]) {
       rc = 0;
     } else if (is_sodos_exe(path)) {
-      wlog("processo filho do SODOS: ", whole ? whole : path);
+      wlog("processo filho do SODOS: ", whole ? line_shown(whole) : path);
       rc = run_sodos_child(p, path, argc, argv);
     } else if (whole && wine_wants_async() && spawn_async(p, o, path, whole)) {
       /* roda em paralelo: o filho grava o codigo e acorda o pai ao sair */
@@ -843,6 +909,31 @@ void wspawn_world_service(void) {
 static int wine_wants_async(void) {
   char v[4];
   return !(k_getenv("WINE_SPAWN", v, (int)sizeof(v)) > 0 && v[0] == '0');
+}
+
+/* "git" e "D:\WINE\BIN\git.exe" sao o mesmo programa; "rg" e "claude.exe" nao:
+ * compara o nome sem a pasta e sem o .exe, sem caixa. */
+static int same_program(const char* x, const char* y) {
+  const char* bx = x;
+  const char* by = y;
+  const char* q;
+  size_t lx, ly, i;
+  for (q = x; *q; q++)
+    if (*q == '\\' || *q == '/' || *q == ':') bx = q + 1;
+  for (q = y; *q; q++)
+    if (*q == '\\' || *q == '/' || *q == ':') by = q + 1;
+  lx = strlen(bx);
+  ly = strlen(by);
+  if (lx > 4 && wstreq(bx + lx - 4, ".exe")) lx -= 4;
+  if (ly > 4 && wstreq(by + ly - 4, ".exe")) ly -= 4;
+  if (lx != ly) return 0;
+  for (i = 0; i < lx; i++) {
+    char cx = bx[i], cy = by[i];
+    if (cx >= 'A' && cx <= 'Z') cx = (char)(cx + 32);
+    if (cy >= 'A' && cy <= 'Z') cy = (char)(cy + 32);
+    if (cx != cy) return 0;
+  }
+  return 1;
 }
 
 static void append_quoted(char* out, size_t max, const char* s) {
@@ -893,13 +984,33 @@ static WINAPI BOOL CreateProcessW(const wchar16* app, wchar16* cmd, void* pa, vo
      * "git" no PATH e passa D:\WINE\BIN\git.exe aqui, com "git" na linha);
      * a linha fica com o caminho no lugar do argv[0] */
     const char* rest = c;
+    const char* t0;
+    char a0[128];
+    size_t k = 0;
     while (*rest == ' ' || *rest == '\t') rest++;
     if (*rest == '"') {
       rest++;
+      t0 = rest;
       while (*rest && *rest != '"') rest++;
+      k = (size_t)(rest - t0);
       if (*rest) rest++;
     } else {
+      t0 = rest;
       while (*rest && *rest != ' ' && *rest != '\t') rest++;
+      k = (size_t)(rest - t0);
+    }
+    /* argv[0] da linha que nao e o programa ("rg" com o claude.exe): vai na
+     * frente para o filho (line_body). "git" com D:\WINE\BIN\git.exe e o
+     * caminho entre aspas do proprio EXE nao mudam nada. */
+    if (k > 0 && k < sizeof(a0)) {
+      memcpy(a0, t0, k);
+      a0[k] = 0;
+      if (!strchr(a0, '\1') && !same_program(a0, a)) {
+        line[0] = '\1';
+        memcpy(line + 1, a0, k);
+        line[k + 1] = '\1';
+        line[k + 2] = 0;
+      }
     }
     append_quoted(line, LINE_MAX_, a);
     strncat(line, rest, LINE_MAX_ - strlen(line) - 1);
@@ -968,7 +1079,13 @@ static WINAPI BOOL CreateProcessW(const wchar16* app, wchar16* cmd, void* pa, vo
       std[2] = *(HANDLE const*)((const uint8_t*)si + 96);
       if (wine_debug) wlogx("CreateProcess: stdio do filho, stdout ", (uint64_t)(uintptr_t)std[1]);
     }
-    h = line[0] ? spawn(line, &err, &spec, envs, dirs, std) : 0;
+    if (line[0] && bash_route(line, &err, dirs, std, &h)) {
+      /* bash.exe do Claude Code: numa thread, sem a tarefa principal (bashbox.c) */
+      if (envs) k_free_shared(envs);
+      if (dirs) k_free_shared(dirs);
+    } else {
+      h = line[0] ? spawn(line, &err, &spec, envs, dirs, std) : 0;
+    }
     if (!line[0]) {
       if (envs) k_free_shared(envs);
       if (dirs) k_free_shared(dirs);

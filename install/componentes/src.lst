@@ -30,10 +30,14 @@ copia  src13/cmd/xcopy/BUILD.BAT  D:\SRC\CMD\XCOPY\
 copia  src13/cmd/xcopy/MAKEFILE   D:\SRC\CMD\XCOPY\
 
 # Ferramentas de develop/ (fora do src13): D:\DEVELOP\<FERRAMENTA>. O MAKE.EXE
-# vai para a raiz do D: com os outros .EXE.
+# e o CURL.EXE vao para a raiz do D: com os outros .EXE.
 copia  develop/make/*.c        D:\DEVELOP\MAKE\
 copia  develop/make/*.h        D:\DEVELOP\MAKE\
 copia  develop/make/BUILD.BAT  D:\DEVELOP\MAKE\
 copia  develop/make/MAKEFILE   D:\DEVELOP\MAKE\
 copia  develop/make/LEIA.TXT   D:\DEVELOP\MAKE\
 copia  develop/make/LICENSE    D:\DEVELOP\MAKE\
+copia  develop/CURL/CURL.C     D:\DEVELOP\CURL\
+copia  develop/CURL/BUILD.BAT  D:\DEVELOP\CURL\
+copia  develop/CURL/MAKEFILE   D:\DEVELOP\CURL\
+copia  develop/CURL/LEIA.TXT   D:\DEVELOP\CURL\

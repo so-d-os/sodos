@@ -6,6 +6,44 @@ Este arquivo vem do repositório do SODOS (`src13/docs/CLAUDE-SODOS.md`) e o `ma
 
 O que segue precisa do SODOS build 49 ou mais novo (o comando `ver` mostra o build) e do serviço do WSL ligado (`SET WSL=1`). Se `sh /d/WSL/SODOS ver` não responder, avise o usuário em vez de tentar outro caminho.
 
+## As ferramentas aqui
+
+- **Bash**: é o `D:\WINE\BIN\BASH.EXE` (o `WSL.EXE` com outro nome), que passa o comando ao Linux do WSL. O primeiro comando depois do boot espera o Linux subir. Os caminhos do Windows no comando (`D:\X`) viram `/d/X`.
+- **PowerShell**: não existe no SODOS. Fica desligado (`CLAUDE_CODE_USE_POWERSHELL_TOOL=0`).
+- **Read, Write, Edit**: caminhos do Windows (`D:\SOURCE\SODOS\src13\...`).
+- **Glob e Grep**: rodam o ripgrep embutido no `claude.exe`. A primeira busca depois do boot pode estourar os 20 s, enquanto o `claude.exe` carrega. Repita; as seguintes levam menos de 1 s. Busque numa pasta ou num arquivo (`D:\SOURCE\SODOS\src13\video`), não no `D:\` inteiro.
+- Se o Bash responder "No suitable shell found" ou o Glob estourar sempre, falta `CLAUDE_CODE_SHELL` no `RODACLAUDE.BAT` ou o `WINE.DLL` é antigo. Avise o usuário e continue com Read, que funciona sempre.
+- Se o Bash responder "falta a imagem SODOS-Debian", a pasta `D:\WSL` não tem `DEBIAN.000`... `VMLINUZ` e `INITRD.IMG`: sem eles o `SET WSL=1` sobe a distro do Windows, que não tem o agente de comandos. Não há outro caminho para o Bash; avise o usuário (a imagem sai de `wsl/scripts/build-image.sh`).
+- Vários Bash, Grep e git podem rodar juntos: o `WINE.DLL` atende o `bash.exe` numa thread (`wine/dll/bashbox.c`), sem prender os outros `CreateProcess`. Um "ENOTSUP ... uv_spawn" indica um `WINE.DLL` antigo.
+
+## O código do SODOS
+
+Neste PC o repositório fica em `D:\SOURCE\SODOS` (clone do `GIT.EXE`; no Bash, `/d/SOURCE/SODOS`). Dentro de `src13`:
+
+| Pasta | O que tem |
+|---|---|
+| `kernel/` | o kernel (`kernel.c`, `vt.c` telas, `clip.c` área de transferência, `wine.c`, `version.c`) |
+| `video/visual.c` | o WIN: janelas, Command, teclado e mouse do desktop (~15 mil linhas: Grep no arquivo e Read com `offset`) |
+| `shell/` | comandos do prompt (`cmd_*.c`) |
+| `utils/` | programas do WIN (NOTEPAD, EXPLORER, WEBCAMV...) |
+| `c_compiler/` | o `cc` do SODOS, a libc e os `include` (`so.h` tem a API do kernel) |
+| `wine/dll/` | o `WINE.DLL` (EXEs do Windows, inclusive este Claude) |
+| `wsl/` | o `WSL.EXE`/`BASH.EXE` |
+| `docs/` | documentação (`CONTROLE.md`, `TROCA.md`) |
+
+## Mudar e testar o sistema
+
+Compile no Bash: o Linux tem gcc, nasm, make e python3. O disco do SODOS no Linux é mais lento que um disco do Linux, então um make do kernel leva alguns minutos; rode com `timeout` longo.
+
+| O que mudou | Compilar (em `/d/SOURCE/SODOS/src13`) | Pôr no ar |
+|---|---|---|
+| kernel | `make kernel_multiboot.elf` | `TROCA KERNEL` (seção abaixo), ou copiar para `D:\BOOT\KERNEL.ELF` e reiniciar |
+| WINE.DLL | `make -C wine build/WINE.DLL` | copiar para `D:\SODOS\DRV\WINE.DLL` e `TROCA WINE` |
+| programa de `utils/` | `make -C c_compiler out/NOME.EXE` | copiar o `.EXE` para `D:\` e abrir com `command` |
+| WSL.EXE/BASH.EXE | `sh wsl/scripts/build-wsl.sh` | peça ao usuário: troca o bash deste Claude |
+
+Antes de trocar um arquivo do sistema, guarde o antigo ao lado (`KERNEL.ELF` → `KERNEL.OLD`). Um programa pequeno também compila direto no SODOS, com o `cc` (fim deste arquivo).
+
 ## Rodar comandos do SODOS a partir do Bash
 
 O Linux não executa programas do SODOS. Para rodar uma linha do prompt do SODOS e ver a saída:

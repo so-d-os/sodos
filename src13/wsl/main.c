@@ -395,6 +395,24 @@ static int client_run(const char* cmd, uint32_t len, int flags) {
     return 255;
   }
   b = box_get(0);
+  if (!(b && b->alive && b->ready) && !img_present()) {
+    /* Sem a imagem propria o SET WSL=1 sobe a distro do Windows (NTFS), que
+     * nao tem o /usr/local/sbin/sodos-agent: o agente nunca diz READY e
+     * cada comando esperava 120 s (e o WINE.DLL, preso nessa espera, recusava
+     * os outros CreateProcess: ENOTSUP no uv_spawn do Claude Code). Um -D no
+     * WSLOPT pode apontar a imagem para outra pasta: ai espera como antes. */
+    char opt[160];
+    if (k_getenv("WSLOPT", opt, (int)sizeof opt) <= 0 || !strstr(opt, "-D")) {
+      char p[128];
+      img_path(p, sizeof p, "DEBIAN.000");
+      fprintf(stderr,
+              "WSL: falta a imagem SODOS-Debian (%s ou DEBIAN.IMG, VMLINUZ, INITRD.IMG). Os comandos do\n"
+              "     bash do Claude Code e do WSL exec rodam pelo agente dessa imagem; a distro do\n"
+              "     Windows nao tem o agente. Copie wsl/build/image para essa pasta (SET WSLDIR muda).\n",
+              p);
+      return 255;
+    }
+  }
   if ((!b || !b->alive) && (k_getenv("WSL", v, (int)sizeof v) <= 0 || v[0] != '1')) {
     /* liga o servico (tela Ctrl+F10) e espera o Linux subir */
     k_setenv("WSL", "1");
@@ -497,6 +515,13 @@ static char* join_args(int argc, char** argv, int from, uint32_t* len) {
 static int bash_main(int argc, char** argv) {
   int i, flags = 0;
   const char* cmd = 0;
+  /* "bash --version": o Claude Code confere o shell assim, com 1 s de prazo,
+   * quando o accessSync falha. Responde aqui, sem subir a VM. */
+  if (argc >= 2 && !strcmp(argv[1], "--version")) {
+    printf("GNU bash, version 5.2.21(1)-release (x86_64-pc-linux-gnu)\n"
+           "SODOS: o bash roda no Linux do WSL.EXE (SET WSL=1), comandos por -c\n");
+    return 0;
+  }
   for (i = 1; i < argc; i++) {
     const char* a = argv[i];
     if (!strcmp(a, "--login")) {
@@ -751,6 +776,10 @@ static int cmd_run(int argc, char** argv, const wsl_io* disk) {
   }
   printf("WSL: distro %s (usuario %s), disco virtual de %llu MB\n", info.name, info.user,
          (unsigned long long)(vhdx_size(st.vd) >> 20));
+  if (cfg.service)
+    printf("WSL: aviso: sem a imagem SODOS-Debian em %s o servico sobe esta distro, que nao tem o\n"
+           "     agente de comandos: WSL exec e o BASH.EXE do Claude Code nao funcionam (so o console).\n",
+           img_dir[0] ? img_dir : "D:\\WSL");
   if (vhdx_dirty(st.vd))
     printf("WSL: aviso: o vhdx tem log pendente (o Windows nao fechou o WSL); o ext4 pode ter\n"
            "     journal por reaplicar, o Linux faz isso na camada de escrita em RAM.\n");

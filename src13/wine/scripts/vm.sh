@@ -50,12 +50,13 @@ case "$1" in
     # MEM=14000: mais RAM (3 claude.exe de 372 MB + ramdisk nao cabem em 8 GB)
     # QEMU_EXTRA="-s": gdb do QEMU na porta 1234 (watchpoints de hardware)
     # SVM=1: AMD-V aninhado (o WSL.EXE do SODOS sobe a VM do Linux)
+    # DISK2=arquivo: outro terceiro disco (ex.: FAT32 com a imagem do WSL; "mount 2 E:")
     setsid qemu-system-x86_64 -accel kvm -cpu host${SVM:+,+svm} -m ${MEM:-8192} -smp 4 -usb -device usb-tablet -vga std $DISP $QEMU_EXTRA \
       -monitor "unix:$MON,server,nowait" -serial "file:$V/serial.log" \
       -netdev user,id=n0,hostfwd=tcp::$PORT-:8797$NETFWD -device ne2k_pci,netdev=n0 -boot order=c \
       -drive format=raw,file="$V/os.img",if=ide,index=0 \
       -drive format=raw,file="$V/disk.img",if=ide,index=1 \
-      -drive format=raw,file="$S/disk2.img",if=ide,index=2,snapshot=on > "$V/qemu.log" 2>&1 </dev/null &
+      -drive format=raw,file="${DISK2:-$S/disk2.img}",if=ide,index=2,snapshot=on > "$V/qemu.log" 2>&1 </dev/null &
     echo $! > "$V/pid"
     i=0
     until curl -s -m 2 "http://127.0.0.1:$PORT/win" >/dev/null 2>&1; do

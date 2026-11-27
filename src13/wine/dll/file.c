@@ -311,12 +311,42 @@ static uint64_t wpath_time(const char* path) {
   return ft && ft < now ? ft : now;
 }
 
+/* 1 se a pasta de path existe (a raiz e um caminho sem pasta contam). O
+ * FAT16 do kernel cria as pastas do meio ao gravar e o FAT32.DLL nao: sem
+ * esta conferencia o CreateFile de "jobs\pins.json.tmp.N" com a pasta jobs
+ * faltando dava um handle valido no D: do PC, as escritas iam para a memoria
+ * e a gravacao falhava so no fechamento ("erro gravando"), sem o programa
+ * saber (no Windows o CreateFile ja falha com ERROR_PATH_NOT_FOUND). */
+static int parent_is_dir(const char* path) {
+  char par[300];
+  char* s;
+  size_t n = strlen(path);
+  if (n >= sizeof(par)) return 1;
+  memcpy(par, path, n + 1);
+  s = strrchr(par, '\\');
+  if (!s) return 1;
+  if (s == par + 2 && par[1] == ':') return 1;
+  *s = 0;
+  return wstat(par, 0) == 2;
+}
+
+/* 1 se a pasta nao tem nada alem de . e .. (ou ja nao existe). */
+static int dir_is_empty(const char* path) {
+  struct k_dirent d;
+  return k_dir(path, &d, 1) <= 0;
+}
+
 /* ---------- objetos de arquivo ---------- */
-void wfile_flush(struct wobj* f) {
-  if (f->type != OBJ_FILE || !f->writable || !f->dirty || !f->path) return;
-  if (wsave(f->path, (const char*)(f->data ? f->data : (const uint8_t*)""), (int)f->size) < 0)
+/* 0 gravou (ou nada a gravar); -1 o disco recusou. */
+int wfile_flush(struct wobj* f) {
+  int rc = 0;
+  if (f->type != OBJ_FILE || !f->writable || !f->dirty || !f->path) return 0;
+  if (wsave(f->path, (const char*)(f->data ? f->data : (const uint8_t*)""), (int)f->size) < 0) {
     wlog("erro gravando ", f->path);
+    rc = -1;
+  }
   f->dirty = 0;
+  return rc;
 }
 
 static char* sdup(const char* s);
@@ -483,6 +513,10 @@ static HANDLE open_file(const char* name, DWORD access, DWORD disp, DWORD flags)
     wset_lasterr(ERROR_FILE_EXISTS);
     return INVALID_HANDLE_VALUE;
   }
+  if (!st && !parent_is_dir(path)) {
+    wset_lasterr(ERROR_PATH_NOT_FOUND);
+    return INVALID_HANDLE_VALUE;
+  }
   f = wobj_new(OBJ_FILE);
   if (!f) return INVALID_HANDLE_VALUE;
   f->path = sdup(path);
@@ -510,8 +544,17 @@ static HANDLE open_file(const char* name, DWORD access, DWORD disp, DWORD flags)
     }
     if (!st || disp == 2 || disp == 5) {
       f->dirty = 1;
-      /* o arquivo passa a existir ja (outro handle pode abrir) */
-      if (!st) wsave(path, "", 0);
+      /* o arquivo passa a existir ja (outro handle pode abrir); se o disco
+       * nao cria (pasta cheia, nome recusado), o CreateFile falha aqui, como
+       * no Windows, em vez de perder as escritas no fechamento */
+      if (!st && wsave(path, "", 0) < 0) {
+        wlog("CreateFile: o disco nao criou ", path);
+        f->dirty = 0;
+        wfile_close(f);
+        k_free(f);
+        wset_lasterr(112); /* ERROR_DISK_FULL */
+        return INVALID_HANDLE_VALUE;
+      }
     }
   } else {
     f->size = size;
@@ -747,7 +790,10 @@ static WINAPI BOOL SetEndOfFile(HANDLE h) {
 static WINAPI BOOL FlushFileBuffers(HANDLE h) {
   struct wobj* f = wh_get(h, OBJ_FILE);
   if (!f && wpipe_flush(h) >= 0) return 1;
-  if (f) wfile_flush(f);
+  if (f && wfile_flush(f) < 0) {
+    wset_lasterr(112); /* ERROR_DISK_FULL: o disco recusou a gravacao */
+    return 0;
+  }
   return 1;
 }
 static WINAPI DWORD GetFileType(HANDLE h) {
@@ -950,7 +996,7 @@ static int copy_file(const char* from, const char* to) {
 }
 static WINAPI BOOL MoveFileExW(const wchar16* from, const wchar16* to, DWORD fl) {
   char a[300], b[300];
-  int r;
+  int r, sa, sb;
   wpath16(from, a, (int)sizeof(a));
   wpath16(to, b, (int)sizeof(b));
   {
@@ -987,14 +1033,41 @@ static WINAPI BOOL MoveFileExW(const wchar16* from, const wchar16* to, DWORD fl)
     }
     ram_unlock();
   }
-  if ((fl & 1) && k_fsize(b) >= 0) k_fdelete(b); /* REPLACE_EXISTING */
+  /* Origem que nao existe: ERROR_FILE_NOT_FOUND sem ir ao disco. O Chromium
+   * (SimpleCacheDeleteFile, LOG.old do LevelDB) e o Claude (*.superseded-N)
+   * renomeiam o que talvez exista e seguem com o erro; cada um deixava um
+   * "[fs] rename falhou -1" na serial. */
+  sa = wstat(a, 0);
+  if (!sa) {
+    wset_lasterr(parent_is_dir(a) ? ERROR_FILE_NOT_FOUND : ERROR_PATH_NOT_FOUND);
+    return 0;
+  }
+  /* Destino que existe: sem REPLACE_EXISTING, ERROR_ALREADY_EXISTS; pasta de
+   * um lado ou do outro, ERROR_ACCESS_DENIED (como no Windows). Com REPLACE o
+   * rename do FAT troca a entrada no lugar: antes o destino era apagado
+   * primeiro e, se a origem faltava, o arquivo bom sumia junto. So a caixa
+   * mudando e o mesmo arquivo. */
+  sb = path_ieq(a, b) ? 0 : wstat(b, 0);
+  if (sb && !(fl & 1)) {
+    wset_lasterr(ERROR_ALREADY_EXISTS);
+    return 0;
+  }
+  if (sb && (sa == 2 || sb == 2)) {
+    wset_lasterr(ERROR_ACCESS_DENIED);
+    return 0;
+  }
+  if (!parent_is_dir(b)) {
+    wset_lasterr(ERROR_PATH_NOT_FOUND);
+    return 0;
+  }
+  if (sb == 1) ram_delete(b); /* um temporario em RAM com o nome do destino sai */
   r = wrename(a, b);
   if (r == 0) return 1;
-  if ((r == -5 || r == -6 || r == -7) && copy_file(a, b)) {
+  if ((r == -5 || r == -6 || r == -7) && sa == 1 && copy_file(a, b)) {
     k_fdelete(a);
     return 1;
   }
-  wset_lasterr(r == -1 ? ERROR_FILE_NOT_FOUND : ERROR_ACCESS_DENIED);
+  wset_lasterr(r == -1 ? ERROR_PATH_NOT_FOUND : r == -6 ? 17u /* NOT_SAME_DEVICE */ : ERROR_ACCESS_DENIED);
   return 0;
 }
 static WINAPI BOOL MoveFileW(const wchar16* from, const wchar16* to) { return MoveFileExW(from, to, 0); }
@@ -1040,9 +1113,11 @@ static WINAPI BOOL RemoveDirectoryW(const wchar16* name) {
   char p[300];
   int r = k_rmdir(wpath16(name, p, (int)sizeof(p)));
   lockt_set(p, 0);
-  if (r) wlog("RemoveDirectory falhou: ", p);
-  else if (is_lock_path(p)) wlog("trava solta: ", p);
-  if (r) wset_lasterr(r == -2 ? 145 : ERROR_PATH_NOT_FOUND); /* DIR_NOT_EMPTY */
+  /* nao existe (-1) e nao vazia (-2) sao respostas normais (rimraf, limpeza
+   * de pastas do Claude Code): so o resto vai para a serial */
+  if (r && r != -1 && r != -2) wlog("RemoveDirectory falhou: ", p);
+  else if (!r && is_lock_path(p)) wlog("trava solta: ", p);
+  if (r) wset_lasterr(r == -2 ? 145u /* DIR_NOT_EMPTY */ : r == -3 ? 267u /* DIRECTORY */ : r == -1 ? (parent_is_dir(p) ? ERROR_FILE_NOT_FOUND : ERROR_PATH_NOT_FOUND) : ERROR_ACCESS_DENIED);
   return r == 0;
 }
 
@@ -1117,16 +1192,31 @@ static WINAPI HANDLE FindFirstFileW(const wchar16* spec, struct find_dataw* d) {
     pat = p;
   }
   f = wobj_new(OBJ_FIND);
-  ents = (struct k_direntl*)k_malloc((unsigned)(sizeof(*ents) * (size_t)max));
-  if (!f || !ents) return INVALID_HANDLE_VALUE;
+  if (!f) return INVALID_HANDLE_VALUE;
   f->p2 = sdup(*pat ? pat : "*");
-  if (slash) {
+  {
     char dir[300];
-    strcpy(dir, p);
-    if (strlen(dir) == 2 && dir[1] == ':') strcat(dir, "\\");
-    n = k_dir_long(dir, ents, max);
-  } else {
-    n = k_dir_long(wp()->cwd, ents, max);
+    if (slash) {
+      strcpy(dir, p);
+      if (strlen(dir) == 2 && dir[1] == ':') strcat(dir, "\\");
+    } else {
+      strcpy(dir, wp()->cwd);
+    }
+    /* Pasta maior que o buffer (o Code Cache do Chromium tem centenas de
+     * arquivos): de novo com 4x, ate as 65536 entradas de uma pasta FAT. */
+    for (;;) {
+      ents = (struct k_direntl*)k_malloc((unsigned)(sizeof(*ents) * (size_t)max));
+      if (!ents) {
+        k_free(f->p2);
+        k_free(f);
+        wset_lasterr(ERROR_NOT_ENOUGH_MEMORY);
+        return INVALID_HANDLE_VALUE;
+      }
+      n = k_dir_long(dir, ents, max);
+      if (n < max || max >= 65536) break;
+      k_free(ents);
+      max *= 4;
+    }
   }
   if (n < 0) {
     k_free(ents);
@@ -1406,13 +1496,18 @@ long wfile_setinfo(HANDLE h, int cls, const void* buf, DWORD len) {
       if (cls == 4 && len >= 24 && f->path && *(const int64_t*)(b + 16) > 0) lockt_set(f->path, *(const uint64_t*)(b + 16));
       return 0;
     case 13: /* FileDispositionInformation: BOOLEAN DeleteFile */
-      if (len < 1) return (long)0xC0000004;
-      if (b[0]) f->u2 |= 1; else f->u2 &= ~1ull;
+    case 64: { /* FileDispositionInformationEx: flags (1 = DELETE) */
+      int del;
+      if (len < (cls == 13 ? 1u : 4u)) return (long)0xC0000004;
+      del = cls == 13 ? b[0] != 0 : (*(const DWORD*)b & 1) != 0;
+      /* Pasta com algo dentro: o Windows recusa ja aqui (o Zig/Bun do Claude
+       * Code faz rmdir assim e espera DirNotEmpty). Aceitar e falhar so no
+       * fechamento deixava o programa achando que apagou, e a serial com
+       * "pasta nao removida ao fechar" para cada pasta de projeto. */
+      if (del && f->is_dir && f->path && !dir_is_empty(f->path)) return (long)0xC0000101; /* DIRECTORY_NOT_EMPTY */
+      if (del) f->u2 |= 1; else f->u2 &= ~1ull;
       return 0;
-    case 64: /* FileDispositionInformationEx: flags (1 = DELETE) */
-      if (len < 4) return (long)0xC0000004;
-      if (*(const DWORD*)b & 1) f->u2 |= 1; else f->u2 &= ~1ull;
-      return 0;
+    }
     case 20: { /* FileEndOfFileInformation */
       uint64_t n, keep = f->pos;
       if (len < 8) return (long)0xC0000004;
@@ -1442,8 +1537,14 @@ long wfile_setinfo(HANDLE h, int cls, const void* buf, DWORD len) {
       {
         wchar16* from = wdup8to16(f->path);
         BOOL ok = from && MoveFileExW(from, name, fl & 1u);
+        DWORD e = wget_lasterr();
         k_free(from);
-        if (!ok) return wget_lasterr() == ERROR_ALREADY_EXISTS ? (long)0xC0000035 : (long)0xC0000022;
+        if (!ok)
+          return e == ERROR_ALREADY_EXISTS ? (long)0xC0000035   /* OBJECT_NAME_COLLISION */
+                 : e == ERROR_FILE_NOT_FOUND ? (long)0xC0000034 /* OBJECT_NAME_NOT_FOUND */
+                 : e == ERROR_PATH_NOT_FOUND ? (long)0xC000003A /* OBJECT_PATH_NOT_FOUND */
+                 : e == 17u ? (long)0xC00000D4                  /* NOT_SAME_DEVICE */
+                            : (long)0xC0000022;                 /* ACCESS_DENIED */
       }
       {
         char* np = sdup(to);

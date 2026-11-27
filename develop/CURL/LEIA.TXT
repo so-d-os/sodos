@@ -1,0 +1,41 @@
+CURL - cliente HTTP/HTTPS no estilo do curl, para o SODOS
+
+Uso (no prompt ou no Command do WIN)
+  curl URL                     mostra o corpo da resposta
+  curl -o D:SAIDA.HTM URL      grava o corpo em um arquivo
+  curl -O URL                  grava com o nome do arquivo da URL (8.3)
+  curl -I URL                  so os cabecalhos da resposta (HEAD)
+  curl -i URL                  cabecalhos e corpo
+  curl -L URL                  segue redirecionamentos (ate 5)
+  curl -s URL                  silencioso (sem as linhas > e [bytes])
+  curl -d "a=1&b=2" URL        POST (application/x-www-form-urlencoded)
+  curl -H "X-Teste: 1" URL     um cabecalho extra
+  curl -h                      ajuda
+  Saida: 0 com HTTP 2xx/3xx, 1 nos outros casos ou em erro.
+
+Precisa de
+  - rede pronta (DHCP feito; "curl: rede nao pronta" se nao estiver)
+  - TLS.DLL na raiz do D: (ou do U:) para https://
+
+De onde veio
+  Escrito para o SODOS; nao e um port do curl original (curl.se) e nao usa
+  codigo dele. Usa so a interface publica: LIBC.DLL, TLS.DLL (TLS 1.3/1.2
+  do SODOS) e o KERNEL.IMP (k_tcp_*, k_fsave, k_ms). Mesma licenca do
+  repositorio do SODOS.
+
+Diferencas para o curl original
+  - HTTP/1.0, uma conexao por pedido; sem HTTP/2, proxy, cookies,
+    autenticacao, upload de arquivo nem retomada.
+  - Corpo de ate 4 MB (o resto e cortado).
+  - Com -L, -i/-I mostram so os cabecalhos da ultima resposta.
+  - -O usa um nome 8.3 em maiusculas (INDEX.HTM se a URL nao tiver nome).
+  - Um so -H por chamada.
+
+Compilar
+  Dentro do SODOS:
+    cd \develop\curl
+    build              (primeira vez, ou sem o MAKE.EXE)
+    make               (depois: so recompila o que mudou)
+  No Linux, a partir de src13/:
+    make -C c_compiler out/CURL.EXE
+  O CURL.EXE pronto tambem vai para a raiz do D: (programas.lst).

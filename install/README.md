@@ -37,7 +37,7 @@ Ou direto, de qualquer pasta: `sh install/install.sh [-n] <disco> [componente...
 | `programas.lst` | Raiz do `D:`: `.EXE`, `.DLL`, compilador, libc, headers (`D:\SYS`), exemplos |
 | `qemu.lst` | `D:\UTILS\QEMU` (pelo script do port) |
 | `sodos.lst` | Programas do sistema em `D:\SODOS`, `LINKEXT.CFG` (sem sobrescrever) e os READMEs |
-| `src.lst` | Fontes para recompilar no SODOS: `D:\SRC\{MC,TOP,GIT,WIFI,CMD\XCOPY}` e `D:\DEVELOP\MAKE` |
+| `src.lst` | Fontes para recompilar no SODOS: `D:\SRC\{MC,TOP,GIT,WIFI,CMD\XCOPY}`, `D:\DEVELOP\MAKE` e `D:\DEVELOP\CURL` |
 | `wine.lst` | `GIT.EXE` em `D:\WINE\BIN` |
 | `wsl.lst` | `D:\WSL.EXE`, o script `D:\WSL\SODOS` e um aviso se falta a imagem `D:\WSL\DEBIAN.IMG` |
 

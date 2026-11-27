@@ -179,7 +179,13 @@ static WINAPI BOOL SetFileInformationByHandle(HANDLE h, int cls, void* buf, DWOR
     case 22: { /* FileRenameInfoEx */
       long st = wfile_setinfo(h, cls == 3 ? 10 : cls == 4 ? 13 : cls == 21 ? 64 : 65, buf, len);
       if (st) {
-        wset_lasterr(st == (long)0xC0000035 ? 183u : 5u);
+        wset_lasterr(st == (long)0xC0000035   ? 183u  /* ALREADY_EXISTS */
+                     : st == (long)0xC0000101 ? 145u  /* DIR_NOT_EMPTY */
+                     : st == (long)0xC0000034 ? 2u    /* FILE_NOT_FOUND */
+                     : st == (long)0xC000003A ? 3u    /* PATH_NOT_FOUND */
+                     : st == (long)0xC00000D4 ? 17u   /* NOT_SAME_DEVICE */
+                     : st == (long)0xC000007F ? 112u  /* DISK_FULL */
+                                              : 5u);  /* ACCESS_DENIED */
         return 0;
       }
       return 1;

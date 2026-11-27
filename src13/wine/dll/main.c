@@ -53,10 +53,11 @@ static char* build_cmdline(int argc, char** argv) {
   return c;
 }
 
-/* RTL_USER_PROCESS_PARAMETERS: so o que programas leem direto do PEB. */
-static void build_params(struct wproc* p) {
+/* RTL_USER_PROCESS_PARAMETERS: so o que programas leem direto do PEB.
+ * image: o caminho do EXE (o argv[0] pode ser outro nome, ver cmd_argv0). */
+static void build_params(struct wproc* p, const char* image) {
   uint8_t* pp = (uint8_t*)wzalloc(0x400);
-  wchar16* img = wdup8to16(p->argv[0]);
+  wchar16* img = wdup8to16(image);
   if (!pp || !img) return;
   *(uint32_t*)(pp + 0) = 0x400;
   *(uint32_t*)(pp + 4) = 0x400;
@@ -190,14 +191,25 @@ static int start(int argc, char** argv) {
     k_puts("wine: sem memoria\n");
     return 1;
   }
+  /* argv[0] e linha de comando: os do pai, como no Windows, quando ele pediu
+   * um nome que nao e o do programa (o Bun do Claude Code roda o proprio
+   * claude.exe com argv0 "rg" para o ripgrep embutido; com o caminho no
+   * lugar, o filho subia como Claude Code e saia com 1). O EXE carregado e o
+   * ImagePathName continuam o caminho de verdade (argv[0] local). */
   for (i = 0; i < argc; i++) {
-    p->argv[i] = argv[i];
-    p->wargv[i] = wdup8to16(argv[i]);
+    const char* s = i == 0 && p->cmd_argv0 ? p->cmd_argv0 : argv[i];
+    p->argv[i] = (char*)s;
+    p->wargv[i] = wdup8to16(s);
   }
-  p->cmdline = build_cmdline(argc, argv);
+  {
+    char* image = argv[0];
+    if (p->cmd_argv0) argv[0] = p->cmd_argv0;
+    p->cmdline = build_cmdline(argc, argv);
+    argv[0] = image;
+  }
   p->wcmdline = wdup8to16(p->cmdline ? p->cmdline : "");
   if (!p->cwd[0]) k_pwd(p->cwd, (int)sizeof(p->cwd)); /* o filho ja traz o do CreateProcess */
-  build_params(p);
+  build_params(p, argv[0]);
   crt_set_process(p);
   wexplorer_stub();
   wlog("start ", p->cmdline);
@@ -243,6 +255,7 @@ static int start(int argc, char** argv) {
   wcon_flush();
   wgui_proc_exit();
   wlogx("ExitProcess ", (uint32_t)p->exit_code);
+  wh_proc_exit_pipes(); /* EOF para quem le o stdout herdado (o pai) */
   wfile_proc_exit();
   return p->exit_code;
 }
@@ -277,6 +290,7 @@ __attribute__((noreturn)) void wexit(int code) {
   if (!wthread()) {
     void wpipe_proc_exit(void); /* pipe.c: de novo, as threads podem ter pedido leitura depois */
     wpipe_proc_exit();
+    wh_proc_exit_pipes();
     wfile_proc_exit();
     k_exit(code);
   }

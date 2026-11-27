@@ -284,6 +284,30 @@ int wh_close(HANDLE h) {
   return 1;
 }
 
+/* Fim do processo: o Windows fecha todos os handles dele. Aqui os pipes, cujo
+ * fim o outro lado espera (EOF/ERROR_BROKEN_PIPE): um filho que herdou a ponta
+ * de escrita do stdout do pai (o Bun herda tudo) segurava o pipe aberto depois
+ * de sair, e o pai nunca via o fim da saida (o ripgrep do Claude Code dava
+ * "timed out after 20 seconds" em todo Glob/Grep). Os outros tipos ficam como
+ * estavam (arquivos, secoes e eventos tem regras proprias no fim). */
+void wh_proc_exit_pipes(void) {
+  struct wproc* p = wp();
+  int i, n = 0;
+  for (i = 1; i < WHANDLE_MAX; i++) {
+    struct wobj* o;
+    wlock();
+    o = p->handles[i];
+    if (o && o->type == OBJ_PIPE) p->handles[i] = 0;
+    else o = 0;
+    wunlock();
+    if (o) {
+      wobj_unref(o);
+      n++;
+    }
+  }
+  if (n && wine_debug) wlogx("fim do processo: pipes fechados ", (uint64_t)n);
+}
+
 /* Solta uma referencia; a ultima fecha o objeto. */
 void wobj_unref(struct wobj* o) {
   wlock();
@@ -1188,6 +1212,12 @@ static struct wobj* thread_new(void* start, void* param, size_t stack, int suspe
 
 struct wobj* wthread_create_main(void* entry, void* arg, uint32_t stack_reserve) {
   return thread_new(entry, arg, stack_reserve, 0, 1);
+}
+
+/* Thread do proprio WINE.DLL (bashbox.c): um Windows de verdade por baixo
+ * (TEB, wp()), sem handle para o EXE. entry: DWORD WINAPI f(void*). */
+struct wobj* wthread_internal(void* entry, void* arg) {
+  return thread_new(entry, arg, 0x40000, 0, 0);
 }
 
 static WINAPI HANDLE CreateThread(void* sa, size_t stack, void* start, void* param, DWORD flags, DWORD* tid) {

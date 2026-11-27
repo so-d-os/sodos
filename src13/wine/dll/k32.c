@@ -35,6 +35,10 @@ static WINAPI BOOL TerminateProcess(HANDLE h, DWORD code) {
     }
     wterminate((int)code);
   }
+  {
+    int wbash_terminate(HANDLE h, DWORD code); /* bashbox.c: bash do Claude Code */
+    if (wbash_terminate(h, code)) return 1;
+  }
   return 0;
 }
 static WINAPI HANDLE GetCurrentProcess(void) { return H_PROCESS; }

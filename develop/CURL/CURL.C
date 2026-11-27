@@ -5,6 +5,7 @@
  *   CURL -I http://exemplo.com/
  *   CURL -d "a=1&b=2" http://exemplo.com/post
  *   CURL -H "X-Teste: 1" http://exemplo.com/
+ *   CURL -I http://exemplo.com/   (-I so cabecalhos; -i cabecalhos e corpo)
  *   CURL -L http://exemplo.com/   (segue redirecionamentos, ate 5)
  *   CURL -s ...   (silencioso)
  * HTTP e HTTPS (TLS 1.3/1.2 via TLS.DLL). Corpo ate 4 MB. */
@@ -173,10 +174,10 @@ static int dechunk(const char* b, int n, char* dst, int* out_len) {
 }
 
 static int fetch(const struct url* u, const char* method, const char* data,
-                 const char* extra_hdr, int head_only,
+                 const char* extra_hdr, int head_only, char* hdr,
                  int* status, char** body, int* blen, char* location, char* err) {
-  char req[1024];
-  char hdr[HDR_MAX];
+  char req[2048];
+  char xh[512];
   char* raw;
   int hlen = 0, rlen = 0, n, hdr_end = -1, i;
   int chunked = 0, clen = -1;
@@ -184,6 +185,7 @@ static int fetch(const struct url* u, const char* method, const char* data,
   *body = 0;
   *blen = 0;
   location[0] = 0;
+  hdr[0] = 0;
   *status = 0;
 
   if (u->tls) {
@@ -198,20 +200,30 @@ static int fetch(const struct url* u, const char* method, const char* data,
     }
   }
 
+  /* O -H e uma linha propria: sem o \r\n dele o pedido nao terminava com a
+   * linha em branco e o servidor ficava esperando o resto dos cabecalhos. */
+  if (extra_hdr[0]) snprintf(xh, sizeof(xh), "%s\r\n", extra_hdr);
+  else xh[0] = 0;
   if (data && *data) {
     snprintf(req, sizeof(req),
              "%s %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: curl-sodos/1.0\r\n"
              "Accept: */*\r\nContent-Type: application/x-www-form-urlencoded\r\n"
-             "Content-Length: %d\r\n%s\r\n%s",
-             method, u->path, u->host, (int)strlen(data), extra_hdr, data);
+             "Content-Length: %d\r\n%s\r\n",
+             method, u->path, u->host, (int)strlen(data), xh);
   } else {
     snprintf(req, sizeof(req),
              "%s %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: curl-sodos/1.0\r\n"
              "Accept: */*\r\n%s\r\n",
-             method, u->path, u->host, extra_hdr);
+             method, u->path, u->host, xh);
   }
   if (c_send(u->tls, req, (int)strlen(req)) < 0) {
     snprintf(err, 160, "falha ao enviar");
+    goto fail;
+  }
+  /* O corpo do POST vai a parte: dentro do req ele era cortado no tamanho
+   * do buffer e o Content-Length ficava maior que o enviado. */
+  if (data && *data && c_send(u->tls, data, (int)strlen(data)) < 0) {
+    snprintf(err, 160, "falha ao enviar os dados");
     goto fail;
   }
 
@@ -351,6 +363,7 @@ int main(int argc, char** argv) {
   struct url u;
   char err[160];
   char location[URL_MAX];
+  static char hdr[HDR_MAX];
   char* body = 0;
   unsigned t0;
 
@@ -386,7 +399,7 @@ int main(int argc, char** argv) {
     if (!silent) printf("> %s %s\n", head_only ? "HEAD" : (data ? "POST" : "GET"), shown);
     err[0] = 0;
     if (fetch(&u, head_only ? "HEAD" : (data ? "POST" : "GET"), data, extra_hdr,
-              head_only, &status, &body, &blen, location, err) != 0) {
+              head_only, hdr, &status, &body, &blen, location, err) != 0) {
       printf("curl: %s\n", err[0] ? err : "falhou");
       return 1;
     }
@@ -410,7 +423,9 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  if (show_hdr && !silent) printf("< HTTP %d\n", status);
+  /* -I e -i: os cabecalhos da resposta (da ultima, com -L), como no curl,
+   * inclusive com -s. Antes saia so "< HTTP 200". */
+  if (show_hdr && hdr[0]) k_write(hdr, (int)strlen(hdr));
 
   if (outfile || auto_name) {
     char name[16];

@@ -189,6 +189,7 @@ struct wproc {
   wchar16** wargv;
   char* cmdline;
   wchar16* wcmdline;
+  char* cmd_argv0;              /* argv[0] da linha que o pai passou, se nao e o programa (proc.c) */
   char** environ;
   wchar16** wenviron;
   int tls_next;
@@ -339,6 +340,7 @@ int wpipe_flush(HANDLE h); /* -1 = nao e pipe */
 int wpipe_fileinfo(HANDLE h, int cls, void* buf, DWORD len);
 int wpipe_mode(HANDLE h);
 void wobj_unref(struct wobj* o); /* obj.c */
+void wh_proc_exit_pipes(void);   /* obj.c: fim do processo, fecha os handles de pipe */
 /* Handle que e ponteiro (GDI, menu, HSTRING...): so le o "magic" se o
  * endereco pode ser nosso. O Chromium passa valores invalidos de proposito
  * (ou por engano) e o Windows so devolve erro; aqui o 0xfffffffc00000000 de

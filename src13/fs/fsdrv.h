@@ -93,11 +93,12 @@ struct fsdrv_ops {
    * somente leitura; -5 erro de disco. */
   int (*remove)(void* vol, const char* path);
   /* So com abi >= FSDRV_ABI_RENAME. Troca o nome e/ou a pasta sem copiar os
-   * dados. Um to que ja existe (arquivo) e substituido; pasta so muda de nome
-   * dentro da mesma pasta-mae. Mesmos codigos de drives_rename: 0 ok; -1 nao
-   * existe (from ou a pasta de to); -2 nome invalido ou pasta/disco cheio;
-   * -3 to e pasta (ou from e pasta e to existe); -4 somente leitura ou erro
-   * de disco; -7 pasta para outra pasta. */
+   * dados. Um to que ja existe (arquivo) e substituido; pasta pode ir para
+   * outra pasta-mae (o ".." dela e acertado). Mesmos codigos de
+   * drives_rename: 0 ok; -1 nao existe (from ou a pasta de to); -2 nome
+   * invalido, pasta/disco cheio ou pasta para dentro dela mesma; -3 to e pasta
+   * (ou from e pasta e to existe); -4 somente leitura ou erro de disco; -7
+   * pasta para outra pasta (so os FAT32.DLL de antes de 2026-11-27). */
   int (*rename)(void* vol, const char* from, const char* to);
   /* So com abi >= FSDRV_ABI_RMDIR. Remove uma pasta vazia. Codigos de
    * fat_rmdir: 0 ok; -1 nao existe; -2 nao esta vazia; -3 e arquivo; -4

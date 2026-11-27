@@ -76,7 +76,10 @@ Gerada sem root por `sh wsl/scripts/build-image.sh` (Linux Debian 12 com o
 mesmo kernel; `MB=` tamanho; `OUT=` outra pasta; sai em partes de 128 MB,
 ou `PARTS=0` para um `DEBIAN.IMG` só, menor que 2048 MB porque o `k_fsize`
 do SODOS é `int`; já vem com gcc, binutils, libc6-dev, make, nasm e
-e2fsprogs). O script desempacota os pacotes com
+e2fsprogs). No Ubuntu do WSL2 (sem `/boot`) use o kernel do próprio WSL:
+`KIMG="/mnt/c/Program Files/WSL/tools/kernel" sh wsl/scripts/build-image.sh`
+(virtio e 9p vêm embutidos nele; a chave do Debian, o busybox e o cpio vêm
+por `apt-get download` em `~/wsltools`). O script desempacota os pacotes com
 `mmdebstrap --mode=chrootless --variant=extract` dentro do `fakeroot`, grava
 o ext4 com `mke2fs -d` num `unshare -r` e termina a instalação (`dpkg -i`)
 num boot da própria imagem no QEMU. O init é `/sbin/sodos-init`: monta
@@ -110,6 +113,30 @@ pedidos pela segunda serial (ttyS1, `vmm/chan.c`) ao
 devolve stdout, stderr e o código. Ainda sem o D:/Z: dentro do Linux: o
 comando roda em `/mnt/<unidade>/...` (a pasta atual do SODOS).
 
+**Só a imagem SODOS-Debian tem o agente.** Sem `D:\WSL\DEBIAN.000` (ou
+`DEBIAN.IMG`), `VMLINUZ` e `INITRD.IMG`, o `SET WSL=1` sobe a distro do
+Windows (NTFS) só como console: o agente nunca diz READY. O `WSL exec` e o
+`BASH.EXE` agora dizem isso na hora (antes esperavam 120 s cada um). Num PC
+com Windows a imagem também precisa estar na pasta: ela não sai do NTFS.
+
+**O bash do Claude Code no WINE.DLL** (`wine/dll/bashbox.c`): quando um
+programa do Windows abre o `bash.exe` (o WSL.EXE com esse nome) e o serviço
+está ligado ou pedido (`SET WSL=1`), o WINE.DLL não roda o `BASH.EXE`: uma
+thread do próprio processo faz o mesmo pedido à caixa e escreve a saída no
+pipe enquanto o comando roda. Antes o `BASH.EXE` ocupava a tarefa principal
+do processo (só ela faz `k_exec`) até o fim do comando; qualquer outro
+`CreateProcess` (git, o `rg` do Grep, outro bash) esperava a vez e desistia em
+60 s com `ERROR_NOT_SUPPORTED`, o "ENOTSUP ... uv_spawn" do Claude Code.
+Agora até 8 comandos correm juntos (vagas da caixa) e o `TerminateProcess`
+do pai (tempo esgotado, Esc) manda o agente matar o comando.
+O agente das imagens até 27/11/2026 não matava nada no `K`: ele nasce com
+`&` do `sodos-init`, o SIGINT fica ignorado e os filhos herdam; o de agora
+volta o SIGINT ao padrão nos filhos e, se o comando não sair, manda SIGTERM
+(2 s) e SIGKILL (mais 3 s). Imagens velhas: refazer com o `build-image.sh`.
+`SET WINE_BASHBOX=0` volta ao `BASH.EXE` na tarefa principal. Teste:
+`wine/tests/bashpar.c` (`BASHPAR.EXE`: um bash lento, um rápido que volta
+antes dele e um morto pelo `TerminateProcess`).
+
 ### As unidades do SODOS no Linux (virtio-9p)
 
 O `WSL.EXE` tem um servidor 9P2000.L (`vmm/p9.c`, virtio-9p, tag `sodos`):
@@ -123,7 +150,21 @@ O FAT não guarda o bit x: arquivo sem extensão no nome (`link64`,
 não muda nada. Os repositórios usam `core.filemode=false`, então o git não vê
 diferença de modo.
 O `BASH.EXE` traduz caminhos do Windows no comando: `D:\WINE\TEMP` vira
-`/mnt/d/WINE/TEMP` (o Claude Code passa caminhos assim).
+`/d/WINE/TEMP`, como no Git Bash (o Claude Code passa caminhos assim).
+`BASH.EXE --version` responde na hora, sem subir a VM: o Claude Code confere
+o shell assim, com 1 s de prazo.
+
+O Claude Code 2.1.3xx só aceita como shell um caminho com `bash` em
+minúsculas, vindo de `CLAUDE_CODE_SHELL` ou `SHELL` (o `CLAUDE_CODE_GIT_BASH_PATH`
+só passa a checagem da partida). Sem isso todo Bash dá "No suitable shell
+found". O `RODACLAUDE.BAT` faz:
+
+```
+SET CLAUDE_CODE_GIT_BASH_PATH=D:\WINE\BIN\bash.exe
+SET CLAUDE_CODE_SHELL=D:\WINE\BIN\bash.exe
+SET CLAUDE_CODE_USE_POWERSHELL_TOOL=0
+SET WINEENV=CLAUDE_CODE_GIT_BASH_PATH;CLAUDE_CODE_SHELL;CLAUDE_CODE_USE_POWERSHELL_TOOL
+```
 
 ## Como funciona
 

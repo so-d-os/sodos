@@ -14,6 +14,7 @@ Fica de fora tudo o que depende de uma versão específica (kernel, drivers, DLL
 | Pasta | O que é | No disco |
 |---|---|---|
 | `make/` | `MAKE.EXE`, port do [pdpmake](https://github.com/rmyorston/pdpmake) (domínio público). As receitas rodam no prompt do SODOS. Veja `make/LEIA.TXT`. | fontes em `D:\DEVELOP\MAKE`, `MAKE.EXE` na raiz do `D:` |
+| `CURL/` | `CURL.EXE`, cliente HTTP/HTTPS no estilo do curl (escrito para o SODOS, não é port), pela `TLS.DLL`: GET, HEAD, POST, `-o`/`-O`, `-L`, `-H`. Veja `CURL/LEIA.TXT`. | fontes em `D:\DEVELOP\CURL`, `CURL.EXE` na raiz do `D:` |
 
 ## Regras para um programa ficar aqui
 
@@ -26,12 +27,12 @@ Fica de fora tudo o que depende de uma versão específica (kernel, drivers, DLL
 
 ## Como uma ferramenta chega ao disco
 
-Os Makefiles do `src13/` buscam os fontes aqui com caminho relativo:
+Duas entradas buscam os fontes aqui com caminho relativo:
 
-- `src13/Makefile`: a lista `<NOME>_SRC` (por exemplo `MAKE_SRC = ../develop/make/...`) e um bloco no alvo `disk-files` que cria `D:\DEVELOP\<NOME>` e copia os fontes em maiúsculas.
-- `src13/c_compiler/Makefile`: a regra que compila o `.EXE` no Linux (por exemplo `MAKE_DIR = ../../develop/make`), que vai para `c_compiler/out/` e de lá para a raiz do `D:`.
+- `install/componentes/src.lst`: as linhas `copia develop/<nome>/... D:\DEVELOP\<NOME>\`, que levam os fontes, o `BUILD.BAT`, o `MAKEFILE` e o `LEIA.TXT` (em maiúsculas) para o disco.
+- `src13/c_compiler/Makefile`: a regra que compila o `.EXE` no Linux (por exemplo `MAKE_DIR = ../../develop/make` e `CURL_DIR = ../../develop/CURL`), na lista do `all`. O `.EXE` vai para `c_compiler/out/` e de lá, pelo `programas.lst`, para a raiz do `D:`.
 
-Para uma ferramenta nova, crie `develop/<nome>/` e acrescente essas duas entradas, seguindo o modelo do `make`.
+Para uma ferramenta nova, crie `develop/<nome>/` e acrescente essas duas entradas, seguindo o modelo do `make` ou do `CURL`.
 
 Compilar e testar o `make` no Linux, a partir de `src13/`:
 
