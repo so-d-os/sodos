@@ -103,12 +103,13 @@ $(O)/WIDGETS.EXE: ../utils/widgets_demo.c $(O)/GUI.DLL include/widgets.h $(HCC) 
 	$(HCC) -o $@ ../utils/widgets_demo.c $(O)/GUI.DLL
 
 # Gerenciador de arquivos do WIN (navegacao entre pastas e unidades).
-$(O)/EXPLORER.EXE: ../utils/explorer.c $(O)/GUI.DLL include/widgets.h $(HCC) $(HEADERS)
+# Inclui a camada visual do NOTEPAD (utils/winui.c, video/wfont.c).
+$(O)/EXPLORER.EXE: ../utils/explorer.c ../utils/winui.c ../video/wfont.c ../video/wfont.h $(O)/GUI.DLL $(HCC) $(HEADERS)
 	$(HCC) -o $@ ../utils/explorer.c $(O)/GUI.DLL
 
 # Bloco de notas (NOTEPAD.EXE): programa proprio, no estilo do Notepad do
 # Windows 10. Inclui o rasterizador TrueType do WIN (video/wfont.c).
-$(O)/NOTEPAD.EXE: ../utils/notepad.c ../video/wfont.c ../video/wfont.h $(O)/GUI.DLL $(HCC) $(HEADERS)
+$(O)/NOTEPAD.EXE: ../utils/notepad.c ../utils/winui.c ../video/wfont.c ../video/wfont.h $(O)/GUI.DLL $(HCC) $(HEADERS)
 	$(HCC) -o $@ ../utils/notepad.c $(O)/GUI.DLL
 
 # Configurador de tela: modelo retro/avancado, cor e imagem de fundo.

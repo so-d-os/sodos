@@ -454,7 +454,7 @@ A barra tem só o botão **Iniciar** e o aviso `ESC=DOS`. O menu tem 7 itens:
 |---|---|
 | Bloco de notas | `NOTEPAD.EXE` (veja **Bloco de notas** abaixo); sem ele no disco, o editor embutido do WIN |
 | Gerenciador | Janela informativa do gerenciador |
-| Explorer | `explorer.asm`, montado em `0x58000` e rodado como app de janela |
+| Explorer | `EXPLORER.EXE` (veja **Explorer** abaixo); sem ele no disco, o `explorer.asm` embutido |
 | Configurações | Submenu **Tela**, **Fontes** (prévia das fontes VGA e 8×8) e **Fontes avançadas** |
 | Navegador | `D:\BROWSER.EXE` |
 | Command | Prompt gráfico (várias janelas) |
@@ -499,11 +499,21 @@ Miniaturas: `make disk-files` gera `NOME.THM` (formato `THM1`, até 64×64 RGBA)
 - Abre e grava UTF-8, UTF-8 com BOM, UTF-16 LE/BE e ANSI (Windows-1252); fim de linha Windows (CRLF), Unix (LF) ou Macintosh (CR), detectados ao abrir e mostrados na barra de status junto com `Ln`, `Col` e o zoom.
 - Texto em TrueType suavizado (Noto Mono, JetBrains Mono ou Fira Mono; menus em Noto Sans), o mesmo rasterizador dos títulos do WIN.
 - Segue as cores do sistema (Configurações → **Temas**): no **Clássico**, o visual claro do Notepad do Windows 10; no **Moderno** (claro) e no **Escuro**, as cores do tema (texto, menus, diálogos, barras de rolagem e de status). Trocar o tema com o bloco de notas aberto vale na hora.
-- Diálogos **Abrir**/**Salvar como** com Área de Trabalho e discos, lista de pastas e arquivos (`*.txt` ou `*.*`) e a codificação; pergunta antes de substituir um arquivo e antes de fechar com alterações.
+- **Abrir**/**Salvar como** usam o diálogo do sistema (o `EXPLORER.EXE` em modo `/OPEN` e `/SAVE`, veja abaixo), com o filtro `*.txt`/`*.*` e a **Codificação**; pergunta antes de substituir um arquivo e antes de fechar com alterações. Sem o `EXPLORER.EXE`, um diálogo próprio.
 - Teclas do Notepad: `Ctrl+N/O/S`, `Ctrl+Shift+S`, `Ctrl+Z/Y/X/C/V/A`, `Ctrl+F`, `Ctrl+H`, `Ctrl+G`, `F3`/`Shift+F3`, `F5`, `F10` (menus pelo teclado), `Ctrl`+setas, `Shift`+setas, duplo clique seleciona palavra e triplo a linha.
 - Fonte, zoom, quebra de linha e barra de status ficam em `NOTEPAD.CFG` ao lado do `.EXE`.
 
 Sem o `NOTEPAD.EXE` no disco, o WIN volta ao editor embutido antigo (abre `C:\readme.txt`, `F2` grava, até 1 KB).
+
+### Explorer
+
+`EXPLORER.EXE` (`src13/utils/explorer.c`) tem o mesmo visual do bloco de notas (camada comum `src13/utils/winui.c`: fonte TrueType e as cores do tema Clássico, Moderno ou Escuro, trocando na hora), no estilo do Explorador de Arquivos do Windows 10:
+
+- barra de cima com Voltar, Avançar, Acima, Atualizar, o endereço e a caixa **Pesquisar** (digitar filtra a lista; Enter abre; Backspace com a caixa vazia sobe uma pasta);
+- barra de comandos **Nova pasta**, **Novo arquivo**, **Abrir**, **Renomear**, **Excluir**; painel **Acesso rápido** (Área de Trabalho, Usuário, Sistema) e **Este computador** (as unidades);
+- lista com **Nome**, **Data de modificação**, **Tipo** e **Tamanho** (clique no cabeçalho ordena), duplo clique abre, botão direito com Abrir, Criar atalho, Renomear, Excluir e Copiar caminho; `F2` renomeia (só o nome fica marcado), `F5` atualiza, `Del` exclui com confirmação.
+
+Também é o diálogo do sistema: `EXPLORER "/PICK|saída|pasta|título"` escolhe uma pasta (o **Escolher pasta** dos programas do WINE), `"/OPEN|saída|pasta|título|filtros|nome"` abre e `"/SAVE|saída|pasta|título|filtros|nome|extra"` salva (filtros `Rótulo=*.txt;Rótulo=*.*`; extra = uma caixa de escolha a mais, como a Codificação do bloco de notas). A resposta vai para o arquivo `saída`: `OK caminho` (com `FILTRO n` e `EXTRA n`) ou `CANCEL`. Como o WIN guarda só 192 bytes de argumentos por programa, `EXPLORER @arquivo` lê o pedido de um arquivo.
 
 ### Command
 

@@ -454,7 +454,7 @@ The bar has only the **Start** button and the `ESC=DOS` hint. The menu has 7 ite
 |---|---|
 | Notepad | `NOTEPAD.EXE` (see **Notepad** below); without it on disk, the WIN built-in editor |
 | Manager | Informative manager window |
-| Explorer | `explorer.asm`, assembled at `0x58000` and run as a window app |
+| Explorer | `EXPLORER.EXE` (see **Explorer** below); without it on disk, the built-in `explorer.asm` |
 | Settings | Submenu **Display**, **Fonts** (VGA vs 8×8 preview) and **Advanced fonts** |
 | Browser | `D:\BROWSER.EXE` |
 | Command | Graphical prompt (several windows) |
@@ -499,11 +499,21 @@ Thumbnails: `make disk-files` generates `NAME.THM` (format `THM1`, up to 64×64 
 - Opens and saves UTF-8, UTF-8 with BOM, UTF-16 LE/BE and ANSI (Windows-1252); Windows (CRLF), Unix (LF) or Macintosh (CR) line endings, detected on open and shown in the status bar with `Ln`, `Col` and the zoom.
 - Antialiased TrueType text (Noto Mono, JetBrains Mono or Fira Mono; menus in Noto Sans), the same rasterizer as the WIN titles.
 - Follows the system colors (Settings → **Temas**): with **Clássico**, the light look of the Windows 10 Notepad; with **Moderno** (light) and **Escuro** (dark), the theme colors (text, menus, dialogs, scroll and status bars). Changing the theme with Notepad open applies at once.
-- **Open**/**Save as** dialogs with Desktop and drives, a folder and file list (`*.txt` or `*.*`) and the encoding; asks before replacing a file and before closing with changes.
+- **Open**/**Save as** use the system dialog (`EXPLORER.EXE` in `/OPEN` and `/SAVE` mode, see below), with the `*.txt`/`*.*` filter and the **Encoding**; asks before replacing a file and before closing with changes. Without `EXPLORER.EXE`, a dialog of its own.
 - Notepad keys: `Ctrl+N/O/S`, `Ctrl+Shift+S`, `Ctrl+Z/Y/X/C/V/A`, `Ctrl+F`, `Ctrl+H`, `Ctrl+G`, `F3`/`Shift+F3`, `F5`, `F10` (keyboard menus), `Ctrl`+arrows, `Shift`+arrows, double click selects a word and triple click the line.
 - Font, zoom, word wrap and status bar are kept in `NOTEPAD.CFG` next to the `.EXE`.
 
 Without `NOTEPAD.EXE` on disk, WIN falls back to the old built-in editor (opens `C:\readme.txt`, `F2` saves, up to 1 KB).
+
+### Explorer
+
+`EXPLORER.EXE` (`src13/utils/explorer.c`) has the same look as Notepad (shared layer `src13/utils/winui.c`: TrueType font and the colors of the Clássico, Moderno or Escuro theme, switching live), in the style of the Windows 10 File Explorer:
+
+- top bar with Back, Forward, Up, Refresh, the address and the **Pesquisar** (search) box (typing filters the list; Enter opens; Backspace with an empty box goes up);
+- command bar **Nova pasta**, **Novo arquivo**, **Abrir**, **Renomear**, **Excluir**; **Acesso rápido** pane (Desktop, User, System) and **Este computador** (the drives);
+- list with **Nome**, **Data de modificação**, **Tipo** and **Tamanho** (click a header to sort), double click opens, right click with Open, Create shortcut, Rename, Delete and Copy path; `F2` renames (only the name is selected), `F5` refreshes, `Del` deletes with confirmation.
+
+It is also the system dialog: `EXPLORER "/PICK|out|folder|title"` picks a folder (the **Choose folder** of WINE programs), `"/OPEN|out|folder|title|filters|name"` opens and `"/SAVE|out|folder|title|filters|name|extra"` saves (filters `Label=*.txt;Label=*.*`; extra = one more choice box, like Notepad's Encoding). The answer goes to the `out` file: `OK path` (with `FILTRO n` and `EXTRA n`) or `CANCEL`. Since WIN keeps only 192 bytes of arguments per program, `EXPLORER @file` reads the request from a file.
 
 ### Command
 
