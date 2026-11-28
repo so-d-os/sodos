@@ -28,6 +28,7 @@
 #include "fbcon.h"
 #include "efistub.h"
 #include "xhci.h"
+#include "i2chid.h"
 #include "vt.h"
 #include "env.h"
 #include "gpu.h"
@@ -3390,6 +3391,11 @@ static void rit_pump(void) {
     rit_usb_t = now;
     rit_emit(rit_x + dx, rit_y + dy, bt, -dz, now);
   }
+  /* Touchpad I2C (notebooks sem mouse PS/2): o pino do GPIO diz se ha relatorio */
+  while (i2chid_poll(&dx, &dy, &dz, &bt)) {
+    rit_usb_t = now;
+    rit_emit(rit_x + dx, rit_y + dy, bt, -dz, now);
+  }
   if (!key && ps2in_kbd_has()) key = 1;    /* tecla USB recem-chegada */
   if (rit_ev != ev0) rit_cursor();
   if (rit_ev != ev0 || key) {
@@ -3422,7 +3428,7 @@ static int rit_main(void* arg) {
     }
     /* Sem MSI o anel do xHCI e o tablet so se veem olhando: 1 ms. Com MSI
      * (ou so PS/2) a interrupcao acorda; 50 ms e so rede de seguranca. */
-    ms = ((!rit_msi && xhci_rit_wanted()) || mouse_abs_mode) ? 1 : 50;
+    ms = ((!rit_msi && xhci_rit_wanted()) || mouse_abs_mode || i2chid_wanted()) ? 1 : 50;
     if (!rit_word) kt_futex_wait(&rit_word, 0, ms);
     rit_word = 0;
     __atomic_store_n(&rit_busy, 1, __ATOMIC_SEQ_CST);
@@ -3700,7 +3706,7 @@ static int input_poll(uint8_t packet[3], int* pkt_idx, uint8_t* sc, int* abs_pos
   {
     /* Mouse USB no xHCI (PC de verdade): relativo, ja aplicado aqui como o tablet. */
     int dx, dy, dz, b;
-    if (xhci_mouse_poll(&dx, &dy, &dz, &b)) {
+    if (xhci_mouse_poll(&dx, &dy, &dz, &b) || i2chid_poll(&dx, &dy, &dz, &b)) {
       sys_mouse_place(sys_mx + dx, sys_my + dy);
       dz = -dz;
       if (dz > 3) dz = 3;
@@ -11906,6 +11912,7 @@ static volatile int wk_seq;   /* +1 a cada tecla Win que abre o menu */
 static int wk_escondeu;       /* este menu escondeu as janelas (fechar devolve) */
 static int wk_fechando;       /* GUI_EV_CLOSE ja mandado ao painel */
 static int wk_held, wk_outra; /* Win apertada; outra tecla no meio (Win+X) */
+static int ce_held;           /* Ctrl+Esc apertado: repeticao nao reabre, soltar engole */
 static uint32_t wk_t_abriu;   /* tique em que o WINMENU.EXE foi aberto (0 = nunca) */
 
 /* Painel aberto do WINMENU (-1 = nenhum). */
@@ -13939,6 +13946,21 @@ static int win_wm_run_u(void) {
         }
         continue;
       }
+      /* Ctrl+Esc: o mesmo que a tecla Win (teclados e notebooks sem ela, ou
+       * com ela presa pelo Fn). O Esc nao vai a janela nenhuma, nem o de
+       * soltar: no desktop um Esc sozinho fecha o WIN. */
+      if (!kbd_e0 && (sc & 0x7F) == SCANCODE_ESC && (kbd_ctrl_down() || ce_held)) {
+        if (!(sc & 0x80)) {
+          if (!ce_held) {
+            wk_toca(wins, &focus, big);
+            need_draw = 1;
+          }
+          ce_held = 1;
+        } else {
+          ce_held = 0;
+        }
+        continue;
+      }
       if (wk_held && !(sc & 0x80) && sc != 0xE0) wk_outra = 1;
       if (keymap_kp_nav(sc)) kbd_e0 = 1; /* NumLock desligado: vira seta, Home... */
       if (kbd_e0 && !(sc & 0x80)) kp = keymap_ext_char(sc);
@@ -14636,6 +14658,7 @@ gfx_restart:
     ps2_enable_keyboard_port();
     ps2in_raw(0);
     if (tablet_hw_init() != 0) (void)xhci_mouse_init(ps2_ok);
+    if (!ps2_ok) (void)i2chid_init();   /* touchpad I2C (notebook sem PS/2) */
   }
   ps2in_flush();       /* sobras de antes do WIN (eco do mouse, teclas velhas) */
   delay_loop();
