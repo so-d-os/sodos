@@ -218,10 +218,12 @@ static int locate(const char* name, char pref, char* out, int max) {
 }
 
 /* Sem unidade nem pasta no nome: cada pasta do PATH (SET PATH=C:\\BIN;U:\\SODOS\\BIN)
- * e por fim a pasta do sistema (PATHSODOS, padrao U:\\SODOS). Assim o BAT.EXE
- * e as DLLs de U:\\SODOS sao achados antes de qualquer SET PATH (START.BAT). */
+ * e por fim a pasta do sistema (PATHSODOS, padrao U:\\SODOS) e a BIN dela
+ * (PATHSODOS\\BIN, onde o install poe os comandos e as DLLs). Assim o BAT.EXE
+ * e as DLLs sao achados antes de qualquer SET PATH (AUTOEXEC.BAT, START.BAT). */
 static int locate_dirs(const char* name, char* out, int max) {
   char dir[DRV_PATH];
+  char rel[DRV_PATH];
   const char* p;
   int i;
   if (has_drive(name)) return -1;
@@ -234,6 +236,9 @@ static int locate_dirs(const char* name, char* out, int max) {
     if (file_size(out) >= 0) return 0;
   }
   env_sodos_path(name, out, max);
+  if (file_size(out) >= 0) return 0;
+  cat3(rel, (int)sizeof(rel), "BIN\\", name, 0);
+  env_sodos_path(rel, out, max);
   if (file_size(out) >= 0) return 0;
   return -1;
 }

@@ -5,7 +5,7 @@
  *
  * Sem -c: link /out:PROG.EXE CRT0.OBJ *.obj ... LIBC.DLL KERNEL.IMP
  * No SO os arquivos padrao (headers, CRT0.OBJ, LIBC.DLL, KERNEL.IMP) ficam em
- * D: ; no Linux, em ../include e ../out relativos ao executavel do cc. */
+ * D:\ ; no Linux, em ../include e ../out relativos ao executavel do cc. */
 #include "cc.h"
 
 static char* defines[64];
@@ -143,8 +143,10 @@ int main(int argc, char** argv) {
 
   for (i = 0; i < extra_inc; i++) pp_add_include(inc_dirs[i]);
 #ifdef __SO__
-  pp_add_include("D:");
-  if (!lib_dir) lib_dir = "D:";
+  /* "D:\" (raiz), nao "D:": sem a barra e a pasta atual do D:, e o cc so
+   * achava o STDIO.H compilando de dentro de D:\. */
+  pp_add_include("D:\\");
+  if (!lib_dir) lib_dir = "D:\\";
 #else
   pp_add_include(format("%s../include/", self_dir));
   if (!lib_dir) lib_dir = format("%s../out/", self_dir);
