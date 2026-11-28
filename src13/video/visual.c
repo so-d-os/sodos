@@ -1048,8 +1048,10 @@ struct icn_ent {
   uint8_t* src;     /* arquivo inteiro (cabecalho + RGBA) */
   int w, h;
   uint32_t* sc;     /* reduzida: 0xAARRGGBB pre-multiplicada */
-  int ss, sw, sh;   /* lado pedido e tamanho real da reduzida */
-  int miss;
+  int ss, sw, sh;   /* lado pedido e tamanho real da reduzida; com miss, ss
+                     * guarda o irq_ticks da ultima tentativa (sc e 0, entao
+                     * o icn_scale nao o le; o tamanho fica, por causa do TROCA) */
+  int miss;         /* 1 = nao carregou, tenta de novo; 2 = arquivo invalido */
 };
 static struct icn_ent icn_tab[ICN_MAX];
 static int icn_n;
@@ -1065,22 +1067,53 @@ static void icn_flush(void) {
   icn_n = 0;
 }
 
+/* Falha de leitura (disco ocupado por outra tarefa, memoria do alto cheia)
+ * nao fica no cache para sempre: o menu Iniciar perdia NOTAS, GERENC, CONFIG
+ * etc. ate a proxima troca de tema. Tenta de novo depois de ICN_RETRY_MS;
+ * so o arquivo que nao existe (miss = 2) nao e relido. */
+#define ICN_RETRY_MS 2000u
+static void icn_fail(struct icn_ent* e, const char* why, int miss) {
+  if (e->miss != miss) {   /* uma linha por mudanca, nao a cada quadro */
+    serial_puts("[tema] icone ");
+    serial_puts(e->name);
+    serial_puts(": ");
+    serial_puts(why);
+    serial_puts("\n");
+  }
+  e->miss = miss;
+  e->ss = (int)(uint32_t)irq_ticks();
+}
+
 static struct icn_ent* icn_get(const char* name) {
   struct icn_ent* e;
   char path[64];
-  int i, j, sz, w, h;
+  int i, j, sz, w, h, rd;
   uint8_t* b;
   if (!ui_th.icons || !ui_th.dir[0] || !gfx_bochs || !um_ready() || !name || !name[0])
     return 0;
-  for (i = 0; i < icn_n; i++)
-    if (th_streq(icn_tab[i].name, name)) return icn_tab[i].miss ? 0 : &icn_tab[i];
-  if (icn_n >= ICN_MAX) return 0;
-  e = &icn_tab[icn_n++];
-  th_copy(e->name, (int)sizeof(e->name), name, 11);
-  e->miss = 1;
-  e->src = 0;
-  e->sc = 0;
-  e->ss = 0;
+  /* O nome guardado esta em maiusculas (th_copy, 11 letras): compara assim.
+   * Com o th_streq, "Pasta" ou "arquivo" do desktop e "Claude" da barra nunca
+   * achavam a propria entrada e criavam outra a cada quadro; as 96 enchiam e
+   * os icones do menu Iniciar pedidos depois (NOTAS, GERENC...) ficavam sem. */
+  {
+    char up_name[12];
+    th_copy(up_name, (int)sizeof(up_name), name, 11);
+    for (i = 0; i < icn_n; i++)
+      if (th_streq(icn_tab[i].name, up_name)) break;
+  }
+  if (i < icn_n) {
+    e = &icn_tab[i];
+    if (!e->miss) return e;
+    if (e->miss == 2 || (uint32_t)irq_ticks() - (uint32_t)e->ss < ICN_RETRY_MS) return 0;
+  } else {
+    if (icn_n >= ICN_MAX) return 0;
+    e = &icn_tab[icn_n++];
+    th_copy(e->name, (int)sizeof(e->name), name, 11);
+    e->miss = 0;
+    e->src = 0;
+    e->sc = 0;
+    e->ss = 0;
+  }
   for (i = 0; ui_th.dir[i] && i < 40; i++) path[i] = ui_th.dir[i];
   for (j = 0; e->name[j]; j++) path[i++] = e->name[j];
   path[i++] = '.';
@@ -1089,20 +1122,38 @@ static struct icn_ent* icn_get(const char* name) {
   path[i++] = 'N';
   path[i] = 0;
   sz = file_size(path);
-  if (sz < 9 || sz > 8 + 128 * 128 * 4) return 0;
+  if (sz < 0) {
+    icn_fail(e, "sem arquivo ou leitura falhou", 1);
+    return 0;
+  }
+  if (sz < 9 || sz > 8 + 128 * 128 * 4) {
+    icn_fail(e, "tamanho invalido", 2);
+    return 0;
+  }
   b = (uint8_t*)umalloc_top((uint32_t)sz + 1);
-  if (!b) return 0;
-  if (file_load(path, (char*)b, sz + 1) != sz || b[0] != 'I' || b[1] != 'C' || b[2] != 'N' ||
-      b[3] != '1') {
+  if (!b) {
+    icn_fail(e, "sem memoria", 1);
+    return 0;
+  }
+  rd = file_load(path, (char*)b, sz + 1);
+  if (rd != sz) {
     ufree(b);
+    icn_fail(e, "leitura curta", 1);
+    return 0;
+  }
+  if (b[0] != 'I' || b[1] != 'C' || b[2] != 'N' || b[3] != '1') {
+    ufree(b);
+    icn_fail(e, "nao e ICN1", 2);
     return 0;
   }
   w = b[4] | (b[5] << 8);
   h = b[6] | (b[7] << 8);
   if (w < 1 || h < 1 || w > 128 || h > 128 || 8 + w * h * 4 > sz) {
     ufree(b);
+    icn_fail(e, "cabecalho invalido", 2);
     return 0;
   }
+  if (e->miss) serial_puts("[tema] icone carregado na nova tentativa\n");
   e->src = b;
   e->w = w;
   e->h = h;
